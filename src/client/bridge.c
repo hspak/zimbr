@@ -394,6 +394,11 @@ void zc_text_clear_pixels(ZcText *t) { if (t->surface) cairo_surface_destroy(t->
 void zc_text_free(ZcText *t) { if (!t) return; zc_text_clear_pixels(t); g_object_unref(t->layout); free(t); }
 int zc_text_width(ZcText *t) { return t->width; }
 int zc_text_height(ZcText *t) { return t->height; }
+double zc_text_ink_center_y(ZcText *t) {
+    PangoRectangle ink;
+    pango_layout_get_extents(t->layout, &ink, NULL);
+    return (ink.y + ink.height / 2.0) / PANGO_SCALE;
+}
 unsigned char *zc_text_pixels(ZcText *t, unsigned color, int start, int end, int top, int height) {
     return zc_text_pixels_on(t, color, start, end, top, height, 0);
 }

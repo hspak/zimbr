@@ -299,14 +299,7 @@ const App = struct {
             s.focus = .search;
         }
         if (ctrl and rl.isKeyPressed(.d)) s.toggleDetails();
-        if (ctrl and rl.isKeyPressed(.n)) {
-            try s.saveDraft();
-            s.message_selection.clear();
-            s.show_details = false;
-            s.show_hidden = false;
-            s.new_mode = true;
-            s.focus = .recipient;
-        }
+        if (ctrl and rl.isKeyPressed(.n)) try s.newMessage();
         if (s.show_details) {
             if (rl.isKeyPressed(.escape)) {
                 s.toggleDetails();
@@ -326,6 +319,10 @@ const App = struct {
             s.message_selection.clear();
             s.new_mode = false;
             s.focus = .composer;
+        }
+        if (s.focus == .composer and s.readOnlyChat()) {
+            s.focus = .none;
+            s.dragging = false;
         }
         const editor: ?*Editor = switch (s.focus) {
             .composer => if (s.send_wait or !u.eq(s.key, s.loaded_key)) null else &s.composer,
@@ -387,16 +384,28 @@ const App = struct {
                 s.draft_dirty = true;
                 s.draft_at = u.now();
             }
-        } else if (s.focus == .none and s.message_selection.id.len > 0) {
-            if (ctrl and rl.isKeyPressed(.a)) s.message_selection.selectAll();
-            if (ctrl and rl.isKeyPressed(.c) and s.message_selection.selected().len > 0) {
-                const clip = try a.dupeZ(u8, s.message_selection.selected());
-                defer a.free(clip);
-                rl.setClipboardText(clip);
-                s.info("Selected text copied");
+        } else {
+            if (s.focus == .none and s.message_selection.id.len > 0) {
+                if (ctrl and rl.isKeyPressed(.a)) s.message_selection.selectAll();
+                if (ctrl and rl.isKeyPressed(.c) and s.message_selection.selected().len > 0) {
+                    const clip = try a.dupeZ(u8, s.message_selection.selected());
+                    defer a.free(clip);
+                    rl.setClipboardText(clip);
+                    s.info("Selected text copied");
+                }
             }
+            // Discard typing while an input is disabled instead of replaying
+            // it when a writable conversation gains focus.
             while (rl.getCharPressed() != 0) {}
         }
+    }
+    fn newMessage(s: *App) !void {
+        try s.saveDraft();
+        s.message_selection.clear();
+        s.show_details = false;
+        s.show_hidden = false;
+        s.new_mode = true;
+        s.focus = .recipient;
     }
     fn startDirect(s: *App) !void {
         const address = std.mem.trim(u8, s.recipient.text.items, " \n\r\t");
@@ -408,6 +417,13 @@ const App = struct {
         defer a.free(key);
         s.show_hidden = false;
         try s.select(key);
+    }
+    fn readOnlyChat(s: *const App) bool {
+        if (std.mem.startsWith(u8, s.key, "new:")) return false;
+        if (s.view) |v| for (v.snapshot.chats) |chat| {
+            if (u.eq(chat.value.id, s.key)) return !chat.value.sendable;
+        };
+        return false;
     }
     fn canSend(s: *App) bool {
         const v = s.view orelse return false;
@@ -434,15 +450,16 @@ const App = struct {
         const ar = arena.allocator();
         s.text.nextFrame(scale);
         s.layout_pending = false;
-        const areas = layout.frame(@floatFromInt(rl.getScreenWidth()), @floatFromInt(rl.getScreenHeight()));
+        const areas = layout.frame(@floatFromInt(rl.getScreenWidth()), @floatFromInt(rl.getScreenHeight()), s.composerHeight());
         std.debug.assert(clip_depth == 0);
         rl.beginDrawing();
         defer rl.endDrawing();
         rl.clearBackground(theme.colors.paper);
         rl.setMouseCursor(.default);
+        s.drawRail(areas.rail);
         s.drawSidebar(areas.sidebar, ar);
         if (s.show_details) {
-            s.drawDetails(.{ .x = areas.header.x, .y = areas.header.y, .width = areas.header.width, .height = areas.status.y - areas.header.y }, ar);
+            s.drawDetails(.{ .x = areas.header.x, .y = areas.header.y, .width = areas.header.width, .height = areas.composer.y + areas.composer.height - areas.header.y }, ar);
         } else {
             s.drawHeader(areas.header, ar);
             beginClip(areas.history);
@@ -462,43 +479,34 @@ const App = struct {
             endClip();
             s.drawComposer(areas.composer);
         }
-        const status = areas.status;
         const footer = areas.sidebar_footer;
         rl.drawRectangleRec(footer, theme.colors.sidebar);
         rl.drawLine(@intFromFloat(footer.x), @intFromFloat(footer.y), @intFromFloat(footer.x + footer.width), @intFromFloat(footer.y), theme.colors.line);
-        const hidden_label = if (s.show_hidden) "Messages" else "Hidden";
-        const hidden_size = s.buttonSize(hidden_label);
+        const online = s.view != null and s.view.?.online;
+        const status = if (online) "Connected to your Mac" else "Offline · drafts saved locally";
+        const status_x = footer.x + sidebar_padding + sidebar_text_inset;
+        const status_width = footer.x + footer.width - sidebar_padding - status_x;
+        const status_size = s.text.lineSize(status, 11, status_width);
+        const status_y = @round((footer.y + (footer.height - status_size.y) / 2) * scale) / scale;
+        // Align with the visible glyphs, excluding the font's line and texture padding.
+        const dot_y = status_y + s.text.lineInkCenterY(status, 11, status_width);
+        rl.drawCircleV(.{ .x = footer.x + sidebar_padding + sidebar_icon_inset + sidebar_icon_size / 2, .y = dot_y }, 3, if (online) theme.colors.success else theme.colors.danger);
+        s.text.drawLine(status, status_x, status_y, 11, status_width, theme.colors.muted, theme.colors.sidebar);
         const fps_width: f32 = if (client_options.fps_counter) 72 else 0;
-        rl.drawRectangleRec(status, theme.colors.sidebar);
-        rl.drawLine(@intFromFloat(status.x), @intFromFloat(status.y), @intFromFloat(status.x + status.width), @intFromFloat(status.y), theme.colors.line);
-        const details_size = s.buttonSize("Details");
-        const reconnect_size = s.buttonSize("Reconnect");
-        // Anchor the whole footer group to the right, reserving room for every
-        // button before ellipsizing long connection messages on narrow windows.
-        const controls_width = hidden_size.x + details_size.x + reconnect_size.x + 16 + 28;
-        const msg_limit = @max(1, status.width - 24 - fps_width - controls_width);
-        const msg = display.label(ar, if (u.now() < s.notice_until) s.notice else if (s.view) |v| v.status else "Opening cache…");
-        const msg_size = s.text.lineSize(msg, 12, msg_limit);
-        const msg_width = @min(msg_limit, msg_size.x);
-        const msg_x = status.x + status.width - 12 - fps_width - msg_width;
-        const dot_x = msg_x - 12;
-        const reconnect = rl.Rectangle{ .x = dot_x - 16 - reconnect_size.x, .y = status.y + (status.height - reconnect_size.y) / 2, .width = reconnect_size.x, .height = reconnect_size.y };
-        const details = rl.Rectangle{ .x = reconnect.x - 8 - details_size.x, .y = status.y + (status.height - details_size.y) / 2, .width = details_size.x, .height = details_size.y };
-        const hidden = rl.Rectangle{ .x = details.x - 8 - hidden_size.x, .y = status.y + (status.height - hidden_size.y) / 2, .width = hidden_size.x, .height = hidden_size.y };
-        if (s.button(hidden, hidden_label, s.show_hidden)) s.toggleHidden() catch s.info("Could not switch conversations. Try again.");
-        if (s.button(details, "Details", s.show_details)) s.toggleDetails();
-        if (s.button(reconnect, "Reconnect", false)) {
-            s.worker.push(.{ .kind = .reconnect }) catch {};
-            s.send_wait = false;
+        // Keep transient feedback in the composer's hint line without reserving
+        // a second footer or repeating the sidebar's connection status.
+        if (u.now() < s.notice_until) {
+            const warning_visible = s.duplicate_risk and s.key.len > 0 and !s.new_mode and !s.show_details;
+            var notice = composerFooter(areas.composer);
+            if (warning_visible) notice.height /= 2;
+            rl.drawRectangleRec(notice, theme.colors.paper);
+            s.drawFooterLabel(display.label(ar, s.notice), notice, theme.colors.muted);
         }
-        rl.drawCircle(@intFromFloat(dot_x), @intFromFloat(status.y + status.height / 2), 4, if (s.view != null and s.view.?.online) theme.colors.accent else theme.colors.danger);
-        beginClip(.{ .x = msg_x, .y = status.y, .width = msg_width, .height = status.height });
-        s.text.drawLine(msg, msg_x, status.y + (status.height - msg_size.y) / 2, 12, msg_width, theme.colors.muted, theme.colors.sidebar);
-        endClip();
         if (client_options.fps_counter) {
             var buffer: [32]u8 = undefined;
             const fps = std.fmt.bufPrint(&buffer, "{d} FPS", .{rl.getFPS()}) catch unreachable;
-            s.text.draw(fps, status.x + status.width - fps_width, status.y + 9, 12, fps_width - 12, theme.colors.muted, theme.colors.sidebar);
+            const band = layout.footer(areas.composer);
+            s.drawFooterLabel(fps, .{ .x = band.x + band.width - fps_width, .y = band.y, .width = fps_width - 12, .height = band.height }, theme.colors.muted);
         }
         if (s.capture_frame) {
             // Read the completed frame before swapping; Wayland may discard the
@@ -519,66 +527,127 @@ const App = struct {
         s.composer_bar = .{};
         s.worker.push(.{ .kind = .viewed, .text = if (!s.show_details and s.following and rl.isWindowFocused()) "yes" else "no" }) catch {};
     }
+    const RailIcon = enum { messages, hidden, details };
+    fn railItem(s: *App, r: rl.Rectangle, label: []const u8, icon: RailIcon, selected: bool) bool {
+        const hot = hover(r);
+        const bg = if (selected) theme.colors.selected else if (hot) theme.colors.avatar else theme.colors.rail;
+        const tile = rl.Rectangle{ .x = r.x + 12, .y = r.y + 3, .width = 40, .height = 36 };
+        if (selected or hot) rl.drawRectangleRounded(tile, 0.3, 8, bg);
+        const color = if (selected or hot) theme.colors.ink else theme.colors.muted;
+        const x = tile.x + 10;
+        const y = tile.y + 9;
+        switch (icon) {
+            .messages => {
+                rl.drawRectangleRoundedLinesEx(.{ .x = x, .y = y, .width = 20, .height = 15 }, 0.3, 8, 1.5, color);
+                rl.drawLineEx(.{ .x = x + 4, .y = y + 15 }, .{ .x = x + 4, .y = y + 19 }, 1.5, color);
+                rl.drawLineEx(.{ .x = x + 4, .y = y + 19 }, .{ .x = x + 9, .y = y + 15 }, 1.5, color);
+                rl.drawLineEx(.{ .x = x + 5, .y = y + 6 }, .{ .x = x + 15, .y = y + 6 }, 1.5, color);
+            },
+            .hidden => {
+                rl.drawRectangleLinesEx(.{ .x = x, .y = y + 1, .width = 20, .height = 5 }, 1.5, color);
+                rl.drawRectangleLinesEx(.{ .x = x + 2, .y = y + 6, .width = 16, .height = 12 }, 1.5, color);
+                rl.drawLineEx(.{ .x = x + 7, .y = y + 10 }, .{ .x = x + 13, .y = y + 10 }, 1.5, color);
+            },
+            .details => {
+                rl.drawCircleLines(@intFromFloat(x + 10), @intFromFloat(y + 9), 10, color);
+                rl.drawCircle(@intFromFloat(x + 10), @intFromFloat(y + 4), 1, color);
+                rl.drawLineEx(.{ .x = x + 10, .y = y + 8 }, .{ .x = x + 10, .y = y + 14 }, 1.5, color);
+            },
+        }
+        const size = s.text.lineSize(label, 10, r.width);
+        s.text.drawLine(label, r.x + (r.width - size.x) / 2, r.y + 43, 10, r.width, color, theme.colors.rail);
+        if (hot) rl.setMouseCursor(.pointing_hand);
+        return hot and rl.isMouseButtonPressed(.left);
+    }
+    fn drawRail(s: *App, r: rl.Rectangle) void {
+        rl.drawRectangleRec(r, theme.colors.rail);
+        if (s.railItem(.{ .x = r.x, .y = r.y + 16, .width = r.width, .height = 62 }, "Messages", .messages, !s.show_hidden and !s.show_details)) {
+            if (s.show_hidden) s.toggleHidden() catch s.info("Could not switch conversations.");
+            if (s.show_details) s.toggleDetails();
+            s.new_mode = false;
+            s.focus = .composer;
+        }
+        if (s.railItem(.{ .x = r.x, .y = r.y + 86, .width = r.width, .height = 62 }, "Hidden", .hidden, s.show_hidden and !s.show_details)) {
+            if (!s.show_hidden) s.toggleHidden() catch s.info("Could not switch conversations.");
+            if (s.show_details) s.toggleDetails();
+            s.new_mode = false;
+            s.focus = .composer;
+        }
+        const footer = layout.footer(r);
+        const details_size = s.text.lineSize("Details", 10, r.width);
+        if (s.railItem(.{ .x = r.x, .y = footer.y + (footer.height - details_size.y) / 2 - 43, .width = r.width, .height = 62 }, "Details", .details, s.show_details)) s.toggleDetails();
+    }
+    const sidebar_row_height: f32 = 36;
+    const sidebar_padding: f32 = 8;
+    const sidebar_icon_inset: f32 = 8;
+    const sidebar_icon_size: f32 = 22;
+    const sidebar_text_inset: f32 = 38;
+    const sidebar_search_height: f32 = 30;
+    const sidebar_search_gap: f32 = sidebar_padding;
+    const sidebar_header_height = sidebar_padding + sidebar_search_height + sidebar_search_gap;
+    const sidebar_list_gap: f32 = 4;
+    fn sidebarViewport(r: rl.Rectangle) rl.Rectangle {
+        return .{ .x = r.x + sidebar_padding, .y = r.y + sidebar_header_height + sidebar_list_gap, .width = r.width - sidebar_padding - 4, .height = @max(0, r.height - sidebar_header_height - sidebar_list_gap - layout.list_bottom_padding) };
+    }
     fn drawSidebar(s: *App, r: rl.Rectangle, ar: u.Allocator) void {
         rl.drawRectangleRec(r, theme.colors.sidebar);
-        rl.drawLine(@intFromFloat(r.width - 1), 0, @intFromFloat(r.width - 1), @intFromFloat(r.height), theme.colors.line);
-        const viewport = rl.Rectangle{ .x = 8, .y = 98, .width = r.width - 16, .height = @max(0, r.height - 106) };
+        rl.drawLine(@intFromFloat(r.x + r.width - 1), @intFromFloat(r.y), @intFromFloat(r.x + r.width - 1), @intFromFloat(r.y + r.height), theme.colors.line);
+        const viewport = sidebarViewport(r);
         var clip = viewport;
         clip.width -= Scrollbar.gutter;
         var count: usize = 0;
         if (s.view) |v| for (v.snapshot.chats) |chat| {
             if (s.matchesSidebar(chat)) count += 1;
         };
-        const content_height = @as(f32, @floatFromInt(count)) * 78;
+        const content_height = @as(f32, @floatFromInt(count)) * sidebar_row_height;
         if (hover(viewport)) s.sidebar_scroll -= rl.getMouseWheelMove() * 34 * Scrollbar.wheel_scale;
         s.sidebar_scroll = std.math.clamp(s.sidebar_scroll, 0, @max(0, content_height - clip.height));
         if (s.sidebar_bar.update(viewport, content_height, s.sidebar_scroll, scrollbarInput())) |offset| s.sidebar_scroll = @floatCast(offset);
         beginClip(clip);
         var y = clip.y - s.sidebar_scroll;
         if (s.view) |v| {
+            // The snapshot is ordered by latest message activity, newest first.
+            // Preserve that order across group and direct conversations.
             for (v.snapshot.chats) |chat| {
-                const name = chatName(chat.value);
                 if (!s.matchesSidebar(chat)) continue;
-                const row = rl.Rectangle{ .x = 10, .y = y, .width = clip.width - 4, .height = 72 };
-                y += 78;
+                const row = rl.Rectangle{ .x = clip.x, .y = y, .width = clip.width, .height = sidebar_row_height - 2 };
+                y += sidebar_row_height;
                 if (row.y + row.height < clip.y or row.y > clip.y + clip.height) continue;
                 const selected = u.eq(s.key, chat.value.id) and !s.new_mode and !s.show_details;
                 const hot = hover(row) and hover(clip);
-                const row_color = if (selected) theme.colors.selected else if (hot) theme.colors.line else theme.colors.sidebar;
-                if (selected or hot) rl.drawRectangleRounded(row, 0.16, 8, row_color);
-                const avatar = rl.Rectangle{ .x = row.x + 10, .y = row.y + 16, .width = 34, .height = 34 };
-                rl.drawRectangleRounded(avatar, 1, 12, if (selected) theme.colors.accent else theme.colors.avatar);
-                const initial = if (chat.value.participants.len > 1) "#" else if (name.len > 0 and std.ascii.isAlphabetic(name[0])) std.fmt.allocPrint(ar, "{c}", .{std.ascii.toUpper(name[0])}) catch "?" else "+";
-                s.text.draw(initial, avatar.x + 10, avatar.y + 6, 18, 26, if (selected) theme.colors.on_accent else theme.colors.ink, if (selected) theme.colors.accent else theme.colors.avatar);
-                // Each child clip intersects the list viewport and restores it
-                // when popped, including rows partly behind the search header.
-                beginClip(.{ .x = row.x + 54, .y = row.y + 10, .width = row.width - 119, .height = 21 });
-                s.text.draw(display.label(ar, name), row.x + 54, row.y + 10, 15, row.width - 119, theme.colors.ink, row_color);
-                endClip();
-                beginClip(.{ .x = row.x + row.width - 61, .y = row.y + 12, .width = 56, .height = 18 });
-                if (chat.value.last_activity) |stamp| s.text.draw(localTime(ar, stamp, true), row.x + row.width - 61, row.y + 12, 10, 56, theme.colors.muted, row_color);
-                endClip();
-                beginClip(.{ .x = row.x + 54, .y = row.y + 32, .width = row.width - 70, .height = 32 });
-                s.text.draw(display.label(ar, chat.preview), row.x + 54, row.y + 32, 12, row.width - 70, theme.colors.muted, row_color);
-                endClip();
-                if (chat.unread > 0) rl.drawCircle(@intFromFloat(row.x + row.width - 10), @intFromFloat(row.y + 43), 3, theme.colors.accent);
+                const bg = if (selected) theme.colors.selected else if (hot) theme.colors.avatar else theme.colors.sidebar;
+                if (selected or hot) rl.drawRectangleRounded(row, 0.2, 8, bg);
+                const name = display.label(ar, chatName(chat.value));
+                if (chat.value.participants.len > 1) {
+                    s.text.drawLine("#", row.x + 11, row.y + 5, 20, 20, if (selected) theme.colors.ink else theme.colors.muted, bg);
+                } else {
+                    s.drawAvatar(.{ .x = row.x + sidebar_icon_inset, .y = row.y + 6, .width = sidebar_icon_size, .height = sidebar_icon_size }, name, theme.participant(chat.value.id, &.{}), 12);
+                }
+                s.text.drawLine(name, row.x + sidebar_text_inset, row.y + 8, 14, row.width - (if (chat.unread > 0) @as(f32, 76) else 46), if (selected or chat.unread > 0) theme.colors.ink else theme.colors.muted, bg);
+                if (chat.unread > 0) {
+                    const badge = rl.Rectangle{ .x = row.x + row.width - 30, .y = row.y + 8, .width = 24, .height = 19 };
+                    rl.drawRectangleRounded(badge, 0.5, 8, theme.colors.ink);
+                    const label = if (chat.unread > 99) "99+" else std.fmt.allocPrint(ar, "{d}", .{chat.unread}) catch "";
+                    const size = s.text.lineSize(label, 10, 24);
+                    s.text.drawLine(label, badge.x + (24 - size.x) / 2, badge.y + 2, 10, 24, theme.colors.sidebar, theme.colors.ink);
+                }
+                if (hot) rl.setMouseCursor(.pointing_hand);
                 if (hot and rl.isMouseButtonPressed(.left)) s.select(chat.value.id) catch s.info("Could not open conversation.");
             }
-            if (count == 0) s.text.draw(if (s.show_hidden) "No hidden conversations found" else if (v.online or v.snapshot.chats.len > 0) "No conversations found" else "Waiting for your Mac…", 20, clip.y + 18, 14, r.width - 40, theme.colors.muted, theme.colors.sidebar);
+            if (count == 0) s.text.draw(if (s.show_hidden) "No hidden conversations" else if (v.online or v.snapshot.chats.len > 0) "No matching conversations" else "Waiting for your Mac…", clip.x + 10, clip.y + 18, 14, clip.width - 20, theme.colors.muted, theme.colors.sidebar);
         }
         endClip();
         s.sidebar_bar.draw(viewport, content_height, s.sidebar_scroll);
-        // Fixed controls are drawn after the list, above all scrolling content.
-        s.text.draw(if (s.show_hidden) "HIDDEN MESSAGES" else "MESSAGES", 20, 21, 11, 180, theme.colors.muted, theme.colors.sidebar);
-        if (s.button(.{ .x = r.width - 52, .y = 11, .width = 32, .height = 30 }, "+", false)) {
-            s.saveDraft() catch {};
-            s.message_selection.clear();
-            s.show_details = false;
-            s.show_hidden = false;
-            s.new_mode = true;
-            s.focus = .recipient;
-        }
-        s.inputBox(&s.search, .{ .x = 16, .y = 52, .width = r.width - 32, .height = 34 }, "Search conversations", .search, false);
+        const search = rl.Rectangle{ .x = clip.x, .y = r.y + sidebar_padding, .width = clip.width, .height = sidebar_search_height };
+        s.inputBox(&s.search, search, "Search conversations", .search, false);
+        const divider_y = r.y + sidebar_header_height;
+        rl.drawLine(@intFromFloat(search.x), @intFromFloat(divider_y), @intFromFloat(search.x + search.width), @intFromFloat(divider_y), theme.colors.line);
+    }
+    fn drawAvatar(s: *App, r: rl.Rectangle, name: []const u8, style: theme.Participant, size: i32) void {
+        rl.drawRectangleRounded(r, 0.25, 8, style.bubble);
+        var initial = [_]u8{if (name.len > 0 and std.ascii.isAlphabetic(name[0])) std.ascii.toUpper(name[0]) else '+'};
+        const measured = s.text.lineSize(&initial, size, r.width);
+        s.text.drawLine(&initial, r.x + (r.width - measured.x) / 2, r.y + (r.height - measured.y) / 2, size, r.width, style.label, style.bubble);
     }
     fn detailSection(s: *App, label: []const u8, r: rl.Rectangle, y: *f32) void {
         y.* += 18;
@@ -594,9 +663,18 @@ const App = struct {
         y.* += height + 10;
     }
     fn drawDetails(s: *App, r: rl.Rectangle, ar: u.Allocator) void {
-        s.text.draw("Technical details", r.x + 24, r.y + 14, 21, r.width - 150, theme.colors.ink, theme.colors.paper);
-        s.text.draw("Connection, synchronization and this client", r.x + 24, r.y + 43, 13, r.width - 48, theme.colors.muted, theme.colors.paper);
-        if (s.button(.{ .x = r.x + r.width - 98, .y = r.y + 18, .width = 74, .height = 30 }, "Back", false)) s.toggleDetails();
+        const back_size = s.buttonSize("Back");
+        const reconnect_size = s.buttonSize("Reconnect");
+        const back = rl.Rectangle{ .x = r.x + r.width - 24 - back_size.x, .y = r.y + 18, .width = back_size.x, .height = 30 };
+        const reconnect = rl.Rectangle{ .x = back.x - 8 - reconnect_size.x, .y = back.y, .width = reconnect_size.x, .height = back.height };
+        const title_width = @max(1, reconnect.x - r.x - 40);
+        s.text.drawLine("Technical details", r.x + 24, r.y + 14, 21, title_width, theme.colors.ink, theme.colors.paper);
+        s.text.drawLine("Connection, synchronization and this client", r.x + 24, r.y + 43, 13, title_width, theme.colors.muted, theme.colors.paper);
+        if (s.button(reconnect, "Reconnect", false)) {
+            s.worker.push(.{ .kind = .reconnect }) catch {};
+            s.send_wait = false;
+        }
+        if (s.button(back, "Back", false)) s.toggleDetails();
         rl.drawLine(@intFromFloat(r.x), @intFromFloat(r.y + 76), @intFromFloat(r.x + r.width), @intFromFloat(r.y + 76), theme.colors.line);
         const viewport = rl.Rectangle{ .x = r.x + 24, .y = r.y + 78, .width = r.width - 32, .height = @max(0, r.height - 86) };
         var clip = viewport;
@@ -672,12 +750,14 @@ const App = struct {
         };
         const hidden = if (s.new_mode) null else s.selectedHidden();
         const text_width = r.width - (if (hidden != null) @as(f32, 140) else 48);
-        beginClip(.{ .x = r.x + 24, .y = r.y + 12, .width = text_width, .height = 56 });
-        s.text.draw(display.label(ar, title), r.x + 24, r.y + 13, 21, text_width, theme.colors.ink, theme.colors.paper);
-        s.text.draw(subtitle, r.x + 24, r.y + 43, 13, text_width, theme.colors.muted, theme.colors.paper);
+        beginClip(.{ .x = r.x + 24, .y = r.y + 8, .width = text_width, .height = 48 });
+        s.text.draw(display.label(ar, title), r.x + 24, r.y + 9, 20, text_width, theme.colors.ink, theme.colors.paper);
+        s.text.draw(subtitle, r.x + 24, r.y + 36, 12, text_width, theme.colors.muted, theme.colors.paper);
         endClip();
         if (hidden) |is_hidden| {
-            if (s.button(.{ .x = r.x + r.width - 104, .y = r.y + 18, .width = 80, .height = 30 }, if (is_hidden) "Unhide" else "Hide", false)) s.setSelectedHidden(!is_hidden) catch s.info("Could not save conversation visibility. Try again.");
+            const label = if (is_hidden) "Unhide" else "Hide";
+            const size = s.buttonSize(label);
+            if (s.button(.{ .x = r.x + r.width - layout.action_right_padding - size.x, .y = r.y + 16, .width = size.x, .height = 30 }, label, false)) s.setSelectedHidden(!is_hidden) catch s.info("Could not save conversation visibility. Try again.");
         }
         rl.drawLine(@intFromFloat(r.x), @intFromFloat(r.y + r.height), @intFromFloat(r.x + r.width), @intFromFloat(r.y + r.height), theme.colors.line);
     }
@@ -688,10 +768,20 @@ const App = struct {
         measured: ?f32,
         padding: f32,
         pending: bool = false,
+        source_index: usize = 0,
         top: f64 = 0,
 
         fn height(row: HistoryRow) f32 {
             return (row.measured orelse 24) + row.padding;
+        }
+
+        fn before(snapshot: @import("client/Store.zig").Snapshot, left: HistoryRow, right: HistoryRow) bool {
+            const left_time = if (left.pending) snapshot.pending[left.source_index].sent_at else snapshot.messages[left.source_index].timestamp;
+            const right_time = if (right.pending) snapshot.pending[right.source_index].sent_at else snapshot.messages[right.source_index].timestamp;
+            const order = std.mem.order(u8, left_time, right_time);
+            if (order != .eq) return order == .lt;
+            if (left.pending != right.pending) return !left.pending;
+            return left.source_index < right.source_index;
         }
     };
     fn prepareHistory(s: *App, inner: f32) ![]HistoryRow {
@@ -721,20 +811,21 @@ const App = struct {
             };
             const text = prepared.text;
             const key = prepared.key;
-            row.* = .{ .id = m.id, .text = text, .key = key, .measured = s.heights.get(key), .padding = 54 };
+            row.* = .{ .id = m.id, .text = text, .key = key, .measured = s.heights.get(key), .padding = 38, .source_index = i };
         }
-        for (snapshot.pending, rows[snapshot.messages.len..]) |p, *row| {
+        for (snapshot.pending, rows[snapshot.messages.len..], 0..) |p, *row, i| {
             const text = display.message(ar, p.input.text);
             const key = std.hash.Wyhash.hash(0, text);
-            row.* = .{ .id = p.input.request_id, .text = text, .key = key, .measured = s.heights.get(key), .padding = if (p.detail.len > 0) 84 else 66, .pending = true };
+            row.* = .{ .id = p.input.request_id, .text = text, .key = key, .measured = s.heights.get(key), .padding = 74, .pending = true, .source_index = i };
         }
+        if (snapshot.pending.len > 0) std.mem.sort(HistoryRow, rows, snapshot, HistoryRow.before);
         s.history_rows = rows;
         s.history_generation = generation;
         if (s.message_selection.id.len > 0) {
             var valid = false;
-            for (rows, 0..) |row, i| {
+            for (rows) |row| {
                 if (!s.message_selection.matches(row.id, row.pending, row.text)) continue;
-                const full = if (row.pending) snapshot.pending[i - snapshot.messages.len].input.text else snapshot.messages[i].text orelse row.text;
+                const full = if (row.pending) snapshot.pending[row.source_index].input.text else snapshot.messages[row.source_index].text orelse row.text;
                 valid = u.eq(full, s.message_selection.full);
                 break;
             }
@@ -883,8 +974,7 @@ const App = struct {
     fn drawHistory(s: *App, r: rl.Rectangle, ar: u.Allocator) void {
         const v = s.view orelse return;
         if (!u.eq(s.key, v.snapshot.selected)) return;
-        const width = @min(500, r.width * 0.76);
-        const inner = width - 24;
+        const inner = historyTextWidth(r);
         const rows = s.prepareHistory(inner) catch return;
         s.positionHistory(rows, r.height);
         var scrolled = false;
@@ -931,58 +1021,58 @@ const App = struct {
         }
         if (v.snapshot.messages.len == 0 and v.snapshot.pending.len == 0) s.text.draw(if (v.loading_history) "Loading history…" else if (v.online) "The start of something good.\nWrite your first message below." else "No cached messages in this conversation.", r.x + 40, r.y + 90, 17, r.width - 80, theme.colors.muted, theme.colors.paper);
         const visible = s.visibleHistory(rows, r.height);
-        const message_end = @min(visible.end, v.snapshot.messages.len);
-        const message_start = @min(visible.start, message_end);
-        for (v.snapshot.messages[message_start..message_end], rows[message_start..message_end]) |m, row| {
+        for (rows[visible.start..visible.end]) |row| {
+            if (row.pending) continue;
+            const m = v.snapshot.messages[row.source_index];
             const text = row.text;
             const h = row.measured.?;
             // Subtract in double precision before drawing. Accumulating tens
             // of thousands of f32 heights caused visible fractional-DPI drift.
             const y = r.y + @as(f32, @floatCast(row.top - s.scroll));
             const outgoing = m.direction == .outgoing;
-            const participant = if (!outgoing and participants.len > 1) theme.participant(m.sender, participants) else null;
-            const x = if (outgoing) r.x + r.width - width - 24 else r.x + 24;
-            if (y + h + 54 >= r.y and y < r.y + r.height) {
-                const bubble = rl.Rectangle{ .x = x, .y = y, .width = width, .height = h + 20 };
-                const bubble_color = if (outgoing) theme.colors.accent else if (participant) |style| style.bubble else theme.colors.incoming;
-                rl.drawRectangleRounded(bubble, 0.14, 10, bubble_color);
-                s.drawMessageText(row, m.text orelse text, bubble, if (outgoing) theme.colors.on_accent else theme.colors.ink, bubble_color);
-                const stamp = if (outgoing)
-                    std.fmt.allocPrint(ar, "{s}  ·  {s}", .{ localTime(ar, m.timestamp, false), @tagName(m.observed_status) }) catch ""
-                else
-                    std.fmt.allocPrint(ar, "{s}  ·  {s}", .{ m.sender, localTime(ar, m.timestamp, false) }) catch "";
-                beginClip(.{ .x = x + 4, .y = y + h + 24, .width = inner, .height = 24 });
-                s.text.draw(display.label(ar, stamp), x + 4, y + h + 26, 11, inner, if (participant) |style| style.label else theme.colors.muted, theme.colors.paper);
-                endClip();
+            const style = if (outgoing) theme.Participant{ .bubble = theme.colors.selected, .label = theme.colors.focus } else theme.participant(m.sender, participants);
+            if (y + row.height() >= r.y and y < r.y + r.height) {
+                const hover_padding = (row.padding - 22) / 2;
+                const bounds = rl.Rectangle{ .x = r.x, .y = y - hover_padding, .width = clip.width, .height = row.height() };
+                const bg = if (hover(bounds)) theme.colors.surface else theme.colors.paper;
+                if (hover(bounds)) rl.drawRectangleRec(bounds, bg);
+                s.drawAvatar(.{ .x = r.x + 20, .y = y, .width = 34, .height = 34 }, if (outgoing) "You" else m.sender, style, 17);
+                const x = r.x + 66;
+                const name = display.label(ar, if (outgoing) "You" else if (m.sender.len > 0) m.sender else "Unknown sender");
+                const name_width = @min(inner * 0.55, s.text.lineSize(name, 14, inner * 0.55).x);
+                s.text.drawLine(name, x, y, 14, name_width, if (outgoing) theme.colors.ink else style.label, bg);
+                const status: MessageStatus = if (!outgoing) .none else switch (m.observed_status) {
+                    .sent => .{ .checks = false },
+                    .delivered => .{ .checks = true },
+                    else => .{ .label = @tagName(m.observed_status) },
+                };
+                const stamp_x = x + name_width + 10;
+                s.drawMessageMeta(localTime(ar, m.timestamp, false), status, .{ .x = stamp_x, .y = y + 2, .width = @max(1, inner - name_width - 10), .height = 18 }, bg);
+                s.drawMessageText(row, m.text orelse text, .{ .x = x, .y = y + 22, .width = inner, .height = h }, theme.colors.ink, bg);
             }
         }
-        const pending_start = @max(visible.start, v.snapshot.messages.len);
-        const pending_end = @max(visible.end, v.snapshot.messages.len);
-        for (v.snapshot.pending[pending_start - v.snapshot.messages.len .. pending_end - v.snapshot.messages.len], rows[pending_start..pending_end]) |p, row| {
+        for (rows[visible.start..visible.end]) |row| {
+            if (!row.pending) continue;
+            const p = v.snapshot.pending[row.source_index];
             const h = row.measured.?;
             const y = r.y + @as(f32, @floatCast(row.top - s.scroll));
-            const x = r.x + r.width - width - 24;
-            if (y + h + row.padding >= r.y and y < r.y + r.height) {
-                const bubble = rl.Rectangle{ .x = x, .y = y, .width = width, .height = h + 20 };
-                rl.drawRectangleRounded(bubble, 0.14, 10, theme.colors.selected);
-                s.drawMessageText(row, p.input.text, bubble, theme.colors.ink, theme.colors.selected);
+            const x = r.x + 66;
+            if (y + row.height() >= r.y and y < r.y + r.height) {
+                s.drawAvatar(.{ .x = r.x + 20, .y = y, .width = 34, .height = 34 }, "You", .{ .bubble = theme.colors.incoming, .label = theme.colors.muted }, 17);
+                const name_width = s.text.lineSize("You", 14, inner).x;
+                s.text.drawLine("You", x, y, 14, name_width, theme.colors.muted, theme.colors.paper);
                 const label = if (u.eq(p.state, "unknown") or u.eq(p.state, "unconfirmed")) "Uncertain · not automatically resent" else if (u.eq(p.state, "failed")) "Failed" else if (u.eq(p.state, "sending")) "Saving / submitting…" else p.state;
-                beginClip(.{ .x = x + 4, .y = y + h + 24, .width = inner - 118, .height = 26 });
-                s.text.drawLine(label, x + 4, y + h + 25, 12, inner - 118, if (p.detail.len > 0) theme.colors.danger else theme.colors.muted, theme.colors.paper);
-                endClip();
-                if (s.button(.{ .x = x + width - 118, .y = y + h + 22, .width = 118, .height = 27 }, "Copy to draft", false)) {
-                    if (s.composer.text.items.len > 0) s.info("Your composer has a draft. Save or clear it before copying another message.") else {
+                const status = if (p.detail.len > 0) std.fmt.allocPrint(ar, "{s} · {s}", .{ label, display.label(ar, p.detail) }) catch label else label;
+                s.drawMessageMeta(localTime(ar, p.sent_at, false), .{ .label = status }, .{ .x = x + name_width + 10, .y = y + 2, .width = @max(1, inner - name_width - 10), .height = 18 }, theme.colors.paper);
+                s.drawMessageText(row, p.input.text, .{ .x = x, .y = y + 22, .width = inner, .height = h }, theme.colors.muted, theme.colors.paper);
+                if (s.button(.{ .x = x + inner - 118, .y = y + h + 24, .width = 118, .height = 27 }, "Copy to draft", false)) {
+                    if (s.readOnlyChat()) s.info("This conversation is read-only.") else if (s.composer.text.items.len > 0) s.info("Your composer has a draft. Save or clear it before copying another message.") else {
                         s.composer.set(p.input.text) catch {};
                         s.draft_dirty = true;
                         s.draft_at = 0;
                         s.focus = .composer;
                         s.duplicate_risk = u.eq(p.state, "unknown") or u.eq(p.state, "unconfirmed");
                     }
-                }
-                if (p.detail.len > 0) {
-                    beginClip(.{ .x = x + 4, .y = y + h + 52, .width = inner, .height = 20 });
-                    s.text.drawLine(display.label(ar, p.detail), x + 4, y + h + 52, 12, inner, theme.colors.danger, theme.colors.paper);
-                    endClip();
                 }
             }
         }
@@ -995,11 +1085,42 @@ const App = struct {
             s.worker.push(.{ .kind = .viewed, .text = "yes" }) catch {};
         };
     }
-    fn drawMessageText(s: *App, row: HistoryRow, full: []const u8, bubble: rl.Rectangle, color: rl.Color, background: rl.Color) void {
-        const x = bubble.x + 12;
-        const y = bubble.y + 10;
-        const width = bubble.width - 24;
-        const hot = hover(bubble);
+    const MessageStatus = union(enum) { none, label: []const u8, checks: bool };
+    fn drawMessageMeta(s: *App, stamp: []const u8, status: MessageStatus, r: rl.Rectangle, background: rl.Color) void {
+        const reserved: f32 = switch (status) {
+            .none => 0,
+            .checks => 28,
+            .label => |label| @min(r.width / 2, s.text.lineSize(label, 11, r.width).x + 8),
+        };
+        const stamp_width = @max(1, r.width - reserved);
+        const size = s.text.lineSize(stamp, 11, stamp_width);
+        s.text.drawLine(stamp, r.x, r.y, 11, stamp_width, theme.colors.muted, background);
+        // Every send state occupies the same slot immediately after the timestamp.
+        const status_x = r.x + size.x + 8;
+        switch (status) {
+            .none => {},
+            .checks => |delivered| drawDeliveryChecks(status_x, r.y + (size.y - 12) / 2, delivered),
+            .label => |label| s.text.drawLine(label, status_x, r.y, 11, @max(1, r.x + r.width - status_x), theme.colors.muted, background),
+        }
+    }
+    fn drawDeliveryChecks(x: f32, y: f32, delivered: bool) void {
+        // Neutral checks indicate transport status; the relay has no read receipts.
+        const color = theme.colors.muted;
+        rl.drawLineEx(.{ .x = x + 1, .y = y + 6 }, .{ .x = x + 5, .y = y + 10 }, 1.5, color);
+        rl.drawLineEx(.{ .x = x + 5, .y = y + 10 }, .{ .x = x + 13, .y = y + 2 }, 1.5, color);
+        if (delivered) {
+            rl.drawLineEx(.{ .x = x + 9, .y = y + 8 }, .{ .x = x + 11, .y = y + 10 }, 1.5, color);
+            rl.drawLineEx(.{ .x = x + 11, .y = y + 10 }, .{ .x = x + 19, .y = y + 2 }, 1.5, color);
+        }
+    }
+    fn historyTextWidth(r: rl.Rectangle) f32 {
+        return @max(80, r.width - 90);
+    }
+    fn drawMessageText(s: *App, row: HistoryRow, full: []const u8, bounds: rl.Rectangle, color: rl.Color, background: rl.Color) void {
+        const x = bounds.x;
+        const y = bounds.y;
+        const width = bounds.width;
+        const hot = hover(bounds);
         const selection = &s.message_selection;
         if (hot) rl.setMouseCursor(.ibeam);
         if (hot and rl.isMouseButtonPressed(.left)) {
@@ -1019,19 +1140,83 @@ const App = struct {
         }
         s.text.drawSelection(row.text, x, y, 16, width, color, if (active) @min(selection.anchor, selection.caret) else 0, if (active) @max(selection.anchor, selection.caret) else 0, background);
     }
+    fn composerHeight(s: *App) f32 {
+        // Measure one line at the current display scale, then add the editor
+        // padding and the shared sidebar footer height.
+        // Round up so fractional layout arithmetic cannot create a scrollbar
+        // for a draft that fits exactly into the single-line viewport.
+        return @ceil(s.text.height("Ag", 16, 400)) + 22 + layout.composer_top_padding + layout.footer_height;
+    }
+    fn composerBox(r: rl.Rectangle) rl.Rectangle {
+        return .{ .x = r.x + 20, .y = r.y + layout.composer_top_padding, .width = r.width - 40, .height = r.height - layout.composer_top_padding - layout.footer_height };
+    }
+    fn composerEditor(box: rl.Rectangle) rl.Rectangle {
+        // Keep the text clear of the Send button.
+        return .{ .x = box.x + 1, .y = box.y + 1, .width = box.width - 100, .height = box.height - 2 };
+    }
+    fn composerFooter(r: rl.Rectangle) rl.Rectangle {
+        var footer = layout.footer(r);
+        footer.x += 24;
+        footer.width -= 48 + (if (client_options.fps_counter) @as(f32, 72) else 0);
+        return footer;
+    }
+    fn drawFooterLabel(s: *App, label: []const u8, r: rl.Rectangle, color: rl.Color) void {
+        const size = s.text.lineSize(label, 11, r.width);
+        s.text.drawLine(label, r.x + (r.width - size.x) / 2, r.y + (r.height - size.y) / 2, 11, r.width, color, theme.colors.paper);
+    }
     fn drawComposer(s: *App, r: rl.Rectangle) void {
         rl.drawRectangleRec(r, theme.colors.paper);
         if (s.key.len == 0 or s.new_mode) return;
-        const box = rl.Rectangle{ .x = r.x + 20, .y = r.y + 8, .width = r.width - 40, .height = 92 };
-        s.inputBox(&s.composer, box, if (s.view != null and s.view.?.online) "Write a message…" else "Write a draft while offline…", .composer, true);
-        s.text.draw(if (s.duplicate_risk) "Earlier send may have succeeded. Sending again may duplicate it." else if (s.enter_to_send) "Enter to send  ·  Shift+Enter for a new line" else "Ctrl+Enter to send  ·  Enter for a new line", r.x + 24, r.y + 116, 11, r.width - 180, theme.colors.muted, theme.colors.paper);
-        if (s.button(.{ .x = r.x + r.width - 112, .y = r.y + 108, .width = 88, .height = 30 }, if (s.send_wait) "Saving…" else "Send ↑", s.canSend())) s.send() catch s.info("Could not queue message. Your draft is retained.");
+        const box = composerBox(r);
+        const read_only = s.readOnlyChat();
+        const background = if (read_only) theme.colors.incoming else theme.colors.surface;
+        rl.drawRectangleRounded(box, 0.12, 8, background);
+        const editor = composerEditor(box);
+        if (read_only) {
+            s.text.drawLine(if (s.composer.text.items.len > 0) s.composer.text.items else "This conversation is read-only", box.x + 12, box.y + 11, 16, box.width - 24, theme.colors.disabled, background);
+        } else {
+            s.inputBox(&s.composer, editor, if (s.view != null and s.view.?.online) "Message this conversation…" else "Write a draft while offline…", .composer, true);
+        }
+        rl.drawRectangleRoundedLinesEx(box, 0.12, 8, 1, if (!read_only and s.focus == .composer) theme.colors.focus else theme.colors.line);
+        if (read_only) return;
+        const send_button = rl.Rectangle{ .x = r.x + r.width - layout.action_right_padding - 76, .y = box.y + (box.height - 28) / 2, .width = 76, .height = 28 };
+        const enabled = s.canSend();
+        const hot = hover(send_button);
+        const bg = if (enabled) theme.colors.success else theme.colors.incoming;
+        rl.drawRectangleRounded(send_button, 0.25, 8, bg);
+        const label = if (s.send_wait) "Saving…" else "Send ↑";
+        const size = s.text.lineSize(label, 13, send_button.width);
+        s.text.drawLine(label, send_button.x + (send_button.width - size.x) / 2, send_button.y + (send_button.height - size.y) / 2, 13, send_button.width, if (enabled) theme.colors.paper else theme.colors.muted, bg);
+        if (hot and enabled) {
+            rl.setMouseCursor(.pointing_hand);
+            if (rl.isMouseButtonPressed(.left)) s.send() catch s.info("Could not queue message. Your draft is retained.");
+        }
+        var footer = composerFooter(r);
+        if (s.duplicate_risk and u.now() < s.notice_until) {
+            footer.height /= 2;
+            footer.y += footer.height;
+        }
+        if (s.duplicate_risk) {
+            s.drawFooterLabel("Earlier send may have succeeded. Sending again may duplicate it.", footer, theme.colors.danger);
+        } else {
+            const hint = if (s.enter_to_send) "Enter to send · Shift+Enter for a new line" else "Ctrl+Enter to send · Enter for a new line";
+            const hint_size = s.text.lineSize(hint, 11, footer.width);
+            s.text.drawLine(hint, footer.x, footer.y + (footer.height - hint_size.y) / 2, 11, footer.width, theme.colors.muted, theme.colors.paper);
+        }
     }
     fn inputBox(s: *App, e: *Editor, r: rl.Rectangle, placeholder: []const u8, focus: @FieldType(App, "focus"), multiline: bool) void {
-        const background = if (multiline) theme.colors.sidebar else theme.colors.paper;
-        rl.drawRectangleRounded(r, 0.12, 8, background);
-        rl.drawRectangleRoundedLinesEx(r, 0.12, 8, 1, if (s.focus == focus) theme.colors.focus else theme.colors.line);
-        const viewport = rl.Rectangle{ .x = r.x + 11, .y = r.y + (if (multiline) @as(f32, 10) else 6), .width = r.width - 22, .height = r.height - (if (multiline) @as(f32, 20) else 10) };
+        const background = if (multiline) theme.colors.surface else if (focus == .search) theme.colors.sidebar else theme.colors.paper;
+        if (!multiline) {
+            rl.drawRectangleRounded(r, 0.2, 8, background);
+            rl.drawRectangleRoundedLinesEx(r, 0.2, 8, 1, if (s.focus == focus) theme.colors.focus else theme.colors.line);
+        }
+        var viewport = rl.Rectangle{ .x = r.x + 11, .y = r.y + (if (multiline) @as(f32, 10) else 6), .width = r.width - 22, .height = r.height - (if (multiline) @as(f32, 20) else 10) };
+        if (focus == .search) {
+            const label = if (e.text.items.len == 0) placeholder else e.text.items;
+            const size = s.text.lineSize(label, 16, viewport.width);
+            viewport.height = @min(size.y, r.height - 2);
+            viewport.y = r.y + r.height / 2 - s.text.lineInkCenterY(label, 16, viewport.width);
+        }
         var inner = viewport;
         if (multiline) inner.width -= Scrollbar.gutter;
         const width = inner.width;
@@ -1098,6 +1283,7 @@ const App = struct {
         const size = s.buttonSize(label);
         const r = rl.Rectangle{ .x = bounds.x + (bounds.width - size.x) / 2, .y = bounds.y + (bounds.height - size.y) / 2, .width = size.x, .height = size.y };
         const hot = hover(r);
+        if (hot) rl.setMouseCursor(.pointing_hand);
         const background = if (primary) (if (hot) theme.colors.accent_hover else theme.colors.accent) else if (hot) theme.colors.line else theme.colors.incoming;
         rl.drawRectangleRounded(r, 0.22, 8, background);
         s.text.drawLine(label, r.x + button_padding.x, r.y + button_padding.y, button_font_size, button_label_width, if (primary) theme.colors.on_accent else theme.colors.muted, background);
@@ -1216,7 +1402,7 @@ test "hidden conversations stay out of search and selection until restored" {
     try std.testing.expectEqualStrings("spam", app.key);
 }
 
-test "sidebar scroll preserves fixed controls and aligned footers in the dark palette" {
+test "workspace navigation, compact lists, message selection, and scrollbars render correctly" {
     // Raylib logs to stdout, which Zig's test runner reserves for its protocol.
     rl.setTraceLogLevel(.none);
     rl.setConfigFlags(.{ .window_highdpi = true });
@@ -1232,7 +1418,7 @@ test "sidebar scroll preserves fixed controls and aligned footers in the dark pa
     const Store = @import("client/Store.zig");
     var chats: [32]Store.Chat = undefined;
     for (&chats, 0..) |*chat, i| chat.* = .{
-        .value = .{ .id = try std.fmt.allocPrint(arena.allocator(), "fixture-{d}", .{i}), .service = "imessage", .title = try std.fmt.allocPrint(arena.allocator(), "Conversation {d} long wrapped label", .{i}), .last_activity = "2026-01-01T00:00:00Z" },
+        .value = .{ .id = try std.fmt.allocPrint(arena.allocator(), "fixture-{d}", .{i}), .service = "imessage", .title = try std.fmt.allocPrint(arena.allocator(), "Conversation {d} long wrapped label", .{i}), .last_activity = "2026-01-01T00:00:00Z", .sendable = true },
         .preview = "This preview must stay below the search box.",
         .unread = 1,
     };
@@ -1248,8 +1434,9 @@ test "sidebar scroll preserves fixed controls and aligned footers in the dark pa
         app.sidebar_scroll = scroll;
         const after = try captureTestFrame(&app, scale);
         defer rl.unloadImage(after);
-        const right: i32 = @intFromFloat(309 * scale);
-        const bottom: i32 = @intFromFloat(94 * scale);
+        const fixed = layout.frame(1120, 780, app.composerHeight());
+        const right: i32 = @intFromFloat((fixed.sidebar.x + fixed.sidebar.width - 1) * scale);
+        const bottom: i32 = @intFromFloat(App.sidebarViewport(fixed.sidebar).y * scale);
         var y: i32 = 0;
         while (y < bottom) : (y += 1) {
             var x: i32 = 0;
@@ -1259,8 +1446,9 @@ test "sidebar scroll preserves fixed controls and aligned footers in the dark pa
     }
     const dark = try captureTestFrame(&app, scale);
     defer rl.unloadImage(dark);
-    try std.testing.expectEqual(theme.colors.sidebar, rl.getImageColor(dark, @intFromFloat(5 * scale), @intFromFloat(5 * scale)));
-    try std.testing.expectEqual(theme.colors.paper, rl.getImageColor(dark, @intFromFloat(320 * scale), @intFromFloat(5 * scale)));
+    try std.testing.expectEqual(theme.colors.rail, rl.getImageColor(dark, @intFromFloat(5 * scale), @intFromFloat(50 * scale)));
+    try std.testing.expectEqual(theme.colors.sidebar, rl.getImageColor(dark, @intFromFloat(70 * scale), @intFromFloat(50 * scale)));
+    try std.testing.expectEqual(theme.colors.paper, rl.getImageColor(dark, @intFromFloat(320 * scale), @intFromFloat(50 * scale)));
     app.toggleDetails();
     app.draw(scale);
     try std.testing.expect(app.details_height > 0);
@@ -1304,18 +1492,19 @@ test "sidebar scroll preserves fixed controls and aligned footers in the dark pa
         const shot = try captureTestFrame(&app, WindowMetrics.current().scale);
         defer rl.unloadImage(shot);
         try std.testing.expectEqual(@as(f32, 0), app.composer_scroll);
-        const areas = layout.frame(@floatFromInt(rl.getScreenWidth()), @floatFromInt(rl.getScreenHeight()));
-        try expectScrollbarPixel(shot, .{ .x = 8, .y = 98, .width = areas.sidebar.width - 16, .height = areas.sidebar.height - 106 }, chats.len * 78, app.sidebar_scroll);
+        const areas = layout.frame(@floatFromInt(rl.getScreenWidth()), @floatFromInt(rl.getScreenHeight()), app.composerHeight());
+        try expectScrollbarPixel(shot, App.sidebarViewport(areas.sidebar), chats.len * App.sidebar_row_height, app.sidebar_scroll);
         try expectScrollbarPixel(shot, areas.history, app.content_height + 16, app.scroll);
-        const composer_viewport = rl.Rectangle{ .x = areas.composer.x + 31, .y = areas.composer.y + 18, .width = areas.composer.width - 62, .height = 72 };
+        const editor = App.composerEditor(App.composerBox(areas.composer));
+        const composer_viewport = rl.Rectangle{ .x = editor.x + 11, .y = editor.y + 10, .width = editor.width - 22, .height = editor.height - 20 };
         try expectScrollbarPixel(shot, composer_viewport, app.text.height(app.composer.text.items, 16, composer_viewport.width - Scrollbar.gutter), app.composer_scroll);
         const visible = app.visibleHistory(app.history_rows, areas.history.height);
         var checked: usize = 0;
         for (app.history_rows[visible.start..visible.end], group_messages[visible.start..visible.end]) |row, m| {
-            const y = areas.history.y + @as(f32, @floatCast(row.top - app.scroll)) + (row.measured.? + 20) / 2;
+            const y = areas.history.y + @as(f32, @floatCast(row.top - app.scroll)) + 17;
             if (y < areas.history.y or y >= areas.history.y + areas.history.height) continue;
             const style = theme.participant(m.sender, chats[0].value.participants);
-            const pixel = rl.getImageColor(shot, @intFromFloat((areas.history.x + 30) * WindowMetrics.current().scale), @intFromFloat(y * WindowMetrics.current().scale));
+            const pixel = rl.getImageColor(shot, @intFromFloat((areas.history.x + 24) * WindowMetrics.current().scale), @intFromFloat(y * WindowMetrics.current().scale));
             try std.testing.expectEqual(style.bubble, pixel);
             checked += 1;
         }
@@ -1324,7 +1513,7 @@ test "sidebar scroll preserves fixed controls and aligned footers in the dark pa
         app.draw(WindowMetrics.current().scale);
         const details = try captureTestFrame(&app, WindowMetrics.current().scale);
         defer rl.unloadImage(details);
-        try expectScrollbarPixel(details, .{ .x = areas.header.x + 24, .y = areas.header.y + 78, .width = areas.header.width - 32, .height = areas.status.y - areas.header.y - 86 }, app.details_height, app.details_scroll);
+        try expectScrollbarPixel(details, .{ .x = areas.header.x + 24, .y = areas.header.y + 78, .width = areas.header.width - 32, .height = areas.composer.y + areas.composer.height - areas.header.y - 86 }, app.details_height, app.details_scroll);
         app.toggleDetails();
     }
     app.composer.caret = 0;
@@ -1339,11 +1528,11 @@ test "sidebar scroll preserves fixed controls and aligned footers in the dark pa
     app.draw(scale);
     const selection_before = try captureTestFrame(&app, scale);
     defer rl.unloadImage(selection_before);
-    const areas = layout.frame(@floatFromInt(rl.getScreenWidth()), @floatFromInt(rl.getScreenHeight()));
+    const areas = layout.frame(@floatFromInt(rl.getScreenWidth()), @floatFromInt(rl.getScreenHeight()), app.composerHeight());
     const row = app.history_rows[app.history_rows.len - 1];
-    const text_width = @min(500, areas.history.width * 0.76) - 24;
-    const text_x = areas.history.x + 36;
-    const text_y = areas.history.y + @as(f32, @floatCast(row.top - app.scroll)) + 10;
+    const text_width = App.historyTextWidth(areas.history);
+    const text_x = areas.history.x + 66;
+    const text_y = areas.history.y + @as(f32, @floatCast(row.top - app.scroll)) + 22;
     const start = app.text.caret(row.text, text_width, "A ".len);
     const end = app.text.caret(row.text, text_width, "A message".len);
     // raylib automation event IDs: mouse position = 7, down = 6, up = 5.
@@ -1367,6 +1556,91 @@ test "sidebar scroll preserves fixed controls and aligned footers in the dark pa
     app.draw(scale);
     try std.testing.expect(!app.message_selection.dragging);
     try std.testing.expectEqualStrings("message", app.message_selection.selected());
+
+    // An uncertain send stays before a newer reply and retains its recovery action.
+    group_messages[group_messages.len - 1].timestamp = "2026-01-01T00:02:00Z";
+    const pending = [_]Store.Pending{.{
+        .input = .{ .request_id = "pending-fixture", .server_epoch = "", .target = .{ .conversation_id = "fixture-0" }, .text = "Keep this uncertain send available as a draft." },
+        .state = "unknown",
+        .detail = "Connection interrupted before confirmation.",
+        .record = null,
+        .sent_at = "2026-01-01T00:01:00Z",
+    }};
+    view.snapshot.pending = &pending;
+    view.generation += 1;
+    app.draw(scale);
+    const pending_row = app.history_rows[app.history_rows.len - 2];
+    try std.testing.expect(pending_row.pending);
+    try std.testing.expectEqualStrings(group_messages[group_messages.len - 1].id, app.history_rows[app.history_rows.len - 1].id);
+    try std.testing.expectEqualStrings("message", app.message_selection.selected());
+    clickTestFrame(&app, areas.history.x + 66 + App.historyTextWidth(areas.history) - 59, areas.history.y + @as(f32, @floatCast(pending_row.top - app.scroll)) + pending_row.measured.? + 37);
+    try std.testing.expectEqualStrings(pending[0].input.text, app.composer.text.items);
+    try std.testing.expect(app.duplicate_risk);
+    view.snapshot.pending = &.{};
+    view.generation += 1;
+
+    // Follow the relocated controls with real pointer events. Returning from
+    // New message must restore composer focus, not the hidden recipient field.
+    try app.newMessage();
+    try std.testing.expect(app.new_mode and app.focus == .recipient);
+    clickTestFrame(&app, areas.rail.x + 32, areas.rail.y + 40);
+    try std.testing.expect(!app.new_mode and app.focus == .composer);
+    clickTestFrame(&app, areas.rail.x + 32, areas.rail.y + 110);
+    try std.testing.expect(app.show_hidden);
+    clickTestFrame(&app, areas.rail.x + 32, areas.rail.y + 40);
+    try std.testing.expect(!app.show_hidden);
+    clickTestFrame(&app, areas.rail.x + 32, areas.sidebar_footer.y + 8 - 43 + 28);
+    try std.testing.expect(app.show_details);
+    app.send_wait = true;
+    clickTestFrame(&app, areas.header.x + areas.header.width - 24 - app.buttonSize("Back").x - 8 - app.buttonSize("Reconnect").x / 2, areas.header.y + 33);
+    try std.testing.expect(!app.send_wait and app.show_details);
+    try std.testing.expect(worker.commands.items[worker.commands.items.len - 1].kind == .reconnect);
+    clickTestFrame(&app, areas.rail.x + 32, areas.rail.y + 40);
+    try std.testing.expect(!app.show_details);
+    clickTestFrame(&app, areas.sidebar.x + 40, areas.sidebar.y + 30);
+    try std.testing.expect(app.focus == .search);
+    app.focus = .none;
+    try app.composer.set("");
+
+    // A chat becoming read-only blocks keyboard and pointer editing without
+    // discarding its draft. Writable chats still support drafting offline.
+    try app.composer.set("Saved draft");
+    app.draft_dirty = false;
+    a.free(app.loaded_key);
+    app.loaded_key = try a.dupe(u8, app.key);
+    chats[0].value.sendable = false;
+    view.online = true;
+    view.reply_existing = true;
+    app.focus = .composer;
+    for ([_]rl.KeyboardKey{ .backspace, .enter }) |key| {
+        rl.playAutomationEvent(.{ .frame = 0, .type = 2, .params = .{ @intFromEnum(key), 0, 0, 0 } });
+        try app.update();
+        rl.playAutomationEvent(.{ .frame = 0, .type = 1, .params = .{ @intFromEnum(key), 0, 0, 0 } });
+        try std.testing.expectEqualStrings("Saved draft", app.composer.text.items);
+        try std.testing.expect(!app.send_wait and !app.draft_dirty and !app.canSend());
+    }
+    const disabled_box = App.composerBox(areas.composer);
+    clickTestFrame(&app, disabled_box.x + 40, disabled_box.y + 16);
+    try std.testing.expect(app.focus == .none);
+    const disabled = try captureTestFrame(&app, scale);
+    defer rl.unloadImage(disabled);
+    try std.testing.expectEqual(theme.colors.incoming, rl.getImageColor(disabled, @intFromFloat((disabled_box.x + 5) * scale), @intFromFloat((disabled_box.y + disabled_box.height / 2) * scale)));
+    clickTestFrame(&app, areas.composer.x + areas.composer.width - layout.action_right_padding - 38, disabled_box.y + disabled_box.height / 2);
+    for (worker.commands.items) |command| try std.testing.expect(command.kind != .send);
+    chats[0].value.sendable = true;
+    view.online = false;
+    view.reply_existing = false;
+    clickTestFrame(&app, disabled_box.x + 40, disabled_box.y + 16);
+    try std.testing.expect(app.focus == .composer);
+    app.composer.caret = app.composer.text.items.len;
+    app.composer.anchor = app.composer.caret;
+    rl.playAutomationEvent(.{ .frame = 0, .type = 2, .params = .{ @intFromEnum(rl.KeyboardKey.backspace), 0, 0, 0 } });
+    try app.update();
+    rl.playAutomationEvent(.{ .frame = 0, .type = 1, .params = .{ @intFromEnum(rl.KeyboardKey.backspace), 0, 0, 0 } });
+    try std.testing.expectEqualStrings("Saved draf", app.composer.text.items);
+    app.focus = .none;
+    app.draft_dirty = false;
+    try app.composer.set("");
 
     // A large cached conversation must settle over multiple frames, keeping
     // input responsive and never painting full text into estimated row heights.
@@ -1628,6 +1902,14 @@ test "offscreen measurements match drawing metrics without evicting layouts" {
             try std.testing.expectEqual(count, text.entries.items.len);
         }
     }
+}
+
+fn clickTestFrame(app: *App, x: f32, y: f32) void {
+    rl.playAutomationEvent(.{ .frame = 0, .type = 7, .params = .{ @intFromFloat(x), @intFromFloat(y), 0, 0 } });
+    rl.playAutomationEvent(.{ .frame = 0, .type = 6, .params = .{ 0, 0, 0, 0 } });
+    app.draw(WindowMetrics.current().scale);
+    rl.playAutomationEvent(.{ .frame = 0, .type = 5, .params = .{ 0, 0, 0, 0 } });
+    app.draw(WindowMetrics.current().scale);
 }
 
 fn captureTestFrame(app: *App, scale: f32) !rl.Image {

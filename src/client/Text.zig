@@ -97,6 +97,10 @@ pub fn lineSize(s: *Self, text: []const u8, size: i32, width: f32) rl.Vector2 {
     const e = s.get(text, size, width, true, true) catch return .{ .x = 0, .y = 18 };
     return .{ .x = e.width, .y = e.height };
 }
+pub fn lineInkCenterY(s: *Self, text: []const u8, size: i32, width: f32) f32 {
+    const e = s.get(text, size, width, true, true) catch return 9;
+    return @floatCast(c.zc_text_ink_center_y(e.layout));
+}
 pub fn drawSelection(s: *Self, text: []const u8, x: f32, y: f32, size: i32, width: f32, color: rl.Color, start: usize, end: usize, background: ?rl.Color) void {
     const e = s.get(text, size, width, false, isOpaque(background)) catch return;
     s.drawEntry(e, x, y, color, start, end, background);

@@ -36,19 +36,31 @@ background worker continues to receive messages while rendering sleeps.
 The bottom-right FPS counter is disabled by default. Enable it with
 `zig build client -Dfps-counter=true` or `zig build run -Dfps-counter=true`.
 
-The client uses a single blue/purple dark color scheme. **Details** (Ctrl+D) opens
+The client uses a Slack-inspired dark layout: a plum navigation rail and sidebar,
+a sidebar search bar (Ctrl+F), and a compact conversation list with unread counts.
+Group and direct conversations appear together, ordered by their latest message,
+newest first, beside a charcoal conversation pane. Incoming and outgoing messages
+share a left-aligned feed with square avatars, sender labels, timestamps, and
+outgoing delivery checkmarks: one for sent, two for delivered.
+Pending and uncertain sends stay in the timeline at their original send time;
+older cached sends use an estimated position from nearby history.
+The compact composer shows one text line with Send alongside, and its bottom
+aligns with the conversation list. Longer drafts scroll within the input. The
+conversation pane extends to the bottom of the window.
+Read-only chats show a disabled grey composer; any existing draft is preserved.
+Connection status appears in the sidebar. **Details** in the navigation rail
+(Ctrl+D) includes **Reconnect** in its header and opens
 a scrollable pane with connection and retry status, relay capabilities, saved
 sync cursor, cache counts, display information,
 client certificate fingerprint and expiry, TLS failure details, and local file
 paths. Private-key contents are never shown. Escape or **Back** returns
-to messages. The search box and sidebar controls stay fixed while the list scrolls.
+to messages. The sidebar search stays fixed while the list scrolls.
 Conversation lists, message history, Details, and overflowing drafts show a
 scrollbar: drag its thumb or click the track to move. Wheel scrolling is 25%
-faster. Incoming group messages use subtle participant tints and matching sender
-labels on the dark background.
+faster. Participant avatars and sender labels use matching colors on the dark background.
 
 Click **Hide** in a conversation's header to remove it from the main sidebar.
-Open **Hidden** at the bottom right and click **Unhide** to restore it;
+Open **Hidden** in the navigation rail and click **Unhide** to restore it;
 **Messages** returns to the main list. Hidden conversations stay hidden across
 restarts and new messages. Hiding only affects this client's local list; message
 history and drafts are kept, and it does not block the sender or change Messages
@@ -84,7 +96,8 @@ Use actual absolute paths. Matching CLI flags are `--relay-url`, `--ca-file`,
 and options fail with migration guidance. Legacy `theme` settings in the config
 file and saved appearance are ignored; the color scheme is fixed.
 `--details` opens diagnostics at launch. After replacing credentials click
-**Reconnect**, which reloads the files and discards all old TLS connections.
+**Reconnect** in the Details pane, which reloads the files and discards all old
+TLS connections.
 Configuration path or endpoint changes require restart. Certificate errors wait
 for correction and Reconnect; transient network failures use bounded backoff.
 A client-certificate expiry warning starts 30 days before its actual expiry.
@@ -152,7 +165,7 @@ Long messages display a preview of up to 4 KiB or 64 lines; the original remains
 in the cache and selecting the message then pressing Ctrl+C copies its full text.
 Text that cannot be rendered safely shows a placeholder. Sidebar labels use
 shorter previews. History layout starts with the newest messages, reuses prepared
-rows between frames, and fills in older rows within an 8 ms frame budget. Bubbles
+rows between frames, and fills in older rows within an 8 ms frame budget. Message rows
 appear at their final size. Short conversations stay aligned to the bottom, and
 scrolling up keeps your reading position while more history loads. `test-gui`
 checks large-history layout, scroll stability, texture eviction, and long-message

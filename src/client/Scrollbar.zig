@@ -14,7 +14,9 @@ pub const Geometry = struct { track: rl.Rectangle, thumb: rl.Rectangle, limit: f
 pub fn geometry(viewport: rl.Rectangle, content: f64, offset: f64) ?Geometry {
     if (viewport.height <= 0 or content <= viewport.height) return null;
     const track = rl.Rectangle{ .x = viewport.x + viewport.width - gutter, .y = viewport.y, .width = gutter, .height = viewport.height };
-    const height = @min(track.height, @max(24, @as(f32, @floatCast(@as(f64, track.height) * viewport.height / content))));
+    // Leave room to drag even in a one-line editor's short track.
+    const min_thumb = @min(24, track.height / 2);
+    const height = @min(track.height, @max(min_thumb, @as(f32, @floatCast(@as(f64, track.height) * viewport.height / content))));
     const limit = content - viewport.height;
     return .{
         .track = track,

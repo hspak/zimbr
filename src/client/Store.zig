@@ -21,6 +21,27 @@ pub fn open(path: [:0]const u8) !Self {
         \\CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY,epoch TEXT NOT NULL,draft_key TEXT NOT NULL,payload TEXT NOT NULL,state TEXT NOT NULL,detail TEXT NOT NULL DEFAULT '',record TEXT);
     );
     if (try db.scalar("SELECT count(*) FROM pragma_table_info('previews') WHERE name='record'") == 0) try db.exec("ALTER TABLE previews ADD COLUMN record TEXT");
+    if (try db.scalar("SELECT count(*) FROM pragma_table_info('outbox') WHERE name='sent_at'") == 0) {
+        try db.exec("BEGIN IMMEDIATE");
+        errdefer db.exec("ROLLBACK") catch {};
+        try db.exec("ALTER TABLE outbox ADD COLUMN sent_at TEXT NOT NULL DEFAULT ''");
+        // Older clients did not save send times. Estimate once from a linked
+        // echo or nearby records in the relay's revision sequence, then keep
+        // that position stable across status updates and restarts.
+        try db.exec(
+            \\UPDATE outbox SET sent_at=coalesce(
+            \\ (SELECT sort_key FROM records WHERE kind='message' AND id=coalesce(json_extract(outbox.record,'$.message_id'),json_extract(outbox.record,'$.candidate_message_id'))),
+            \\ (SELECT sort_key FROM records WHERE kind='message' AND chat=outbox.draft_key
+            \\   AND outbox.epoch=(SELECT value FROM meta WHERE key='epoch')
+            \\   AND revision<=CAST(json_extract(outbox.record,'$.revision') AS INTEGER) ORDER BY revision DESC,sort_key DESC LIMIT 1),
+            \\ (SELECT sort_key FROM records WHERE kind='message' AND chat=outbox.draft_key
+            \\   AND outbox.epoch=(SELECT value FROM meta WHERE key='epoch')
+            \\   AND revision>CAST(json_extract(outbox.record,'$.revision') AS INTEGER) ORDER BY revision,sort_key LIMIT 1),
+            \\ (SELECT sort_key FROM records WHERE kind='message' AND chat=outbox.draft_key ORDER BY sort_key DESC LIMIT 1),
+            \\ strftime('%Y-%m-%dT%H:%M:%f000000Z','now'))
+        );
+        try db.exec("COMMIT");
+    }
     return .{ .db = db };
 }
 pub fn close(s: Self) void {
@@ -144,9 +165,10 @@ pub fn persistSend(s: Self, a: u.Allocator, key: []const u8, input: t.SendInput)
     try t.validate(input);
     if (!u.eq(input.server_epoch, try s.get(a, "epoch"))) return error.StaleEpoch;
     const payload = try u.json(a, input);
+    const sent_at = try u.timestamp(a, (u.now() - 978307200000) * 1000000);
     try s.db.exec("BEGIN IMMEDIATE");
     errdefer s.db.exec("ROLLBACK") catch {};
-    try s.exec("INSERT INTO outbox(id,epoch,draft_key,payload,state) VALUES(?,?,?,?,'sending')", &.{ .{ .text = input.request_id }, .{ .text = input.server_epoch }, .{ .text = key }, .{ .text = payload } });
+    try s.exec("INSERT INTO outbox(id,epoch,draft_key,payload,state,sent_at) VALUES(?,?,?,?,'sending',?)", &.{ .{ .text = input.request_id }, .{ .text = input.server_epoch }, .{ .text = key }, .{ .text = payload }, .{ .text = sent_at } });
     try s.saveDraft(key, "");
     try s.db.exec("COMMIT");
 }
@@ -171,7 +193,7 @@ pub fn nextPage(s: Self, a: u.Allocator, chat: []const u8) !?[]const u8 {
     return if (q.bytes(0).len == 0) null else try q.text(a, 0);
 }
 pub const Chat = struct { value: t.Conversation, preview: []const u8, unread: i64, hidden: bool = false };
-pub const Pending = struct { input: t.SendInput, state: []const u8, detail: []const u8, record: ?t.SendRequest };
+pub const Pending = struct { input: t.SendInput, state: []const u8, detail: []const u8, record: ?t.SendRequest, sent_at: []const u8 };
 pub const Snapshot = struct {
     chats: []const Chat,
     messages: []const t.Message,
@@ -229,12 +251,12 @@ pub fn snapshotWithMessages(s: Self, a: u.Allocator, selected: []const u8, share
     // The observed echo supplies the sole visible status, including while the
     // relay finishes checking a provisional match. Keep the durable request
     // unchanged so withdrawing the hint restores its unresolved bubble.
-    var ps = try s.db.prepare("SELECT payload,state,detail,record FROM outbox WHERE draft_key=? AND NOT EXISTS(SELECT 1 FROM records m WHERE m.kind='message' AND m.id=" ++ echo_id_sql ++ ") ORDER BY rowid");
+    var ps = try s.db.prepare("SELECT payload,state,detail,record,sent_at FROM outbox WHERE draft_key=? AND NOT EXISTS(SELECT 1 FROM records m WHERE m.kind='message' AND m.id=" ++ echo_id_sql ++ ") ORDER BY rowid");
     defer ps.close();
     try ps.bind(&.{.{ .text = selected }});
     while (try ps.step()) {
         const record = if (ps.bytes(3).len > 0) (try std.json.parseFromSlice(t.SendRequest, a, ps.bytes(3), .{ .ignore_unknown_fields = true, .allocate = .alloc_always })).value else null;
-        try pending.append(a, .{ .input = (try std.json.parseFromSlice(t.SendInput, a, ps.bytes(0), .{ .ignore_unknown_fields = true, .allocate = .alloc_always })).value, .state = try ps.text(a, 1), .detail = try ps.text(a, 2), .record = record });
+        try pending.append(a, .{ .input = (try std.json.parseFromSlice(t.SendInput, a, ps.bytes(0), .{ .ignore_unknown_fields = true, .allocate = .alloc_always })).value, .state = try ps.text(a, 1), .detail = try ps.text(a, 2), .record = record, .sent_at = try ps.text(a, 4) });
     }
     return .{ .chats = chats.items, .messages = shared_messages orelse messages.items, .pending = pending.items, .selected = try a.dupe(u8, selected), .draft = try s.draft(a, selected), .epoch = try s.get(a, "epoch"), .more = (try s.nextPage(a, selected)) != null };
 }

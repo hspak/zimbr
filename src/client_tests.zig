@@ -191,6 +191,73 @@ test "an unchanged authoritative request resolves local uncertainty without anot
     _ = try s.upsert(a, "request", raw);
     try std.testing.expectEqual(@as(i64, 1), try s.db.scalar("SELECT count(*) FROM outbox WHERE state='delivered'"));
 }
+test "outbox send times survive status updates, restart, and epoch reset" {
+    const t = @import("protocol/types.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    const path = try std.fmt.allocPrintSentinel(ar, ".zig-cache/tmp/{s}/client.db", .{tmp.sub_path}, 0);
+    const input = t.SendInput{ .request_id = epoch, .server_epoch = epoch, .target = .{ .recipient = .{ .address = "test@example.invalid", .service = "imessage" } }, .text = "Keep my place" };
+    var sent_at: []const u8 = undefined;
+    {
+        const store = try Store.open(path);
+        defer store.close();
+        try store.beginSync(epoch, epoch ++ ":0");
+        const before = try u.timestamp(ar, (u.now() - 978307200000) * 1000000);
+        try store.persistSend(ar, "c1", input);
+        const after = try u.timestamp(ar, (u.now() - 978307200000) * 1000000);
+        sent_at = (try store.snapshot(ar, "c1")).pending[0].sent_at;
+        try std.testing.expect(std.mem.order(u8, sent_at, before) != .lt);
+        try std.testing.expect(std.mem.order(u8, sent_at, after) != .gt);
+        try store.outcome(epoch, "unknown", "Connection interrupted");
+        _ = try store.upsert(ar, "request", try u.json(ar, t.SendRequest{ .request_id = epoch, .server_epoch = epoch, .target = input.target, .text = input.text, .revision = "2", .state = .unknown }));
+        try std.testing.expectEqualStrings(sent_at, (try store.snapshot(ar, "c1")).pending[0].sent_at);
+    }
+    const reopened = try Store.open(path);
+    defer reopened.close();
+    try std.testing.expectEqualStrings(sent_at, (try reopened.snapshot(ar, "c1")).pending[0].sent_at);
+    try reopened.beginSync("22345678-1234-1234-1234-123456789012", "22345678-1234-1234-1234-123456789012:0");
+    try std.testing.expectEqualStrings(sent_at, (try reopened.snapshot(ar, "c1")).pending[0].sent_at);
+}
+
+test "legacy outbox positions are estimated from nearby history only once" {
+    const t = @import("protocol/types.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    const path = try std.fmt.allocPrintSentinel(ar, ".zig-cache/tmp/{s}/client.db", .{tmp.sub_path}, 0);
+    const input = t.SendInput{ .request_id = epoch, .server_epoch = epoch, .target = .{ .recipient = .{ .address = "test@example.invalid", .service = "imessage" } }, .text = "Older uncertain send" };
+    {
+        const store = try Store.open(path);
+        defer store.close();
+        try store.beginSync(epoch, epoch ++ ":0");
+        var m = (try std.json.parseFromSlice(t.Message, ar, message, .{})).value;
+        m.revision = "10";
+        _ = try store.upsert(ar, "message", try u.json(ar, m));
+        m.id = "m2";
+        m.revision = "30";
+        m.timestamp = "2026-01-01T00:02:00Z";
+        _ = try store.upsert(ar, "message", try u.json(ar, m));
+        try store.persistSend(ar, "c1", input);
+        _ = try store.upsert(ar, "request", try u.json(ar, t.SendRequest{ .request_id = epoch, .server_epoch = epoch, .target = input.target, .text = input.text, .revision = "20", .state = .unknown }));
+        // Recreate the schema used before send times were persisted.
+        try store.db.exec("ALTER TABLE outbox DROP COLUMN sent_at");
+    }
+    {
+        const migrated = try Store.open(path);
+        defer migrated.close();
+        try std.testing.expectEqualStrings("2026-01-01T00:00:00Z", (try migrated.snapshot(ar, "c1")).pending[0].sent_at);
+        _ = try migrated.upsert(ar, "request", try u.json(ar, t.SendRequest{ .request_id = epoch, .server_epoch = epoch, .target = input.target, .text = input.text, .revision = "40", .state = .unknown }));
+    }
+    const reopened = try Store.open(path);
+    defer reopened.close();
+    try std.testing.expectEqualStrings("2026-01-01T00:00:00Z", (try reopened.snapshot(ar, "c1")).pending[0].sent_at);
+}
+
 test "provisional outgoing echoes replace uncertainty without confirming or discarding the request" {
     const t = @import("protocol/types.zig");
     const SharedSnapshot = @import("client/SharedSnapshot.zig");
