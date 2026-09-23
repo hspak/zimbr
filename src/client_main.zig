@@ -553,11 +553,14 @@ const App = struct {
         var y = clip.y - s.details_scroll;
         s.detailSection("Connection", clip, &y);
         s.detailRow("Status", if (s.view) |v| v.status else "Opening cache…", clip, &y);
-        s.detailRow("Endpoint", std.fmt.allocPrint(ar, "http://127.0.0.1:{d}", .{s.worker.config.port}) catch "", clip, &y);
-        s.detailRow("Transport", "Loopback HTTP / SSE through a manually managed SSH tunnel", clip, &y);
+        s.detailRow("Endpoint", s.worker.config.relay_url, clip, &y);
+        s.detailRow("Transport", "Direct HTTPS / SSE · TLS 1.3 · mutual certificates", clip, &y);
         if (s.view) |v| {
             const d = v.diagnostics;
-            s.detailRow("Authentication", if (d.auth_blocked) "Action required — check the token file, then Reconnect" else if (d.last_status_ms > 0 and v.online) "Bearer token accepted" else "Bearer token file; waiting for connection", clip, &y);
+            s.detailRow("Authentication", if (d.auth_blocked) "Action required — see failure details, then Reconnect" else if (d.last_status_ms > 0 and v.online) "mTLS authenticated" else "Client certificate; waiting for connection", clip, &y);
+            s.detailRow("Client SHA-256", if (d.transport.fingerprint.len > 0) d.transport.fingerprint else "Not loaded", clip, &y);
+            s.detailRow("Certificate expiry", if (d.transport.expiring) std.fmt.allocPrint(ar, "{s} · renew now, then Reconnect", .{d.transport.expires}) catch "" else d.transport.expires, clip, &y);
+            s.detailRow("Failure", std.fmt.allocPrint(ar, "{s} · curl {d} · verification {d}\n{s}", .{ d.transport.failure, d.transport.curl_code, d.transport.verify_result, d.transport.detail }) catch "", clip, &y);
             s.detailRow("Last response", if (d.last_response_ms == 0) "None this session" else if (d.last_http_status == 0) "Transport interrupted / no HTTP response" else std.fmt.allocPrint(ar, "HTTP {d} · {s}", .{ d.last_http_status, elapsed(ar, d.last_response_ms) }) catch "", clip, &y);
             s.detailRow("Retry", if (d.auth_blocked) "Waiting for Reconnect" else if (!v.online and d.retry_at > u.now()) std.fmt.allocPrint(ar, "In {d}s", .{@divTrunc(d.retry_at - u.now() + 999, 1000)}) catch "" else if (v.online) "Not needed" else "Connecting", clip, &y);
             s.detailSection("Relay", clip, &y);
@@ -586,7 +589,9 @@ const App = struct {
         s.detailRow("Display", std.fmt.allocPrint(ar, "{d} × {d} logical · {d} × {d} pixels · {d:.0}% scale", .{ rl.getScreenWidth(), rl.getScreenHeight(), rl.getRenderWidth(), rl.getRenderHeight(), s.text.scale * 100 }) catch "", clip, &y);
         s.detailRow("Appearance", if (theme.is_dark) "Dark" else "Light", clip, &y);
         s.detailRow("Database", std.fmt.allocPrint(ar, "{s}/client.db", .{s.worker.config.data}) catch "", clip, &y);
-        s.detailRow("Token file", s.worker.config.token_path, clip, &y);
+        s.detailRow("CA file", s.worker.config.ca_file, clip, &y);
+        s.detailRow("Client certificate", s.worker.config.client_cert_file, clip, &y);
+        s.detailRow("Client key file", s.worker.config.client_key_file, clip, &y);
         s.detailRow("Send shortcut", if (s.enter_to_send) "Enter (Shift+Enter for a new line)" else "Ctrl+Enter", clip, &y);
         s.details_height = y - clip.y + s.details_scroll + 12;
         endClip();
@@ -1110,7 +1115,7 @@ test "sidebar scroll preserves the fixed header and dark mode changes every surf
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     _ = clay.initialize(.init(try arena.allocator().alloc(u8, clay.minMemorySize())), .{ .w = 1120, .h = 780 }, .{ .error_handler_function = clayError });
-    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/zimbr-ui-test", .token_path = "/tmp/zimbr-ui-test/token" } };
+    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/zimbr-ui-test" } };
     defer worker.shutdown();
     const Store = @import("client/Store.zig");
     var chats: [32]Store.Chat = undefined;
@@ -1308,7 +1313,7 @@ test "shared message presentations survive replaced views and refresh edited tex
     const ar = arena.allocator();
     var message = t.Message{ .id = "m1", .conversation_id = "c1", .sender = "peer", .direction = .incoming, .service = "imessage", .timestamp = "2026-01-01T00:00:00Z", .kind = .text, .text = "Long " ++ "x" ** 6000, .decoding = .plain, .observed_status = .received };
     _ = try store.upsert(ar, "message", try u.json(ar, message));
-    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/unused", .token_path = "/tmp/unused/token" } };
+    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
     defer worker.shutdown();
     rl.setTraceLogLevel(.none);
     rl.initWindow(780, 560, "Zimbr shared view checks");
@@ -1347,7 +1352,7 @@ test "shared message presentations survive replaced views and refresh edited tex
 }
 
 test "history larger than the old cache limit renders newest first and settles" {
-    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/zimbr-history-test", .token_path = "/tmp/zimbr-history-test/token" } };
+    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/zimbr-history-test" } };
     defer worker.shutdown();
     var app = App{ .worker = &worker };
     defer app.deinit();
@@ -1422,7 +1427,7 @@ test "history larger than the old cache limit renders newest first and settles" 
 }
 
 test "reading position survives deferred heights and prepended history" {
-    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/zimbr-history-test", .token_path = "/tmp/zimbr-history-test/token" } };
+    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/zimbr-history-test" } };
     defer worker.shutdown();
     var app = App{ .worker = &worker, .following = false };
     defer app.deinit();
@@ -1462,7 +1467,7 @@ test "reading position survives deferred heights and prepended history" {
 }
 
 test "loading reveals final rows without moving the newest message or snapping small scrolls" {
-    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/zimbr-history-test", .token_path = "/tmp/zimbr-history-test/token" } };
+    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/zimbr-history-test" } };
     defer worker.shutdown();
     var app = App{ .worker = &worker };
     defer app.deinit();

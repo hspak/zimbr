@@ -4,6 +4,17 @@ const std = @import("std");
 const Store = @import("Store.zig");
 const MessageHistory = @import("MessageHistory.zig");
 const Self = @This();
+// Connection metadata belongs to each published View's arena, never the shared
+// history allocation. Reconnect/renewal can update it without replacing records.
+pub const Transport = struct {
+    failure: []const u8 = "none",
+    curl_code: c_int = 0,
+    verify_result: c_long = 0,
+    detail: []const u8 = "",
+    fingerprint: []const u8 = "",
+    expires: []const u8 = "",
+    expiring: bool = false,
+};
 const a = if (@import("builtin").is_test) std.testing.allocator else std.heap.page_allocator;
 refs: std.atomic.Value(usize) = .init(1),
 arena: std.heap.ArenaAllocator,

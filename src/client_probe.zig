@@ -18,6 +18,11 @@ pub fn main(init: std.process.Init) !void {
     while (u.now() < deadline) {
         if (worker.take()) |v| {
             defer v.destroy();
+            if (v.diagnostics.auth_blocked) {
+                const d = v.diagnostics.transport;
+                std.debug.print("{s}\n{s} (curl {d}, verification {d})\n", .{ v.status, d.detail, d.curl_code, d.verify_result });
+                return error.ConnectionNeedsAttention;
+            }
             if (v.online and !selected and v.snapshot.chats.len > 0) {
                 try worker.push(.{ .kind = .select, .key = v.snapshot.chats[0].value.id });
                 selected = true;

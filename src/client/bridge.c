@@ -2,6 +2,9 @@
 #define _POSIX_C_SOURCE 200809L
 #include "bridge.h"
 #include <curl/curl.h>
+#include <openssl/ssl.h>
+#include <openssl/pem.h>
+#include <openssl/x509v3.h>
 #include <pango/pangocairo.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,9 +14,148 @@
 #include <limits.h>
 #include <poll.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <errno.h>
 
-struct Slot { CURL *easy; char *body; size_t len; long status; int done, stream; int64_t last_rx; struct ZcNet *owner; };
-struct ZcNet { CURLM *multi; struct curl_slist *headers; struct Slot slots[2]; unsigned port; ZcStreamFn fn; void *context; };
+_Static_assert(CURL_ERROR_SIZE <= sizeof(((ZcError *)0)->message), "Diagnostic buffer must hold curl errors");
+
+struct Slot {
+    CURL *easy; char *body; size_t len; long status; int done, stream, alert;
+    int64_t last_rx; struct ZcNet *owner; ZcError error;
+};
+struct ZcNet {
+    CURLM *multi; struct curl_slist *headers; struct Slot slots[2];
+    char *origin, *ca, *cert, *key; size_t ca_len, cert_len, key_len;
+    X509 *root; ZcStreamFn fn; void *context;
+};
+static void failure(ZcError *e, int kind, const char *message) {
+    e->kind=kind; snprintf(e->message,sizeof(e->message),"%s",message);
+}
+
+/* Never follow symlinks, including directory components. Only the immediate
+ * containing directory needs to be private; ancestors must be trusted and not
+ * writable by others (the root-owned sticky /tmp exception permits fixtures). */
+int zc_private_read(const char *path, char **data, size_t *length) {
+    *data=NULL; *length=0;
+    if (!path || path[0]!='/' || strlen(path)>=PATH_MAX) return -1;
+    char copy[PATH_MAX]; strcpy(copy,path+1);
+    int dir=open("/",O_RDONLY|O_DIRECTORY|O_CLOEXEC), fd=-1, result=-1;
+    if (dir<0) return -1;
+    char *part=copy;
+    for (;;) {
+        char *slash=strchr(part,'/'); if (slash) *slash=0;
+        if (!*part || !strcmp(part,".") || !strcmp(part,"..")) goto end;
+        struct stat st;
+        if (fstat(dir,&st)) goto end;
+        if (slash) {
+            if ((st.st_uid!=0 && st.st_uid!=getuid()) ||
+                ((st.st_mode&0022) && !(st.st_uid==0 && (st.st_mode&S_ISVTX)))) goto end;
+            int next=openat(dir,part,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+            if (next<0) { if (errno==ENOENT) result=0; goto end; }
+            close(dir); dir=next; part=slash+1; continue;
+        }
+        if (st.st_uid!=getuid() || (st.st_mode&0777)!=0700) goto end;
+        fd=openat(dir,part,O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC);
+        if (fd<0) { if (errno==ENOENT) result=0; goto end; }
+        if (fstat(fd,&st) || !S_ISREG(st.st_mode) || st.st_uid!=getuid() ||
+            (st.st_mode&0777)!=0600 || st.st_nlink!=1 || st.st_size<1 || st.st_size>1024*1024) goto end;
+        *length=(size_t)st.st_size;
+        *data=calloc(1,*length+1); if (!*data) goto end;
+        size_t used=0;
+        while (used<*length) {
+            ssize_t n=read(fd,*data+used,*length-used);
+            if (n<0 && errno==EINTR) continue;
+            if (n<=0) goto end;
+            used+=(size_t)n;
+        }
+        char extra;
+        if (read(fd,&extra,1)!=0 || memchr(*data,0,*length)) goto end;
+        result=1; break;
+    }
+end:
+    if (fd>=0) close(fd);
+    close(dir);
+    if (result!=1) { zc_private_free(*data,*length); *data=NULL; *length=0; }
+    return result;
+}
+void zc_private_free(char *data, size_t length) {
+    if (data) { OPENSSL_cleanse(data,length); free(data); }
+}
+int zc_origin_valid(const char *origin) {
+    if (!origin || strncmp(origin,"https://",8) || strlen(origin)>4096) return 0;
+    for (const unsigned char *p=(const unsigned char *)origin; *p; p++)
+        if (*p<=32 || *p>=127 || strchr("@?#%\\",*p)) return 0;
+    const char *authority=origin+8, *slash=strchr(authority,'/');
+    if (!*authority || (slash && slash[1]) || authority==(slash ? slash : origin)) return 0;
+    size_t len=slash ? (size_t)(slash-authority) : strlen(authority);
+    if (!len || authority[len-1]==':') return 0;
+    CURLU *url=curl_url(); if (!url) return 0;
+    char *host=NULL, *port=NULL;
+    int ok=curl_url_set(url,CURLUPART_URL,origin,0)==CURLUE_OK &&
+           curl_url_get(url,CURLUPART_HOST,&host,0)==CURLUE_OK && host && *host;
+    if (ok && host[0]!='[') {
+        size_t label=0, total=strlen(host);
+        if (total>253 || host[0]=='.' || host[0]=='-') ok=0;
+        for (size_t i=0;ok && i<total;i++) {
+            unsigned char ch=(unsigned char)host[i];
+            if (ch=='.') {
+                if (!label || host[i-1]=='-') ok=0;
+                label=0;
+            } else {
+                if (!((ch>='a' && ch<='z') || (ch>='A' && ch<='Z') ||
+                      (ch>='0' && ch<='9') || ch=='-') || (!label && ch=='-') || ++label>63) ok=0;
+            }
+        }
+        if (host[total-1]=='-') ok=0;
+    }
+    if (ok && curl_url_get(url,CURLUPART_PORT,&port,0)==CURLUE_OK) {
+        char *end=NULL; long number=strtol(port,&end,10);
+        ok=*port && !*end && number>0 && number<=65535;
+    }
+    curl_free(host); curl_free(port); curl_url_cleanup(url); return ok;
+}
+static int no_password(char *buf, int size, int rwflag, void *context) {
+    (void)buf; (void)size; (void)rwflag; (void)context; return 0;
+}
+static X509 *certificate(const char *pem, size_t len) {
+    BIO *bio=BIO_new_mem_buf(pem,(int)len); if (!bio) return NULL;
+    X509 *cert=PEM_read_bio_X509(bio,NULL,NULL,NULL); BIO_free(bio); return cert;
+}
+static int credentials(ZcNet *n, ZcError *e, ZcIdentity *identity) {
+    n->root=certificate(n->ca,n->ca_len);
+    X509 *cert=certificate(n->cert,n->cert_len);
+    BIO *bio=BIO_new_mem_buf(n->key,(int)n->key_len);
+    EVP_PKEY *key=bio ? PEM_read_bio_PrivateKey(bio,NULL,no_password,NULL) : NULL;
+    BIO_free(bio);
+    int ok=0;
+    X509_STORE *store=X509_STORE_new(); X509_STORE_CTX *ctx=X509_STORE_CTX_new();
+    if (!n->root || !cert || !key || !store || !ctx) {
+        failure(e,ZC_CREDENTIALS,"Cannot read PEM CA/certificate or unencrypted private key. Repair the credential files, then Reconnect."); goto end;
+    }
+    if (X509_check_ca(n->root)<=0 || X509_check_ca(cert)>0 ||
+        (X509_get_ext_by_NID(cert,NID_ext_key_usage,-1)<0 || !(X509_get_extended_key_usage(cert)&XKU_SSL_CLIENT)) ||
+        X509_check_private_key(cert,key)!=1) {
+        failure(e,ZC_CREDENTIALS,"Expected a CA, a non-CA clientAuth certificate and its matching private key. Repair credentials, then Reconnect."); goto end;
+    }
+    if (!X509_STORE_add_cert(store,n->root) || !X509_STORE_CTX_init(ctx,store,cert,NULL) ||
+        !X509_STORE_CTX_set_purpose(ctx,X509_PURPOSE_SSL_CLIENT) || X509_verify_cert(ctx)!=1) {
+        e->verify_result=X509_STORE_CTX_get_error(ctx);
+        snprintf(e->message,sizeof(e->message),"Client credential verification failed: %s. Renew or repair credentials, then Reconnect.",X509_verify_cert_error_string(e->verify_result));
+        e->kind=ZC_CREDENTIALS; goto end;
+    }
+    unsigned char digest[EVP_MAX_MD_SIZE]; unsigned length=0;
+    struct tm expires={0};
+    if (!X509_digest(cert,EVP_sha256(),digest,&length) || length!=32 ||
+        !ASN1_TIME_to_tm(X509_get0_notAfter(cert),&expires)) {
+        failure(e,ZC_CREDENTIALS,"Cannot inspect client certificate identity or expiry."); goto end;
+    }
+    for (unsigned i=0;i<32;i++) snprintf(identity->fingerprint+i*2,3,"%02x",digest[i]);
+    strftime(identity->expires,sizeof(identity->expires),"%Y-%m-%dT%H:%M:%SZ",&expires);
+    identity->expires_at=(int64_t)timegm(&expires); ok=1;
+end:
+    X509_STORE_CTX_free(ctx); X509_STORE_free(store); X509_free(cert); EVP_PKEY_free(key); return ok;
+}
 static int64_t monotonic_ms(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return (int64_t)ts.tv_sec*1000+ts.tv_nsec/1000000; }
 static int progress(void *context, curl_off_t a, curl_off_t b, curl_off_t c, curl_off_t d) {
     (void)a; (void)b; (void)c; (void)d;
@@ -21,90 +163,159 @@ static int progress(void *context, curl_off_t a, curl_off_t b, curl_off_t c, cur
     return s->stream && monotonic_ms()-s->last_rx>45000;
 }
 static size_t receive(char *data, size_t size, size_t count, void *context) {
-    struct Slot *s = context; size_t n = size * count; s->last_rx=monotonic_ms();
+    struct Slot *s=context; size_t n=size*count; s->last_rx=monotonic_ms();
     if (s->stream) {
-        long status = 0; curl_easy_getinfo(s->easy, CURLINFO_RESPONSE_CODE, &status);
-        if (status != 200) return n;
-        return s->owner->fn(s->owner->context, data, n) ? n : 0;
+        long status=0; curl_easy_getinfo(s->easy,CURLINFO_RESPONSE_CODE,&status);
+        if (status!=200) return n;
+        return s->owner->fn(s->owner->context,data,n) ? n : 0;
     }
-    if (n > 64*1024*1024 - s->len) return 0;
-    char *next = realloc(s->body, s->len + n + 1); if (!next) return 0;
-    s->body = next; memcpy(next + s->len, data, n); s->len += n; next[s->len] = 0; return n;
+    if (n>64*1024*1024-s->len) return 0;
+    char *next=realloc(s->body,s->len+n+1); if (!next) return 0;
+    s->body=next; memcpy(next+s->len,data,n); s->len+=n; next[s->len]=0; return n;
 }
-ZcNet *zc_net_new(const char *token, unsigned port, ZcStreamFn fn, void *context) {
-    if (curl_global_init(CURL_GLOBAL_DEFAULT)) return NULL;
-    ZcNet *n = calloc(1, sizeof(*n)); if (!n) { curl_global_cleanup(); return NULL; }
-    n->multi = curl_multi_init(); n->port = port; n->fn = fn; n->context = context;
-    char auth[96]; snprintf(auth, sizeof(auth), "Authorization: Bearer %s", token);
-    n->headers = curl_slist_append(NULL, auth); memset(auth, 0, sizeof(auth));
-    n->headers = curl_slist_append(n->headers, "Content-Type: application/json");
-    return n;
+static void tls_message(int write, int version, int type, const void *buf, size_t len, SSL *ssl, void *context) {
+    (void)version; (void)ssl;
+    struct Slot *s=context;
+    if (!write && type==SSL3_RT_ALERT && len==2) s->alert=((const unsigned char *)buf)[1];
+}
+static CURLcode tls_context(CURL *easy, void *context, void *user) {
+    (void)easy; SSL_CTX *ctx=context; struct Slot *s=user;
+    /* Replace the entire store, including lookup methods. Clearing CAPATH and
+     * native-root options alone is not the trust isolation boundary. */
+    X509_STORE *store=X509_STORE_new();
+    if (!store) return CURLE_OUT_OF_MEMORY;
+    if (!X509_STORE_add_cert(store,s->owner->root)) { X509_STORE_free(store); return CURLE_SSL_CACERT_BADFILE; }
+    SSL_CTX_set_cert_store(ctx,store);
+    SSL_CTX_set_msg_callback(ctx,tls_message); SSL_CTX_set_msg_callback_arg(ctx,s);
+    SSL_CTX_set_session_cache_mode(ctx,SSL_SESS_CACHE_OFF);
+    return CURLE_OK;
 }
 static void clear_slot(ZcNet *n, int index) {
-    struct Slot *s = &n->slots[index];
-    if (s->easy) { curl_multi_remove_handle(n->multi, s->easy); curl_easy_cleanup(s->easy); }
-    free(s->body); memset(s, 0, sizeof(*s));
+    struct Slot *s=&n->slots[index];
+    if (s->easy) { curl_multi_remove_handle(n->multi,s->easy); curl_easy_cleanup(s->easy); }
+    free(s->body); memset(s,0,sizeof(*s));
 }
-void zc_net_free(ZcNet *n) { if (!n) return; clear_slot(n,0); clear_slot(n,1); curl_slist_free_all(n->headers); curl_multi_cleanup(n->multi); free(n); curl_global_cleanup(); }
+void zc_net_free(ZcNet *n) {
+    if (!n) return;
+    clear_slot(n,0); clear_slot(n,1); curl_slist_free_all(n->headers);
+    if (n->multi) curl_multi_cleanup(n->multi);
+    X509_free(n->root); free(n->origin);
+    zc_private_free(n->ca,n->ca_len); zc_private_free(n->cert,n->cert_len); zc_private_free(n->key,n->key_len);
+    free(n); curl_global_cleanup();
+}
+ZcNet *zc_net_new(const char *origin, const char *ca, const char *cert, const char *key,
+                  ZcStreamFn fn, void *context, ZcError *error, ZcIdentity *identity) {
+    memset(error,0,sizeof(*error)); memset(identity,0,sizeof(*identity));
+    if (curl_global_init(CURL_GLOBAL_DEFAULT)) { failure(error,ZC_CONFIG,"libcurl initialization failed."); return NULL; }
+    ZcNet *n=calloc(1,sizeof(*n));
+    if (!n) { curl_global_cleanup(); failure(error,ZC_CONFIG,"Transport allocation failed."); return NULL; }
+    const curl_version_info_data *version=curl_version_info(CURLVERSION_NOW);
+    if (!version->ssl_version || strncmp(version->ssl_version,"OpenSSL/3.",10) || OpenSSL_version_num()<0x30000000L) {
+        failure(error,ZC_CONFIG,"Zimbr requires libcurl with the OpenSSL 3 TLS backend. Install a supported build."); goto fail;
+    }
+    if (!zc_origin_valid(origin)) { failure(error,ZC_CONFIG,"relay_url must be an HTTPS origin with a hostname and optional port only."); goto fail; }
+    n->origin=strdup(origin); if (!n->origin) goto oom;
+    size_t len=strlen(n->origin); if (n->origin[len-1]=='/') n->origin[len-1]=0;
+    const char *paths[]={ca,cert,key}; char **buffers[]={&n->ca,&n->cert,&n->key};
+    size_t *lengths[]={&n->ca_len,&n->cert_len,&n->key_len};
+    const char *labels[]={"CA file","Client certificate","Client key"};
+    for (int i=0;i<3;i++) if (zc_private_read(paths[i],buffers[i],lengths[i])!=1) {
+        snprintf(error->message,sizeof(error->message),"%s missing or unsafe. Use an absolute path, owned 0600 file in a 0700 directory, without symlinks; then Reconnect.",labels[i]);
+        error->kind=ZC_CREDENTIALS; goto fail;
+    }
+    if (!credentials(n,error,identity)) goto fail;
+    n->multi=curl_multi_init(); n->headers=curl_slist_append(NULL,"Content-Type: application/json");
+    n->fn=fn; n->context=context;
+    if (!n->multi || !n->headers) goto oom;
+    return n;
+oom: failure(error,ZC_CONFIG,"Transport allocation failed.");
+fail: zc_net_free(n); return NULL;
+}
 int zc_net_start(ZcNet *n, int stream, const char *path, const char *body) {
-    if (n->slots[stream].easy || path[0] != '/') return 0;
-    struct Slot *s = &n->slots[stream]; s->easy = curl_easy_init(); if (!s->easy) return 0;
-    s->owner = n; s->stream = stream; s->last_rx=monotonic_ms();
-    char url[8192]; if (snprintf(url, sizeof(url), "http://127.0.0.1:%u%s", n->port, path) >= (int)sizeof(url)) { clear_slot(n,stream); return 0; }
-    curl_easy_setopt(s->easy, CURLOPT_URL, url);
-    curl_easy_setopt(s->easy, CURLOPT_PROXY, "");
-    curl_easy_setopt(s->easy, CURLOPT_PROTOCOLS_STR, "http");
-    curl_easy_setopt(s->easy, CURLOPT_FOLLOWLOCATION, 0L);
-    curl_easy_setopt(s->easy, CURLOPT_HTTPHEADER, n->headers);
-    curl_easy_setopt(s->easy, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(s->easy, CURLOPT_CONNECTTIMEOUT_MS, 3000L);
-    curl_easy_setopt(s->easy, CURLOPT_TIMEOUT_MS, stream ? 0L : 7000L);
-    if (!stream) {
-        curl_easy_setopt(s->easy, CURLOPT_LOW_SPEED_LIMIT, 1L);
-        curl_easy_setopt(s->easy, CURLOPT_LOW_SPEED_TIME, 7L);
-    }
-    curl_easy_setopt(s->easy, CURLOPT_NOPROGRESS, 0L);
-    curl_easy_setopt(s->easy, CURLOPT_XFERINFOFUNCTION, progress);
-    curl_easy_setopt(s->easy, CURLOPT_XFERINFODATA, s);
-    curl_easy_setopt(s->easy, CURLOPT_WRITEFUNCTION, receive);
-    curl_easy_setopt(s->easy, CURLOPT_WRITEDATA, s);
-    curl_easy_setopt(s->easy, CURLOPT_PRIVATE, s);
-    if (body) { curl_easy_setopt(s->easy, CURLOPT_POST, 1L); curl_easy_setopt(s->easy, CURLOPT_COPYPOSTFIELDS, body); }
-    return curl_multi_add_handle(n->multi, s->easy) == CURLM_OK;
+    if (stream<0 || stream>1 || n->slots[stream].easy || path[0]!='/' || path[1]=='/') return 0;
+    struct Slot *s=&n->slots[stream]; s->easy=curl_easy_init(); if (!s->easy) return 0;
+    s->owner=n; s->stream=stream; s->last_rx=monotonic_ms();
+    char url[8192];
+    if (snprintf(url,sizeof(url),"%s%s",n->origin,path)>=(int)sizeof(url)) { clear_slot(n,stream); return 0; }
+    CURLcode code;
+#define SET(option,value) do { code=curl_easy_setopt(s->easy,option,value); if (code!=CURLE_OK) goto setup_error; } while (0)
+    struct curl_blob ca={n->ca,n->ca_len,CURL_BLOB_COPY}, cert={n->cert,n->cert_len,CURL_BLOB_COPY}, key={n->key,n->key_len,CURL_BLOB_COPY};
+    SET(CURLOPT_ERRORBUFFER,s->error.message);
+    SET(CURLOPT_URL,url);
+    SET(CURLOPT_PROXY,""); SET(CURLOPT_NOPROXY,"*");
+    SET(CURLOPT_PROTOCOLS_STR,"https"); SET(CURLOPT_REDIR_PROTOCOLS_STR,"https");
+    SET(CURLOPT_FOLLOWLOCATION,0L); SET(CURLOPT_MAXREDIRS,0L);
+    SET(CURLOPT_HTTP_VERSION,(long)CURL_HTTP_VERSION_1_1);
+    SET(CURLOPT_SSL_VERIFYPEER,1L); SET(CURLOPT_SSL_VERIFYHOST,2L);
+    SET(CURLOPT_SSLVERSION,(long)(CURL_SSLVERSION_TLSv1_3|CURL_SSLVERSION_MAX_TLSv1_3));
+    SET(CURLOPT_SSL_OPTIONS,0L); SET(CURLOPT_SSL_SESSIONID_CACHE,0L);
+    SET(CURLOPT_CAINFO,NULL); SET(CURLOPT_CAPATH,NULL); SET(CURLOPT_CA_CACHE_TIMEOUT,0L);
+    SET(CURLOPT_CAINFO_BLOB,&ca); SET(CURLOPT_SSLCERTTYPE,"PEM"); SET(CURLOPT_SSLKEYTYPE,"PEM");
+    SET(CURLOPT_SSLCERT_BLOB,&cert); SET(CURLOPT_SSLKEY_BLOB,&key);
+    SET(CURLOPT_SSL_CTX_FUNCTION,tls_context); SET(CURLOPT_SSL_CTX_DATA,s);
+    SET(CURLOPT_HTTPHEADER,n->headers); SET(CURLOPT_NOSIGNAL,1L);
+    SET(CURLOPT_CONNECTTIMEOUT_MS,3000L); SET(CURLOPT_TIMEOUT_MS,stream ? 0L : 7000L);
+    if (!stream) { SET(CURLOPT_LOW_SPEED_LIMIT,1L); SET(CURLOPT_LOW_SPEED_TIME,7L); }
+    SET(CURLOPT_NOPROGRESS,0L); SET(CURLOPT_XFERINFOFUNCTION,progress); SET(CURLOPT_XFERINFODATA,s);
+    SET(CURLOPT_WRITEFUNCTION,receive); SET(CURLOPT_WRITEDATA,s); SET(CURLOPT_PRIVATE,s);
+    if (body) { SET(CURLOPT_POST,1L); SET(CURLOPT_COPYPOSTFIELDS,body); }
+    if (curl_multi_add_handle(n->multi,s->easy)!=CURLM_OK) { code=CURLE_FAILED_INIT; goto setup_error; }
+    return 1;
+setup_error:
+    s->error.curl_code=code;
+    snprintf(s->error.message,sizeof(s->error.message),"libcurl TLS/request setup failed: %s. Install a supported libcurl/OpenSSL build, then Reconnect.",curl_easy_strerror(code));
+    s->error.kind=ZC_CONFIG; s->done=1; return 1;
+#undef SET
 }
-void zc_net_cancel_stream(ZcNet *n) { clear_slot(n, 1); }
-void zc_net_cancel_request(ZcNet *n) { clear_slot(n, 0); }
+void zc_net_cancel_stream(ZcNet *n) { clear_slot(n,1); }
+void zc_net_cancel_request(ZcNet *n) { clear_slot(n,0); }
 int zc_net_wait(ZcNet *n, int wake_fd, int timeout_ms) {
-    int ready = 0;
+    int ready=0;
     if (n) {
-        struct curl_waitfd wake = { .fd = wake_fd, .events = CURL_WAIT_POLLIN, .revents = 0 };
-        if (curl_multi_poll(n->multi, &wake, wake_fd >= 0 ? 1 : 0, timeout_ms, &ready) != CURLM_OK) return 0;
+        struct curl_waitfd wake={.fd=wake_fd,.events=CURL_WAIT_POLLIN,.revents=0};
+        if (curl_multi_poll(n->multi,&wake,wake_fd>=0 ? 1 : 0,timeout_ms,&ready)!=CURLM_OK) return 0;
     } else {
-        struct pollfd wake = { .fd = wake_fd, .events = POLLIN };
-        poll(&wake, wake_fd >= 0 ? 1 : 0, timeout_ms);
+        struct pollfd wake={.fd=wake_fd,.events=POLLIN}; poll(&wake,wake_fd>=0 ? 1 : 0,timeout_ms);
     }
-    if (wake_fd >= 0) { char bytes[128]; while (read(wake_fd, bytes, sizeof(bytes)) > 0) {} }
+    if (wake_fd>=0) { char bytes[128]; while (read(wake_fd,bytes,sizeof(bytes))>0) {} }
     return 1;
 }
 int zc_net_poll(ZcNet *n) {
-    int active = 0; if (curl_multi_perform(n->multi, &active) != CURLM_OK) return 0;
+    int active=0; if (curl_multi_perform(n->multi,&active)!=CURLM_OK) return 0;
     int queued; CURLMsg *m;
-    while ((m = curl_multi_info_read(n->multi, &queued))) if (m->msg == CURLMSG_DONE) {
-        struct Slot *s = NULL; curl_easy_getinfo(m->easy_handle, CURLINFO_PRIVATE, &s);
-        curl_easy_getinfo(m->easy_handle, CURLINFO_RESPONSE_CODE, &s->status);
-        if (m->data.result != CURLE_OK && (!s->stream || s->status == 200)) s->status = 0;
-        s->done = 1;
+    while ((m=curl_multi_info_read(n->multi,&queued))) if (m->msg==CURLMSG_DONE) {
+        struct Slot *s=NULL; curl_easy_getinfo(m->easy_handle,CURLINFO_PRIVATE,&s);
+        curl_easy_getinfo(m->easy_handle,CURLINFO_RESPONSE_CODE,&s->status);
+        curl_easy_getinfo(m->easy_handle,CURLINFO_SSL_VERIFYRESULT,&s->error.verify_result);
+        CURLcode code=m->data.result; s->error.curl_code=code;
+        if (code!=CURLE_OK) {
+            if (!s->error.message[0]) snprintf(s->error.message,sizeof(s->error.message),"%s",curl_easy_strerror(code));
+            if (code==CURLE_PEER_FAILED_VERIFICATION || code==CURLE_SSL_ISSUER_ERROR) s->error.kind=ZC_SERVER_TRUST;
+            else if (code==CURLE_SSL_CERTPROBLEM || code==CURLE_SSL_CACERT_BADFILE) s->error.kind=ZC_CREDENTIALS;
+            else if ((s->alert>=42 && s->alert<=46) || s->alert==48 || s->alert==116) s->error.kind=ZC_CLIENT_REJECTED;
+            else if (code==CURLE_SSL_CONNECT_ERROR || s->alert) s->error.kind=ZC_TLS;
+            else s->error.kind=ZC_NETWORK;
+        } else if (s->status>=300 || (s->stream && s->status!=200)) {
+            s->error.kind=ZC_HTTP;
+            snprintf(s->error.message,sizeof(s->error.message),"Relay returned HTTP %ld%s",s->status,s->status<400 ? "; redirects are disabled. Check relay_url, then Reconnect." : ".");
+        }
+        if (code==CURLE_OK && s->stream && s->status==200) {
+            failure(&s->error,ZC_NETWORK,"Event stream closed. Reconnecting from the saved cursor.");
+        }
+        /* Keep the actual HTTP status even for truncated 200 responses. */
+        s->done=1;
     }
     return 1;
 }
 int zc_net_done(ZcNet *n, int stream) { return n->slots[stream].done; }
 long zc_net_status(ZcNet *n, int stream) {
-    struct Slot *s = &n->slots[stream]; long status = s->status;
-    if (s->easy && !s->done) curl_easy_getinfo(s->easy, CURLINFO_RESPONSE_CODE, &status);
+    struct Slot *s=&n->slots[stream]; long status=s->status;
+    if (s->easy && !s->done) curl_easy_getinfo(s->easy,CURLINFO_RESPONSE_CODE,&status);
     return status;
 }
+void zc_net_error(ZcNet *n, int stream, ZcError *error) { *error=n->slots[stream].error; }
 const char *zc_net_body(ZcNet *n, size_t *length) { *length=n->slots[0].len; return n->slots[0].body; }
-void zc_net_ack(ZcNet *n, int stream) { clear_slot(n, stream); }
+void zc_net_ack(ZcNet *n, int stream) { clear_slot(n,stream); }
 
 struct ZcText { PangoLayout *layout; cairo_surface_t *surface; int width, height; double scale; };
 static cairo_t *text_context(cairo_surface_t *surface, double scale, int top) {

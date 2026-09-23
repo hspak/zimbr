@@ -1,8 +1,11 @@
 # Zimbr
 
 A Zig 0.16 relay for the Messages account on a logged-in Mac. It reads Apple's
-SQLite database without modifying it, exposes an authenticated loopback HTTP/SSE
-API, and sends text through a bounded Messages AppleScript subprocess.
+SQLite database without modifying it and sends text through a bounded Messages
+AppleScript subprocess. The Linux client now requires direct HTTPS with mTLS.
+The relay transport migration is being implemented separately on macOS; the
+old relay in this checkout is not compatible with the new client. See the
+[migration plan](docs/mtls-migration.md) and [Linux setup](docs/linux-mtls.md).
 
 The Linux desktop client uses Zig, Clay, raylib, and Pango. It supports conversation
 browsing, cached history, live updates, direct messages, existing-conversation
@@ -13,12 +16,14 @@ send routing or locked-screen operation.
 ## Linux client
 
 Use Zig **0.16.0**, `pkg-config`, and development headers/libraries for SQLite,
-libcurl, Pango/Cairo, OpenGL, Wayland, and xkbcommon. Clay and raylib are pinned in
+libcurl (7.88+ with the OpenSSL 3 backend), OpenSSL 3, Pango/Cairo, OpenGL,
+Wayland, and xkbcommon. Clay and raylib are pinned in
 `build.zig.zon`; Flamez is not a build or runtime dependency. Install a system
 sans-serif font and an emoji font for the scripts you use.
 
 ```sh
 zig build client
+# After provisioning and configuration below:
 zig build run
 # Optional user-local executable, icon, and application launcher:
 packaging/linux/install.sh
@@ -31,54 +36,46 @@ the background worker continues to receive messages.
 The sidebar's **Dark mode / Light mode** button saves the appearance for the next
 launch. **Details** (Ctrl+D) opens a scrollable pane with connection and retry
 status, relay capabilities, saved sync cursor, cache counts, display information,
-and local file paths. Token contents are never shown. Escape or **Back** returns
+client certificate fingerprint and expiry, TLS failure details, and local file
+paths. Private-key contents are never shown. Escape or **Back** returns
 to messages. The search box and sidebar controls stay fixed while the list scrolls.
 Conversation lists, message history, Details, and overflowing drafts show a
 scrollbar: drag its thumb or click the track to move. Wheel scrolling is 25%
 faster. Incoming group messages use subtle participant tints and matching sender
 labels in both light and dark mode.
 
-Open the tunnel in a terminal using your existing SSH key and host trust:
+Provision a local device key/CSR and import the verified CA and signed leaf with
+`packaging/linux/provision.py`, following [Linux mTLS setup](docs/linux-mtls.md).
+The relay must enable the device's entire-leaf SHA-256 fingerprint. Use a directly
+reachable hostname covered by its server certificate; proxies and redirects are
+disabled. Both API and SSE connections require TLS 1.3 and client authentication.
 
-```sh
-ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
-  -L 127.0.0.1:8731:127.0.0.1:8731 user@mac-mini
-```
+Default data is `$XDG_DATA_HOME/zimbr` (fallback `~/.local/share/zimbr`). The cache
+and drafts remain in their existing database and contain plaintext. Credentials
+and security configuration must be owned 0600 files in 0700 directories with no
+symlinks. The GUI never receives Apple account credentials.
 
-The relay installer already creates its bearer token. Copy it over SSH once;
-keep it out of terminal output and command arguments:
-
-```sh
-umask 077
-mkdir -p "$HOME/.local/share/zimbr"
-ssh user@mac-mini 'cat "$HOME/Library/Application Support/Zimbr/token"' \
-  > "$HOME/.local/share/zimbr/token"
-chmod 600 "$HOME/.local/share/zimbr/token"
-zig-out/bin/zimbr
-```
-
-Default data is `$XDG_DATA_HOME/zimbr` (fallback `~/.local/share/zimbr`), with
-owner-only directory permissions. The cache and drafts contain plaintext. Only
-loopback HTTP is accepted, using the manually managed SSH tunnel; proxies and
-redirects are disabled. The GUI never receives Apple account credentials.
-
-Optional `$XDG_CONFIG_HOME/zimbr/config.json` (fallback `~/.config/zimbr/config.json`):
+`$XDG_CONFIG_HOME/zimbr/config.json` (fallback `~/.config/zimbr/config.json`):
 
 ```json
 {
-  "port": 8731,
-  "token_file": "/absolute/path/to/private/token",
-  "data_dir": "/absolute/path/to/client-data",
+  "relay_url": "https://mac-mini.local:8731",
+  "ca_file": "/home/USER/.config/zimbr/tls/ca.pem",
+  "client_cert_file": "/home/USER/.config/zimbr/tls/client.pem",
+  "client_key_file": "/home/USER/.config/zimbr/tls/client-key.pem",
   "enter_to_send": true
 }
 ```
 
-`--port`, `--token-file`, and `--data-dir` override these preferences. An optional
-`"theme": "dark"` or `"theme": "light"` config entry (or `--theme dark|light`) sets
-the appearance at launch; otherwise the saved sidebar choice is used. `--details`
-opens the diagnostics pane at launch. After token
-rotation, replace the local file and click **Reconnect**. Authentication errors
-wait for that action; network errors reconnect with bounded exponential backoff.
+Use actual absolute paths. Matching CLI flags are `--relay-url`, `--ca-file`,
+`--client-cert-file`, `--client-key-file`, and `--data-dir`. Old transport fields
+and options fail with migration guidance. An optional `"theme": "dark"` or
+`"theme": "light"` (or `--theme dark|light`) overrides saved appearance.
+`--details` opens diagnostics at launch. After replacing credentials click
+**Reconnect**, which reloads the files and discards all old TLS connections.
+Configuration path or endpoint changes require restart. Certificate errors wait
+for correction and Reconnect; transient network failures use bounded backoff.
+A client-certificate expiry warning starts 30 days before its actual expiry.
 
 Enter sends; Shift+Enter inserts a newline. Ctrl+A/C/X/V, Ctrl+Z, Ctrl+Shift+Z,
 Ctrl+Y, Home/End, arrows, mouse selection, and clipboard are supported. Ctrl+N
@@ -100,7 +97,8 @@ IME-capable editor when needed. Missing glyphs remain copyable as original UTF-8
 
 Offline drafts are saved but new sends are not queued offline. Each outgoing
 request is persisted before its first POST; recovery checks the original UUID
-without automatically sending again. An uncertain or failed message can be copied
+without automatically sending again. While the original submission is unresolved,
+new sends stay as drafts. An uncertain or failed message can be copied
 to a draft for deliberate retry. Sending again after an uncertain result can
 create a duplicate. A relay epoch reset preserves drafts and outbox identities;
 orphaned drafts remain discoverable as **Recovered draft**. Local unread markers
@@ -111,6 +109,7 @@ Linux verification:
 
 ```sh
 zig build test client-probe fake-relay
+python3 tests/client_tls.py
 python3 tests/client_integration.py
 python3 tests/client_transport.py
 python3 tests/client_details.py
@@ -124,8 +123,10 @@ zig-out/bin/client-probe --data-dir /path/to/client-data
 ```
 
 `test-client` runs store, SSE, and Unicode text tests without a GPU. The Python
-client integration suite uses the actual client worker and actual fixture relay
-for history, pagination, direct/group sends, echo merging, uncertain outcomes,
+client integration suite uses the actual client worker, temporary device/CA
+certificates, and an authenticated TLS test adapter in front of the existing
+fixture relay. The adapter is temporary Linux test infrastructure pending the
+native relay migration. It covers history, pagination, direct/group sends, echo merging, uncertain outcomes,
 crashes, expired cursors, and epoch changes. A Wayland screenshot
 can be exported with `zimbr --screenshot /path/to/image.png --frames 90`.
 
@@ -174,7 +175,10 @@ joins, event replay, transaction rollback, persistence failures, idempotency,
 observed delivery, uncertain correlation, stalled and interrupted dispatch,
 source replacement, and token rotation. They never modify the real Messages DB.
 
-## Install and permissions
+## Existing macOS installation (pre-mTLS)
+
+This section records the old relay behavior pending the macOS migration. Do not
+use it to deploy the new Linux client; use the coordinated migration plan.
 
 ```sh
 python3 packaging/macos/install.py                 # stage app and plist
@@ -215,7 +219,7 @@ Automation is probed only after database reads succeed. It does not send a test
 message automatically. Screen locking must be tested separately from logging out.
 After logout/reboot, this agent requires the user's graphical login session.
 
-## Operation
+## Existing macOS operation (pre-mTLS)
 
 ```sh
 zig-out/bin/relay setup
@@ -237,32 +241,11 @@ is 32 random bytes encoded as 64 hexadecimal characters in a 0600 `token` file.
 Token rotation is atomic; existing streams close at their next heartbeat. A
 process lock prevents two relay instances from dispatching from the same journal.
 
-The API always binds **127.0.0.1**, default port **8731**. It never falls back to a
-public interface. From Linux, establish the tunnel using your normal SSH trust
-and authentication:
-
-```sh
-ssh -N -T -o ExitOnForwardFailure=yes \
-  -L 127.0.0.1:8731:127.0.0.1:8731 user@mac-mini
-```
-
-Configure the client with the token through an owner-readable file or secret
-store. Do not place it in URLs, process arguments, or logs. Every API endpoint,
-including status and events, requires `Authorization: Bearer TOKEN`. The relay
-stores plaintext normalized history in its separate journal and relies on the
-Mac account/disk protections at rest. Apple credentials remain on the Mac.
-
-To inspect status locally without putting the token in command arguments:
-
-```sh
-python3 - <<'PY'
-import http.client, pathlib
-p = pathlib.Path.home() / 'Library/Application Support/Zimbr/token'
-c = http.client.HTTPConnection('127.0.0.1', 8731)
-c.request('GET', '/v1/status', headers={'Authorization': 'Bearer ' + p.read_text().strip()})
-print(c.getresponse().read().decode())
-PY
-```
+The pre-migration relay binds **127.0.0.1** and requires its bearer token on every
+API endpoint. Its old SSH transport is incompatible with the current Linux
+client. Replace it with the matching mTLS relay before cutover; server-side setup,
+smoke tools, and authorization are owned by the macOS migration. The relay's
+plaintext journal still relies on Mac account/disk protections at rest.
 
 Stop/start the agent with `launchctl bootout gui/$(id -u)/com.hsp.zimbr.relay` and
 `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hsp.zimbr.relay.plist`.

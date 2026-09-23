@@ -3,7 +3,15 @@
 #include <stdint.h>
 typedef struct ZcNet ZcNet;
 typedef int (*ZcStreamFn)(void *, const char *, size_t);
-ZcNet *zc_net_new(const char *token, unsigned port, ZcStreamFn fn, void *context);
+enum ZcFailure { ZC_OK, ZC_NETWORK, ZC_SERVER_TRUST, ZC_CREDENTIALS, ZC_CLIENT_REJECTED, ZC_TLS, ZC_HTTP, ZC_CONFIG };
+typedef struct { int kind, curl_code; long verify_result; char message[256]; } ZcError;
+typedef struct { char fingerprint[65], expires[32]; int64_t expires_at; } ZcIdentity;
+/* Secure descriptor-based read. 1 = success, 0 = absent, -1 = unsafe/error. */
+int zc_private_read(const char *path, char **data, size_t *length);
+void zc_private_free(char *data, size_t length);
+int zc_origin_valid(const char *origin);
+ZcNet *zc_net_new(const char *origin, const char *ca, const char *cert, const char *key,
+                  ZcStreamFn fn, void *context, ZcError *error, ZcIdentity *identity);
 void zc_net_free(ZcNet *net);
 int zc_net_start(ZcNet *net, int stream, const char *path, const char *body);
 void zc_net_cancel_stream(ZcNet *net);
@@ -12,6 +20,7 @@ int zc_net_wait(ZcNet *net, int wake_fd, int timeout_ms);
 int zc_net_poll(ZcNet *net);
 int zc_net_done(ZcNet *net, int stream);
 long zc_net_status(ZcNet *net, int stream);
+void zc_net_error(ZcNet *net, int stream, ZcError *error);
 const char *zc_net_body(ZcNet *net, size_t *length);
 void zc_net_ack(ZcNet *net, int stream);
 typedef struct ZcText ZcText;

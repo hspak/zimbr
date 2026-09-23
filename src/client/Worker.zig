@@ -24,6 +24,7 @@ pub const RelayStatus = struct {
     degraded_reasons: []const []const u8,
 };
 pub const Diagnostics = struct {
+    transport: SharedSnapshot.Transport = .{},
     server: ?RelayStatus = null,
     cursor: []const u8 = "",
     job: []const u8 = "idle",
@@ -103,6 +104,8 @@ last_status_ms: i64 = 0,
 last_event_ms: i64 = 0,
 last_response_ms: i64 = 0,
 last_http_status: i64 = 0,
+transport_error: c.ZcError = std.mem.zeroes(c.ZcError),
+identity: c.ZcIdentity = std.mem.zeroes(c.ZcIdentity),
 pub fn start(s: *Self) !void {
     if (u.c.pipe(&s.wake_pipe) != 0) return error.WorkerWakeUnavailable;
     errdefer {
@@ -203,19 +206,23 @@ fn work(s: *Self) !void {
             if (c.zc_net_done(n, 0) != 0) try s.complete();
             if (c.zc_net_done(n, 1) != 0) {
                 const status = c.zc_net_status(n, 1);
+                c.zc_net_error(n, 1, &s.transport_error);
+                s.last_http_status = status;
+                s.last_response_ms = u.now();
                 c.zc_net_ack(n, 1);
                 s.stream_active = false;
                 s.sse.deinit();
-                if (status == 409 or status == 410) {
+                if (s.transport_error.curl_code == 0 and (status == 409 or status == 410)) {
                     s.need_sync = true;
                     s.status = "Refreshing expired history…";
                     s.online = false;
                     s.retry_at = 0;
                 } else s.disconnected(status);
             }
-            if (s.stream_active and !s.online and c.zc_net_status(n, 1) == 200) {
+            if (!s.auth_blocked and s.stream_active and !s.online and c.zc_net_status(n, 1) == 200) {
                 s.online = true;
                 s.backoff = 1000;
+                s.transport_error = std.mem.zeroes(c.ZcError);
                 s.status = if (s.send_direct or s.reply_existing) "Connected" else "Connected · relay cannot send; run relay doctor on the Mac";
                 s.dirty = true;
             }
@@ -234,31 +241,12 @@ fn work(s: *Self) !void {
     }
 }
 fn connect(s: *Self) !void {
-    var token: [67]u8 = undefined;
-    const len = u.c.zr_read_secret(s.config.token_path, &token, 66);
-    if (len < 0) {
-        s.status = "Setup needed · token file missing or not private (chmod 600). Then Reconnect.";
-        s.auth_blocked = true;
-        s.dirty = true;
+    s.net = c.zc_net_new(s.config.relay_url, s.config.ca_file, s.config.client_cert_file, s.config.client_key_file, receive, s, &s.transport_error, &s.identity);
+    if (s.net == null) {
+        s.disconnected(0);
         return;
     }
-    const value = std.mem.trim(u8, token[0..@intCast(len)], "\r\n");
-    if (value.len != 64) {
-        s.status = "Setup needed · invalid relay token file. Then Reconnect.";
-        s.auth_blocked = true;
-        s.dirty = true;
-        return;
-    }
-    for (value) |ch| if (!std.ascii.isHex(ch)) {
-        s.auth_blocked = true;
-        s.status = "Setup needed · invalid relay token file.";
-        s.dirty = true;
-        return;
-    };
-    token[64] = 0;
-    defer @memset(&token, 0);
-    s.net = c.zc_net_new(&token, s.config.port, receive, s) orelse return error.TransportUnavailable;
-    s.status = "Connecting to relay…";
+    s.status = "Connecting with mTLS…";
     s.retry_at = 0;
     s.dirty = true;
 }
@@ -302,11 +290,18 @@ fn setJobKey(s: *Self, key: []const u8) !void {
 fn disconnected(s: *Self, status: c_long) void {
     s.online = false;
     s.dirty = true;
-    if (status == 401) {
-        s.auth_blocked = true;
-        s.status = "Authentication rejected · update the token file, then Reconnect";
-    } else {
-        s.status = "Offline · cached messages and drafts available. Check the SSH tunnel.";
+    const kind = s.transport_error.kind;
+    s.auth_blocked = s.auth_blocked or kind == c.ZC_SERVER_TRUST or kind == c.ZC_CREDENTIALS or kind == c.ZC_CLIENT_REJECTED or kind == c.ZC_CONFIG or status == 401 or status == 403 or (status >= 300 and status < 400);
+    s.status = switch (kind) {
+        c.ZC_SERVER_TRUST => "Server identity verification failed · check the CA, hostname and expiry, then Reconnect",
+        c.ZC_CREDENTIALS => "Local credentials need repair · see Details, then Reconnect",
+        c.ZC_CLIENT_REJECTED => "Client certificate rejected · check enrollment and validity on the Mac, then Reconnect",
+        c.ZC_CONFIG => "Connection configuration failed · see Details, then Reconnect",
+        c.ZC_TLS => "TLS connection failed · see Details; retrying (certificate rejection is not confirmed)",
+        c.ZC_HTTP => if (s.auth_blocked) "Relay HTTP error · check endpoint and access on the Mac, then Reconnect" else "Relay HTTP error · see Details; retrying",
+        else => "Offline · cached messages and drafts available. Check the network and relay.",
+    };
+    if (s.auth_blocked) s.retry_at = 0 else {
         s.retry_at = u.now() + s.backoff + @mod(u.now(), 251);
         s.backoff = @min(s.backoff * 2, 30000);
     }
@@ -315,6 +310,9 @@ fn disconnected(s: *Self, status: c_long) void {
         s.stream_active = false;
         s.sse.deinit();
     }
+}
+fn unresolved(s: *Self) !bool {
+    return try s.store.db.scalar("SELECT count(*) FROM outbox WHERE epoch=(SELECT value FROM meta WHERE key='epoch') AND record IS NULL AND state IN ('sending','unknown')") > 0;
 }
 fn schedule(s: *Self) !void {
     var arena = std.heap.ArenaAllocator.init(a);
@@ -326,6 +324,14 @@ fn schedule(s: *Self) !void {
             s.need_sync = false;
             try s.request(.sync, "/v1/sync", null);
         } else try s.request(.status, "/v1/status", null);
+    } else if (try s.unresolved() and u.now() >= s.recovery_at) {
+        var q = try s.store.db.prepare("SELECT id FROM outbox WHERE epoch=(SELECT value FROM meta WHERE key='epoch') AND record IS NULL AND state IN ('sending','unknown') ORDER BY rowid LIMIT 1");
+        defer q.close();
+        if (try q.step()) {
+            try s.setJobKey(q.bytes(0));
+            s.recovery_at = u.now() + 5000;
+            try s.request(.recover, try std.fmt.allocPrint(ar, "/v1/send-requests/{s}", .{s.job_key}), null);
+        }
     } else if (s.need_history and s.selected.len > 0 and !std.mem.startsWith(u8, s.selected, "new:")) {
         s.need_history = false;
         try s.setJobKey(s.selected);
@@ -366,8 +372,15 @@ fn attach(s: *Self, ar: u.Allocator) !void {
 }
 fn complete(s: *Self) !void {
     const n = s.net.?;
-    const status = c.zc_net_status(n, 0);
-    s.last_http_status = status;
+    const http_status = c.zc_net_status(n, 0);
+    var request_error: c.ZcError = undefined;
+    c.zc_net_error(n, 0, &request_error);
+    // Keep an explicit SSE/configuration failure visible until Reconnect even
+    // if an already-running API request finishes afterwards.
+    if (!s.auth_blocked) s.transport_error = request_error;
+    // A partial HTTP 200 must never be treated as a complete response.
+    const status = if (request_error.curl_code == 0) http_status else 0;
+    s.last_http_status = http_status;
     s.last_response_ms = u.now();
     var len: usize = 0;
     const ptr = c.zc_net_body(n, &len);
@@ -386,7 +399,7 @@ fn complete(s: *Self) !void {
         }
         if (job == .send) {
             // Transport failures and server errors may follow durable acceptance.
-            const definite = status == 400 or status == 401 or status == 409 or status == 413;
+            const definite = status == 400 or status == 401 or status == 403 or status == 409 or status == 413;
             try s.store.outcome(s.job_key, if (definite) "failed" else "unknown", if (definite) "Relay rejected this submission. Copy it to the composer to edit." else "Outcome uncertain. Checking the original request ID; no automatic resend.");
         } else if (job == .recover and status == 404) {
             try s.store.outcome(s.job_key, "unconfirmed", "The relay has no record of this request. It will not be resent automatically.");
@@ -404,6 +417,7 @@ fn complete(s: *Self) !void {
         } else s.disconnected(status);
         return;
     }
+    if (s.auth_blocked and job != .send and job != .recover) return;
     s.handleResponse(ar, job, raw) catch |err| {
         std.log.warn("client response: {s}", .{@errorName(err)});
         if (job == .history and u.eq(s.job_key, s.selected)) {
@@ -559,6 +573,16 @@ fn drain(s: *Self) !void {
                 s.need_history = true;
             },
             .reconnect => {
+                if (s.job == .send) {
+                    try s.store.outcome(s.job_key, "unknown", "Connection changed. Checking the original request ID before any new submission.");
+                    s.content_dirty = true;
+                }
+                if (s.job == .history) {
+                    s.need_history = true;
+                    s.older = s.job_older;
+                }
+                s.recovery_at = 0;
+                s.recover_row = 0;
                 s.auth_blocked = false;
                 s.retry_at = 0;
                 s.backoff = 1000;
@@ -580,6 +604,10 @@ fn drain(s: *Self) !void {
                 if (!s.online or s.stop.load(.acquire)) {
                     try s.store.saveDraft(cmd.key, cmd.text);
                     s.status = "Offline · message kept as a draft";
+                } else if (try s.unresolved()) {
+                    try s.store.saveDraft(cmd.key, cmd.text);
+                    s.recovery_at = 0;
+                    s.status = "Checking the previous send's original request ID · new message kept as a draft";
                 } else {
                     const direct = std.mem.startsWith(u8, cmd.key, "new:");
                     if ((direct and !s.send_direct) or (!direct and !s.reply_existing)) {
@@ -639,7 +667,27 @@ fn publish(s: *Self) !void {
     v.snapshot.draft = try s.store.draft(ar, s.selected);
     v.dark_mode = u.eq(try s.store.get(ar, "theme"), "dark");
     const server = try s.store.get(ar, "relay_status");
+    const expiring = s.identity.expires_at > 0 and s.identity.expires_at - @divTrunc(u.now(), 1000) <= 30 * 86400;
+    if (expiring and s.online) v.status = try std.fmt.allocPrint(ar, "{s} · client certificate expires {s}; renew and Reconnect", .{ s.status, std.mem.sliceTo(&s.identity.expires, 0) });
     v.diagnostics = .{
+        .transport = .{
+            .failure = switch (s.transport_error.kind) {
+                c.ZC_OK => "none",
+                c.ZC_NETWORK => "network",
+                c.ZC_SERVER_TRUST => "server_trust",
+                c.ZC_CREDENTIALS => "credentials",
+                c.ZC_CLIENT_REJECTED => "client_rejected",
+                c.ZC_TLS => "tls",
+                c.ZC_HTTP => "http",
+                else => "configuration",
+            },
+            .curl_code = s.transport_error.curl_code,
+            .verify_result = s.transport_error.verify_result,
+            .detail = try ar.dupe(u8, std.mem.sliceTo(&s.transport_error.message, 0)),
+            .fingerprint = try ar.dupe(u8, std.mem.sliceTo(&s.identity.fingerprint, 0)),
+            .expires = try ar.dupe(u8, std.mem.sliceTo(&s.identity.expires, 0)),
+            .expiring = expiring,
+        },
         .server = if (server.len > 0) (try std.json.parseFromSlice(RelayStatus, ar, server, .{ .ignore_unknown_fields = true })).value else null,
         .cursor = try s.store.get(ar, "cursor"),
         .job = @tagName(s.job),
@@ -674,7 +722,7 @@ pub fn encode(ar: u.Allocator, raw: []const u8) ![]const u8 {
 }
 
 test "metadata views share immutable history while edited records replace it" {
-    var worker = Self{ .io = std.testing.io, .config = .{ .data = "/tmp/unused", .token_path = "/tmp/unused/token" } };
+    var worker = Self{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
     worker.store = try Store.open(":memory:");
     defer worker.store.close();
     defer worker.shutdown();
@@ -711,7 +759,7 @@ test "metadata views share immutable history while edited records replace it" {
 
 test "an invalid frame rolls back the complete network batch for safe replay" {
     const epoch = "12345678-1234-1234-1234-123456789012";
-    var worker = Self{ .io = std.testing.io, .config = .{ .data = "/tmp/unused", .token_path = "/tmp/unused/token" } };
+    var worker = Self{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
     worker.store = try Store.open(":memory:");
     defer worker.store.close();
     defer worker.shutdown();
@@ -733,4 +781,29 @@ test "an invalid frame rolls back the complete network batch for safe replay" {
     try worker.receiveBatch(frame);
     try std.testing.expectEqual(@as(i64, 1), try worker.store.db.scalar("SELECT count(*) FROM records"));
     try std.testing.expectEqualStrings(epoch ++ ":1", try worker.store.get(arena.allocator(), "cursor"));
+}
+
+test "an unresolved submission holds new text until the original ID has an authoritative outcome" {
+    const epoch = "12345678-1234-1234-1234-123456789012";
+    var worker = Self{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" }, .online = true, .reply_existing = true };
+    worker.store = try Store.open(":memory:");
+    defer worker.store.close();
+    defer worker.shutdown();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    try worker.store.beginSync(epoch, epoch ++ ":0");
+    const input = t.SendInput{ .request_id = epoch, .server_epoch = epoch, .target = .{ .conversation_id = epoch }, .text = "Original submission" };
+    try worker.store.persistSend(ar, "chat", input);
+    try worker.store.outcome(epoch, "unknown", "Connection interrupted");
+    // Even with the stream back online, submitting must not allocate a new UUID
+    // or clear the new text before lookup resolves the original submission.
+    try worker.push(.{ .kind = .send, .key = "chat", .text = "Keep this new draft" });
+    try worker.drain();
+    try std.testing.expectEqual(@as(i64, 1), try worker.store.db.scalar("SELECT count(*) FROM outbox"));
+    try std.testing.expectEqualStrings("Keep this new draft", try worker.store.draft(ar, "chat"));
+    try std.testing.expect(try worker.unresolved());
+    try worker.handleResponse(ar, .recover, try u.json(ar, t.SendRequest{ .request_id = epoch, .server_epoch = epoch, .target = input.target, .text = input.text, .state = .submitted }));
+    try std.testing.expect(!try worker.unresolved());
+    try std.testing.expectEqualStrings("Keep this new draft", try worker.store.draft(ar, "chat"));
 }

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Exercise saved appearance and diagnostics through the production worker."""
 import json
+import os
+from tls_fixture import PKI, RelayTLS
 from pathlib import Path
 import queue
 import socket
@@ -18,6 +20,7 @@ BIN = ROOT / 'zig-out/bin'
 def main():
     with tempfile.TemporaryDirectory(prefix='zimbr-details-') as temp:
         root = Path(temp)
+        os.environ['XDG_CONFIG_HOME'] = str(root/'config')
         source, relay, client = root / 'source.db', root / 'relay', root / 'client'
         create(source, count=8)
         with socket.socket() as sock:
@@ -25,13 +28,16 @@ def main():
             port = sock.getsockname()[1]
         args = ['--data-dir', str(relay), '--messages-db', str(source), '--port', str(port)]
         subprocess.run([str(BIN / 'fake-relay'), 'setup', *args], check=True, capture_output=True)
+        tls = PKI(root/'tls')
+        frontend = RelayTLS(tls, port, (relay/'token').read_text().strip())
         token = (relay / 'token').read_text().strip()
+        private_key_line = (tls.root/'client-key.pem').read_text().splitlines()[1]
         with (root / 'server.log').open('w') as log:
             server = subprocess.Popen([str(BIN / 'fake-relay'), 'serve', *args], stdout=log, stderr=log)
             proc = None
             def start():
                 nonlocal proc
-                proc = subprocess.Popen([str(BIN / 'client-probe'), '--control', '--data-dir', str(client), '--token-file', str(relay / 'token'), '--port', str(port)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, text=True)
+                proc = subprocess.Popen([str(BIN / 'client-probe'), '--control', '--data-dir', str(client), *tls.client_args(frontend.server_port)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, text=True)
                 views = queue.Queue()
                 def read():
                     for line in proc.stdout:
@@ -45,7 +51,7 @@ def main():
                 deadline = time.monotonic() + 25
                 while time.monotonic() < deadline:
                     line = views.get(timeout=max(.1, deadline-time.monotonic()))
-                    assert token not in line, 'Credentials must never enter diagnostics'
+                    assert token not in line and private_key_line not in line, 'Credentials must never enter diagnostics'
                     value = json.loads(line)
                     if predicate(value):
                         return value
@@ -69,6 +75,10 @@ def main():
                 assert details['bootstrapped'] and details['stream_active']
                 assert details['cursor'].startswith(details['server']['server_epoch'] + ':')
                 assert details['last_status_ms'] > 0
+                assert len(details['transport']['fingerprint']) == 64
+                assert details['transport']['expires'].endswith('Z')
+                assert details['transport']['failure'] == 'none'
+                assert len(frontend.peers) >= 2  # API and SSE both authenticate
                 command(kind='appearance', text='dark')
                 until(views, lambda v: v['dark_mode'])
                 stop()
@@ -86,6 +96,7 @@ def main():
                     assert db.execute("SELECT value FROM meta WHERE key='theme'").fetchone()[0] == 'light'
                 print('PASS: live diagnostics, offline server status, retry state, private credentials, and persistent light/dark appearance')
             finally:
+                frontend.close()
                 if proc and proc.poll() is None:
                     proc.kill()
                     proc.wait()

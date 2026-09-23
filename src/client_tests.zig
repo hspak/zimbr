@@ -3,6 +3,8 @@ const Store = @import("client/Store.zig");
 const Editor = @import("client/Editor.zig");
 const Sse = @import("client/Sse.zig");
 comptime {
+    _ = @import("client/Config.zig");
+    _ = @import("client/Worker.zig");
     _ = @import("client/display.zig");
     _ = @import("client/MessageSelection.zig");
 }

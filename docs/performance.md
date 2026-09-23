@@ -1,5 +1,9 @@
 # Messaging performance
 
+Recorded results below predate mTLS. The current Linux performance harness uses
+temporary certificates and an authenticated TLS fixture adapter pending the
+separate relay migration; reruns measure that additional fixture hop.
+
 The critical path is the whole system: observing Apple's database, committing
 the relay journal, transporting changes, committing the client cache, publishing
 the view, and drawing it. Both endpoints and the wire protocol are ours to change.

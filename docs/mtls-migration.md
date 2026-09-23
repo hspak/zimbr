@@ -1,7 +1,8 @@
 **Direct HTTPS with mandatory mTLS — migration design**
 
-Proposed on 2026-09-23. This document describes implementation work; the current
-release still uses HTTP through SSH. One coordinated release replaces that
+Proposed on 2026-09-23 against the HTTP-through-SSH release. The Linux client
+implementation and setup are described in [linux-mtls.md](linux-mtls.md). Server
+implementation and coordinated deployment remain separate macOS work. One coordinated release replaces that
 transport and its shared bearer token. There is no compatibility listener or
 automatic downgrade. The HTTP v1 payloads, durable cursors, send request IDs,
 relay journal, client cache, and drafts retain their current semantics.

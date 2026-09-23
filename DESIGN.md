@@ -22,8 +22,10 @@ must remain visible as unsupported content rather than silently disappearing.
 
 The Mac remains the endpoint that communicates with Apple's iMessage service.
 The relay exposes our own API; Linux never receives Apple account credentials.
-Initial connectivity uses an SSH tunnel to an HTTP service bound to the Mac's
-loopback interface.
+Connectivity uses direct HTTPS with mandatory device certificates (TLS 1.3,
+HTTP/1.1). The Linux implementation is complete; relay implementation is separate
+macOS work. [The migration contract](docs/mtls-migration.md) supersedes the old
+SSH/bearer-token transport; [Linux setup](docs/linux-mtls.md) documents provisioning.
 
 ```mermaid
 flowchart LR
@@ -33,7 +35,7 @@ flowchart LR
     Adapter -->|AppleScript sends| Messages
     Adapter <--> Relay[Zig relay]
     Relay <--> Journal[(Relay database)]
-    Relay <-->|HTTP and SSE over SSH| Linux[Zig Linux GUI]
+    Relay <-->|HTTPS and SSE with mTLS| Linux[Zig Linux GUI]
     Linux <--> Cache[(Client cache and drafts)]
     Android[Future Android client] -.->|Same versioned API| Relay
 ```
@@ -284,7 +286,6 @@ Setup needs:
 - A logged-in user session and system settings that keep the Mac available.
 
 Test permission prompts and grants interactively before unattended startup.
-The SSH process only forwards traffic; it should not need database access.
 Do not assume that grants made to a development terminal transfer to the installed
 LaunchAgent.
 
@@ -311,21 +312,21 @@ References:
 
 ### 1.8. Security and service operation
 
-Bind the initial API to `127.0.0.1:8731`. Do not fall back to a public bind if
-configuration fails. Use OpenSSH port forwarding from Linux, with host-key
-verification and the user's normal SSH authentication.
-
-Require a high-entropy bearer token on every API request, including status and
-event subscriptions. Generate it during local setup, store it with owner-only
-permissions, and support rotation. Never put it in URLs or logs.
+Bind the relay to an explicitly configured reachable address; bind failure must
+not select another interface. Authenticate TLS peers before parsing HTTP using a
+dedicated CA and an enabled SHA-256 fingerprint of the device leaf's entire DER.
+Use locally generated leaf keys and setup-time mkcert CSR signing. Runtime private
+keys and security configuration are owned 0600 files in 0700 directories. Keep
+the CA signing key outside runtime directories. The relay implementation and its
+lifecycle/handshake acceptance checks belong to the macOS migration.
 
 The Mac can read message plaintext, and the client cache will also contain
 plaintext. Apple's iMessage encryption terminates at the Mac; the relay-to-client
-connection is a separate protected hop. The MVP relies on SSH in transit and
+connection is a separate protected hop. The transport uses mutually authenticated TLS in transit and
 the operating systems' account and disk protections at rest.
 
 Logs should contain operation IDs, error categories, durations, and counts.
-Exclude message bodies, tokens, and raw participant addresses by default.
+Exclude message bodies, private keys, and raw participant addresses by default.
 HTTP errors must not expose SQL, local paths, or complete subprocess output.
 
 Serve history in bounded pages. Limit request sizes, decoder input sizes,
@@ -333,9 +334,10 @@ concurrent streams, and subprocess output. Disconnect slow event consumers rathe
 than allowing unbounded memory growth; their durable cursor permits recovery.
 If the relay cannot persist a send request, reject it before dispatch.
 
-Future direct connections require an explicit HTTPS/authentication deployment
-design, including individual device credentials and revocation. A VPN can provide
-connectivity, but does not replace the relay's authentication.
+Device renewal replaces credentials and reconnects without resetting the cache.
+Revocation requires applying the relay allowlist and completing its restart so
+existing connections close. A private network supplies reachability; mTLS supplies
+peer authentication.
 
 ### 1.9. Mac acceptance checks
 
@@ -632,10 +634,11 @@ Use a local SQLite cache for:
 - Local read markers and per-conversation drafts.
 - Outgoing request IDs, payloads, and last known outcomes.
 
-Store non-secret preferences in the normal user configuration directory. Store
-message cache and drafts in the user's application data directory. Keep tokens in
-a desktop secret store where available, with an owner-readable file fallback
-whose behavior is documented. Do not put tokens in process arguments.
+Store preferences and TLS paths in the private user configuration directory.
+Store the message cache and drafts in the user's application data directory.
+Read credential files through protected descriptors, reject symlinks and unsafe
+permissions, and validate the certificate/key pair before connecting. Never put
+private-key contents in process arguments or diagnostics.
 
 Render in response to changes and input, with a modest idle wakeup policy.
 A messaging window should not continuously redraw at a game-like frame rate when
@@ -644,34 +647,24 @@ nothing changes. Desktop integration should use its own application ID and
 
 ### 2.7. Initial connection experience
 
-For the first development version, users establish the SSH tunnel themselves:
+Configure an HTTPS origin and absolute paths for the dedicated CA, device
+certificate, and local private key. Preserve the existing data directory, cache,
+drafts, and outbox. Old port/token settings are rejected. Endpoint and configuration
+changes require restart; Reconnect reloads credential files and destroys old
+connection pools and TLS sessions. There is no plaintext transport mode.
 
-```sh
-ssh -N -T -o ExitOnForwardFailure=yes \
-  -L 127.0.0.1:8731:127.0.0.1:8731 user@mac-mini
-```
+The client distinguishes DNS/network failures, server trust/hostname failures,
+local credential errors, explicit certificate rejection alerts, ambiguous TLS
+errors, relay HTTP errors, and Messages integration readiness. Details retains
+CURLcode, verification result and bounded diagnostic text, plus the leaf
+fingerprint and expiry. Warn during the last 30 days before expiry.
 
-The GUI connects to `http://127.0.0.1:8731` and receives the relay token through
-local configuration. This keeps SSH host verification, keys, and interactive
-authentication in the user's existing SSH tooling. A different local port can
-be configured if needed.
-
-The client distinguishes:
-
-- Tunnel/API unreachable.
-- Authentication rejected.
-- Relay reachable but Messages integration unavailable.
-- History synchronizing.
-- Connected and current.
-
-Retry transient connection failures with exponential backoff and jitter, initially
-from one to 30 seconds. Authentication and configuration errors need user action
-instead of continuous retries. A network error after a send submission triggers
-status lookup with its original ID, not a fresh request.
-
-Managing an SSH child from the GUI can be added later, with explicit host trust
-and credential handling. Android will likely use a private network or HTTPS
-deployment rather than this desktop-oriented tunnel setup.
+Retry transient failures with exponential backoff and jitter from one to 30
+seconds. Explicit certificate/configuration failures wait for correction and
+Reconnect. After an interrupted send, resolve its original request ID before
+another submission; new text remains a draft while recovery is outstanding.
+Never automatically resend an uncertain request. Credential renewal is a
+connection change and never a cache reset.
 
 ### 2.8. Mock relay and Linux verification
 
