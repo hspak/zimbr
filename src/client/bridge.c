@@ -317,22 +317,24 @@ void zc_net_error(ZcNet *n, int stream, ZcError *error) { *error=n->slots[stream
 const char *zc_net_body(ZcNet *n, size_t *length) { *length=n->slots[0].len; return n->slots[0].body; }
 void zc_net_ack(ZcNet *n, int stream) { clear_slot(n,stream); }
 
-struct ZcText { PangoLayout *layout; cairo_surface_t *surface; int width, height; double scale; };
-static cairo_t *text_context(cairo_surface_t *surface, double scale, int top) {
+struct ZcText { PangoLayout *layout; cairo_surface_t *surface; int width, height, subpixel; double scale; };
+static cairo_t *text_context(cairo_surface_t *surface, double scale, int top, int subpixel) {
     cairo_t *cr = cairo_create(surface);
-    cairo_translate(cr, 0, -top);
+    // Keep glyph coordinates unchanged across tiles, including color emoji.
+    cairo_surface_set_device_offset(surface, 0, -top);
     cairo_scale(cr, scale, scale);
     cairo_font_options_t *options = cairo_font_options_create();
-    // Smooth glyph edges with grayscale coverage, suitable for transparent
-    // textures without LCD subpixel color fringes.
-    cairo_font_options_set_antialias(options, CAIRO_ANTIALIAS_GRAY);
+    // Cairo/FreeType falls back when the font backend cannot render LCD glyphs.
+    // Transparent textures use grayscale; RGB coverage needs an opaque backdrop.
+    cairo_font_options_set_antialias(options, subpixel ? CAIRO_ANTIALIAS_SUBPIXEL : CAIRO_ANTIALIAS_GRAY);
+    cairo_font_options_set_subpixel_order(options, CAIRO_SUBPIXEL_ORDER_RGB);
     cairo_font_options_set_hint_style(options, CAIRO_HINT_STYLE_SLIGHT);
     cairo_font_options_set_hint_metrics(options, CAIRO_HINT_METRICS_ON);
     cairo_set_font_options(cr, options);
     cairo_font_options_destroy(options);
     return cr;
 }
-ZcText *zc_text_new(const char *text, int length, double size, int width, double scale) {
+ZcText *zc_text_new_with_options(const char *text, int length, double size, int width, double scale, int single_line, int subpixel) {
     if (length < 0 || length > 65536 || !isfinite(size) || size < 1 || size > 256 ||
         length*(size + 4)*PANGO_SCALE > INT_MAX - 1048576.0 ||
         !isfinite(scale) || scale < .5 || scale > 8 || width < 1 || (width + 2.0)*scale > 4096) return NULL;
@@ -354,11 +356,11 @@ ZcText *zc_text_new(const char *text, int length, double size, int width, double
         if (g_unichar_isspace(ch)) word = p;
         if (p - word > 512) char_wrap = 1;
     }
-    ZcText *t = calloc(1, sizeof(*t)); if (!t) return NULL; t->scale = scale;
+    ZcText *t = calloc(1, sizeof(*t)); if (!t) return NULL; t->scale = scale; t->subpixel = subpixel;
     cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
     // Shape and hint at the same device scale used for rasterization. Creating
     // the layout at 1x then drawing it at fractional scale softens small text.
-    cairo_t *cr = text_context(surface, scale, 0); t->layout = pango_cairo_create_layout(cr);
+    cairo_t *cr = text_context(surface, scale, 0, subpixel); t->layout = pango_cairo_create_layout(cr);
     PangoFontDescription *font = pango_font_description_new();
     pango_font_description_set_family(font, "sans-serif");
     pango_font_description_set_absolute_size(font, size * PANGO_SCALE);
@@ -366,6 +368,11 @@ ZcText *zc_text_new(const char *text, int length, double size, int width, double
     pango_layout_set_text(t->layout, text, length);
     pango_layout_set_width(t->layout, width > 0 ? width * PANGO_SCALE : -1);
     pango_layout_set_wrap(t->layout, char_wrap ? PANGO_WRAP_CHAR : PANGO_WRAP_WORD_CHAR);
+    if (single_line) {
+        pango_layout_set_single_paragraph_mode(t->layout, TRUE);
+        pango_layout_set_height(t->layout, -1);
+        pango_layout_set_ellipsize(t->layout, PANGO_ELLIPSIZE_END);
+    }
     pango_layout_set_spacing(t->layout, 3 * PANGO_SCALE);
     pango_layout_get_pixel_size(t->layout, &t->width, &t->height);
     // A single unbreakable grapheme can exceed the requested width. Clip it;
@@ -377,17 +384,48 @@ ZcText *zc_text_new(const char *text, int length, double size, int width, double
     t->height = (int)height;
     return t;
 }
+ZcText *zc_text_new(const char *text, int length, double size, int width, double scale) {
+    return zc_text_new_with_options(text, length, size, width, scale, 0, 0);
+}
+ZcText *zc_text_new_line(const char *text, int length, double size, int width, double scale) {
+    return zc_text_new_with_options(text, length, size, width, scale, 1, 0);
+}
 void zc_text_clear_pixels(ZcText *t) { if (t->surface) cairo_surface_destroy(t->surface); t->surface = NULL; }
 void zc_text_free(ZcText *t) { if (!t) return; zc_text_clear_pixels(t); g_object_unref(t->layout); free(t); }
 int zc_text_width(ZcText *t) { return t->width; }
 int zc_text_height(ZcText *t) { return t->height; }
 unsigned char *zc_text_pixels(ZcText *t, unsigned color, int start, int end, int top, int height) {
+    return zc_text_pixels_on(t, color, start, end, top, height, 0);
+}
+unsigned char *zc_text_pixels_on(ZcText *t, unsigned color, int start, int end, int top, int height, unsigned background) {
     zc_text_clear_pixels(t);
     if (top < 0 || top >= t->height || height < 1 || height > 2048 ||
-        height > t->height - top || (size_t)t->width * (size_t)height > 8*1024*1024) return NULL;
-    t->surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, t->width, height);
+        height > t->height - top || (size_t)t->width * (size_t)height > 8*1024*1024 ||
+        (t->subpixel && (background & 255) != 255)) return NULL;
+    // Cairo can clip glyph coverage differently when a glyph straddles a surface
+    // edge. Include whole intersecting lines, then return just the requested tile.
+    int raster_top = top, raster_bottom = top + height;
+    PangoLayoutIter *bounds = pango_layout_get_iter(t->layout);
+    do {
+        PangoRectangle ink, logical;
+        pango_layout_iter_get_line_extents(bounds, &ink, &logical);
+        int y = (int)floor(MIN(ink.y, logical.y)/(double)PANGO_SCALE*t->scale) - 2;
+        int bottom = (int)ceil(MAX(ink.y + ink.height, logical.y + logical.height)/(double)PANGO_SCALE*t->scale) + 2;
+        if (bottom < top || y > top + height) continue;
+        raster_top = MIN(raster_top, y);
+        raster_bottom = MAX(raster_bottom, bottom);
+    } while (pango_layout_iter_next_line(bounds));
+    pango_layout_iter_free(bounds);
+    if ((size_t)t->width * (size_t)(raster_bottom - raster_top) > 8*1024*1024) return NULL;
+    t->surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, t->width, raster_bottom - raster_top);
     if (cairo_surface_status(t->surface) != CAIRO_STATUS_SUCCESS) { zc_text_clear_pixels(t); return NULL; }
-    cairo_t *cr = text_context(t->surface, t->scale, top);
+    cairo_t *cr = text_context(t->surface, t->scale, raster_top, t->subpixel);
+    if ((background & 255) == 255) {
+        // Composite each RGB coverage channel onto its real background before
+        // uploading; a single texture alpha cannot preserve three coverages.
+        cairo_set_source_rgb(cr, ((background>>24)&255)/255., ((background>>16)&255)/255., ((background>>8)&255)/255.);
+        cairo_paint(cr);
+    }
     // Use the measured layout unchanged. Only draw lines intersecting this
     // tile; drawing the entire document still shapes/rasterizes offscreen text.
     PangoLayoutIter *it = pango_layout_get_iter(t->layout);
@@ -396,7 +434,8 @@ unsigned char *zc_text_pixels(ZcText *t, unsigned color, int start, int end, int
         pango_layout_iter_get_line_extents(it, &ink, &logical);
         double bottom = MAX(ink.y + ink.height, logical.y + logical.height)/(double)PANGO_SCALE*t->scale;
         double line_top = MIN(ink.y, logical.y)/(double)PANGO_SCALE*t->scale;
-        if (bottom < top || line_top > top + height) continue;
+        // LCD filtering can extend glyph coverage beyond the reported ink box.
+        if (bottom + 2 < top || line_top - 2 > top + height) continue;
         PangoLayoutLine *line = pango_layout_iter_get_line_readonly(it);
         if (start != end) {
             int *ranges, n;
@@ -413,7 +452,7 @@ unsigned char *zc_text_pixels(ZcText *t, unsigned color, int start, int end, int
     cairo_status_t status = cairo_status(cr);
     cairo_destroy(cr); cairo_surface_flush(t->surface);
     if (status != CAIRO_STATUS_SUCCESS) { zc_text_clear_pixels(t); return NULL; }
-    unsigned char *pixels = cairo_image_surface_get_data(t->surface);
+    unsigned char *pixels = cairo_image_surface_get_data(t->surface) + (top - raster_top)*cairo_image_surface_get_stride(t->surface);
     // Cairo is premultiplied native ARGB; raylib expects straight RGBA.
     for (int y=0; y<height; ++y) for (int x=0; x<t->width; ++x) {
         unsigned char *p = pixels+y*cairo_image_surface_get_stride(t->surface)+x*4;

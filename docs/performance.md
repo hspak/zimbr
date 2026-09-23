@@ -49,7 +49,7 @@ flowchart LR
 - **Cache writes:** commit complete SSE frames from one network delivery in one
   transaction. Any invalid frame or persistence failure rolls back that batch's
   records, unread markers, and cursor together. Replay starts at the durable cursor.
-- **UI publication:** immutable shared snapshots let drafts, appearance, and
+- **UI publication:** immutable shared snapshots let drafts and
   connection status update without reparsing or copying the entire history. The
   renderer retains prepared rows while the content generation is unchanged.
   Content updates compare ordered message IDs and revisions, reusing independently
@@ -181,7 +181,7 @@ shared snapshot lifetime, and full-text preservation with truncated projections.
 Incremental-history checks include prepends, same-count edits, reordering, linked
 echoes, failed snapshot construction, epoch replacement, and selection changes.
 The testing allocator verifies that record references and failed builds are freed.
-The isolated Wayland checks exercise both themes and large-history rendering.
+The isolated Wayland checks exercise the dark palette and large-history rendering.
 
 The production relay's Zig code and the C platform boundary compile for Apple
 Silicon. Native macOS runtime verification of the new kqueue path is still needed;

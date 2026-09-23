@@ -36,16 +36,23 @@ background worker continues to receive messages while rendering sleeps.
 The bottom-right FPS counter is disabled by default. Enable it with
 `zig build client -Dfps-counter=true` or `zig build run -Dfps-counter=true`.
 
-The sidebar's **Dark mode / Light mode** button saves the appearance for the next
-launch. **Details** (Ctrl+D) opens a scrollable pane with connection and retry
-status, relay capabilities, saved sync cursor, cache counts, display information,
+The client uses a single blue/purple dark color scheme. **Details** (Ctrl+D) opens
+a scrollable pane with connection and retry status, relay capabilities, saved
+sync cursor, cache counts, display information,
 client certificate fingerprint and expiry, TLS failure details, and local file
 paths. Private-key contents are never shown. Escape or **Back** returns
 to messages. The search box and sidebar controls stay fixed while the list scrolls.
 Conversation lists, message history, Details, and overflowing drafts show a
 scrollbar: drag its thumb or click the track to move. Wheel scrolling is 25%
 faster. Incoming group messages use subtle participant tints and matching sender
-labels in both light and dark mode.
+labels on the dark background.
+
+Click **Hide** in a conversation's header to remove it from the main sidebar.
+Open **Hidden** at the bottom right and click **Unhide** to restore it;
+**Messages** returns to the main list. Hidden conversations stay hidden across
+restarts and new messages. Hiding only affects this client's local list; message
+history and drafts are kept, and it does not block the sender or change Messages
+on your Mac.
 
 Provision a local device key/CSR and import the verified CA and signed leaf with
 `packaging/linux/provision.py`, following [Linux mTLS setup](docs/linux-mtls.md).
@@ -74,8 +81,8 @@ symlinks. The GUI never receives Apple account credentials.
 
 Use actual absolute paths. Matching CLI flags are `--relay-url`, `--ca-file`,
 `--client-cert-file`, `--client-key-file`, and `--data-dir`. Old transport fields
-and options fail with migration guidance. An optional `"theme": "dark"` or
-`"theme": "light"` (or `--theme dark|light`) overrides saved appearance.
+and options fail with migration guidance. Legacy `theme` settings in the config
+file and saved appearance are ignored; the color scheme is fixed.
 `--details` opens diagnostics at launch. After replacing credentials click
 **Reconnect**, which reloads the files and discards all old TLS connections.
 Configuration path or endpoint changes require restart. Certificate errors wait
@@ -93,7 +100,10 @@ Unsupported services remain readable with sending disabled.
 Pango supplies shaping, font fallback, wrapping, and grapheme boundaries. Text is
 rasterized at the Wayland display scale and aligned to physical pixels, including
 at fractional scales; moving between display scales refreshes the text cache.
-Lettering uses full-opacity colors with grayscale antialiasing at glyph edges.
+Lettering requests RGB subpixel antialiasing on opaque backgrounds, with a
+grayscale fallback where unsupported. Transparent text overlays use grayscale
+antialiasing; text on solid surfaces is composited against its actual background
+to preserve the RGB coverage at glyph edges.
 Combining marks and joined emoji survive editing and restart. Full input-method/preedit
 integration, visual bidirectional cursor navigation, and accessibility are future
 work. For input-method users, set `enter_to_send` to `false` to reserve plain Enter

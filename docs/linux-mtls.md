@@ -81,8 +81,7 @@ Create `~/.config/zimbr/config.json` (or `$XDG_CONFIG_HOME/zimbr/config.json`):
   "ca_file": "/home/USER/.config/zimbr/tls/ca.pem",
   "client_cert_file": "/home/USER/.config/zimbr/tls/client.pem",
   "client_key_file": "/home/USER/.config/zimbr/tls/client-key.pem",
-  "enter_to_send": true,
-  "theme": "light"
+  "enter_to_send": true
 }
 ```
 
@@ -94,7 +93,7 @@ Shared system ancestors such as `/home` may be root-owned; they need not be 0700
 The root-owned sticky `/tmp` ancestor is allowed for temporary test directories.
 
 CLI overrides are `--relay-url`, `--ca-file`, `--client-cert-file`,
-`--client-key-file`, `--data-dir`, and `--theme`. An origin may include a port and
+`--client-key-file`, and `--data-dir`. An origin may include a port and
 a trailing `/`, but no userinfo, query, fragment, or application path. Old
 `port`/`token_file` settings and `--port`/`--token-file` fail with migration guidance.
 Remove obsolete fields even when providing new CLI overrides.

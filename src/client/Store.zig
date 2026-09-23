@@ -14,6 +14,7 @@ pub fn open(path: [:0]const u8) !Self {
         \\CREATE INDEX IF NOT EXISTS history ON records(kind,chat,sort_key,id);
         \\CREATE TABLE IF NOT EXISTS drafts(key TEXT PRIMARY KEY,text TEXT NOT NULL);
         \\CREATE TABLE IF NOT EXISTS unread(chat TEXT PRIMARY KEY,count INTEGER NOT NULL);
+        \\CREATE TABLE IF NOT EXISTS hidden_chats(key TEXT PRIMARY KEY);
         \\CREATE TABLE IF NOT EXISTS live_seen(id TEXT PRIMARY KEY);
         \\CREATE TABLE IF NOT EXISTS pages(chat TEXT PRIMARY KEY,cursor TEXT);
         \\CREATE TABLE IF NOT EXISTS previews(chat TEXT PRIMARY KEY);
@@ -52,6 +53,10 @@ pub fn saveDraft(s: Self, key: []const u8, value: []const u8) !void {
 }
 pub fn read(s: Self, chat: []const u8) !void {
     try s.exec("DELETE FROM unread WHERE chat=?", &.{.{ .text = chat }});
+}
+pub fn setHidden(s: Self, key: []const u8, hidden: bool) !void {
+    if (key.len == 0) return error.InvalidConversation;
+    try s.exec(if (hidden) "INSERT OR IGNORE INTO hidden_chats VALUES(?)" else "DELETE FROM hidden_chats WHERE key=?", &.{.{ .text = key }});
 }
 pub fn beginSync(s: Self, epoch: []const u8, cursor: []const u8) !void {
     if (!t.uuid(epoch)) return error.InvalidEpoch;
@@ -165,7 +170,7 @@ pub fn nextPage(s: Self, a: u.Allocator, chat: []const u8) !?[]const u8 {
     if (!try q.step()) return "";
     return if (q.bytes(0).len == 0) null else try q.text(a, 0);
 }
-pub const Chat = struct { value: t.Conversation, preview: []const u8, unread: i64 };
+pub const Chat = struct { value: t.Conversation, preview: []const u8, unread: i64, hidden: bool = false };
 pub const Pending = struct { input: t.SendInput, state: []const u8, detail: []const u8, record: ?t.SendRequest };
 pub const Snapshot = struct {
     chats: []const Chat,
@@ -185,7 +190,7 @@ pub fn snapshotWithMessages(s: Self, a: u.Allocator, selected: []const u8, share
     var chats: std.ArrayList(Chat) = .empty;
     var messages: std.ArrayList(t.Message) = .empty;
     var pending: std.ArrayList(Pending) = .empty;
-    var q = try s.db.prepare("SELECT c.record,coalesce(u.count,0),(SELECT m.record FROM records m WHERE m.kind='message' AND m.chat=c.id ORDER BY m.sort_key DESC,m.id DESC LIMIT 1),p.record FROM records c LEFT JOIN unread u ON c.id=u.chat LEFT JOIN previews p ON p.chat=c.id WHERE c.kind='conversation' ORDER BY c.sort_key DESC,c.id DESC");
+    var q = try s.db.prepare("SELECT c.record,coalesce(u.count,0),(SELECT m.record FROM records m WHERE m.kind='message' AND m.chat=c.id ORDER BY m.sort_key DESC,m.id DESC LIMIT 1),p.record,EXISTS(SELECT 1 FROM hidden_chats h WHERE h.key=c.id) FROM records c LEFT JOIN unread u ON c.id=u.chat LEFT JOIN previews p ON p.chat=c.id WHERE c.kind='conversation' ORDER BY c.sort_key DESC,c.id DESC");
     defer q.close();
     while (try q.step()) {
         const v = (try std.json.parseFromSlice(t.Conversation, a, q.bytes(0), .{ .ignore_unknown_fields = true, .allocate = .alloc_always })).value;
@@ -203,15 +208,15 @@ pub fn snapshotWithMessages(s: Self, a: u.Allocator, selected: []const u8, share
             const newer_revision = latest != null and u.eq(p.message_id, latest.?.id) and (try std.fmt.parseInt(i64, p.revision, 10)) > (try std.fmt.parseInt(i64, latest.?.revision, 10));
             if (newer_position or newer_revision) preview = if (p.text.len > 0) p.text else p.kind;
         }
-        try chats.append(a, .{ .value = v, .preview = preview, .unread = q.int(1) });
+        try chats.append(a, .{ .value = v, .preview = preview, .unread = q.int(1), .hidden = q.int(4) != 0 });
     }
     // Local drafts without a current server conversation remain discoverable
     // after an epoch reset or while composing a new direct conversation.
-    var drafts = try s.db.prepare("SELECT key FROM (SELECT key FROM drafts WHERE text!='' UNION SELECT draft_key AS key FROM outbox WHERE state!='delivered') local WHERE NOT EXISTS(SELECT 1 FROM records WHERE kind='conversation' AND id=local.key)");
+    var drafts = try s.db.prepare("SELECT key,EXISTS(SELECT 1 FROM hidden_chats h WHERE h.key=local.key) FROM (SELECT key FROM drafts WHERE text!='' UNION SELECT draft_key AS key FROM outbox WHERE state!='delivered') local WHERE NOT EXISTS(SELECT 1 FROM records WHERE kind='conversation' AND id=local.key)");
     defer drafts.close();
     while (try drafts.step()) {
         const key = try drafts.text(a, 0);
-        try chats.append(a, .{ .value = .{ .id = key, .title = if (std.mem.startsWith(u8, key, "new:")) key[4..] else "Recovered draft", .service = "imessage" }, .preview = "Saved locally · drafts and send history", .unread = 0 });
+        try chats.append(a, .{ .value = .{ .id = key, .title = if (std.mem.startsWith(u8, key, "new:")) key[4..] else "Recovered draft", .service = "imessage" }, .preview = "Saved locally · drafts and send history", .unread = 0, .hidden = drafts.int(1) != 0 });
     }
     // Separate chat history from linked send echoes so SQLite can use the
     // ordered history index instead of scanning every cached conversation.

@@ -2,7 +2,6 @@ const std = @import("std");
 const u = @import("../common.zig");
 const c = @import("c.zig").api;
 const Self = @This();
-pub const Theme = enum { light, dark };
 data: [:0]const u8,
 relay_url: [:0]const u8 = "",
 ca_file: [:0]const u8 = "",
@@ -12,7 +11,6 @@ screenshot: ?[:0]const u8 = null,
 frames: usize = 0,
 control: bool = false,
 enter_to_send: bool = true,
-theme: ?Theme = null,
 details: bool = false,
 const Preferences = struct {
     relay_url: ?[]const u8 = null,
@@ -21,7 +19,6 @@ const Preferences = struct {
     client_key_file: ?[]const u8 = null,
     data_dir: ?[]const u8 = null,
     enter_to_send: bool = true,
-    theme: ?Theme = null,
 };
 fn preferences(a: u.Allocator, raw: []const u8) !Preferences {
     const value = try std.json.parseFromSlice(std.json.Value, a, raw, .{});
@@ -41,7 +38,7 @@ pub fn parse(init: std.process.Init) !Self {
     const args = try init.minimal.args.toSlice(a);
     for (args[1..]) |arg| {
         if (u.eq(arg, "--help")) {
-            const help = "Usage: zimbr --relay-url https://HOST[:PORT] --ca-file PATH\n             --client-cert-file PATH --client-key-file PATH\n       zimbr [--data-dir PATH] [--theme light|dark] [--details]\n       zimbr [--screenshot PATH --frames 90]\nConfig: $XDG_CONFIG_HOME/zimbr/config.json\nUse absolute credential paths: owned 0600 files in 0700 directories; no symlinks.\nTLS 1.3 with mutual authentication is required. Reconnect reloads credentials.\n";
+            const help = "Usage: zimbr --relay-url https://HOST[:PORT] --ca-file PATH\n             --client-cert-file PATH --client-key-file PATH\n       zimbr [--data-dir PATH] [--details]\n       zimbr [--screenshot PATH --frames 90]\nConfig: $XDG_CONFIG_HOME/zimbr/config.json\nUse absolute credential paths: owned 0600 files in 0700 directories; no symlinks.\nTLS 1.3 with mutual authentication is required. Reconnect reloads credentials.\n";
             _ = u.c.write(1, help.ptr, help.len);
             std.process.exit(0);
         }
@@ -85,7 +82,7 @@ pub fn parse(init: std.process.Init) !Self {
         }
         if (i + 1 >= args.len) return error.InvalidArguments;
         const value = args[i + 1];
-        if (u.eq(args[i], "--data-dir")) data = value else if (u.eq(args[i], "--relay-url")) pref.relay_url = value else if (u.eq(args[i], "--ca-file")) pref.ca_file = value else if (u.eq(args[i], "--client-cert-file")) pref.client_cert_file = value else if (u.eq(args[i], "--client-key-file")) pref.client_key_file = value else if (u.eq(args[i], "--screenshot")) screenshot = try a.dupeZ(u8, value) else if (u.eq(args[i], "--frames")) frames = try std.fmt.parseInt(usize, value, 10) else if (u.eq(args[i], "--theme")) pref.theme = std.meta.stringToEnum(Theme, value) orelse return error.InvalidTheme else return error.InvalidArguments;
+        if (u.eq(args[i], "--data-dir")) data = value else if (u.eq(args[i], "--relay-url")) pref.relay_url = value else if (u.eq(args[i], "--ca-file")) pref.ca_file = value else if (u.eq(args[i], "--client-cert-file")) pref.client_cert_file = value else if (u.eq(args[i], "--client-key-file")) pref.client_key_file = value else if (u.eq(args[i], "--screenshot")) screenshot = try a.dupeZ(u8, value) else if (u.eq(args[i], "--frames")) frames = try std.fmt.parseInt(usize, value, 10) else return error.InvalidArguments;
         i += 1;
     }
     const origin = try a.dupeZ(u8, pref.relay_url orelse "");
@@ -103,18 +100,17 @@ pub fn parse(init: std.process.Init) !Self {
     try std.Io.Dir.cwd().createDirPath(init.io, data);
     const dir = try a.dupeZ(u8, data);
     if (u.c.chmod(dir, 0o700) != 0) return error.PrivateDirectoryRequired;
-    return .{ .data = dir, .relay_url = origin, .ca_file = try a.dupeZ(u8, pref.ca_file.?), .client_cert_file = try a.dupeZ(u8, pref.client_cert_file.?), .client_key_file = try a.dupeZ(u8, pref.client_key_file.?), .screenshot = screenshot, .frames = frames, .control = control, .enter_to_send = pref.enter_to_send, .theme = pref.theme, .details = details };
+    return .{ .data = dir, .relay_url = origin, .ca_file = try a.dupeZ(u8, pref.ca_file.?), .client_cert_file = try a.dupeZ(u8, pref.client_cert_file.?), .client_key_file = try a.dupeZ(u8, pref.client_key_file.?), .screenshot = screenshot, .frames = frames, .control = control, .enter_to_send = pref.enter_to_send, .details = details };
 }
 
 test "only HTTPS origins are accepted" {
     for ([_][:0]const u8{ "https://mac-mini.local:8731", "https://localhost/", "https://[::1]:8731" }) |url| try std.testing.expect(c.zc_origin_valid(url) == 1);
     for ([_][:0]const u8{ "", "http://localhost", "https://", "https:///", "https://user@host", "https://host?", "https://host#", "https://host/path", "https://host:0", "https://host:65536", "https://host:", "https://host\\path", "https://host/%2f", "https:// host", "https://foo!", "https://-host", "https://host..local", "https://." }) |url| try std.testing.expect(c.zc_origin_valid(url) == 0);
 }
-test "appearance and editor preferences are preserved" {
+test "editor preferences are preserved and obsolete theme settings are ignored" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const raw = "{\"relay_url\":\"https://mac\",\"theme\":\"dark\",\"enter_to_send\":false}";
+    const raw = "{\"relay_url\":\"https://mac\",\"theme\":\"light\",\"enter_to_send\":false}";
     const pref = try preferences(arena.allocator(), raw);
-    try std.testing.expectEqual(Theme.dark, pref.theme.?);
     try std.testing.expect(!pref.enter_to_send);
 }

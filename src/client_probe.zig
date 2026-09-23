@@ -55,7 +55,7 @@ fn control(init: std.process.Init, worker: *Worker) !void {
         }
         if (worker.take()) |v| {
             defer v.destroy();
-            const raw = try u.json(a, .{ .online = v.online, .status = v.status, .chats = v.snapshot.chats.len, .messages = v.snapshot.messages.len, .pending = v.snapshot.pending.len, .selected = v.snapshot.selected, .ack = v.ack, .dark_mode = v.dark_mode, .diagnostics = v.diagnostics });
+            const raw = try u.json(a, .{ .online = v.online, .status = v.status, .chats = v.snapshot.chats.len, .messages = v.snapshot.messages.len, .pending = v.snapshot.pending.len, .selected = v.snapshot.selected, .ack = v.ack, .diagnostics = v.diagnostics });
             _ = u.c.write(1, raw.ptr, raw.len);
             _ = u.c.write(1, "\n", 1);
         }

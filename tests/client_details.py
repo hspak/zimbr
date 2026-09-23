@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise saved appearance and diagnostics through the production worker."""
+"""Exercise live and cached diagnostics through the production worker."""
 import json
 import os
 from relay_fixture import Fixture
@@ -77,22 +77,16 @@ def main():
                 assert details['transport']['expires'].endswith('Z')
                 assert details['transport']['failure'] == 'none'
                 assert details['transport']['fingerprint'] == tls.fingerprint('client')
-                command(kind='appearance', text='dark')
-                until(views, lambda v: v['dark_mode'])
                 stop()
                 server.terminate()
                 server.wait(timeout=5)
                 views = start()
-                offline = until(views, lambda v: not v['online'] and v['dark_mode'] and v['diagnostics']['server'] is not None)
+                offline = until(views, lambda v: not v['online'] and v['diagnostics']['server'] is not None)
                 assert offline['diagnostics']['cached_messages'] > 0
                 assert offline['diagnostics']['last_status_ms'] == details['last_status_ms']
                 until(views, lambda v: v['diagnostics']['retry_at'] > 0)
-                command(kind='appearance', text='light')
-                until(views, lambda v: not v['dark_mode'])
                 stop()
-                with sqlite3.connect(client / 'client.db') as db:
-                    assert db.execute("SELECT value FROM meta WHERE key='theme'").fetchone()[0] == 'light'
-                print('PASS: live diagnostics, offline server status, retry state, private credentials, and persistent light/dark appearance')
+                print('PASS: live diagnostics, offline server status, retry state, and private credentials')
             finally:
                 if proc and proc.poll() is None:
                     proc.kill()

@@ -8,7 +8,7 @@ const Sse = @import("Sse.zig");
 const Self = @This();
 const SharedSnapshot = @import("SharedSnapshot.zig");
 const a = std.heap.page_allocator;
-pub const Command = struct { kind: enum { select, draft, send, older, reconnect, check, viewed, appearance }, key: []const u8 = "", text: []const u8 = "", recipient: []const u8 = "" };
+pub const Command = struct { kind: enum { select, draft, send, older, reconnect, check, viewed, hide, unhide }, key: []const u8 = "", text: []const u8 = "", recipient: []const u8 = "" };
 pub const RelayStatus = struct {
     api_version: []const u8,
     server_epoch: []const u8,
@@ -51,7 +51,6 @@ pub const View = struct {
     ack: u64,
     loading_history: bool = false,
     redirect_from: []const u8 = "",
-    dark_mode: bool = false,
     diagnostics: Diagnostics = .{},
     shared: ?*SharedSnapshot = null,
     content_generation: ?u64 = null,
@@ -538,8 +537,9 @@ fn drain(s: *Self) !void {
         defer arena.deinit();
         const ar = arena.allocator();
         switch (cmd.kind) {
-            .appearance => {
-                if (u.eq(cmd.text, "dark") or u.eq(cmd.text, "light")) try s.store.set("theme", cmd.text);
+            .hide, .unhide => {
+                try s.store.setHidden(cmd.key, cmd.kind == .hide);
+                s.content_dirty = true;
             },
             .select => {
                 s.content_dirty = true;
@@ -550,7 +550,8 @@ fn drain(s: *Self) !void {
                 s.viewed = true;
                 try s.store.set("selected", cmd.key);
                 try s.store.read(cmd.key);
-                s.need_history = true;
+                s.need_history = cmd.key.len > 0;
+                s.older = false;
             },
             .draft => {
                 try s.store.saveDraft(cmd.key, cmd.text);
@@ -638,6 +639,8 @@ fn resolveDirect(s: *Self) !void {
     if (!try q.step()) return;
     const chat = try q.text(ar, 0);
     try s.store.exec("UPDATE outbox SET draft_key=? WHERE draft_key=?", &.{ .{ .text = chat }, .{ .text = s.selected } });
+    try s.store.exec("INSERT OR IGNORE INTO hidden_chats SELECT ? WHERE EXISTS(SELECT 1 FROM hidden_chats WHERE key=?)", &.{ .{ .text = chat }, .{ .text = s.selected } });
+    try s.store.setHidden(s.selected, false);
     try s.store.set("selected", chat);
     a.free(s.redirect_from);
     s.redirect_from = try a.dupe(u8, s.selected);
@@ -665,7 +668,6 @@ fn publish(s: *Self) !void {
     v.* = .{ .arena = arena, .snapshot = shared.snapshot, .shared = shared, .content_generation = shared.generation, .status = try arena.allocator().dupe(u8, s.status), .online = s.online, .send_direct = s.send_direct, .reply_existing = s.reply_existing, .generation = s.generation, .ack = s.ack, .loading_history = s.need_history or s.job == .history, .redirect_from = try arena.allocator().dupe(u8, s.redirect_from) };
     const ar = arena.allocator();
     v.snapshot.draft = try s.store.draft(ar, s.selected);
-    v.dark_mode = u.eq(try s.store.get(ar, "theme"), "dark");
     const server = try s.store.get(ar, "relay_status");
     const expiring = s.identity.expires_at > 0 and s.identity.expires_at - @divTrunc(u.now(), 1000) <= 30 * 86400;
     if (expiring and s.online) v.status = try std.fmt.allocPrint(ar, "{s} · client certificate expires {s}; renew and Reconnect", .{ s.status, std.mem.sliceTo(&s.identity.expires, 0) });
@@ -745,6 +747,21 @@ test "metadata views share immutable history while edited records replace it" {
     try std.testing.expectEqual(first.content_generation, metadata.content_generation);
     try std.testing.expectEqualStrings("New draft", metadata.snapshot.draft);
     try std.testing.expectEqualStrings("", first.snapshot.draft);
+    try worker.push(.{ .kind = .hide, .key = "chat" });
+    try worker.drain();
+    try worker.publish();
+    const hidden = worker.take().?;
+    defer hidden.destroy();
+    try std.testing.expect(hidden.snapshot.chats[0].hidden);
+    try std.testing.expect(!metadata.snapshot.chats[0].hidden);
+    try std.testing.expectEqual(metadata.shared.?.history, hidden.shared.?.history);
+    try std.testing.expectEqualStrings("New draft", hidden.snapshot.draft);
+    try worker.push(.{ .kind = .unhide, .key = "chat" });
+    try worker.drain();
+    try worker.publish();
+    const visible = worker.take().?;
+    defer visible.destroy();
+    try std.testing.expect(!visible.snapshot.chats[0].hidden);
     message.text = "Edited";
     message.revision = "1";
     _ = try worker.store.upsert(ar, "message", try u.json(ar, message));

@@ -6,7 +6,7 @@ const Self = @This();
 const a = std.heap.page_allocator;
 // Apply the same modest reduction to labels, messages, and editor metrics.
 pub const font_scale = 0.94;
-const Entry = struct { hash: u64, text: []const u8, layout: *c.ZcText, texture: ?rl.Texture2D = null, tile_top: i32 = -1, used: u64 = 0, width: f32, height: f32, fallback: bool = false, raster_failed: bool = false, color: rl.Color = rl.Color.white, start: usize = 0, end: usize = 0 };
+const Entry = struct { hash: u64, text: []const u8, layout: *c.ZcText, texture: ?rl.Texture2D = null, tile_top: i32 = -1, used: u64 = 0, width: f32, height: f32, fallback: bool = false, raster_failed: bool = false, color: rl.Color = rl.Color.white, background: ?rl.Color = null, start: usize = 0, end: usize = 0 };
 const max_texture_bytes = 32 * 1024 * 1024;
 entries: std.ArrayList(Entry) = .empty,
 texture_bytes: usize = 0,
@@ -36,10 +36,12 @@ pub fn nextFrame(s: *Self, scale: f32) void {
     s.scale = scale;
     s.frame += 1;
 }
-fn get(s: *Self, text: []const u8, size: i32, width: f32) !*Entry {
+fn get(s: *Self, text: []const u8, size: i32, width: f32, single_line: bool, subpixel: bool) !*Entry {
     var hash = std.hash.Wyhash.init(0);
     hash.update(text);
     hash.update(std.mem.asBytes(&size));
+    hash.update(std.mem.asBytes(&single_line));
+    hash.update(std.mem.asBytes(&subpixel));
     if (!std.math.isFinite(width) or !std.math.isFinite(s.scale) or s.scale < 0.5 or s.scale > 8) return error.TextLayoutFailed;
     const w: i32 = @intFromFloat(std.math.clamp(width, 1, 4096 / s.scale - 2));
     hash.update(std.mem.asBytes(&w));
@@ -48,8 +50,8 @@ fn get(s: *Self, text: []const u8, size: i32, width: f32) !*Entry {
         e.used = s.frame;
         return e;
     };
-    const original = if (text.len <= 65536) c.zc_text_new(text.ptr, @intCast(text.len), @as(f64, @floatFromInt(size)) * font_scale, w, s.scale) else null;
-    const layout = original orelse c.zc_text_new(display.unavailable.ptr, display.unavailable.len, @as(f64, @floatFromInt(size)) * font_scale, w, s.scale) orelse return error.TextLayoutFailed;
+    const original = if (text.len <= 65536) c.zc_text_new_with_options(text.ptr, @intCast(text.len), @as(f64, @floatFromInt(size)) * font_scale, w, s.scale, @intFromBool(single_line), @intFromBool(subpixel)) else null;
+    const layout = original orelse c.zc_text_new_with_options(display.unavailable.ptr, display.unavailable.len, @as(f64, @floatFromInt(size)) * font_scale, w, s.scale, @intFromBool(single_line), @intFromBool(subpixel)) orelse return error.TextLayoutFailed;
     errdefer c.zc_text_free(layout);
     const copy = try a.dupe(u8, text);
     errdefer a.free(copy);
@@ -71,7 +73,7 @@ fn get(s: *Self, text: []const u8, size: i32, width: f32) !*Entry {
     return &s.entries.items[s.entries.items.len - 1];
 }
 pub fn height(s: *Self, text: []const u8, size: i32, width: f32) f32 {
-    const e = s.get(text, size, width) catch return 24;
+    const e = s.get(text, size, width, false, true) catch return 24;
     return e.height;
 }
 // Offscreen history needs only metrics. Keeping these layouts in the drawing
@@ -79,16 +81,33 @@ pub fn height(s: *Self, text: []const u8, size: i32, width: f32) f32 {
 pub fn measure(s: *Self, text: []const u8, size: i32, width: f32) f32 {
     if (!std.math.isFinite(width) or !std.math.isFinite(s.scale) or s.scale < 0.5 or s.scale > 8) return 24;
     const w: i32 = @intFromFloat(std.math.clamp(width, 1, 4096 / s.scale - 2));
-    const original = if (text.len <= 65536) c.zc_text_new(text.ptr, @intCast(text.len), @as(f64, @floatFromInt(size)) * font_scale, w, s.scale) else null;
-    const layout = original orelse c.zc_text_new(display.unavailable.ptr, display.unavailable.len, @as(f64, @floatFromInt(size)) * font_scale, w, s.scale) orelse return 24;
+    const original = if (text.len <= 65536) c.zc_text_new_with_options(text.ptr, @intCast(text.len), @as(f64, @floatFromInt(size)) * font_scale, w, s.scale, 0, 1) else null;
+    const layout = original orelse c.zc_text_new_with_options(display.unavailable.ptr, display.unavailable.len, @as(f64, @floatFromInt(size)) * font_scale, w, s.scale, 0, 1) orelse return 24;
     defer c.zc_text_free(layout);
     return @as(f32, @floatFromInt(c.zc_text_height(layout))) / s.scale;
 }
-pub fn draw(s: *Self, text: []const u8, x: f32, y: f32, size: i32, width: f32, color: rl.Color) void {
-    s.drawSelection(text, x, y, size, width, color, 0, 0);
+pub fn draw(s: *Self, text: []const u8, x: f32, y: f32, size: i32, width: f32, color: rl.Color, background: ?rl.Color) void {
+    s.drawSelection(text, x, y, size, width, color, 0, 0, background);
 }
-pub fn drawSelection(s: *Self, text: []const u8, x: f32, y: f32, size: i32, width: f32, color: rl.Color, start: usize, end: usize) void {
-    const e = s.get(text, size, width) catch return;
+pub fn drawLine(s: *Self, text: []const u8, x: f32, y: f32, size: i32, width: f32, color: rl.Color, background: ?rl.Color) void {
+    const e = s.get(text, size, width, true, isOpaque(background)) catch return;
+    s.drawEntry(e, x, y, color, 0, 0, background);
+}
+pub fn lineSize(s: *Self, text: []const u8, size: i32, width: f32) rl.Vector2 {
+    const e = s.get(text, size, width, true, true) catch return .{ .x = 0, .y = 18 };
+    return .{ .x = e.width, .y = e.height };
+}
+pub fn drawSelection(s: *Self, text: []const u8, x: f32, y: f32, size: i32, width: f32, color: rl.Color, start: usize, end: usize, background: ?rl.Color) void {
+    const e = s.get(text, size, width, false, isOpaque(background)) catch return;
+    s.drawEntry(e, x, y, color, start, end, background);
+}
+fn isOpaque(background: ?rl.Color) bool {
+    return if (background) |color| color.a == 255 else false;
+}
+fn rgba(color: rl.Color) u32 {
+    return (@as(u32, color.r) << 24) | (@as(u32, color.g) << 16) | (@as(u32, color.b) << 8) | color.a;
+}
+fn drawEntry(s: *Self, e: *Entry, x: f32, y: f32, color: rl.Color, start: usize, end: usize, background: ?rl.Color) void {
     if (e.raster_failed or y >= @as(f32, @floatFromInt(rl.getScreenHeight())) or y + e.height <= 0) return;
     const full_height = c.zc_text_height(e.layout);
     var top: i32 = @intFromFloat(@floor(@min(@as(f32, @floatFromInt(full_height)), @max(0, -y) * s.scale) / 256) * 256);
@@ -97,7 +116,7 @@ pub fn drawSelection(s: *Self, text: []const u8, x: f32, y: f32, size: i32, widt
     while (top < visible_end) {
         const tile_height = @min(visible_end - top, 2048);
         if (tile_height <= 0) return;
-        if (e.texture != null and (e.tile_top != top or e.texture.?.height != tile_height or !std.meta.eql(e.color, color) or e.start != start or e.end != end)) s.dropTexture(e);
+        if (e.texture != null and (e.tile_top != top or e.texture.?.height != tile_height or !std.meta.eql(e.color, color) or !std.meta.eql(e.background, background) or e.start != start or e.end != end)) s.dropTexture(e);
         if (e.texture == null) {
             const bytes = @as(usize, @intCast(c.zc_text_width(e.layout))) * @as(usize, @intCast(tile_height)) * 4;
             for (s.entries.items) |*other| {
@@ -106,10 +125,10 @@ pub fn drawSelection(s: *Self, text: []const u8, x: f32, y: f32, size: i32, widt
             }
             e.tile_top = top;
             e.color = color;
+            e.background = background;
             e.start = start;
             e.end = end;
-            const rgba: u32 = (@as(u32, color.r) << 24) | (@as(u32, color.g) << 16) | (@as(u32, color.b) << 8) | color.a;
-            const pixels = c.zc_text_pixels(e.layout, rgba, if (e.fallback) 0 else @intCast(start), if (e.fallback) 0 else @intCast(end), top, tile_height);
+            const pixels = c.zc_text_pixels_on(e.layout, rgba(color), if (e.fallback) 0 else @intCast(start), if (e.fallback) 0 else @intCast(end), top, tile_height, if (background) |bg| rgba(bg) else 0);
             if (pixels == null) {
                 e.raster_failed = true;
                 return;
@@ -132,7 +151,7 @@ pub fn drawSelection(s: *Self, text: []const u8, x: f32, y: f32, size: i32, widt
     }
 }
 pub fn caret(s: *Self, text: []const u8, width: f32, index: usize) rl.Rectangle {
-    const e = s.get(text, 16, width) catch return .{ .x = 0, .y = 0, .width = 1, .height = 20 };
+    const e = s.get(text, 16, width, false, true) catch return .{ .x = 0, .y = 0, .width = 1, .height = 20 };
     if (e.fallback) return .{ .x = 0, .y = 0, .width = 1, .height = 20 };
     var x: c_int = 0;
     var y: c_int = 0;
@@ -141,7 +160,7 @@ pub fn caret(s: *Self, text: []const u8, width: f32, index: usize) rl.Rectangle 
     return .{ .x = @floatFromInt(x), .y = @floatFromInt(y), .width = 1.5, .height = @floatFromInt(h) };
 }
 pub fn hit(s: *Self, text: []const u8, width: f32, x: f32, y: f32) usize {
-    const e = s.get(text, 16, width) catch return 0;
+    const e = s.get(text, 16, width, false, true) catch return 0;
     if (e.fallback) return 0;
     return @intCast(@max(0, c.zc_text_hit(e.layout, @intFromFloat(x), @intFromFloat(y))));
 }

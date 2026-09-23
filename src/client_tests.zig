@@ -11,6 +11,49 @@ comptime {
 const u = @import("common.zig");
 const epoch = "12345678-1234-1234-1234-123456789012";
 const message = "{\"id\":\"m1\",\"revision\":\"2\",\"conversation_id\":\"c1\",\"sender\":\"test@example.invalid\",\"direction\":\"incoming\",\"service\":\"imessage\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"kind\":\"text\",\"text\":\"Hello 👋\",\"decoding\":\"plain\",\"observed_status\":\"received\"}";
+test "hidden conversations survive restart and live updates without losing history or drafts" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    const path = try std.fmt.allocPrintSentinel(ar, ".zig-cache/tmp/{s}/client.db", .{tmp.sub_path}, 0);
+    const conversation = "{\"id\":\"c1\",\"service\":\"imessage\"}";
+    {
+        const store = try Store.open(path);
+        defer store.close();
+        try store.beginSync(epoch, epoch ++ ":0");
+        _ = try store.upsert(ar, "conversation", conversation);
+        try store.saveDraft("c1", "Keep this draft 👋");
+        try store.setHidden("c1", true);
+        try store.setHidden("c1", true);
+    }
+    const store = try Store.open(path);
+    defer store.close();
+    try std.testing.expect((try store.snapshot(ar, "c1")).chats[0].hidden);
+    const ev = "{\"cursor\":\"" ++ epoch ++ ":1\",\"sequence\":\"1\",\"type\":\"message.upsert\",\"origin\":\"live\",\"record\":" ++ message ++ "}";
+    try store.event(ar, ev, epoch ++ ":1", "message.upsert", "");
+    _ = try store.upsert(ar, "conversation", "{\"id\":\"c1\",\"revision\":\"1\",\"service\":\"imessage\",\"title\":\"New activity\"}");
+    const hidden = try store.snapshot(ar, "c1");
+    try std.testing.expect(hidden.chats[0].hidden);
+    try std.testing.expectEqualStrings("Hello 👋", hidden.messages[0].text.?);
+    try std.testing.expectEqualStrings("Keep this draft 👋", hidden.draft);
+    try store.setHidden("c1", false);
+    const visible = try store.snapshot(ar, "c1");
+    try std.testing.expect(!visible.chats[0].hidden);
+    try std.testing.expectEqualStrings(hidden.draft, visible.draft);
+    try std.testing.expectEqualStrings(hidden.messages[0].text.?, visible.messages[0].text.?);
+
+    // A recovered draft must not bring a hidden conversation back into the list.
+    try store.setHidden("c1", true);
+    try store.beginSync(epoch, epoch ++ ":0");
+    const recovered = try store.snapshot(ar, "c1");
+    try std.testing.expect(recovered.chats[0].hidden);
+    try std.testing.expectEqualStrings("Keep this draft 👋", recovered.draft);
+    _ = try store.upsert(ar, "conversation", conversation);
+    try std.testing.expect((try store.snapshot(ar, "c1")).chats[0].hidden);
+}
+
 test "events commit records and cursor together, deduplicate replay and ignore stale snapshots" {
     const s = try Store.open(":memory:");
     defer s.close();
@@ -369,25 +412,68 @@ test "unsafe text and invalid geometry fail before shaping or allocation" {
     try std.testing.expect(c.zc_text_new("a", 1, 16, 300, 0) == null);
 }
 
+test "RGB glyph edges use opaque backgrounds and transparent text stays grayscale" {
+    const c = @import("client/c.zig").api;
+    const text = "RGB hinting: Hello world";
+    const rgb = c.zc_text_new_with_options(text.ptr, text.len, 16, 300, 1, 0, 1) orelse return error.NoLayout;
+    defer c.zc_text_free(rgb);
+    const height = c.zc_text_height(rgb);
+    const bytes: usize = @intCast(c.zc_text_width(rgb) * height * 4);
+    // Independent RGB coverages cannot be stored in one transparent alpha.
+    try std.testing.expect(c.zc_text_pixels(rgb, 0xffffffff, 0, 0, 0, height) == null);
+    var chromatic: usize = 0;
+    for ([_]u32{ 0x000000ff, 0xffffffff }) |background| {
+        const foreground = (background ^ 0xffffff00);
+        const pixels = c.zc_text_pixels_on(rgb, foreground, 0, 0, 0, height, background);
+        try std.testing.expect(pixels != null);
+        var i: usize = 0;
+        while (i < bytes) : (i += 4) {
+            try std.testing.expectEqual(@as(u8, 255), pixels[i + 3]);
+            if (pixels[i] != pixels[i + 1] or pixels[i + 1] != pixels[i + 2]) chromatic += 1;
+        }
+        try std.testing.expectEqual(@as(u8, @intCast(background >> 24)), pixels[0]);
+    }
+    const gray = c.zc_text_new(text.ptr, text.len, 16, 300, 1) orelse return error.NoLayout;
+    defer c.zc_text_free(gray);
+    const gray_pixels = c.zc_text_pixels(gray, 0xffffffff, 0, 0, 0, c.zc_text_height(gray));
+    try std.testing.expect(gray_pixels != null);
+    const gray_bytes: usize = @intCast(c.zc_text_width(gray) * c.zc_text_height(gray) * 4);
+    var partial_alpha = false;
+    var i: usize = 0;
+    while (i < gray_bytes) : (i += 4) {
+        try std.testing.expectEqual(gray_pixels[i], gray_pixels[i + 1]);
+        try std.testing.expectEqual(gray_pixels[i + 1], gray_pixels[i + 2]);
+        partial_alpha = partial_alpha or (gray_pixels[i + 3] > 0 and gray_pixels[i + 3] < 255);
+    }
+    try std.testing.expect(partial_alpha);
+    // Some font backends only provide grayscale coverage.
+    if (chromatic == 0) return error.SkipZigTest;
+}
+
 test "fractional scale tiles match full text rendering including selection and bidi" {
     const c = @import("client/c.zig").api;
     const text = "Café é 👩‍💻 שלום مرحبا\n" ** 12;
-    for ([_]f64{ 1, 1.25, 1.5, 2 }) |scale| {
-        const layout = c.zc_text_new(text.ptr, text.len, 16, 300, scale) orelse return error.NoLayout;
+    for ([_]f64{ 1, 1.25, 1.5, 2 }) |scale| for ([_]bool{ false, true }) |subpixel| {
+        const layout = c.zc_text_new_with_options(text.ptr, text.len, 16, 300, scale, 0, @intFromBool(subpixel)) orelse return error.NoLayout;
         defer c.zc_text_free(layout);
         const width: usize = @intCast(c.zc_text_width(layout));
         const height = c.zc_text_height(layout);
-        const ptr = c.zc_text_pixels(layout, 0x112233ff, 0, 80, 0, height);
+        const background: u32 = if (subpixel) 0xf0e8d8ff else 0;
+        const ptr = c.zc_text_pixels_on(layout, 0x112233ff, 0, 80, 0, height, background);
         try std.testing.expect(ptr != null);
         const full = try std.testing.allocator.dupe(u8, ptr[0 .. width * @as(usize, @intCast(height)) * 4]);
         defer std.testing.allocator.free(full);
         // It must contain glyphs rather than an empty successful surface.
         var ink = false;
-        var i: usize = 3;
-        while (i < full.len) : (i += 4) ink = ink or full[i] != 0;
+        var i: usize = 0;
+        while (i < full.len) : (i += 4) {
+            ink = ink or if (subpixel) full[i] != background >> 24 else full[i + 3] != 0;
+        }
         try std.testing.expect(ink);
-        const tile = c.zc_text_pixels(layout, 0x112233ff, 0, 80, 128, 128);
-        try std.testing.expect(tile != null);
-        try std.testing.expectEqualSlices(u8, full[width * 128 * 4 ..][0 .. width * 128 * 4], tile[0 .. width * 128 * 4]);
-    }
+        for ([_]usize{ 1, 17, 64, 128 }) |top| {
+            const tile = c.zc_text_pixels_on(layout, 0x112233ff, 0, 80, @intCast(top), 128, background);
+            try std.testing.expect(tile != null);
+            try std.testing.expectEqualSlices(u8, full[width * top * 4 ..][0 .. width * 128 * 4], tile[0 .. width * 128 * 4]);
+        }
+    };
 }

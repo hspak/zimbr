@@ -85,15 +85,22 @@ def main():
             wait(lambda: rows('SELECT text FROM drafts WHERE key=?', (cid,)) == [(draft,)])
             send(kind='older')
             wait(lambda: rows("SELECT count(*) FROM records WHERE kind='message' AND chat=?", (cid,))[0][0] == 121)
+            send(kind='hide', key=cid)
+            wait(lambda: rows('SELECT key FROM hidden_chats') == [(cid,)])
             # At-least-once replay uses the last durable cursor after a crash.
             stop(); proc = start(); wait(online)
             assert rows('SELECT text FROM drafts WHERE key=?', (cid,)) == [(draft,)]
+            assert rows('SELECT key FROM hidden_chats') == [(cid,)]
             send(kind='viewed', text='no')
             time.sleep(.2)
             with sqlite3.connect(source) as db:
                 add_message(db, 'Live while connected')
             wait(lambda: rows("SELECT count(*) FROM records WHERE kind='message' AND json_extract(record,'$.text')='Live while connected'")[0][0] == 1)
             wait(lambda: rows('SELECT count FROM unread WHERE chat=?', (cid,)) == [(1,)])
+            assert rows('SELECT key FROM hidden_chats') == [(cid,)]
+            send(kind='unhide', key=cid)
+            wait(lambda: rows('SELECT key FROM hidden_chats') == [])
+            assert rows('SELECT text FROM drafts WHERE key=?', (cid,)) == [(draft,)]
             before = rows("SELECT value FROM meta WHERE key='cursor'")[0][0]
             send(kind='reconnect'); wait(online)
             assert rows("SELECT count(*) FROM records WHERE kind='message' AND json_extract(record,'$.text')='Live while connected'")[0][0] == 1
