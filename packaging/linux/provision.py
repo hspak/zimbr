@@ -10,6 +10,7 @@ import argparse
 from datetime import datetime, timezone
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import tempfile
@@ -17,7 +18,7 @@ import tempfile
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID, ExtensionOID
 
 
@@ -47,16 +48,56 @@ def private_dir(path, create=False):
         raise
 
 
-def read_key(fd):
-    keyfd = os.open('client-key.pem', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+def read_private(fd, name):
+    keyfd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
     try:
         info = os.fstat(keyfd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1:
-            raise ValueError('Client key must be a private owned 0600 regular file')
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1 or not 0 < info.st_size <= 1024*1024:
+            raise ValueError(f'{name} must be a private owned 0600 regular file (at most 1 MiB)')
         with os.fdopen(keyfd, 'rb', closefd=False) as source:
-            return serialization.load_pem_private_key(source.read(1024*1024), password=None)
+            data = source.read(1024*1024+1)
+            if len(data) > 1024*1024:
+                raise ValueError(f'{name} is too large')
+            return data
     finally:
         os.close(keyfd)
+
+
+def device_name(value):
+    name = value.lower()
+    if (len(name) > 253 or not name.endswith('.zimbr.invalid') or
+            any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label) for label in name.split('.'))):
+        raise ValueError('Use an explicit ASCII device DNS name under zimbr.invalid, e.g. linux-desktop.zimbr.invalid')
+    return name
+
+
+def client_profile(obj):
+    required = {ExtensionOID.BASIC_CONSTRAINTS, ExtensionOID.KEY_USAGE,
+                ExtensionOID.EXTENDED_KEY_USAGE, ExtensionOID.SUBJECT_ALTERNATIVE_NAME}
+    allowed = required | ({ExtensionOID.SUBJECT_KEY_IDENTIFIER, ExtensionOID.AUTHORITY_KEY_IDENTIFIER}
+                          if isinstance(obj, x509.Certificate) else set())
+    extensions = {ext.oid: ext for ext in obj.extensions}
+    if not required <= extensions.keys() or extensions.keys() - allowed:
+        raise ValueError('Missing or unexpected client certificate/CSR extensions; regenerate old CSRs with --name')
+    bc = extensions[ExtensionOID.BASIC_CONSTRAINTS]
+    ku = extensions[ExtensionOID.KEY_USAGE]
+    if not bc.critical or bc.value.ca or bc.value.path_length is not None:
+        raise ValueError('Client leaf must have critical non-CA Basic Constraints')
+    if list(extensions[ExtensionOID.EXTENDED_KEY_USAGE].value) != [ExtendedKeyUsageOID.CLIENT_AUTH]:
+        raise ValueError('Client leaf must have only clientAuth EKU')
+    usage = ku.value
+    if not ku.critical or not usage.digital_signature or any((usage.key_cert_sign, usage.crl_sign,
+                                                            usage.key_agreement, usage.data_encipherment, usage.content_commitment)):
+        raise ValueError('Unexpected client key usage')
+    sans = list(extensions[ExtensionOID.SUBJECT_ALTERNATIVE_NAME].value)
+    if len(sans) != 1 or not isinstance(sans[0], x509.DNSName):
+        raise ValueError('Client SAN must be exactly one explicit device DNS name')
+    device_name(sans[0].value)
+    pub = obj.public_key()
+    if not ((isinstance(pub, ec.EllipticCurvePublicKey) and pub.key_size >= 256) or
+            (isinstance(pub, rsa.RSAPublicKey) and pub.key_size >= 2048)):
+        raise ValueError('Unsupported or weak client public key')
+    return sans
 
 
 def write_new(fd, name, data):
@@ -68,6 +109,7 @@ def write_new(fd, name, data):
 
 
 def request(args):
+    device_san = device_name(args.name)
     path, fd = private_dir(args.tls_dir, create=True)
     try:
         for name in ('client-key.pem', 'client.csr'):
@@ -82,10 +124,12 @@ def request(args):
                .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
                .add_extension(x509.KeyUsage(True, False, False, False, False, False, False, False, False), critical=True)
                .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]), critical=False)
+               .add_extension(x509.SubjectAlternativeName([x509.DNSName(device_san)]), critical=False)
                .sign(key, hashes.SHA256()))
         write_new(fd, 'client-key.pem', key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
         write_new(fd, 'client.csr', csr.public_bytes(serialization.Encoding.PEM))
         print(f'Created {path}/client.csr. Transfer only the CSR to the administrator; keep client-key.pem here.')
+        print(f'Ask the Mac signer to use --role client --name {device_san}. Keep client.csr here for import verification.')
     finally:
         os.close(fd)
 
@@ -111,19 +155,14 @@ def import_certificate(args):
         for item in (ca, cert):
             if not item.not_valid_before_utc <= datetime.now(timezone.utc) < item.not_valid_after_utc:
                 raise ValueError('Certificate is expired or not yet valid')
-        if cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca:
-            raise ValueError('Client certificate must not be a CA')
-        if list(cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value) != [ExtendedKeyUsageOID.CLIENT_AUTH]:
-            raise ValueError('Client leaf must have only clientAuth EKU')
-        allowed = {ExtensionOID.BASIC_CONSTRAINTS, ExtensionOID.KEY_USAGE, ExtensionOID.EXTENDED_KEY_USAGE,
-                   ExtensionOID.SUBJECT_KEY_IDENTIFIER, ExtensionOID.AUTHORITY_KEY_IDENTIFIER}
-        if any(ext.oid not in allowed for ext in cert.extensions):
-            raise ValueError('Unexpected extension in client certificate')
-        usage = cert.extensions.get_extension_for_class(x509.KeyUsage).value
-        if not usage.digital_signature or usage.key_cert_sign or usage.crl_sign:
-            raise ValueError('Unexpected client key usage')
-        if public_key(read_key(fd).public_key()) != public_key(cert.public_key()):
-            raise ValueError('Issued client certificate does not match the local private key')
+        csr = x509.load_pem_x509_csr(read_private(fd, 'client.csr'))
+        if not csr.is_signature_valid:
+            raise ValueError('Local CSR signature is invalid')
+        if client_profile(cert) != client_profile(csr):
+            raise ValueError('Issued client SAN does not exactly match the local CSR')
+        key = serialization.load_pem_private_key(read_private(fd, 'client-key.pem'), password=None)
+        if public_key(key.public_key()) != public_key(csr.public_key()) or public_key(key.public_key()) != public_key(cert.public_key()):
+            raise ValueError('Issued client certificate/CSR does not match the local private key')
         # Stage public files, verify with the same purpose checks as the runtime,
         # and atomically replace only after all validation has succeeded.
         with tempfile.TemporaryDirectory(prefix='.import-', dir=path) as staging:
@@ -152,6 +191,7 @@ def main():
     commands = parser.add_subparsers(dest='command', required=True)
     req = commands.add_parser('request', help='create a new local key and clientAuth CSR')
     req.add_argument('--tls-dir', required=True)
+    req.add_argument('--name', required=True, help='explicit device SAN, e.g. linux-desktop.zimbr.invalid; must match the Mac signer --name')
     req.add_argument('--label', default='Zimbr Linux device')
     imp = commands.add_parser('import', help='validate and import issued public credentials')
     imp.add_argument('--tls-dir', required=True)
@@ -162,7 +202,7 @@ def main():
     os.umask(0o077)
     try:
         (request if args.command == 'request' else import_certificate)(args)
-    except (ValueError, OSError, InvalidSignature, UnsupportedAlgorithm, x509.ExtensionNotFound, subprocess.CalledProcessError) as exc:
+    except (ValueError, TypeError, OSError, InvalidSignature, UnsupportedAlgorithm, x509.ExtensionNotFound, subprocess.CalledProcessError) as exc:
         parser.exit(1, f'Provisioning failed: {exc}\n')
 
 

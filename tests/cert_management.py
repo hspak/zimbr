@@ -36,6 +36,83 @@ class CertificateManagement(unittest.TestCase):
             args += ['--name', name]
         return subprocess.run(args, capture_output=True, text=True, timeout=30)
 
+    def linux(self, *args):
+        return subprocess.run([sys.executable, str(ROOT/'packaging/linux/provision.py'), *map(str, args)],
+                              capture_output=True, text=True, timeout=30)
+
+    def test_linux_request_mac_signer_and_linux_import(self):
+        directory = self.root/'linux'
+        name = 'linux-desktop.zimbr.invalid'
+        result = self.linux('request', '--tls-dir', directory, '--name', name, '--label', 'Workstation display label')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        csr_path = directory/'client.csr'
+        csr = x509.load_pem_x509_csr(csr_path.read_bytes())
+        from cryptography.x509.oid import NameOID
+        self.assertEqual(csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value, 'Workstation display label')
+        self.assertEqual(list(csr.extensions.get_extension_for_class(x509.SubjectAlternativeName).value), [x509.DNSName(name)])
+        original_key = (directory/'client-key.pem').read_bytes()
+        issued = directory/'issued.pem'
+        result = self.sign(csr_path, 'client', [name], issued)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        ca_path = self.root/'issuer/rootCA.pem'
+        ca = x509.load_pem_x509_certificate(ca_path.read_bytes())
+        args = ('import', '--tls-dir', directory, '--ca', ca_path, '--cert', issued, '--ca-sha256')
+        result = self.linux(*args, '0'*64)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((directory/'client.pem').exists())
+        result = self.linux(*args, ca.fingerprint(hashes.SHA256()).hex())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(report['sha256'], result.stdout)
+        self.assertEqual((directory/'client.pem').read_bytes(), issued.read_bytes())
+        self.assertEqual((directory/'client-key.pem').read_bytes(), original_key)
+        self.assertFalse((directory/'rootCA-key.pem').exists())
+        # Existing keys are never replaced by another request operation.
+        self.assertNotEqual(self.linux('request', '--tls-dir', directory, '--name', name).returncode, 0)
+        self.assertEqual((directory/'client-key.pem').read_bytes(), original_key)
+
+        # A valid certificate from the correct CA with the same key but a
+        # different approved device name must still fail local import.
+        key = serialization.load_pem_private_key(original_key, None)
+        wrong_name = 'other-device.zimbr.invalid'
+        builder = x509.CertificateSigningRequestBuilder().subject_name(csr.subject)
+        for ext in csr.extensions:
+            value = x509.SubjectAlternativeName([x509.DNSName(wrong_name)]) if ext.oid == ExtensionOID.SUBJECT_ALTERNATIVE_NAME else ext.value
+            builder = builder.add_extension(value, ext.critical)
+        changed = directory/'other.csr'
+        atomic(changed, builder.sign(key, hashes.SHA256()).public_bytes(serialization.Encoding.PEM))
+        wrong_cert = directory/'other.pem'
+        result = self.sign(changed, 'client', [wrong_name], wrong_cert)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        installed = (directory/'client.pem').read_bytes()
+        result = self.linux('import', '--tls-dir', directory, '--ca', ca_path, '--cert', wrong_cert,
+                            '--ca-sha256', ca.fingerprint(hashes.SHA256()).hex())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('SAN does not exactly match', result.stderr)
+        self.assertEqual((directory/'client.pem').read_bytes(), installed)
+        # The retained request is security configuration, not an unchecked hint.
+        original_csr = csr_path.read_bytes()
+        csr_path.unlink()
+        csr_path.symlink_to(changed)
+        result = self.linux(*args, ca.fingerprint(hashes.SHA256()).hex())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((directory/'client.pem').read_bytes(), installed)
+        csr_path.unlink()
+        atomic(csr_path, original_csr)
+        csr_path.chmod(0o644)
+        self.assertNotEqual(self.linux(*args, ca.fingerprint(hashes.SHA256()).hex()).returncode, 0)
+        self.assertEqual((directory/'client.pem').read_bytes(), installed)
+
+    def test_linux_requires_an_explicit_device_dns_name(self):
+        directory = self.root/'linux'
+        self.assertNotEqual(self.linux('request', '--tls-dir', directory).returncode, 0)
+        for name in ('linux-desktop', '*.zimbr.invalid', 'user@zimbr.invalid', '127.0.0.1',
+                     '-device.zimbr.invalid', 'device..zimbr.invalid'):
+            with self.subTest(name=name):
+                result = self.linux('request', '--tls-dir', directory, '--name', name)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((directory/'client-key.pem').exists())
+
     def test_actual_mkcert_preserves_client_and_server_contract(self):
         for role, names, eku in (
             ('client', ['linux-desktop.zimbr.invalid'], ExtendedKeyUsageOID.CLIENT_AUTH),

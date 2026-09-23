@@ -3,7 +3,7 @@
 Only synthetic databases and recipients are used. No GPU or Apple account needed.
 """
 import json
-from tls_fixture import PKI, RelayTLS
+from relay_fixture import Fixture
 import os
 from pathlib import Path
 import select
@@ -40,12 +40,11 @@ def main():
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0))
             port = sock.getsockname()[1]
-        opts = ['--data-dir', str(relay), '--messages-db', str(source), '--port', str(port)]
+        tls = Fixture(root, port)
+        opts = ['--data-dir', str(relay), '--messages-db', str(source), '--config', str(tls.config)]
         subprocess.run([str(BIN / 'fake-relay'), 'setup', *opts], check=True, capture_output=True)
         logfile = open(root / 'relay.log', 'w+')
         server = subprocess.Popen([str(BIN / 'fake-relay'), 'serve', *opts], stdout=logfile, stderr=logfile)
-        tls = PKI(root/'tls')
-        frontend = RelayTLS(tls, port, (relay/'token').read_text().strip())
         proc = None
         views = []
         def rows(sql, args=(), path=client / 'client.db'):
@@ -69,7 +68,7 @@ def main():
             proc.stdin.flush()
         def start():
             views.clear()
-            return subprocess.Popen([str(BIN / 'client-probe'), '--control', '--data-dir', str(client), *tls.client_args(frontend.server_port)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+            return subprocess.Popen([str(BIN / 'client-probe'), '--control', '--data-dir', str(client), *tls.client_args()], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
         def stop():
             proc.stdin.write(b'quit\n'); proc.stdin.flush()
             assert proc.wait(timeout=10) == 0, proc.stderr.read().decode()
@@ -164,7 +163,6 @@ def main():
                 proc.kill(); proc.wait()
             if server.poll() is None:
                 server.terminate(); server.wait(timeout=5)
-            frontend.close()
             logfile.close()
 
 if __name__ == '__main__':

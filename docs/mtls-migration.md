@@ -5,7 +5,9 @@ Linux client implementations are both present. See [macOS operation](macos-tls.m
 [Linux setup](linux-mtls.md), and the [integration review](linux-mtls-review.md).
 The Mac is authoritative for [certificate management](certificate-management.md);
 client provisioning must follow that issuance and enrollment contract.
-Linux execution and device provisioning remain on the Linux host.
+Linux provisioning now matches the Mac contract, and synthetic worker suites
+exercise the native relay directly. Installed two-host acceptance remains a
+separate deployment check.
 There is no compatibility listener or automatic downgrade. The HTTP v1 payloads, durable cursors, send request IDs,
 relay journal, client cache, and drafts retain their current semantics.
 

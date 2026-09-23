@@ -358,7 +358,7 @@ def provisioning(root, pki):
     tool = ROOT/'packaging/linux/provision.py'
     dest = root/'provisioned'
     command = ['python3', str(tool)]
-    subprocess.run([*command, 'request', '--tls-dir', str(dest)], check=True, capture_output=True)
+    subprocess.run([*command, 'request', '--tls-dir', str(dest), '--name', 'linux-desktop.zimbr.invalid'], check=True, capture_output=True)
     csr = x509.load_pem_x509_csr((dest/'client.csr').read_bytes())
     assert csr.is_signature_valid
     assert list(csr.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value) == [ExtendedKeyUsageOID.CLIENT_AUTH]
@@ -379,7 +379,7 @@ def provisioning(root, pki):
     assert cert.fingerprint(hashes.SHA256()).hex().encode() in result.stdout
     assert (dest/'client.pem').stat().st_mode & 0o777 == 0o600
     original = (dest/'client-key.pem').read_bytes()
-    assert subprocess.run([*command, 'request', '--tls-dir', str(dest)], capture_output=True).returncode != 0
+    assert subprocess.run([*command, 'request', '--tls-dir', str(dest), '--name', 'linux-desktop.zimbr.invalid'], capture_output=True).returncode != 0
     assert (dest/'client-key.pem').read_bytes() == original
     installed = (dest/'client.pem').read_bytes()
     returned.write_bytes((pki.root/'client.pem').read_bytes())

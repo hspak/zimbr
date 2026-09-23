@@ -297,7 +297,7 @@ fn disconnected(s: *Self, status: c_long) void {
         c.ZC_CREDENTIALS => "Local credentials need repair · see Details, then Reconnect",
         c.ZC_CLIENT_REJECTED => "Client certificate rejected · check enrollment and validity on the Mac, then Reconnect",
         c.ZC_CONFIG => "Connection configuration failed · see Details, then Reconnect",
-        c.ZC_TLS => "TLS connection failed · see Details; retrying (certificate rejection is not confirmed)",
+        c.ZC_TLS => "TLS connection failed · check relay TLS settings and device enrollment; see Details. Retrying.",
         c.ZC_HTTP => if (s.auth_blocked) "Relay HTTP error · check endpoint and access on the Mac, then Reconnect" else "Relay HTTP error · see Details; retrying",
         else => "Offline · cached messages and drafts available. Check the network and relay.",
     };

@@ -58,7 +58,10 @@ class Fixture:
             builder = builder.add_extension(x509.ExtendedKeyUsage(eku or [ExtendedKeyUsageOID.SERVER_AUTH if server else ExtendedKeyUsageOID.CLIENT_AUTH]), critical=False)
         if server:
             import ipaddress
-            builder = builder.add_extension(x509.SubjectAlternativeName(sans or [x509.DNSName('localhost'), x509.IPAddress(ipaddress.ip_address('127.0.0.1'))]), critical=False)
+            default_sans = [x509.DNSName('localhost'), x509.IPAddress(ipaddress.ip_address('127.0.0.1'))]
+        else:
+            default_sans = [x509.DNSName(name + '.zimbr.invalid')]
+        builder = builder.add_extension(x509.SubjectAlternativeName(default_sans if sans is None else sans), critical=False)
         cert = builder.sign(self.ca_key, hashes.SHA256())
         atomic(self.root/(name+'.pem'), cert.public_bytes(serialization.Encoding.PEM))
         atomic(self.root/(name+'-key.pem'), key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
@@ -77,3 +80,24 @@ class Fixture:
 
     def connection(self, auth=True, timeout=4, name='client'):
         return http.client.HTTPSConnection('127.0.0.1', self.port, timeout=timeout, context=self.context(name if auth else None))
+
+    def client_args(self, port=None, name='client'):
+        return ['--relay-url', f'https://localhost:{self.port if port is None else port}',
+                '--ca-file', str(self.root/'ca.pem'), '--client-cert-file', str(self.root/f'{name}.pem'),
+                '--client-key-file', str(self.root/f'{name}-key.pem')]
+
+    def server_context(self):
+        """Authenticated listener for HTTP/SSE fault injection only."""
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ctx.maximum_version = ssl.TLSVersion.TLSv1_3
+        ctx.load_cert_chain(self.root/'server.pem', self.root/'server-key.pem')
+        ctx.load_verify_locations(self.root/'ca.pem')
+        ctx.verify_mode = ssl.CERT_REQUIRED
+        ctx.num_tickets = 0
+        ctx.set_alpn_protocols(['http/1.1'])
+        return ctx
+
+    def enroll(self, name):
+        self.devices = [d for d in self.devices if d['sha256'] != self.fingerprint(name)]
+        self.devices.append({'label': name, 'sha256': self.fingerprint(name), 'enabled': True})
+        save_json(self.root/'devices.json', self.devices)

@@ -1,9 +1,8 @@
 # Messaging performance
 
-The measurements below describe the pre-mTLS release. Both transport
-implementations are now present, but the Linux performance harness still uses
-the old fake-relay adapter and needs the changes described in
-[the integration review](linux-mtls-review.md) before rerunning. Current Mac
+The measurements below describe the pre-mTLS release. The Linux performance harness now connects
+directly to the native mTLS fake relay with temporary enrolled credentials;
+the old plaintext adapter has been removed. Current Mac
 transport/deployment checks are in [macOS TLS operation](macos-tls.md).
 
 The critical path is the whole system: observing Apple's database, committing

@@ -12,7 +12,8 @@ import tempfile
 import threading
 import time
 from fixture import create
-from tls_fixture import PKI, TLSServer
+from tls_fixture import TLSServer
+from relay_fixture import Fixture
 from client_integration import wait
 ROOT=Path(__file__).resolve().parents[1]
 BIN=ROOT/'zig-out/bin'
@@ -23,11 +24,13 @@ def main():
         os.environ['XDG_CONFIG_HOME']=str(root/'config')
         with socket.socket() as sock:
             sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
-        opts=['--data-dir',str(relay),'--messages-db',str(source),'--port',str(port)]
+        tls=Fixture(root,port)
+        tls.issue('fault-proxy');tls.enroll('fault-proxy')
+        upstream_context=tls.context('fault-proxy')
+        opts=['--data-dir',str(relay),'--messages-db',str(source),'--config',str(tls.config)]
         subprocess.run([str(BIN/'fake-relay'),'setup',*opts],check=True,capture_output=True)
         log=open(root/'log','w+')
         server=subprocess.Popen([str(BIN/'fake-relay'),'serve',*opts],stdout=log,stderr=log)
-        tls=PKI(root/'tls')
         faults={'history':True,'post':True,'posts':0,'lookups':0,'lookup_ids':[],'auth':0,'stream':True}
         slow_history=threading.Event();release_history=threading.Event()
         class Proxy(http.server.BaseHTTPRequestHandler):
@@ -36,7 +39,7 @@ def main():
             def do_GET(self):self.forward()
             def do_POST(self):self.forward()
             def forward(self):
-                conn=http.client.HTTPConnection('127.0.0.1',port,timeout=20)
+                conn=http.client.HTTPSConnection('127.0.0.1',port,timeout=20,context=upstream_context)
                 try:
                     assert not self.headers.get('Authorization')
                     if faults.get('reject'):
@@ -48,7 +51,7 @@ def main():
                     if self.command=='POST':faults['posts']+=1
                     if '/send-requests/' in self.path:
                         faults['lookups']+=1;faults['lookup_ids'].append(self.path.rsplit('/',1)[-1])
-                    conn.request(self.command,self.path,body,{'Authorization':'Bearer '+(relay/'token').read_text().strip(),'Content-Type':'application/json'})
+                    conn.request(self.command,self.path,body,{'Content-Type':'application/json'})
                     result=conn.getresponse()
                     if result.status==401:faults['auth']+=1
                     if self.path.startswith('/v1/events') and result.status==200:
@@ -69,7 +72,7 @@ def main():
                 except (OSError,http.client.HTTPException):
                     self.close_connection=True
                 finally:conn.close()
-        proxy=TLSServer(Proxy,tls.context())
+        proxy=TLSServer(Proxy,tls.server_context())
         proc=None
         def rows(sql,args=(),path=client/'client.db'):
             with sqlite3.connect(path) as db:return db.execute(sql,args).fetchall()

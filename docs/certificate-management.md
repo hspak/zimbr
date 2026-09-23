@@ -108,8 +108,10 @@ CA replacement requires a coordinated explicit trust update on every device.
 
 ## Client handoff
 
-Commit `218d87c` needs two provisioning changes: add the selected client SAN to
-its CSR, and allow/validate the same SAN on import. Its integration harnesses
-also need to target the native TLS fake relay. See the reproducible findings in
-[the client integration review](linux-mtls-review.md). Linux implementation and
-runtime acceptance remain on the Linux host.
+The Linux helper implements this profile with `request --name DEVICE.zimbr.invalid`.
+Its import verifies the returned SAN against its locally retained, signed CSR and
+checks both against the local private key. See [Linux setup](linux-mtls.md) for
+commands. Real-mkcert round trips run in `tests/cert_management.py`; native relay
+worker coverage runs in `tests/client_native_tls.py` and the converted client
+integration/fault/Details/performance suites. The original handoff findings and
+resolution are recorded in [the integration review](linux-mtls-review.md).

@@ -1,17 +1,17 @@
 # Linux mTLS setup and handoff
 
-The Linux client requires direct HTTPS with TLS 1.3, HTTP/1.1, and a device
-certificate. The macOS relay implementation is also present in the combined
-worktree and is installed on the Mac. The client provisioning flow and temporary
-relay adapter still need the corrections in [the integration review](linux-mtls-review.md)
-before the two-host cutover. No client fallback or tunnel is used.
+The Linux client and native macOS relay use direct HTTPS with TLS 1.3,
+HTTP/1.1, and an enrolled device certificate. The provisioning and integration
+mismatches from [the review](linux-mtls-review.md) are resolved. Linux worker
+suites now connect directly to the production TLS implementation in `fake-relay`.
+No client fallback, plaintext adapter, or tunnel is used.
 
 The Mac owns issuance and enrollment policy. Follow the authoritative
-[certificate management contract](certificate-management.md): request an
-explicit device SAN such as `linux-desktop.zimbr.invalid`, have the Mac signer
-validate that exact name, and validate the returned SAN during import. The
-commands below describe the incoming client helper; at `218d87c`, its request
-and import implementations need those changes before this workflow can complete.
+[certificate management contract](certificate-management.md): request an explicit
+device SAN, have the Mac signer validate that exact name, and validate the returned
+SAN against the retained local CSR during import. Examples use the reserved placeholder `https://relay.example:8731`; replace it
+with your relay endpoint. Installed two-host
+acceptance is separate from the synthetic tests documented here.
 
 ## Provision a Linux device
 
@@ -28,14 +28,19 @@ umask 077
 mkdir -p "$HOME/.config/zimbr"
 chmod 700 "$HOME/.config/zimbr"
 python3 packaging/linux/provision.py request \
-  --tls-dir "$HOME/.config/zimbr/tls" --label linux-desktop
+  --tls-dir "$HOME/.config/zimbr/tls" \
+  --name linux-desktop.zimbr.invalid --label 'Linux desktop'
 ```
 
-This creates a 0600 local P-256 key and `client.csr` in a 0700 directory. It
-refuses to overwrite an existing key. Transfer **only the CSR** to the Mac's
+This creates a 0600 local P-256 key and `client.csr` in a 0700 directory. `--name`
+is the explicit device DNS SAN under `zimbr.invalid`; `--label` is human-readable
+subject metadata. Neither authorizes access. Keep the CSR locally for import
+verification, and pass the same `--name` to the Mac signer. The helper refuses
+to overwrite an existing key. Old CSRs without a SAN need a fresh key/CSR in a
+new private directory. Transfer **only the CSR** to the Mac's
 administrator using the existing trusted SSH channel. The administrator must
 inspect the CSR's signature, non-CA constraint, digital-signature key usage,
-and clientAuth EKU and reject unexpected extensions before signing. With the
+and clientAuth EKU, exact SAN, and absence of unexpected extensions before signing. With the
 dedicated Zimbr `CAROOT`, sign using mkcert's `-csr` support; do not combine
 `-csr` with `-client`, run `mkcert -install`, or reuse a general development CA.
 Use the existing Mac `tools/tls_admin.py sign --role client --name ...` and
@@ -60,8 +65,10 @@ python3 packaging/linux/provision.py import \
   --ca-sha256 VERIFIED_CA_DER_SHA256
 ```
 
-Import verifies the pin, leaf signature, purpose, validity, extensions, and key
-match before replacing runtime public certificates. Enroll the **client leaf
+Import verifies the pin, leaf signature, purpose, validity, extensions, allowed
+key usages, and the certificate/CSR/private-key match before replacing runtime
+public certificates. Its SAN must exactly match the signed local CSR, which
+must also be an owned 0600 regular file without symlinks or hardlinks. Enroll the **client leaf
 DER SHA-256** printed by the helper in the relay's enabled-device allowlist.
 The CA key stays in protected administrator storage; neither the helper nor the
 Linux application needs it. Private-key contents are never command arguments.
@@ -101,6 +108,10 @@ DNS/network errors and ambiguous TLS failures retry with bounded backoff.
 Explicit trust, credential, configuration, certificate-rejection, and HTTP
 access/redirect failures wait for **Reconnect** after correction. A generic TLS
 handshake failure is never reported as proven client-certificate rejection.
+The native relay currently sends a generic handshake-failure alert for an
+unenrolled or disabled fingerprint. For that diagnostic, check enrollment of the
+fingerprint shown in Details and the relay TLS configuration; bounded retries
+continue until the connection succeeds or you click Reconnect.
 
 Reconnect validates and reloads credentials and destroys all old HTTP/SSE
 connections and TLS session state. File changes alone do not change a running
@@ -139,7 +150,9 @@ different minor version, supply a target OpenSSL 3.5 build using
 
 ```sh
 zig build test client client-probe fake-relay
+python3 tests/cert_management.py  # real mkcert required; ZIMBR_MKCERT may override its path
 python3 tests/client_tls.py
+python3 tests/client_native_tls.py
 python3 tests/client_integration.py
 python3 tests/client_transport.py
 python3 tests/client_details.py
@@ -149,15 +162,20 @@ zig fmt --check build.zig src
 ```
 
 Python client harnesses require `cryptography` and use ephemeral CAs; no test CA
-is installed in system trust stores. `tests/tls_fixture.py` supplies authenticated
-TLS endpoints. Its test-only adapter still forwards synthetic payloads to the
-old fake relay over plaintext loopback; the current native fake relay no longer
-supports that transport. Convert these integration consumers to the native TLS
-fake relay before rerunning, using `tests/relay_fixture.py` and
-`tests/integration.py` as references. Earlier adapter results cover the Linux
-worker, persistence, and HTTP/SSE fault handling but do **not** establish native
-relay TLS, enrollment, revocation, handshake limits, or signed LaunchAgent
-behavior. Current server evidence is in [macOS TLS operation](macos-tls.md).
+is installed in system trust stores. `tests/relay_fixture.py` configures the native
+relay and enrolls its test devices. Integration, Details, and performance suites
+connect directly to its HTTPS listener. Transport faults use an authenticated
+TLS intermediary with its own enrolled upstream certificate; both hops verify
+TLS and no bearer token is sent. `tests/tls_fixture.py` retains standalone TLS
+endpoints for malformed HTTP/SSE and server-identity negative tests.
+
+`tests/cert_management.py` exercises Linux request → Mac signer/real mkcert →
+Linux import, including a correctly signed wrong-SAN certificate and unsafe
+retained CSRs. `tests/client_native_tls.py` exercises enrollment, credential
+renewal, old/current device revocation with completed relay restart, closure of
+pooled HTTP and SSE, saved cursor replay, drafts, and durable send IDs. These
+checks use the same relay TLS transport as the Mac, with synthetic message data.
+Installed-server verification is described in [macOS TLS operation](macos-tls.md).
 
 The server contract is unchanged API v1 payloads/cursors/request IDs behind a
 TLS 1.3, HTTP/1.1 origin. Both API and event connections present the device leaf;

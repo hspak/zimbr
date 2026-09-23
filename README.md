@@ -3,9 +3,8 @@
 A Zig 0.16 relay for the Messages account on a logged-in Mac. It reads Apple's
 SQLite database without modifying it, exposes a TLS 1.3 HTTPS/SSE API requiring
 an enrolled client certificate, and sends through a bounded Messages AppleScript
-subprocess. Both transport implementations are present; provisioning and test
-handoff issues found while combining them are recorded in
-[the client review](docs/linux-mtls-review.md).
+subprocess. Both endpoints share the [certificate management contract](docs/certificate-management.md).
+The Linux worker is tested directly against the native mTLS relay.
 
 The Linux desktop client uses Zig, Clay, raylib, and Pango. It supports conversation
 browsing, cached history, live updates, direct messages, existing-conversation
@@ -46,6 +45,8 @@ labels in both light and dark mode.
 
 Provision a local device key/CSR and import the verified CA and signed leaf with
 `packaging/linux/provision.py`, following [Linux mTLS setup](docs/linux-mtls.md).
+Request an explicit `--name linux-desktop.zimbr.invalid`, have the Mac signer
+approve that same name, and retain `client.csr` for import verification.
 The relay must enable the device's entire-leaf SHA-256 fingerprint. Use a directly
 reachable hostname covered by its server certificate; proxies and redirects are
 disabled. Both API and SSE connections require TLS 1.3 and client authentication.
@@ -108,7 +109,10 @@ visible as placeholders; downloads and notifications are not implemented.
 Linux verification:
 
 ```sh
+# Add -Dopenssl-prefix=/absolute/openssl-3.5 if system OpenSSL is another minor version.
 zig build test client-probe fake-relay
+python3 tests/cert_management.py  # real mkcert required
+python3 tests/client_native_tls.py
 python3 tests/client_tls.py
 python3 tests/client_integration.py
 python3 tests/client_transport.py
@@ -124,10 +128,9 @@ zig-out/bin/client-probe --data-dir /path/to/client-data
 
 `test-client` runs store, SSE, and Unicode text tests without a GPU. The Python
 client integration suite uses the actual client worker, temporary device/CA
-certificates, and an authenticated TLS test adapter in front of the existing
-fixture relay. The adapter still expects the old plaintext fake relay and must
-be replaced with direct native TLS before running the combined client integration
-suites. It covers history, pagination, direct/group sends, echo merging, uncertain outcomes,
+certificates, and the native relay's production TLS transport. Fault injection
+uses mTLS on both the worker and relay sides of its intermediary. It covers
+history, pagination, direct/group sends, echo merging, uncertain outcomes,
 crashes, expired cursors, and epoch changes. A Wayland screenshot
 can be exported with `zimbr --screenshot /path/to/image.png --frames 90`.
 
@@ -170,7 +173,8 @@ Python network tests/tools require TLS 1.3 support (`ssl.HAS_TLSv1_3`); Apple's
 bundled LibreSSL Python is insufficient. For cross builds, supply target-architecture
 OpenSSL archives with `-Dopenssl-prefix`, `-Dtarget`, and
 `-Dmacos-sdk=/path/to/MacOSX.sdk`. Native and fake relays use the same TLS wrapper.
-Linux execution of the combined pair remains separate validation work.
+Linux synthetic worker suites exercise the combined pair directly. Installed
+two-host acceptance remains a separate deployment check.
 
 The Mac owns certificate issuance and enrollment; clients follow the
 [certificate management contract](docs/certificate-management.md).

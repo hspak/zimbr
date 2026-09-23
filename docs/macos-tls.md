@@ -3,9 +3,9 @@
 The macOS relay now requires TLS 1.3, HTTP/1.1, and a separately enrolled client
 certificate on **every** API and SSE connection. The Linux transport code is
 also available.
-Its provisioning and test adapters need the corrections recorded in
-[the integration review](linux-mtls-review.md); execution of the Linux client
-remains on the Linux host.
+The Linux provisioning and test handoff corrections are recorded as resolved in
+[the integration review](linux-mtls-review.md); Linux suites now exercise the
+native relay directly. Installed two-host acceptance remains separate.
 There is no plaintext listener, bearer token, or automatic fallback.
 
 ## Build

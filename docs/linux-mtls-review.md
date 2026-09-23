@@ -4,13 +4,27 @@ Reviewed the initial client mTLS migration on 2026-09-23 after pulling
 it into the macOS worktree. The Mac implementation was preserved. Linux binaries
 and GUI tests were not run on this host.
 
+Linux follow-up: the findings below are resolved. The helper now requires a
+separate device `--name`, retains the CSR, and verifies the exact issued SAN and
+CSR/key match on import. Real mkcert round trips use the Mac signer. Ordinary
+worker harnesses target the native mTLS relay directly; fault injection verifies
+TLS on both hops. The obsolete plaintext/token adapter has been removed.
+
+The Linux native build also required `_DEFAULT_SOURCE` in the relay C wrapper
+for glibc's `S_ISVTX` definition. No relay authorization policy was relaxed.
+An unenrolled device produces OpenSSL's generic handshake-failure alert; the
+client retains the ambiguous TLS classification and bounded retries while
+suggesting that users check device enrollment and relay TLS settings.
+
+The findings below preserve the original client migration review, before these fixes.
+
 The server is authoritative for certificate management. The chosen
 [certificate contract](certificate-management.md) retains strict CSR validation,
 an explicit client device SAN, a dedicated Mac-held CA, and leaf-fingerprint
 enrollment. The Linux implementation should adapt to that contract. Existing
 Mac tooling is sufficient.
 
-## P1: provisioning cannot complete with the Mac issuer
+## Resolved P1: provisioning cannot complete with the Mac issuer
 
 `packaging/linux/provision.py:request` creates a clientAuth CSR without a SAN.
 `tools/tls_admin.py sign` requires an explicit expected `--name` and rejects that
@@ -37,7 +51,7 @@ Required client changes:
 
 The Mac signer will not relax its validation to accept the old no-SAN CSR.
 
-## P1: integration harnesses still require the removed HTTP/token relay
+## Resolved P1: integration harnesses still require the removed HTTP/token relay
 
 `tests/client_integration.py`, `tests/client_transport.py`,
 `tests/client_details.py`, and `tests/performance.py` start `fake-relay` using
@@ -66,7 +80,7 @@ test implementations without treating the old adapter as compatible.
 
 ## Acceptance scope
 
-The merged native relay/fake-relay build and Zig unit suite pass, along with all
+Original Mac validation: the merged native relay/fake-relay build and Zig unit suite pass, along with all
 11 native TLS tests, 3 Mac helper tests, 2 real-mkcert certificate tests, and the
 native integration suite. Formatting, changed-test syntax, and diff checks pass.
 These are separate from the Linux runtime suites; installed-server verification is
@@ -74,3 +88,10 @@ described in [macOS TLS operation](macos-tls.md). Linux must verify its own buil
 the corrected provisioning/import flow, direct Mac reachability, worker/GUI
 behavior, reconnect, replay, and revocation against the installed pair.
 
+Linux follow-up validation passes with the native relay built against OpenSSL
+3.5.8: relay/client builds and Zig unit tests; four real-mkcert certificate tests;
+client TLS, integration, transport-fault, and Details suites; two native worker
+enrollment/renewal/revocation tests; all 11 relay TLS tests; and a native mTLS
+performance smoke run. Python syntax, Zig formatting, and diff checks pass.
+Commands and scope are in [Linux setup](linux-mtls.md). Installed two-host
+acceptance remains separate. No real messages were sent.

@@ -7,7 +7,7 @@ View times include the probe's 20 ms sampling interval, but exclude GPU drawing.
 import argparse
 import json
 import os
-from tls_fixture import PKI, RelayTLS
+from relay_fixture import Fixture
 import math
 from pathlib import Path
 import queue
@@ -115,10 +115,9 @@ def run(args):
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0))
             port = sock.getsockname()[1]
-        options = ['--data-dir', str(relay), '--messages-db', str(source), '--port', str(port)]
+        tls = Fixture(root, port)
+        options = ['--data-dir', str(relay), '--messages-db', str(source), '--config', str(tls.config)]
         subprocess.run([str(bins/'fake-relay'), 'setup', *options], check=True, capture_output=True)
-        tls = PKI(root/'tls')
-        frontend = RelayTLS(tls, port, (relay/'token').read_text().strip())
         with (root/'process.log').open('w') as log:
             ingest_started = time.monotonic()
             server = subprocess.Popen([str(bins/'fake-relay'), 'serve', *options], stdout=log, stderr=log)
@@ -130,7 +129,7 @@ def run(args):
                 result['indexed_source_joins'] = True
                 started = time.monotonic()
                 probe = Probe([str(bins/'client-probe'), '--control', '--data-dir', str(client),
-                               *tls.client_args(frontend.server_port)], log)
+                               *tls.client_args()], log)
                 connected = probe.until(lambda v: v['online'] and v['chats'] == args.chats)
                 result['connect_ms'] = round((connected-started)*1000, 2)
                 connected_at = started
@@ -187,7 +186,6 @@ def run(args):
                 for key in ('incoming', 'send_ack', 'send_dispatch', 'send_echo'):
                     result[key] = summary(result[key])
             finally:
-                frontend.close()
                 if probe:
                     probe.close()
                 server.terminate()

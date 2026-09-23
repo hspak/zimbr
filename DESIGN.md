@@ -24,8 +24,10 @@ must remain visible as unsupported content rather than silently disappearing.
 The Mac remains the endpoint that communicates with Apple's iMessage service.
 The relay exposes our own API; Linux never receives Apple account credentials.
 Connectivity uses direct HTTPS with mandatory device certificates (TLS 1.3,
-HTTP/1.1). Both transport implementations are present; the Linux provisioning
-and test handoff still needs the corrections in [the integration review](docs/linux-mtls-review.md).
+HTTP/1.1). Both transport implementations and the Linux provisioning flow follow the
+shared certificate contract. Linux integration suites use the native relay TLS
+transport directly; the [integration review](docs/linux-mtls-review.md) records
+the resolved handoff issues.
 [The migration contract](docs/mtls-migration.md) supersedes the old SSH/bearer-token
 transport. The Mac defines [certificate policy](docs/certificate-management.md);
 [Linux setup](docs/linux-mtls.md) documents the client workflow.

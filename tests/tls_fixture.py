@@ -1,12 +1,10 @@
-"""Ephemeral mTLS fixtures for the Linux client, never system-trusted.
+"""Ephemeral authenticated TLS endpoints for Linux client negative/fault tests.
 
-The TLS adapter forwards synthetic API payloads to the existing fake relay until
-its separately owned server migration lands. It is test infrastructure only;
-there is no plaintext mode in the client or deployable TLS proxy here.
+Ordinary worker integration uses the native relay and tests/relay_fixture.py.
+No test CA is installed in a system trust store.
 """
 from datetime import datetime, timedelta, timezone
 import hashlib
-import http.client
 import http.server
 import ipaddress
 from pathlib import Path
@@ -115,39 +113,3 @@ class TLSServer(http.server.ThreadingHTTPServer):
             sock.close()
         self.server_close()
         self.thread.join(timeout=2)
-
-
-class RelayTLS(TLSServer):
-    def __init__(self, pki, upstream_port, token):
-        class Handler(http.server.BaseHTTPRequestHandler):
-            protocol_version = 'HTTP/1.1'
-            def log_message(self, *args): pass
-            def do_GET(self): self.forward()
-            def do_POST(self): self.forward()
-            def forward(self):
-                assert not self.headers.get('Authorization'), 'Client must not send bearer credentials'
-                conn = http.client.HTTPConnection('127.0.0.1', upstream_port, timeout=20)
-                try:
-                    body = self.rfile.read(int(self.headers.get('Content-Length', 0)))
-                    conn.request(self.command, self.path, body, {'Authorization': 'Bearer '+token, 'Content-Type': 'application/json'})
-                    result = conn.getresponse()
-                    self.send_response(result.status)
-                    if self.path.startswith('/v1/events') and result.status == 200:
-                        self.send_header('Content-Type', 'text/event-stream')
-                        self.send_header('Connection', 'close')
-                        self.end_headers()
-                        self.close_connection = True
-                        while chunk := result.readline():
-                            self.wfile.write(chunk)
-                            self.wfile.flush()
-                    else:
-                        raw = result.read()
-                        self.send_header('Content-Type', 'application/json')
-                        self.send_header('Content-Length', str(len(raw)))
-                        self.end_headers()
-                        self.wfile.write(raw)
-                except (OSError, http.client.HTTPException):
-                    self.close_connection = True
-                finally:
-                    conn.close()
-        super().__init__(Handler, pki.context())
