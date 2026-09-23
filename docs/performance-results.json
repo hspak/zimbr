@@ -1,0 +1,284 @@
+{
+  "date": "2026-09-22",
+  "build": "Zig 0.16.0 ReleaseFast",
+  "transport": "synthetic localhost",
+  "probe_sampling_ms": 20,
+  "results": {
+    "small_before": {
+      "fixture_messages": 244,
+      "conversations": 4,
+      "incoming": {
+        "samples": 12,
+        "p50_ms": 885.13,
+        "p95_ms": 1210.17,
+        "max_ms": 1210.17
+      },
+      "send_ack": {
+        "samples": 6,
+        "p50_ms": 102.2,
+        "p95_ms": 126.81,
+        "max_ms": 126.81
+      },
+      "send_dispatch": {
+        "samples": 6,
+        "p50_ms": 169.88,
+        "p95_ms": 265.17,
+        "max_ms": 265.17
+      },
+      "send_echo": {
+        "samples": 6,
+        "p50_ms": 882.64,
+        "p95_ms": 984.72,
+        "max_ms": 984.72
+      },
+      "initial_ingest_ms": 4075.36,
+      "indexed_source_joins": true,
+      "connect_ms": 266.88,
+      "sidebar_ready_ms": 635.8,
+      "open_history_ms": 112.83,
+      "burst": {
+        "messages": 500,
+        "elapsed_ms": 4034.03
+      }
+    },
+    "small_after": {
+      "fixture_messages": 244,
+      "conversations": 4,
+      "incoming": {
+        "samples": 12,
+        "p50_ms": 18.7,
+        "p95_ms": 25.94,
+        "max_ms": 25.94
+      },
+      "send_ack": {
+        "samples": 6,
+        "p50_ms": 26.37,
+        "p95_ms": 39.53,
+        "max_ms": 39.53
+      },
+      "send_dispatch": {
+        "samples": 6,
+        "p50_ms": 26.58,
+        "p95_ms": 39.83,
+        "max_ms": 39.83
+      },
+      "send_echo": {
+        "samples": 6,
+        "p50_ms": 26.37,
+        "p95_ms": 39.53,
+        "max_ms": 39.53
+      },
+      "initial_ingest_ms": 2035.61,
+      "indexed_source_joins": true,
+      "connect_ms": 25.66,
+      "sidebar_ready_ms": 26.03,
+      "open_history_ms": 39.64,
+      "burst": {
+        "messages": 500,
+        "elapsed_ms": 59.86
+      }
+    },
+    "sidebar_before": {
+      "fixture_messages": 440,
+      "conversations": 200,
+      "incoming": {
+        "samples": 3,
+        "p50_ms": 885.3,
+        "p95_ms": 945.28,
+        "max_ms": 945.28
+      },
+      "send_ack": {
+        "samples": 3,
+        "p50_ms": 35.29,
+        "p95_ms": 38.76,
+        "max_ms": 38.76
+      },
+      "send_dispatch": {
+        "samples": 3,
+        "p50_ms": 217.88,
+        "p95_ms": 221.49,
+        "max_ms": 221.49
+      },
+      "send_echo": {
+        "samples": 3,
+        "p50_ms": 758.35,
+        "p95_ms": 902.45,
+        "max_ms": 902.45
+      },
+      "initial_ingest_ms": 6119.26,
+      "indexed_source_joins": true,
+      "connect_ms": 266.74,
+      "sidebar_ready_ms": 20733.86,
+      "open_history_ms": 143.15,
+      "burst": {
+        "messages": 100,
+        "elapsed_ms": 1023.71
+      }
+    },
+    "sidebar_after": {
+      "fixture_messages": 440,
+      "conversations": 200,
+      "incoming": {
+        "samples": 3,
+        "p50_ms": 22.19,
+        "p95_ms": 25.79,
+        "max_ms": 25.79
+      },
+      "send_ack": {
+        "samples": 3,
+        "p50_ms": 34.76,
+        "p95_ms": 38.79,
+        "max_ms": 38.79
+      },
+      "send_dispatch": {
+        "samples": 3,
+        "p50_ms": 35.01,
+        "p95_ms": 39.14,
+        "max_ms": 39.14
+      },
+      "send_echo": {
+        "samples": 3,
+        "p50_ms": 34.76,
+        "p95_ms": 38.79,
+        "max_ms": 38.79
+      },
+      "initial_ingest_ms": 1076.16,
+      "indexed_source_joins": true,
+      "connect_ms": 25.46,
+      "sidebar_ready_ms": 25.85,
+      "open_history_ms": 39.51,
+      "burst": {
+        "messages": 100,
+        "elapsed_ms": 39.85
+      }
+    },
+    "large_first_pass": {
+      "fixture_messages": 50004,
+      "conversations": 4,
+      "incoming": {
+        "samples": 12,
+        "p50_ms": 121.1,
+        "p95_ms": 165.25,
+        "max_ms": 165.25
+      },
+      "send_ack": {
+        "samples": 6,
+        "p50_ms": 85.06,
+        "p95_ms": 98.82,
+        "max_ms": 98.82
+      },
+      "send_dispatch": {
+        "samples": 6,
+        "p50_ms": 95.25,
+        "p95_ms": 110.56,
+        "max_ms": 110.56
+      },
+      "send_echo": {
+        "samples": 6,
+        "p50_ms": 165.33,
+        "p95_ms": 239.32,
+        "max_ms": 239.32
+      },
+      "initial_ingest_ms": 24429.84,
+      "indexed_source_joins": true,
+      "connect_ms": 25.71,
+      "sidebar_ready_ms": 26.04,
+      "open_history_ms": 39.71,
+      "load_cached_history_ms": 23188.58,
+      "selected_cached_messages": 25001,
+      "history_text_bytes": 1024,
+      "burst": {
+        "messages": 500,
+        "elapsed_ms": 339.63
+      }
+    },
+    "large_final": {
+      "fixture_messages": 50004,
+      "conversations": 4,
+      "incoming": {
+        "samples": 12,
+        "p50_ms": 81.38,
+        "p95_ms": 134.6,
+        "max_ms": 134.6
+      },
+      "send_ack": {
+        "samples": 6,
+        "p50_ms": 35.07,
+        "p95_ms": 40.19,
+        "max_ms": 40.19
+      },
+      "send_dispatch": {
+        "samples": 6,
+        "p50_ms": 45.07,
+        "p95_ms": 67.43,
+        "max_ms": 67.43
+      },
+      "send_echo": {
+        "samples": 6,
+        "p50_ms": 85.0,
+        "p95_ms": 120.55,
+        "max_ms": 120.55
+      },
+      "initial_ingest_ms": 18267.62,
+      "indexed_source_joins": true,
+      "connect_ms": 25.6,
+      "sidebar_ready_ms": 25.93,
+      "open_history_ms": 39.68,
+      "load_cached_history_ms": 14800.86,
+      "selected_cached_messages": 25001,
+      "history_text_bytes": 1024,
+      "burst": {
+        "messages": 500,
+        "elapsed_ms": 199.54
+      }
+    }
+  },
+  "comparison_notes": {
+    "small_and_sidebar": "Original performance baseline versus final implementation. Source joins indexed identically in each comparison.",
+    "large": "First performance pass versus final implementation, with 25001 selected messages loaded before latency sampling.",
+    "send_ack": "Local durable outbox acknowledgement, not remote acceptance or Apple delivery."
+  },
+  "cache_publication": {
+    "scenario": "25000 messages, 1024 ASCII text bytes, in-memory SQLite, 15 samples per update kind; old and new snapshots coexist during publication.",
+    "rss_measurement": "Whole-process Linux peak RSS from getrusage(RUSAGE_CHILDREN), including fixture construction.",
+    "cold_measurement": "Final cold creation includes prepared display previews/hashes; the original baseline performed that work on the UI thread outside this measurement.",
+    "before": {
+      "messages": 25000,
+      "text_bytes": 1024,
+      "samples": 15,
+      "cold_ms": 46.2,
+      "unchanged": {
+        "p50_ms": 45.37,
+        "p95_ms": 47.13
+      },
+      "edit": {
+        "p50_ms": 45.18,
+        "p95_ms": 46.01
+      },
+      "append": {
+        "p50_ms": 45.18,
+        "p95_ms": 45.85
+      },
+      "max_rss_kib": 247560
+    },
+    "after": {
+      "messages": 25000,
+      "text_bytes": 1024,
+      "samples": 15,
+      "cold_ms": 77.13,
+      "unchanged": {
+        "p50_ms": 5.04,
+        "p95_ms": 8.5
+      },
+      "edit": {
+        "p50_ms": 6.35,
+        "p95_ms": 7.89
+      },
+      "append": {
+        "p50_ms": 6.47,
+        "p95_ms": 7.33
+      },
+      "max_rss_kib": 181264
+    }
+  }
+}

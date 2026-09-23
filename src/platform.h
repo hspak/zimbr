@@ -24,3 +24,7 @@ int zr_lock(const char *path);
 int zr_socket_closed(int fd);
 
 int64_t zr_monotonic_ms(void);
+typedef struct ZrWatch ZrWatch;
+ZrWatch *zr_watch_open(const char *path);
+int zr_watch_wait(ZrWatch *watch, int timeout_ms);
+void zr_watch_close(ZrWatch *watch);

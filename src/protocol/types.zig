@@ -17,6 +17,8 @@ pub const Conversation = struct {
     sendable: bool = false,
 };
 pub const Attachment = struct { id: []const u8, name: []const u8, mime_type: []const u8, bytes: []const u8 };
+// A sidebar projection, never a replacement for the canonical message record.
+pub const ConversationPreview = struct { conversation_id: []const u8, message_id: []const u8, revision: []const u8, timestamp: []const u8, kind: []const u8, text: []const u8 };
 pub const Message = struct {
     id: []const u8 = "",
     revision: []const u8 = "0",

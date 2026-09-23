@@ -124,6 +124,7 @@ fn run(init: std.process.Init) !void {
     // Retain the lock for the lifetime of this process, including its workers.
     const core = try a.create(Core);
     core.* = .{ .io = init.io, .journal = try Journal.open(db_path), .source_path = source_path, .event_limit = event_limit, .automation_ready = if (read_only) false else fake, .automation_error = if (read_only) "read_only_mode" else "automation_unverified" };
+    core.journal.changed = .{ .signal = &core.changed, .io = init.io };
     try core.journal.recover(a);
     const ingestion = try std.Thread.spawn(.{}, Core.ingestLoop, .{core});
     ingestion.detach();

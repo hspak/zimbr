@@ -3,5 +3,17 @@
     .fingerprint = 0x9aa1f6bc7ed51f5b,
     .version = "0.1.0",
     .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .zclay = .{
+            .url = "git+https://github.com/johan0A/clay-zig-bindings#e0286c488a303b93501944ccde10730cc74ecd58",
+            .hash = "zclay-0.2.2-Ej1rkP3RAACYZGzQB5NGPaqfySgKfO26NYk5Ja6Z15gC",
+            .lazy = true,
+        },
+        .raylib_zig = .{
+            .url = "git+https://github.com/raylib-zig/raylib-zig?ref=devel#8758f4cd3a5ae0df6941c4715257223d34c5ad3e",
+            .hash = "raylib_zig-6.0.0-KE8RECZ8BQDm-txuospkpZHbJ6DNpacUF7D88RWQ_qAe",
+            .lazy = true,
+        },
+    },
     .paths = .{ "build.zig", "build.zig.zon", "src", "tests", "packaging", "tools", "docs", "README.md", "DESIGN.md" },
 }

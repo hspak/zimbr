@@ -7,6 +7,14 @@
 #include <signal.h>
 #include <spawn.h>
 #include <sys/wait.h>
+#include <limits.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#ifdef __APPLE__
+#include <sys/event.h>
+#elif defined(__linux__)
+#include <sys/inotify.h>
+#endif
 extern char **environ;
 int zr_random(void *bytes, size_t length) {
     int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
@@ -70,6 +78,8 @@ void zr_socket_timeout(int fd) {
     struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    int no_delay = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &no_delay, sizeof(no_delay));
 #ifdef SO_NOSIGPIPE
     int yes = 1; setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes));
 #endif
@@ -179,4 +189,128 @@ int zr_socket_closed(int fd) {
     if (p.revents & (POLLHUP | POLLERR | POLLNVAL)) return 1;
     char byte;
     return recv(fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT) == 0;
+}
+
+// File notifications are hints only: callers always re-read SQLite and retain
+// a periodic reconciliation scan. Watch the database and its WAL/journal,
+// including replacement and sidecar creation; never watch SHM reader traffic.
+struct ZrWatch {
+    int fd;
+    char paths[4][PATH_MAX];
+#ifdef __APPLE__
+    int files[4];
+    dev_t devices[4];
+    ino_t inodes[4];
+    struct stat snapshots[3];
+    int present[3];
+#elif defined(__linux__)
+    int directory;
+    const char *names[3];
+#endif
+};
+#ifdef __APPLE__
+static int watch_refresh(ZrWatch *w) {
+    int changed = 0;
+    for (int i=0; i<4; ++i) {
+        struct stat st;
+        int exists = stat(w->paths[i], &st) == 0;
+        if (i > 0) {
+            const struct stat *old = &w->snapshots[i-1];
+            if (exists != w->present[i-1] || (exists && (st.st_dev != old->st_dev || st.st_ino != old->st_ino ||
+                st.st_size != old->st_size || st.st_mtimespec.tv_sec != old->st_mtimespec.tv_sec ||
+                st.st_mtimespec.tv_nsec != old->st_mtimespec.tv_nsec))) changed = 1;
+            w->present[i-1] = exists;
+            if (exists) w->snapshots[i-1] = st;
+        }
+        if (w->files[i] >= 0 && (!exists || st.st_dev != w->devices[i] || st.st_ino != w->inodes[i])) {
+            close(w->files[i]); w->files[i] = -1;
+        }
+        if (!exists || w->files[i] >= 0) continue;
+        int fd = open(w->paths[i], O_EVTONLY | O_CLOEXEC);
+        if (fd < 0) continue;
+        struct kevent event;
+        EV_SET(&event, fd, EVFILT_VNODE, EV_ADD | EV_CLEAR,
+               NOTE_WRITE | NOTE_EXTEND | NOTE_DELETE | NOTE_RENAME | NOTE_REVOKE, 0, NULL);
+        if (kevent(w->fd, &event, 1, NULL, 0, NULL) < 0) { close(fd); continue; }
+        w->files[i] = fd; w->devices[i] = st.st_dev; w->inodes[i] = st.st_ino;
+    }
+    return changed;
+}
+#endif
+ZrWatch *zr_watch_open(const char *path) {
+    ZrWatch *w = calloc(1, sizeof(*w));
+    if (!w) return NULL;
+    w->fd = -1;
+    if (snprintf(w->paths[1], PATH_MAX, "%s", path) >= PATH_MAX ||
+        snprintf(w->paths[2], PATH_MAX, "%s-wal", path) >= PATH_MAX ||
+        snprintf(w->paths[3], PATH_MAX, "%s-journal", path) >= PATH_MAX) { free(w); return NULL; }
+    const char *slash = strrchr(path, '/');
+    if (slash) {
+        size_t len = slash == path ? 1 : (size_t)(slash-path);
+        memcpy(w->paths[0], path, len); w->paths[0][len] = 0;
+    } else strcpy(w->paths[0], ".");
+#ifdef __APPLE__
+    for (int i=0; i<4; ++i) w->files[i] = -1;
+    w->fd = kqueue();
+    if (w->fd >= 0) { fcntl(w->fd, F_SETFD, FD_CLOEXEC); watch_refresh(w); }
+#elif defined(__linux__)
+    w->fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    w->directory = -1;
+    for (int i=0; i<3; ++i) {
+        const char *p = strrchr(w->paths[i+1], '/');
+        w->names[i] = p ? p+1 : w->paths[i+1];
+    }
+#endif
+    if (w->fd < 0) { free(w); return NULL; }
+    return w;
+}
+int zr_watch_wait(ZrWatch *w, int timeout_ms) {
+    if (!w) { poll(NULL, 0, timeout_ms); return 0; }
+    int64_t deadline = zr_monotonic_ms() + timeout_ms;
+    for (;;) {
+    int left = (int)(deadline - zr_monotonic_ms());
+    if (left < 0) left = 0;
+#ifdef __APPLE__
+    if (watch_refresh(w)) return 1;
+    struct kevent events[8];
+    struct timespec timeout = { .tv_sec = left/1000, .tv_nsec = (left%1000)*1000000L };
+    int n = kevent(w->fd, NULL, 0, events, 8, &timeout);
+    if (n <= 0) return 0;
+    int changed = 0;
+    for (int i=0; i<n; ++i) if ((int)events[i].ident != w->files[0]) changed = 1;
+    changed |= watch_refresh(w);
+    if (changed) return 1;
+#elif defined(__linux__)
+    if (w->directory < 0) w->directory = inotify_add_watch(w->fd, w->paths[0],
+        IN_MODIFY | IN_CLOSE_WRITE | IN_CREATE | IN_MOVED_TO | IN_MOVED_FROM | IN_DELETE | IN_DELETE_SELF | IN_MOVE_SELF);
+    struct pollfd p = { .fd = w->fd, .events = POLLIN };
+    if (poll(&p, 1, left) <= 0) return 0;
+    union { struct inotify_event align; char bytes[8192]; } buffer;
+    int changed = 0;
+    ssize_t n;
+    while ((n = read(w->fd, buffer.bytes, sizeof(buffer.bytes))) > 0) {
+        for (size_t pos=0; pos < (size_t)n;) {
+            struct inotify_event *event = (struct inotify_event *)(buffer.bytes+pos);
+            if (event->wd == w->directory && (event->mask & (IN_IGNORED | IN_DELETE_SELF | IN_MOVE_SELF))) {
+                if (!(event->mask & IN_IGNORED)) inotify_rm_watch(w->fd, w->directory);
+                w->directory = -1; changed = 1;
+            }
+            if (event->mask & IN_Q_OVERFLOW) changed = 1;
+            for (int i=0; event->len && i<3; ++i) if (!strcmp(event->name, w->names[i])) changed = 1;
+            pos += sizeof(*event) + event->len;
+        }
+    }
+    if (changed) return 1;
+#else
+    poll(NULL, 0, left); return 0;
+#endif
+    if (zr_monotonic_ms() >= deadline) return 0;
+    }
+}
+void zr_watch_close(ZrWatch *w) {
+    if (!w) return;
+#ifdef __APPLE__
+    for (int i=0; i<4; ++i) if (w->files[i] >= 0) close(w->files[i]);
+#endif
+    close(w->fd); free(w);
 }

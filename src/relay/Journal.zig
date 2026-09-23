@@ -4,6 +4,7 @@ const t = @import("../protocol/types.zig");
 const Db = @import("Sqlite.zig");
 const Self = @This();
 db: Db,
+changed: ?struct { signal: *@import("../Signal.zig"), io: std.Io } = null,
 pub fn open(path: [:0]const u8) !Self {
     const db = try Db.open(path, false);
     errdefer db.close();
@@ -28,6 +29,7 @@ pub fn begin(self: Self) !void {
 }
 pub fn commit(self: Self) !void {
     try self.db.exec("COMMIT");
+    if (self.changed) |change| change.signal.notify(change.io);
 }
 pub fn rollback(self: Self) void {
     self.db.exec("ROLLBACK") catch {};
@@ -71,7 +73,7 @@ pub fn event(self: Self, seq: i64, kind: []const u8, record: []const u8, origin:
 }
 pub fn conversation(self: Self, a: u.Allocator, source: []const u8, row: i64, route: []const u8, value: t.Conversation, origin: []const u8) ![]const u8 {
     var v = value;
-    var find = try self.db.prepare("SELECT id,content FROM conversations WHERE source=?");
+    var find = try self.db.prepare("SELECT id,content,source_row,route,service FROM conversations WHERE source=?");
     defer find.close();
     try find.bind(&.{.{ .text = source }});
     const exists = try find.step();
@@ -79,7 +81,8 @@ pub fn conversation(self: Self, a: u.Allocator, source: []const u8, row: i64, ro
     v.revision = "0";
     const content = try u.json(a, v);
     if (exists and u.eq(find.bytes(1), content)) {
-        try self.execute("UPDATE conversations SET source_row=?,route=?,service=? WHERE id=?", &.{ .{ .int = row }, .{ .text = route }, .{ .text = v.service }, .{ .text = v.id } });
+        if (find.int(2) != row or !u.eq(find.bytes(3), route) or !u.eq(find.bytes(4), v.service))
+            try self.execute("UPDATE conversations SET source_row=?,route=?,service=? WHERE id=?", &.{ .{ .int = row }, .{ .text = route }, .{ .text = v.service }, .{ .text = v.id } });
         return v.id;
     }
     const seq = try self.next();
@@ -93,7 +96,7 @@ pub fn conversation(self: Self, a: u.Allocator, source: []const u8, row: i64, ro
 }
 pub fn message(self: Self, a: u.Allocator, source: []const u8, row: i64, date: i64, value: t.Message, origin: []const u8) !void {
     var v = value;
-    var find = try self.db.prepare("SELECT id,content FROM messages WHERE source=?");
+    var find = try self.db.prepare("SELECT id,content,source_row FROM messages WHERE source=?");
     defer find.close();
     try find.bind(&.{.{ .text = source }});
     const exists = try find.step();
@@ -101,7 +104,7 @@ pub fn message(self: Self, a: u.Allocator, source: []const u8, row: i64, date: i
     v.revision = "0";
     const content = try u.json(a, v);
     if (exists and u.eq(find.bytes(1), content)) {
-        try self.execute("UPDATE messages SET source_row=? WHERE id=?", &.{ .{ .int = row }, .{ .text = v.id } });
+        if (find.int(2) != row) try self.execute("UPDATE messages SET source_row=? WHERE id=?", &.{ .{ .int = row }, .{ .text = v.id } });
         return;
     }
     const seq = try self.next();
@@ -238,6 +241,19 @@ pub fn page(self: Self, a: u.Allocator, conversation_id: ?[]const u8, before: ?[
     return .{ .records = try items.toOwnedSlice(a), .next = next_key };
 }
 pub const Frame = struct { sequence: i64, frame: []const u8 };
+pub fn previews(self: Self, a: u.Allocator, before: ?[]const u8, limit: usize) ![]t.ConversationPreview {
+    // The same conversation page, with one indexed latest-message lookup per
+    // chat. Keep payloads small without ever truncating canonical messages.
+    var q = try self.db.prepare("SELECT m.conversation_id,m.id,json_extract(m.record,'$.revision'),json_extract(m.record,'$.timestamp'),json_extract(m.record,'$.kind'),substr(m.text,1,256) FROM conversations c LEFT JOIN messages m ON m.id=(SELECT id FROM messages WHERE conversation_id=c.id ORDER BY date_ns DESC,id DESC LIMIT 1) WHERE c.id<? ORDER BY c.id DESC LIMIT ?");
+    defer q.close();
+    try q.bind(&.{ .{ .text = before orelse "~" }, .{ .int = @intCast(limit) } });
+    var result: std.ArrayList(t.ConversationPreview) = .empty;
+    while (try q.step()) {
+        if (q.bytes(1).len == 0) continue;
+        try result.append(a, .{ .conversation_id = try q.text(a, 0), .message_id = try q.text(a, 1), .revision = try q.text(a, 2), .timestamp = try q.text(a, 3), .kind = try q.text(a, 4), .text = try q.text(a, 5) });
+    }
+    return result.toOwnedSlice(a);
+}
 pub fn events(self: Self, a: u.Allocator, after: i64) ![]const Frame {
     var s = try self.db.prepare("SELECT sequence,type,record,origin FROM events WHERE sequence>? ORDER BY sequence LIMIT 100");
     defer s.close();
@@ -252,6 +268,22 @@ pub fn events(self: Self, a: u.Allocator, after: i64) ![]const Frame {
         try items.append(a, .{ .sequence = seq, .frame = try std.fmt.allocPrint(a, "id: {s}\nevent: {s}\ndata: {s}\n\n", .{ cur, s.bytes(1), data }) });
     }
     return items.toOwnedSlice(a);
+}
+
+test "subscribers are notified only after a successful durable commit" {
+    var signal = @import("../Signal.zig"){};
+    var j = try Self.open(":memory:");
+    defer j.close();
+    j.changed = .{ .signal = &signal, .io = std.testing.io };
+    const before = signal.observe();
+    try j.begin();
+    try j.db.exec("PRAGMA defer_foreign_keys=ON; INSERT INTO participants VALUES('missing','fixture')");
+    try std.testing.expectError(error.DatabaseFailure, j.commit());
+    try std.testing.expectEqual(before, signal.observe());
+    j.rollback();
+    try j.begin();
+    try j.commit();
+    try std.testing.expect(signal.observe() != before);
 }
 
 test "atomic ingestion rollback preserves progress, records, and event sequence" {
@@ -277,6 +309,16 @@ test "atomic ingestion rollback preserves progress, records, and event sequence"
     try std.testing.expectEqualStrings(id, same);
     try std.testing.expectEqual(@as(i64, 2), try j.db.scalar("SELECT source_row FROM conversations"));
     try std.testing.expectEqual(seq, try j.sequence());
+    const value = t.Message{ .conversation_id = id, .sender = "fixture", .direction = .incoming, .service = "imessage", .timestamp = "2026-01-01T00:00:00Z", .kind = .text, .text = "Fixture", .decoding = .plain, .observed_status = .received };
+    try j.message(a, "private-message", 3, 1, value, "historical_import");
+    const message_seq = try j.sequence();
+    try j.message(a, "private-message", 4, 1, value, "reconciliation");
+    try std.testing.expectEqual(@as(i64, 4), try j.db.scalar("SELECT source_row FROM messages"));
+    try std.testing.expectEqual(message_seq, try j.sequence());
+    const changes = u.c.sqlite3_total_changes64(j.db.handle);
+    _ = try j.conversation(a, "private-chat", 2, "iMessage;-;fixture", .{ .service = "imessage" }, "reconciliation");
+    try j.message(a, "private-message", 4, 1, value, "reconciliation");
+    try std.testing.expectEqual(changes, u.c.sqlite3_total_changes64(j.db.handle));
 }
 test "durable sends retain idempotency after recovery and event pruning" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

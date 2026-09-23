@@ -1,5 +1,8 @@
 const std = @import("std");
 pub const c = @cImport({
+    // Zig 0.16 cannot translate glibc's fortified open/openat wrappers.
+    // This only affects bindings; compiled C sources retain fortification.
+    @cUndef("_FORTIFY_SOURCE");
     @cInclude("platform.h");
 });
 pub const Allocator = std.mem.Allocator;

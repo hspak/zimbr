@@ -51,6 +51,16 @@ def main():
             with sqlite3.connect(data/'relay.db') as db:return db.execute(statement,args).fetchall()
         try:
             proc=start();wait_for(ready)
+            # A reused socket must still authenticate each request independently.
+            persistent=http.client.HTTPConnection('127.0.0.1',port,timeout=4)
+            persistent.request('GET','/v1/status',headers={'Authorization':'Bearer '+token})
+            response=persistent.getresponse();assert response.status==200;response.read()
+            original_socket=persistent.sock
+            persistent.request('GET','/v1/sync',headers={'Authorization':'Bearer '+token})
+            response=persistent.getresponse();assert response.status==200;response.read()
+            assert persistent.sock is original_socket and original_socket is not None
+            persistent.request('GET','/v1/status',headers={'Authorization':'Bearer '+'0'*64})
+            response=persistent.getresponse();assert response.status==401;response.read();persistent.close()
             duplicate=subprocess.run([str(BIN),'serve',*common],capture_output=True,timeout=5)
             assert duplicate.returncode!=0 and b'AlreadyRunning' in duplicate.stderr
             assert request('/v1/status',auth=False)[0]==401
@@ -58,6 +68,10 @@ def main():
             wait_for(lambda:sql('SELECT count(*) FROM messages')[0][0]==244)
             conversations=request('/v1/conversations?limit=2')[1]
             assert len(conversations['conversations'])==2 and conversations['next']
+            projected=request('/v1/conversations?limit=2&previews=1')[1]
+            assert projected['conversations']==conversations['conversations']
+            assert projected['previews'] is not None
+            assert all(p['conversation_id'] in {c['id'] for c in projected['conversations']} and len(p['text'])<=256 for p in projected['previews'])
             ids=[];page=conversations
             while True:
                 ids.extend(c['id'] for c in page['conversations'])

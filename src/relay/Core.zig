@@ -5,6 +5,7 @@ const Journal = @import("Journal.zig");
 const Adapter = if (@import("options").fake) @import("adapter/fake.zig") else @import("adapter/macos.zig");
 const fake = @import("options").fake;
 const Self = @This();
+const Signal = @import("../Signal.zig");
 io: std.Io,
 journal: Journal,
 source_path: [:0]const u8,
@@ -18,6 +19,9 @@ stop: std.atomic.Value(bool) = .init(false),
 connections: std.atomic.Value(usize) = .init(0),
 streams: std.atomic.Value(usize) = .init(0),
 event_limit: i64 = 100000,
+changed: Signal = .{},
+send_ready: Signal = .{},
+ingest_pending: bool = false,
 pub fn lock(self: *Self) void {
     self.mutex.lockUncancelable(self.io);
 }
@@ -29,6 +33,10 @@ pub fn sleep(self: *Self, ms: i64) void {
 }
 pub fn ingestLoop(self: *Self) void {
     var tick: usize = 0;
+    const watch = u.c.zr_watch_open(self.source_path);
+    defer u.c.zr_watch_close(watch);
+    var settle = false;
+    var maintenance: i64 = 0;
     while (!self.stop.load(.acquire)) {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         self.lock();
@@ -47,16 +55,27 @@ pub fn ingestLoop(self: *Self) void {
             const count = self.journal.db.scalar("SELECT count(*) FROM messages") catch 0;
             std.log.info("ingestion ready={} code={s} duration_ms={d} records={d}", .{ self.read_ready, self.degraded, u.c.zr_monotonic_ms() - started, count });
         }
-        if (tick % 60 == 0) self.journal.prune(self.event_limit) catch {};
+        if (u.now() >= maintenance) {
+            self.journal.prune(self.event_limit) catch {};
+            maintenance = u.now() + 60000;
+        }
+        const pending = self.read_ready and self.ingest_pending;
         self.unlock();
         arena.deinit();
         tick += 1;
-        self.sleep(1000);
+        // Drain bounded backfill/live pages promptly. Notifications may precede
+        // SQLite's commit, so take one short settling pass, then keep the full
+        // periodic scan as recovery for missed/coalesced filesystem events.
+        const changed = u.c.zr_watch_wait(watch, if (pending) 1 else if (settle) 50 else 1000) != 0;
+        settle = changed;
     }
 }
 pub fn ingest(self: *Self, a: u.Allocator) !void {
     var source = try Adapter.open(a, self.source_path);
     defer source.close();
+    try source.db.exec("BEGIN");
+    defer source.db.exec("ROLLBACK") catch {};
+    var batch = ImportBatch{ .source = source };
     const high = try source.high();
     const j = self.journal;
     try j.begin();
@@ -88,21 +107,19 @@ pub fn ingest(self: *Self, a: u.Allocator) !void {
     const chat_after = try j.position(a, "chats");
     const chats = try source.chatRows(a, chat_after);
     for (chats) |row| {
-        if (try source.chat(a, row, complete)) |chat| {
-            _ = try j.conversation(a, chat.source, chat.row, chat.route, chat.value, "reconciliation");
-        }
+        _ = try self.importChat(a, &batch, row, "reconciliation", complete);
     }
     try j.setPosition(a, "chats", if (chats.len == 0) 0 else chats[chats.len - 1]);
     const live_rows = try source.rowsFor(a, .live, live, 0);
     for (live_rows) |row| {
-        try self.importRow(a, source, row, "live", complete);
+        try self.importRow(a, &batch, row, "live", complete);
         live = row;
     }
     try j.setPosition(a, "live", live);
     try j.setProgress("anchor", (try source.guid(a, live)) orelse "");
     if (backfill > 0) {
         const old = try source.rowsFor(a, .backfill, backfill, 0);
-        for (old) |row| try self.importRow(a, source, row, "historical_import", false);
+        for (old) |row| try self.importRow(a, &batch, row, "historical_import", false);
         backfill = if (old.len == 0) 0 else old[old.len - 1] - 1;
         try j.setPosition(a, "backfill", backfill);
     }
@@ -111,11 +128,11 @@ pub fn ingest(self: *Self, a: u.Allocator) !void {
     defer pending.close();
     var pending_rows: std.ArrayList(i64) = .empty;
     while (try pending.step()) try pending_rows.append(a, pending.int(0));
-    for (pending_rows.items) |row| try self.importRow(a, source, row, "reconciliation", complete);
-    for (try source.rowsFor(a, .recent, high, 0)) |row| try self.importRow(a, source, row, "reconciliation", complete);
+    for (pending_rows.items) |row| try self.importRow(a, &batch, row, "reconciliation", complete);
+    for (try source.rowsFor(a, .recent, high, 0)) |row| try self.importRow(a, &batch, row, "reconciliation", complete);
     const rolling = try j.position(a, "rolling");
     const older = try source.rowsFor(a, .rolling, rolling, 0);
-    for (older) |row| try self.importRow(a, source, row, "reconciliation", complete);
+    for (older) |row| try self.importRow(a, &batch, row, "reconciliation", complete);
     try j.setPosition(a, "rolling", if (older.len == 0) 0 else older[older.len - 1]);
     // History requests schedule bounded reconciliation, serviced alongside live scans.
     var rq = try j.db.prepare("SELECT r.conversation_id,r.after_row,c.source_row FROM reconcile_chats r JOIN conversations c ON c.id=r.conversation_id ORDER BY r.rowid LIMIT 1");
@@ -123,16 +140,37 @@ pub fn ingest(self: *Self, a: u.Allocator) !void {
     if (try rq.step()) {
         const cid = try rq.text(a, 0);
         const rows = try source.rowsFor(a, .chat, rq.int(1), rq.int(2));
-        for (rows) |row| try self.importRow(a, source, row, "reconciliation", complete);
+        for (rows) |row| try self.importRow(a, &batch, row, "reconciliation", complete);
         if (rows.len == 0) try j.execute("DELETE FROM reconcile_chats WHERE conversation_id=?", &.{.{ .text = cid }}) else try j.execute("UPDATE reconcile_chats SET after_row=? WHERE conversation_id=?", &.{ .{ .int = rows[rows.len - 1] }, .{ .text = cid } });
     }
-    try self.reconcile(a, source, complete);
+    try self.reconcile(a, &batch, complete);
     try j.commit();
     self.read_ready = true;
     self.degraded = if (self.automation_ready) "" else self.automation_error;
     self.last_scan_ms = u.now();
+    self.send_ready.notify(self.io);
+    self.ingest_pending = high > live or backfill > 0 or chats.len == 100 or try j.db.scalar("SELECT count(*) FROM reconcile_chats") > 0;
 }
-fn importRow(self: *Self, a: u.Allocator, source: Adapter.Source, row: i64, origin: []const u8, complete: bool) !void {
+const ImportBatch = struct {
+    source: Adapter.Source,
+    rows: std.AutoHashMapUnmanaged(i64, void) = .empty,
+    chats: std.AutoHashMapUnmanaged(i64, ?[]const u8) = .empty,
+};
+fn importChat(self: *Self, a: u.Allocator, batch: *ImportBatch, row: i64, origin: []const u8, complete: bool) !?[]const u8 {
+    const cached = try batch.chats.getOrPut(a, row);
+    if (!cached.found_existing) {
+        // The source read transaction fixes metadata for this entire batch.
+        // Resolve and journal each conversation once, including the chat scan.
+        cached.value_ptr.* = if (try batch.source.chat(a, row, complete)) |chat|
+            try self.journal.conversation(a, chat.source, chat.row, chat.route, chat.value, origin)
+        else
+            null;
+    }
+    return cached.value_ptr.*;
+}
+fn importRow(self: *Self, a: u.Allocator, batch: *ImportBatch, row: i64, origin: []const u8, complete: bool) !void {
+    if ((try batch.rows.getOrPut(a, row)).found_existing) return;
+    const source = batch.source;
     const j = self.journal;
     if (try source.message(a, row)) |m| {
         const origin_key = try std.fmt.allocPrint(a, "pending:{d}", .{row});
@@ -144,8 +182,7 @@ fn importRow(self: *Self, a: u.Allocator, source: Adapter.Source, row: i64, orig
         if (m.pending and remembered == null) try j.setProgress(origin_key, event_origin);
         if (m.pending) try j.execute("INSERT INTO pending_source(source_row,attempt_ms) VALUES(?,?) ON CONFLICT(source_row) DO UPDATE SET attempt_ms=excluded.attempt_ms", &.{ .{ .int = row }, .{ .int = u.now() } }) else try j.execute("DELETE FROM pending_source WHERE source_row=?", &.{.{ .int = row }});
         if (m.chat_row == 0 or m.source.len == 0) return;
-        if (try source.chat(a, m.chat_row, complete)) |chat| {
-            const cid = try j.conversation(a, chat.source, chat.row, chat.route, chat.value, event_origin);
+        if (try self.importChat(a, batch, m.chat_row, event_origin, complete)) |cid| {
             var v = m.value;
             v.conversation_id = cid;
             try j.message(a, m.source, m.row, m.date, v, event_origin);
@@ -157,6 +194,7 @@ pub fn senderLoop(self: *Self) void {
     var last_check: i64 = 0;
     var recovery_needed = false;
     while (!self.stop.load(.acquire)) {
+        const observed = self.send_ready.observe();
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         const a = arena.allocator();
         self.lock();
@@ -190,11 +228,12 @@ pub fn senderLoop(self: *Self) void {
             } else |_| {}
             self.unlock();
         }
-        if (!recovery_needed) self.dispatchOne(a) catch {
+        const dispatched = if (!recovery_needed) self.dispatchOne(a) catch blk: {
             recovery_needed = true;
-        };
+            break :blk false;
+        } else false;
         arena.deinit();
-        self.sleep(250);
+        if (!dispatched) self.send_ready.wait(self.io, observed, 1000);
     }
 }
 const Work = struct { v: t.SendRequest, route: Journal.Route };
@@ -240,8 +279,8 @@ fn prepareSend(self: *Self, a: u.Allocator) !?Work {
     try j.commit();
     return .{ .v = v, .route = r };
 }
-fn dispatchOne(self: *Self, a: u.Allocator) !void {
-    const work = (try self.prepareSend(a)) orelse return;
+fn dispatchOne(self: *Self, a: u.Allocator) !bool {
+    const work = (try self.prepareSend(a)) orelse return false;
     const started = u.c.zr_monotonic_ms();
     var v = work.v;
     if (fake) {
@@ -260,12 +299,13 @@ fn dispatchOne(self: *Self, a: u.Allocator) !void {
     defer self.unlock();
     const j = self.journal;
     // A reset during automation must not overwrite its held state.
-    if (!u.eq(v.server_epoch, try j.epoch(a))) return;
+    if (!u.eq(v.server_epoch, try j.epoch(a))) return true;
     try j.begin();
     errdefer j.rollback();
     _ = try j.updateRequest(a, v);
     try j.commit();
     std.log.info("send request={s} state={s} code={s} duration_ms={d}", .{ v.request_id, @tagName(v.state), if (v.error_info) |e| e.code else "none", u.c.zr_monotonic_ms() - started });
+    return true;
 }
 fn rejectQueued(self: *Self, a: u.Allocator, value: t.SendRequest, code: []const u8) !void {
     var v = value;
@@ -276,7 +316,7 @@ fn rejectQueued(self: *Self, a: u.Allocator, value: t.SendRequest, code: []const
     _ = try self.journal.updateRequest(a, v);
     try self.journal.commit();
 }
-fn reconcile(self: *Self, a: u.Allocator, source: Adapter.Source, complete: bool) !void {
+fn reconcile(self: *Self, a: u.Allocator, batch: *ImportBatch, complete: bool) !void {
     const j = self.journal;
     var s = try j.db.prepare("SELECT r.record,r.dispatch_ms,r.source_floor,r.mode,r.route FROM send_requests r LEFT JOIN send_observations o ON o.request_id=r.id WHERE r.state IN ('submitted','unknown') AND r.dispatch_ms IS NOT NULL AND r.epoch=(SELECT epoch FROM relay_meta) ORDER BY coalesce(o.attempt_ms,0),r.dispatch_ms LIMIT 100");
     defer s.close();
@@ -290,7 +330,7 @@ fn reconcile(self: *Self, a: u.Allocator, source: Adapter.Source, complete: bool
             var refresh = try j.db.prepare("SELECT source_row FROM messages WHERE id=?");
             defer refresh.close();
             try refresh.bind(&.{.{ .text = mid }});
-            if (try refresh.step()) try self.importRow(a, source, refresh.int(0), "reconciliation", complete);
+            if (try refresh.step()) try self.importRow(a, batch, refresh.int(0), "reconciliation", complete);
             var q = try j.db.prepare("SELECT status FROM messages WHERE id=?");
             defer q.close();
             try q.bind(&.{.{ .text = mid }});

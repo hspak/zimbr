@@ -1,15 +1,153 @@
-# Zimbr macOS relay
+# Zimbr
 
 A Zig 0.16 relay for the Messages account on a logged-in Mac. It reads Apple's
 SQLite database without modifying it, exposes an authenticated loopback HTTP/SSE
 API, and sends text through a bounded Messages AppleScript subprocess.
 
-The Linux GUI is not implemented in this work. The relay, fixture adapter,
-protocol, and recovery tests are available. Real-account acceptance is tracked in
+The Linux desktop client uses Zig, Clay, raylib, and Pango. It supports conversation
+browsing, cached history, live updates, direct messages, existing-conversation
+replies, Unicode drafts, and send recovery. Real-account acceptance is tracked in
 [docs/mac-validation.md](docs/mac-validation.md); installation alone does not prove
 send routing or locked-screen operation.
 
-## Build and test
+## Linux client
+
+Use Zig **0.16.0**, `pkg-config`, and development headers/libraries for SQLite,
+libcurl, Pango/Cairo, OpenGL, Wayland, and xkbcommon. Clay and raylib are pinned in
+`build.zig.zon`; Flamez is not a build or runtime dependency. Install a system
+sans-serif font and an emoji font for the scripts you use.
+
+```sh
+zig build client
+zig build run
+# Optional user-local executable, icon, and application launcher:
+packaging/linux/install.sh
+```
+
+Linux uses Wayland exclusively. The GUI was rendered at 125% desktop scaling
+and uses `zimbr` as its application ID. Rendering sleeps between changes while
+the background worker continues to receive messages.
+
+The sidebar's **Dark mode / Light mode** button saves the appearance for the next
+launch. **Details** (Ctrl+D) opens a scrollable pane with connection and retry
+status, relay capabilities, saved sync cursor, cache counts, display information,
+and local file paths. Token contents are never shown. Escape or **Back** returns
+to messages. The search box and sidebar controls stay fixed while the list scrolls.
+Conversation lists, message history, Details, and overflowing drafts show a
+scrollbar: drag its thumb or click the track to move. Wheel scrolling is 25%
+faster. Incoming group messages use subtle participant tints and matching sender
+labels in both light and dark mode.
+
+Open the tunnel in a terminal using your existing SSH key and host trust:
+
+```sh
+ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
+  -L 127.0.0.1:8731:127.0.0.1:8731 user@mac-mini
+```
+
+The relay installer already creates its bearer token. Copy it over SSH once;
+keep it out of terminal output and command arguments:
+
+```sh
+umask 077
+mkdir -p "$HOME/.local/share/zimbr"
+ssh user@mac-mini 'cat "$HOME/Library/Application Support/Zimbr/token"' \
+  > "$HOME/.local/share/zimbr/token"
+chmod 600 "$HOME/.local/share/zimbr/token"
+zig-out/bin/zimbr
+```
+
+Default data is `$XDG_DATA_HOME/zimbr` (fallback `~/.local/share/zimbr`), with
+owner-only directory permissions. The cache and drafts contain plaintext. Only
+loopback HTTP is accepted, using the manually managed SSH tunnel; proxies and
+redirects are disabled. The GUI never receives Apple account credentials.
+
+Optional `$XDG_CONFIG_HOME/zimbr/config.json` (fallback `~/.config/zimbr/config.json`):
+
+```json
+{
+  "port": 8731,
+  "token_file": "/absolute/path/to/private/token",
+  "data_dir": "/absolute/path/to/client-data",
+  "enter_to_send": true
+}
+```
+
+`--port`, `--token-file`, and `--data-dir` override these preferences. An optional
+`"theme": "dark"` or `"theme": "light"` config entry (or `--theme dark|light`) sets
+the appearance at launch; otherwise the saved sidebar choice is used. `--details`
+opens the diagnostics pane at launch. After token
+rotation, replace the local file and click **Reconnect**. Authentication errors
+wait for that action; network errors reconnect with bounded exponential backoff.
+
+Enter sends; Shift+Enter inserts a newline. Ctrl+A/C/X/V, Ctrl+Z, Ctrl+Shift+Z,
+Ctrl+Y, Home/End, arrows, mouse selection, and clipboard are supported. Ctrl+N
+starts a direct conversation; Ctrl+F searches the sidebar. Drag over message text
+and press Ctrl+C to copy the highlighted portion. Click a message then Ctrl+C to
+copy it in full; Ctrl+A selects the whole message. New recipients must be an
+international number or email.
+Unsupported services remain readable with sending disabled.
+
+Pango supplies shaping, font fallback, wrapping, and grapheme boundaries. Text is
+rasterized at the Wayland display scale and aligned to physical pixels, including
+at fractional scales; moving between display scales refreshes the text cache.
+Lettering uses full-opacity colors with grayscale antialiasing at glyph edges.
+Combining marks and joined emoji survive editing and restart. Full input-method/preedit
+integration, visual bidirectional cursor navigation, and accessibility are future
+work. For input-method users, set `enter_to_send` to `false` to reserve plain Enter
+for text input and use Ctrl+Enter or the Send button; paste committed text from an
+IME-capable editor when needed. Missing glyphs remain copyable as original UTF-8.
+
+Offline drafts are saved but new sends are not queued offline. Each outgoing
+request is persisted before its first POST; recovery checks the original UUID
+without automatically sending again. An uncertain or failed message can be copied
+to a draft for deliberate retry. Sending again after an uncertain result can
+create a duplicate. A relay epoch reset preserves drafts and outbox identities;
+orphaned drafts remain discoverable as **Recovered draft**. Local unread markers
+do not change Apple's read receipts. Attachments and unsupported content remain
+visible as placeholders; downloads and notifications are not implemented.
+
+Linux verification:
+
+```sh
+zig build test client-probe fake-relay
+python3 tests/client_integration.py
+python3 tests/client_transport.py
+python3 tests/client_details.py
+# Requires a running Wayland desktop:
+zig build test-gui
+python3 tests/integration.py
+python3 tests/mac_acceptance_test.py
+zig fmt --check build.zig src
+# Read-only connection check, with aggregate-only output:
+zig-out/bin/client-probe --data-dir /path/to/client-data
+```
+
+`test-client` runs store, SSE, and Unicode text tests without a GPU. The Python
+client integration suite uses the actual client worker and actual fixture relay
+for history, pagination, direct/group sends, echo merging, uncertain outcomes,
+crashes, expired cursors, and epoch changes. A Wayland screenshot
+can be exported with `zimbr --screenshot /path/to/image.png --frames 90`.
+
+Long messages display a preview of up to 4 KiB or 64 lines; the original remains
+in the cache and selecting the message then pressing Ctrl+C copies its full text.
+Text that cannot be rendered safely shows a placeholder. Sidebar labels use
+shorter previews. History layout starts with the newest messages, reuses prepared
+rows between frames, and fills in older rows within an 8 ms frame budget. Bubbles
+appear at their final size. Short conversations stay aligned to the bottom, and
+scrolling up keeps your reading position while more history loads. `test-gui`
+checks large-history layout, scroll stability, texture eviction, and long-message
+rendering; `test-client` covers Unicode, raster bounds, and fractional-scale tiles.
+
+The relay and client use filesystem/commit notifications, socket readiness,
+durable event batches, reusable HTTP connections, and shared history snapshots.
+Changed histories reuse immutable message records and prepared previews, while
+ingestion batches resolve each conversation once and skip unchanged writes.
+Conversation pages can include small sidebar previews, avoiding a request per
+conversation. See [performance measurements and architecture](docs/performance.md)
+for benchmarks, reliability constraints, and remaining platform validation.
+
+## Relay build and test
 
 Install Zig **0.16.0** and Apple's Command Line Tools. The build uses the selected
 macOS SDK (`xcrun --show-sdk-path`) and system SQLite, with no GUI dependencies.
@@ -27,8 +165,8 @@ zig build macos-check -Dtarget=x86_64-macos
 
 For a cross build, pass `-Dmacos-sdk=/path/to/MacOSX.sdk`. `fake-relay` and the core
 unit tests also have a Linux build path, requiring system SQLite development
-headers/library; Linux execution is not yet validated in this Mac environment.
-There is no `client` target until the Linux client is implemented.
+headers/library; Linux execution is covered by the fixture integration suites.
+The real relay remains independent of GUI libraries.
 
 The tests use temporary synthetic databases. They cover HTTP authentication,
 Unicode and independent Foundation archive fixtures, stable pagination, delayed

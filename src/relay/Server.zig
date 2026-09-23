@@ -35,15 +35,24 @@ fn connection(self: *Self, stream: std.Io.net.Stream) void {
     var reader = Transport.Reader.init(stream.socket.handle, &read_buf);
     var writer = Transport.Writer.init(stream.socket.handle, &write_buf);
     var server = std.http.Server.init(&reader.interface, &writer.interface);
-    var req = server.receiveHead() catch return;
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    self.handle(arena.allocator(), &req, stream.socket.handle) catch |err| {
-        if (err == error.WriteFailed or err == error.ReadFailed or err == error.EndOfStream) return;
-        const mapping = mapError(err);
-        const body = u.json(arena.allocator(), .{ .error_info = t.SafeError{ .code = mapping.code, .message = mapping.message } }) catch return;
-        respond(&req, body, mapping.status) catch {};
-    };
+    // Reuse authenticated HTTP connections across bounded requests. Each
+    // request still gets fresh authorization, a deadline, and its own arena.
+    for (0..64) |request_index| {
+        reader.deadline = u.c.zr_monotonic_ms() + 10000;
+        var req = server.receiveHead() catch return;
+        if (request_index == 63) req.head.keep_alive = false;
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        self.handle(arena.allocator(), &req, stream.socket.handle) catch |err| {
+            if (err == error.WriteFailed or err == error.ReadFailed or err == error.EndOfStream) return;
+            const mapping = mapError(err);
+            const body = u.json(arena.allocator(), .{ .error_info = t.SafeError{ .code = mapping.code, .message = mapping.message } }) catch return;
+            req.head.keep_alive = false;
+            respond(&req, body, mapping.status) catch {};
+            return;
+        };
+        if (!req.head.keep_alive or server.reader.state != .ready) return;
+    }
 }
 fn token(self: *Self) ![64]u8 {
     var buf: [66]u8 = undefined;
@@ -73,6 +82,7 @@ fn handle(self: *Self, a: u.Allocator, req: *std.http.Server.Request, fd: c_int)
     if (authorization.len != 71 or !std.mem.startsWith(u8, authorization, "Bearer ") or !std.crypto.timing_safe.eql([64]u8, authorization[7..71].*, expected)) return error.Unauthorized;
     if (req.head.transfer_compression != .identity) return error.InvalidRequest;
     if ((req.head.content_length orelse 0) > t.max_body) return error.BodyTooLarge;
+    if (req.head.method == .GET and ((req.head.content_length orelse 0) != 0 or req.head.transfer_encoding == .chunked)) return error.InvalidRequest;
     const target = try a.dupe(u8, req.head.target);
     const split = std.mem.indexOfScalar(u8, target, '?') orelse target.len;
     const path = target[0..split];
@@ -100,6 +110,7 @@ fn handle(self: *Self, a: u.Allocator, req: *std.http.Server.Request, fd: c_int)
         const j = self.core.journal;
         if (input) |v| {
             const accepted = try j.accept(a, v, self.core.read_ready and self.core.automation_ready and u.now() - self.core.last_scan_ms < 5000);
+            if (accepted.fresh) self.core.send_ready.notify(self.core.io);
             response = accepted.record;
             status = if (accepted.fresh) .accepted else .ok;
         } else if (u.eq(path, "/v1/status")) {
@@ -108,8 +119,11 @@ fn handle(self: *Self, a: u.Allocator, req: *std.http.Server.Request, fd: c_int)
             const epoch = try j.epoch(a);
             response = try u.json(a, .{ .server_epoch = epoch, .cursor = try t.cursor(a, epoch, try j.sequence()) });
         } else if (u.eq(path, "/v1/conversations")) {
-            const p = try j.page(a, null, try param(a, query, "before"), try pageLimit(a, query));
-            response = try u.json(a, .{ .conversations = p.records, .next = p.next });
+            const before = try param(a, query, "before");
+            const limit = try pageLimit(a, query);
+            const p = try j.page(a, null, before, limit);
+            const previews = if (u.eq((try param(a, query, "previews")) orelse "", "1")) try j.previews(a, before, limit) else null;
+            response = try u.json(a, .{ .conversations = p.records, .next = p.next, .previews = previews });
         } else if (std.mem.startsWith(u8, path, "/v1/conversations/") and std.mem.endsWith(u8, path, "/messages")) {
             const id = path[18 .. path.len - 9];
             if (!t.uuid(id)) return error.InvalidRequest;
@@ -147,6 +161,7 @@ fn events(self: *Self, req: *std.http.Server.Request, start: []const u8, initial
     stream.flush() catch return;
     var heartbeat = u.now();
     while (!self.core.stop.load(.acquire)) {
+        const observed = self.core.changed.observe();
         if (u.c.zr_socket_closed(fd) != 0) return;
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
@@ -163,9 +178,11 @@ fn events(self: *Self, req: *std.http.Server.Request, start: []const u8, initial
         };
         for (frames) |frame| {
             stream.writer.writeAll(frame.frame) catch return;
+            seq = frame.sequence;
+        }
+        if (frames.len > 0) {
             stream.writer.flush() catch return;
             stream.flush() catch return;
-            seq = frame.sequence;
         }
         if (u.now() - heartbeat >= 15000) {
             const current_token = self.token() catch return;
@@ -175,11 +192,11 @@ fn events(self: *Self, req: *std.http.Server.Request, start: []const u8, initial
             stream.flush() catch return;
             heartbeat = u.now();
         }
-        self.core.sleep(if (frames.len == 100) 1 else 250);
+        if (frames.len == 0) self.core.changed.wait(self.core.io, observed, 1000);
     }
 }
 fn respond(req: *std.http.Server.Request, body: []const u8, status: std.http.Status) !void {
-    try req.respond(body, .{ .status = status, .keep_alive = false, .extra_headers = &.{ .{ .name = "content-type", .value = "application/json" }, .{ .name = "cache-control", .value = "no-store" } } });
+    try req.respond(body, .{ .status = status, .keep_alive = req.head.keep_alive, .extra_headers = &.{ .{ .name = "content-type", .value = "application/json" }, .{ .name = "cache-control", .value = "no-store" } } });
 }
 fn pageLimit(a: u.Allocator, query: []const u8) !usize {
     const value = (try param(a, query, "limit")) orelse return t.default_page;

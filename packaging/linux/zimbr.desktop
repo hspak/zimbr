@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Zimbr
+Comment=iMessage through your Mac
+Exec=zimbr
+Icon=zimbr
+Terminal=false
+Categories=Network;InstantMessaging;
+StartupWMClass=zimbr

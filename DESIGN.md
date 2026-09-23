@@ -1,8 +1,8 @@
 # iMessage relay design
 
-Status: design specification. The macOS relay implementation is in progress;
-current implementation and macOS 27 acceptance evidence are tracked in
-[docs/mac-validation.md](docs/mac-validation.md). Linux client work is pending.
+Status: design specification, with relay and Linux client implementations available.
+Current macOS acceptance evidence is tracked in [docs/mac-validation.md](docs/mac-validation.md);
+Linux build, verification, and text-backend limitations are documented in [README.md](README.md).
 
 Build a small, self-hosted system that uses an always-on Mac mini, signed into
 Messages, to send and receive iMessages from a graphical Linux application.
@@ -541,8 +541,7 @@ server that no longer has its idempotency record.
 
 Build a desktop window using Clay and raylib, following the reusable parts of
 Flamez: window setup, scaling, layout, theme organization, and render-loop
-structure. Start with its Wayland path; document the supported display backend
-and add X11 support separately if needed.
+structure. Linux uses Wayland exclusively.
 
 The first interface has:
 
