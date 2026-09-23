@@ -33,6 +33,7 @@ fn clientModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     return m;
 }
 fn client(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+    const fps_counter = b.option(bool, "fps-counter", "Show the FPS counter in the bottom-right corner") orelse false;
     const core = clientModule(b, target, optimize, "src/client_tests.zig");
     const tests = b.addTest(.{ .root_module = core });
     const test_run = b.addRunArtifact(tests);
@@ -61,6 +62,7 @@ fn client(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     const m = clientModule(b, target, optimize, "src/client_main.zig");
     const client_options = b.addOptions();
     client_options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    client_options.addOption(bool, "fps_counter", fps_counter);
     m.addOptions("client_options", client_options);
     m.addImport("raylib", ray_module);
     m.addImport("zclay", clay.module("zclay"));

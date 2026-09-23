@@ -144,8 +144,70 @@ test "an unchanged authoritative request resolves local uncertainty without anot
     const raw = try u.json(a, @import("protocol/types.zig").SendRequest{ .request_id = epoch, .server_epoch = epoch, .target = input.target, .text = input.text, .revision = "2", .state = .delivered });
     _ = try s.upsert(a, "request", raw);
     try s.outcome(epoch, "unknown", "Lost HTTP response");
+    try std.testing.expectEqual(@as(i64, 1), try s.db.scalar("SELECT count(*) FROM outbox WHERE state='delivered' AND detail=''"));
     _ = try s.upsert(a, "request", raw);
     try std.testing.expectEqual(@as(i64, 1), try s.db.scalar("SELECT count(*) FROM outbox WHERE state='delivered'"));
+}
+test "provisional outgoing echoes replace uncertainty without confirming or discarding the request" {
+    const t = @import("protocol/types.zig");
+    const SharedSnapshot = @import("client/SharedSnapshot.zig");
+    const s = try Store.open(":memory:");
+    defer s.close();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    try s.beginSync(epoch, epoch ++ ":0");
+    const input = t.SendInput{ .request_id = epoch, .server_epoch = epoch, .target = .{ .recipient = .{ .address = "test@example.invalid", .service = "imessage" } }, .text = "Awww" };
+    var request = t.SendRequest{ .request_id = epoch, .server_epoch = epoch, .target = input.target, .text = input.text, .revision = "3", .state = .unknown, .error_info = .{ .code = "awaiting_observation", .message = "Awaiting an unambiguous outgoing Messages record.", .outcome = .uncertain } };
+    var echo = (try std.json.parseFromSlice(t.Message, ar, message, .{})).value;
+    echo.direction = .outgoing;
+    echo.observed_status = .delivered;
+    echo.text = input.text;
+    // Cover existing chats and the eventual echo in a new direct conversation,
+    // with both message-before-request and request-before-message arrival.
+    for ([_][]const u8{ "c1", "new:test@example.invalid" }) |key| {
+        try s.db.exec("DELETE FROM outbox; DELETE FROM records;");
+        try s.persistSend(ar, key, input);
+        request.revision = "3";
+        request.candidate_message_id = null;
+        _ = try s.upsert(ar, "request", try u.json(ar, request));
+        if (u.eq(key, "c1")) _ = try s.upsert(ar, "message", try u.json(ar, echo));
+        // Text alone must never hide a pending send.
+        try std.testing.expectEqual(@as(usize, 1), (try s.snapshot(ar, key)).pending.len);
+        request.revision = "4";
+        request.candidate_message_id = echo.id;
+        _ = try s.upsert(ar, "request", try u.json(ar, request));
+        if (!u.eq(key, "c1")) {
+            try std.testing.expectEqual(@as(usize, 1), (try s.snapshot(ar, key)).pending.len);
+            _ = try s.upsert(ar, "message", try u.json(ar, echo));
+        }
+        const merged = try SharedSnapshot.create(s, key, 1, null);
+        defer merged.release();
+        try std.testing.expectEqual(@as(usize, 1), merged.snapshot.messages.len);
+        try std.testing.expectEqual(.delivered, merged.snapshot.messages[0].observed_status);
+        try std.testing.expectEqual(@as(usize, 0), merged.snapshot.pending.len);
+        try std.testing.expectEqual(@as(usize, 0), (try s.snapshot(ar, key)).pending.len);
+        try std.testing.expectEqual(@as(i64, 1), try s.db.scalar("SELECT count(*) FROM outbox WHERE state='unknown' AND json_extract(record,'$.message_id') IS NULL"));
+        // Another plausible echo withdraws the hint. The saved request and its
+        // uncertainty return, and new-conversation history drops the old hint.
+        request.revision = "5";
+        request.candidate_message_id = null;
+        _ = try s.upsert(ar, "request", try u.json(ar, request));
+        const ambiguous = try SharedSnapshot.create(s, key, 2, merged);
+        defer ambiguous.release();
+        try std.testing.expectEqual(@as(usize, 1), ambiguous.snapshot.pending.len);
+        try std.testing.expectEqualStrings("unknown", ambiguous.snapshot.pending[0].state);
+        try std.testing.expectEqual(@as(usize, if (u.eq(key, "c1")) 1 else 0), ambiguous.snapshot.messages.len);
+    }
+    // Old-epoch hints are never used after a reset, even if an ID is cached again.
+    request.revision = "6";
+    request.candidate_message_id = echo.id;
+    _ = try s.upsert(ar, "request", try u.json(ar, request));
+    try s.beginSync("22345678-1234-1234-1234-123456789012", "22345678-1234-1234-1234-123456789012:0");
+    _ = try s.upsert(ar, "message", try u.json(ar, echo));
+    const reset = try s.snapshot(ar, "new:test@example.invalid");
+    try std.testing.expectEqual(@as(usize, 1), reset.pending.len);
+    try std.testing.expectEqual(@as(usize, 0), reset.messages.len);
 }
 test "failed cursor commit rolls back a new message and unread marker" {
     const s = try Store.open(":memory:");

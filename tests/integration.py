@@ -175,19 +175,40 @@ def main():
             wait_for(lambda:request('/v1/send-requests/'+ambiguous['request_id'])[1]['state']=='unknown')
             with database(source) as db:
                 add_message(db,ambiguous['text'],is_from_me=1,is_sent=1,is_delivered=1)
+            wait_for(lambda:request('/v1/send-requests/'+ambiguous['request_id'])[1].get('candidate_message_id'),timeout=5)
+            provisional=request('/v1/send-requests/'+ambiguous['request_id'])[1]
+            assert provisional['state']=='unknown' and provisional['message_id'] is None
+            with database(source) as db:
                 add_message(db,ambiguous['text'],is_from_me=1,is_sent=1,is_delivered=1)
+            wait_for(lambda:request('/v1/send-requests/'+ambiguous['request_id'])[1].get('candidate_message_id') is None,timeout=5)
             rejected=send('[fake:reject]');assert request('/v1/messages',rejected)[0]==202
             wait_for(lambda:request('/v1/send-requests/'+rejected['request_id'])[1]['state']=='failed')
             # Correlation must observe the outgoing record; osascript/fake return is insufficient.
-            wait_for(lambda:request('/v1/send-requests/'+v['request_id'])[1]['state']=='delivered',timeout=40)
+            wait_for(lambda:request('/v1/send-requests/'+v['request_id'])[1]['state']=='delivered',timeout=15)
             observed_request=request('/v1/send-requests/'+v['request_id'])[1]
             assert observed_request['message_id'] and observed_request['error_info'] is None
+            assert observed_request['candidate_message_id'] is None
             for checked in (new_direct,group):
                 wait_for(lambda:request('/v1/send-requests/'+checked['request_id'])[1]['state']=='delivered',timeout=10)
             group_message=request('/v1/send-requests/'+group['request_id'])[1]['message_id']
             assert sql('SELECT conversation_id FROM messages WHERE id=?',(group_message,))[0][0]==group_id
             assert request('/v1/send-requests/'+ambiguous['request_id'])[1]['state']=='unknown'
             assert request('/v1/send-requests/'+ambiguous['request_id'])[1]['message_id'] is None
+            # A single delivered echo cannot resolve two overlapping requests,
+            # even when one uses a recipient and the other its existing chat.
+            direct_id=sql("SELECT id FROM conversations WHERE route='iMessage;-;new@example.invalid'")[0][0]
+            overlaps=[send('[fake:unknown]',new_direct['target']),send('[fake:unknown]',{'conversation_id':direct_id})]
+            for item in overlaps:
+                assert request('/v1/messages',item)[0]==202
+                wait_for(lambda:request('/v1/send-requests/'+item['request_id'])[1]['state']=='unknown')
+            with database(source) as db:
+                source_chat=db.execute("SELECT ROWID FROM chat WHERE guid='iMessage;-;new@example.invalid'").fetchone()[0]
+                add_message(db,'[fake:unknown]',chat=source_chat,is_from_me=1,is_sent=1,is_delivered=1)
+            wait_for(lambda:sql("SELECT count(*) FROM send_observations o JOIN send_requests r ON r.id=o.request_id WHERE r.id IN (?,?) AND o.attempt_ms>=r.dispatch_ms+10000",tuple(item['request_id'] for item in overlaps))[0][0]==2,timeout=15)
+            for item in overlaps:
+                unresolved=request('/v1/send-requests/'+item['request_id'])[1]
+                assert unresolved['state']=='unknown'
+                assert unresolved['message_id'] is None and unresolved['candidate_message_id'] is None
             # Temporary source locks degrade readiness without losing the journal.
             blocker=sqlite3.connect(source);blocker.execute('BEGIN EXCLUSIVE')
             try:wait_for(lambda:not request('/v1/status')[1]['adapter_ready'],timeout=8)

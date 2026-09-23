@@ -141,8 +141,8 @@ class NativeClient(unittest.TestCase):
         probe.until(lambda v: v['selected'] == cid and v['messages'] > 0)
         probe.command(kind='send', key=cid, text='Native renewal fixture send')
         request_id = self.wait_rows('SELECT id FROM outbox')[0][0]
-        # Echo matching deliberately waits for a full 30-second observation window.
-        self.wait_rows('SELECT state FROM outbox WHERE id=?', (request_id,), [('delivered',)], timeout=45)
+        # Confirmation waits for the full 10-second observation window.
+        self.wait_rows('SELECT state FROM outbox WHERE id=?', (request_id,), [('delivered',)], timeout=15)
         draft = 'Draft survives renewal 👩‍💻'
         probe.command(kind='draft', key=cid, text=draft)
         self.wait_rows('SELECT text FROM drafts WHERE key=?', (cid,), [(draft,)])

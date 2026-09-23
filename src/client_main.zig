@@ -1,6 +1,7 @@
 const std = @import("std");
 const rl = @import("raylib");
 const clay = @import("zclay");
+const client_options = @import("client_options");
 const u = @import("common.zig");
 const t = @import("protocol/types.zig");
 const Config = @import("client/Config.zig");
@@ -56,7 +57,7 @@ fn run(init: std.process.Init) !void {
     rl.pollInputEvents();
     rl.setWindowMinSize(780, 560);
     rl.setExitKey(.null);
-    rl.setTargetFPS(30);
+    rl.setTargetFPS(120);
     _ = clay.initialize(.init(try init.arena.allocator().alloc(u8, clay.minMemorySize())), .{ .w = 1120, .h = 780 }, .{ .error_handler_function = clayError });
     var worker = Worker{ .io = init.io, .config = config };
     try worker.start();
@@ -66,6 +67,7 @@ fn run(init: std.process.Init) !void {
     defer app.deinit();
     var frames: usize = 0;
     var last_draw: i64 = 0;
+    var active_until: f64 = 0;
     var last_generation: u64 = 0;
     var last_revision: u64 = 0;
     var last_mouse = rl.getMousePosition();
@@ -76,8 +78,16 @@ fn run(init: std.process.Init) !void {
         const revision = app.composer.revision + app.search.revision + app.recipient.revision;
         const mouse = rl.getMousePosition();
         const window = WindowMetrics.current();
-        const input = rl.getKeyPressed() != .null or rl.isMouseButtonDown(.left) or rl.isMouseButtonReleased(.left) or rl.getMouseWheelMove() != 0 or mouse.x != last_mouse.x or mouse.y != last_mouse.y;
-        if (frames < 4 or config.frames > 0 or app.layout_pending or input or rl.isWindowResized() or !std.meta.eql(window, last_window) or generation != last_generation or revision != last_revision or u.now() - last_draw >= 500) {
+        const keyboard_input = for (std.enums.values(rl.KeyboardKey)) |key| {
+            if (pressed(key)) break true;
+        } else false;
+        const input = keyboard_input or rl.isMouseButtonDown(.left) or rl.isMouseButtonReleased(.left) or rl.getMouseWheelMove() != 0 or mouse.x != last_mouse.x or mouse.y != last_mouse.y;
+        const window_changed = rl.isWindowResized() or !std.meta.eql(window, last_window);
+        const now = rl.getTime();
+        // Keep rendering between input events so scrolling and key repeat do
+        // not fall back to the idle polling cadence during an interaction.
+        if (input or window_changed or revision != last_revision) active_until = now + 0.5;
+        if (frames < 4 or config.frames > 0 or app.layout_pending or now < active_until or generation != last_generation or u.now() - last_draw >= 500) {
             app.capture_frame = config.screenshot != null and config.frames > 0 and frames + 1 >= config.frames;
             app.draw(window.scale);
             last_draw = u.now();
@@ -421,15 +431,21 @@ const App = struct {
             s.drawComposer(areas.composer);
         }
         const status = areas.status;
+        const fps_width: f32 = if (client_options.fps_counter) 72 else 0;
         rl.drawRectangleRec(status, theme.colors.sidebar);
         rl.drawCircle(@intFromFloat(status.x + 22), @intFromFloat(status.y + 18), 4, if (s.view != null and s.view.?.online) theme.colors.accent else theme.colors.danger);
         const msg = if (u.now() < s.notice_until) s.notice else if (s.view) |v| v.status else "Opening cache…";
-        beginClip(.{ .x = status.x + 32, .y = status.y, .width = status.width - 142, .height = status.height });
-        s.text.draw(msg, status.x + 32, status.y + 9, 12, status.width - 142, theme.colors.muted);
+        beginClip(.{ .x = status.x + 32, .y = status.y, .width = status.width - 142 - fps_width, .height = status.height });
+        s.text.draw(msg, status.x + 32, status.y + 9, 12, status.width - 142 - fps_width, theme.colors.muted);
         endClip();
-        if (s.button(.{ .x = status.x + status.width - 104, .y = status.y + 4, .width = 92, .height = 28 }, "Reconnect", false)) {
+        if (s.button(.{ .x = status.x + status.width - 104 - fps_width, .y = status.y + 4, .width = 92, .height = 28 }, "Reconnect", false)) {
             s.worker.push(.{ .kind = .reconnect }) catch {};
             s.send_wait = false;
+        }
+        if (client_options.fps_counter) {
+            var buffer: [32]u8 = undefined;
+            const fps = std.fmt.bufPrint(&buffer, "{d} FPS", .{rl.getFPS()}) catch unreachable;
+            s.text.draw(fps, status.x + status.width - fps_width, status.y + 9, 12, fps_width - 12, theme.colors.muted);
         }
         if (s.capture_frame) {
             // Read the completed frame before swapping; Wayland may discard the
@@ -583,7 +599,7 @@ const App = struct {
             s.detailRow("Current history", std.fmt.allocPrint(ar, "{d} cached messages · {s}", .{ v.snapshot.messages.len, if (v.loading_history) "Loading" else if (v.snapshot.more) "Older history available" else "No older page" }) catch "", clip, &y);
         }
         s.detailSection("Client", clip, &y);
-        s.detailRow("Version", @import("client_options").version, clip, &y);
+        s.detailRow("Version", client_options.version, clip, &y);
         s.detailRow("Platform", @tagName(@import("builtin").os.tag) ++ " / " ++ @tagName(@import("builtin").cpu.arch) ++ " · Wayland", clip, &y);
         s.detailRow("Rendering", "raylib / Clay · Pango / Cairo · grayscale antialiasing", clip, &y);
         s.detailRow("Display", std.fmt.allocPrint(ar, "{d} × {d} logical · {d} × {d} pixels · {d:.0}% scale", .{ rl.getScreenWidth(), rl.getScreenHeight(), rl.getRenderWidth(), rl.getRenderHeight(), s.text.scale * 100 }) catch "", clip, &y);

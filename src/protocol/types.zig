@@ -48,6 +48,9 @@ pub const SendRequest = struct {
     text: []const u8,
     state: SendState = .queued,
     message_id: ?[]const u8 = null,
+    // Presentation-only echo while the observation window is still open.
+    // It may be withdrawn if another matching message appears.
+    candidate_message_id: ?[]const u8 = null,
     error_info: ?SafeError = null,
 };
 pub fn uuid(s: []const u8) bool {

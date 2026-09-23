@@ -187,6 +187,7 @@ pub fn reset(self: Self, a: u.Allocator) !void {
         var v = item;
         v.state = .unknown;
         v.message_id = null;
+        v.candidate_message_id = null;
         v.error_info = .{ .code = "source_reset", .message = "Source changed; this request is held for review.", .outcome = .uncertain };
         _ = try self.updateRequest(a, v);
     }

@@ -146,7 +146,8 @@ pub fn persistSend(s: Self, a: u.Allocator, key: []const u8, input: t.SendInput)
     try s.db.exec("COMMIT");
 }
 pub fn outcome(s: Self, id: []const u8, state: []const u8, detail: []const u8) !void {
-    try s.exec("UPDATE outbox SET state=?,detail=? WHERE id=?", &.{ .{ .text = state }, .{ .text = detail }, .{ .text = id } });
+    // A late HTTP failure must not overwrite a request already received via SSE.
+    try s.exec("UPDATE outbox SET state=?,detail=? WHERE id=? AND record IS NULL", &.{ .{ .text = state }, .{ .text = detail }, .{ .text = id } });
 }
 pub fn page(s: Self, chat: []const u8, cursor: ?[]const u8) !void {
     try s.exec("INSERT INTO pages VALUES(?,?) ON CONFLICT(chat) DO UPDATE SET cursor=excluded.cursor", &.{ .{ .text = chat }, if (cursor) |v| .{ .text = v } else .null_value });
@@ -220,9 +221,10 @@ pub fn snapshotWithMessages(s: Self, a: u.Allocator, selected: []const u8, share
         try ms.bind(&.{ .{ .text = selected }, .{ .text = selected }, .{ .text = selected } });
         while (try ms.step()) try messages.append(a, (try std.json.parseFromSlice(t.Message, a, ms.bytes(0), .{ .ignore_unknown_fields = true, .allocate = .alloc_always })).value);
     }
-    // Every linked canonical echo belongs to the history query above. Use a
-    // primary-key lookup instead of searching all messages for every old send.
-    var ps = try s.db.prepare("SELECT payload,state,detail,record FROM outbox WHERE draft_key=? AND NOT EXISTS(SELECT 1 FROM records m WHERE m.kind='message' AND m.id=json_extract(outbox.record,'$.message_id')) ORDER BY rowid");
+    // The observed echo supplies the sole visible status, including while the
+    // relay finishes checking a provisional match. Keep the durable request
+    // unchanged so withdrawing the hint restores its unresolved bubble.
+    var ps = try s.db.prepare("SELECT payload,state,detail,record FROM outbox WHERE draft_key=? AND NOT EXISTS(SELECT 1 FROM records m WHERE m.kind='message' AND m.id=" ++ echo_id_sql ++ ") ORDER BY rowid");
     defer ps.close();
     try ps.bind(&.{.{ .text = selected }});
     while (try ps.step()) {
@@ -231,5 +233,6 @@ pub fn snapshotWithMessages(s: Self, a: u.Allocator, selected: []const u8, share
     }
     return .{ .chats = chats.items, .messages = shared_messages orelse messages.items, .pending = pending.items, .selected = try a.dupe(u8, selected), .draft = try s.draft(a, selected), .epoch = try s.get(a, "epoch"), .more = (try s.nextPage(a, selected)) != null };
 }
-pub const history_query = "SELECT record,id,revision,sort_key FROM records WHERE kind='message' AND chat=? UNION ALL SELECT record,id,revision,sort_key FROM records WHERE kind='message' AND chat!=? AND id IN (SELECT json_extract(record,'$.message_id') FROM outbox WHERE draft_key=? AND record IS NOT NULL) ORDER BY sort_key,id";
-pub const history_versions_query = "SELECT NULL,id,revision,sort_key FROM records WHERE kind='message' AND chat=? UNION ALL SELECT NULL,id,revision,sort_key FROM records WHERE kind='message' AND chat!=? AND id IN (SELECT json_extract(record,'$.message_id') FROM outbox WHERE draft_key=? AND record IS NOT NULL) ORDER BY sort_key,id";
+const echo_id_sql = "coalesce(json_extract(outbox.record,'$.message_id'),CASE WHEN outbox.state='unknown' AND outbox.epoch=(SELECT value FROM meta WHERE key='epoch') THEN json_extract(outbox.record,'$.candidate_message_id') END)";
+pub const history_query = "SELECT record,id,revision,sort_key FROM records WHERE kind='message' AND chat=? UNION ALL SELECT record,id,revision,sort_key FROM records WHERE kind='message' AND chat!=? AND id IN (SELECT " ++ echo_id_sql ++ " FROM outbox WHERE draft_key=? AND record IS NOT NULL) ORDER BY sort_key,id";
+pub const history_versions_query = "SELECT NULL,id,revision,sort_key FROM records WHERE kind='message' AND chat=? UNION ALL SELECT NULL,id,revision,sort_key FROM records WHERE kind='message' AND chat!=? AND id IN (SELECT " ++ echo_id_sql ++ " FROM outbox WHERE draft_key=? AND record IS NOT NULL) ORDER BY sort_key,id";

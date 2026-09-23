@@ -29,8 +29,12 @@ packaging/linux/install.sh
 ```
 
 Linux uses Wayland exclusively. The GUI was rendered at 125% desktop scaling
-and uses `zimbr` as its application ID. Rendering sleeps between changes while
-the background worker continues to receive messages.
+and uses `zimbr` as its application ID. Movement, scrolling, and navigation target
+120 FPS, returning to idle rendering after half a second without activity. The
+background worker continues to receive messages while rendering sleeps.
+
+The bottom-right FPS counter is disabled by default. Enable it with
+`zig build client -Dfps-counter=true` or `zig build run -Dfps-counter=true`.
 
 The sidebar's **Dark mode / Light mode** button saves the appearance for the next
 launch. **Details** (Ctrl+D) opens a scrollable pane with connection and retry

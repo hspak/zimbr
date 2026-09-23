@@ -102,19 +102,24 @@ def main():
             wait(lambda: rows('SELECT count(*) FROM outbox')[0][0] == 1)
             request_id = rows('SELECT id FROM outbox')[0][0]
             assert rows('SELECT text FROM drafts WHERE key=?', (cid,)) == [('',)]
-            wait(lambda: rows("SELECT state FROM outbox WHERE id=?", (request_id,)) == [('delivered',)], timeout=45)
+            # The observed delivery replaces the pending bubble during the
+            # observation window, before the relay confirms the correlation.
+            wait(lambda: rows("SELECT state FROM outbox WHERE id=? AND json_extract(record,'$.candidate_message_id') IS NOT NULL", (request_id,)) == [('unknown',)], timeout=8)
+            wait(lambda: pump().get('pending') == 0, timeout=2)
+            assert rows("SELECT state FROM outbox WHERE id=?", (request_id,)) == [('unknown',)]
+            wait(lambda: rows("SELECT state FROM outbox WHERE id=?", (request_id,)) == [('delivered',)], timeout=12)
             wait(lambda: pump().get('pending') == 0)
             assert rows("SELECT count(*) FROM message WHERE text='Client fixture send 👋\nSecond line'", path=source)[0][0] == 1
             # A new direct target transitions into the observed conversation; group replies
             # retain the existing group route. No synthetic send reaches Apple.
             send(kind='select', key='new:bob@example.invalid')
             send(kind='send', key='new:bob@example.invalid', recipient='bob@example.invalid', text='New direct fixture')
-            wait(lambda: rows("SELECT count(*) FROM outbox WHERE state='delivered'")[0][0] == 2, timeout=45)
+            wait(lambda: rows("SELECT count(*) FROM outbox WHERE state='delivered'")[0][0] == 2, timeout=15)
             wait(lambda: not pump().get('selected', 'new:').startswith('new:'))
             group=rows("SELECT id FROM records WHERE kind='conversation' AND json_extract(record,'$.title')='Fixture group'")[0][0]
             send(kind='select', key=group)
             send(kind='send', key=group, text='Existing group fixture')
-            wait(lambda: rows("SELECT count(*) FROM outbox WHERE state='delivered'")[0][0] == 3, timeout=45)
+            wait(lambda: rows("SELECT count(*) FROM outbox WHERE state='delivered'")[0][0] == 3, timeout=15)
             assert rows("SELECT cm.chat_id FROM message m JOIN chat_message_join cm ON cm.message_id=m.ROWID WHERE m.text='Existing group fixture'", path=source) == [(2,)]
             send(kind='select', key=cid)
             # Definitive rejection and ambiguous adapter outcome retain their payload.

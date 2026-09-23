@@ -73,12 +73,15 @@ acknowledgement never claims an uncommitted write. Request IDs, conflict detecti
 uncertain outcomes, source epochs, cursor expiry, and replay deduplication retain
 their existing meanings. The Apple database is opened read-only.
 
-The 30-second outgoing-message correlation window is deliberately unchanged.
+These measurements used a 30-second outgoing-message correlation window. The
+current window is 10 seconds; a unique provisional echo replaces the pending
+bubble during that window without confirming the request's identity.
 The current AppleScript boundary returns an invocation outcome rather than an
 authoritative message ID. An earlier unique text match is not enough to rule out
 a second matching message or a delayed join. Making confirmation immediate requires
-a separately validated adapter that returns an authoritative identity; shortening
-the window or silently resending would change reliability, not just performance.
+a separately validated adapter that returns an authoritative identity. The shorter
+window reduces the time available to discover competing matches; ambiguous
+requests remain uncertain and are never automatically resent.
 
 ## Reproducing the measurements
 

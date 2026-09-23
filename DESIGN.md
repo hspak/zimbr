@@ -264,7 +264,7 @@ An HTTP acceptance response means only that the relay owns the request. An
 AppleScript success response alone must not be displayed as remote delivery.
 If the automation path provides no authoritative outgoing message ID, correlate
 against new database records using the actual route, direction, text, and a
-bounded observation window. Serialize sends to reduce ambiguity, but recognize
+10-second observation window. Serialize sends to reduce ambiguity, but recognize
 that a user can also send identical text from another Apple device.
 
 If correlation has multiple plausible candidates, keep the outcome unknown.
@@ -281,6 +281,11 @@ explains any duplicate risk when the previous outcome is unknown.
 Publish send-request updates and message updates through the event journal. Once
 an outgoing message is identified, associate it with the request so the client
 can merge its pending bubble with the observed message.
+During the observation window, a unique candidate can provide a provisional
+`candidate_message_id` for the same display merge. The observed message supplies
+the visible status; the request stays unresolved until the window closes. Clear
+the hint if another candidate or competing request makes the match ambiguous.
+Hints never authorize resending and do not survive a source epoch change.
 
 ### 1.7. LaunchAgent, permissions, and recovery
 

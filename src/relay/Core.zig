@@ -4,6 +4,7 @@ const t = @import("../protocol/types.zig");
 const Journal = @import("Journal.zig");
 const Adapter = if (@import("options").fake) @import("adapter/fake.zig") else @import("adapter/macos.zig");
 const fake = @import("options").fake;
+const observation_window_ms = 10000;
 const Self = @This();
 const Signal = @import("../Signal.zig");
 io: std.Io,
@@ -340,6 +341,7 @@ fn reconcile(self: *Self, a: u.Allocator, batch: *ImportBatch, complete: bool) !
             if (try q.step()) {
                 if (u.eq(q.bytes(0), "delivered")) {
                     v.state = .delivered;
+                    v.error_info = null;
                     _ = try j.updateRequest(a, v);
                 } else if (u.eq(q.bytes(0), "failed")) {
                     v.state = .failed;
@@ -349,19 +351,36 @@ fn reconcile(self: *Self, a: u.Allocator, batch: *ImportBatch, complete: bool) !
             }
             continue;
         }
-        // Wait for the complete 30-second observation window before selecting a
-        // unique candidate. Later scans may resolve delayed joins in that window.
-        if (u.now() < p.time + 30000) continue;
+        // Publish a provisional echo for display as soon as it is observed.
+        // Confirmation still waits for the complete observation window, and a
+        // later second candidate withdraws the hint without confirming the send.
         var q = try j.db.prepare("SELECT m.id,m.status FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE m.source_row>? AND m.direction='outgoing' AND c.service='imessage' AND m.text=? AND m.date_ns BETWEEN ? AND ? AND ((?='chat' AND c.route=?) OR (?='direct' AND (SELECT count(*) FROM participants WHERE conversation_id=c.id)=1 AND EXISTS(SELECT 1 FROM participants WHERE conversation_id=c.id AND address=?))) AND NOT EXISTS(SELECT 1 FROM send_requests WHERE message_id=m.id) LIMIT 2");
         defer q.close();
         const start = (p.time - 2000 - 978307200000) * 1000000;
-        const end = (p.time + 30000 - 978307200000) * 1000000;
+        const end = (p.time + observation_window_ms - 978307200000) * 1000000;
         try q.bind(&.{ .{ .int = p.floor }, .{ .text = v.text }, .{ .int = start }, .{ .int = end }, .{ .text = p.mode }, .{ .text = p.route }, .{ .text = p.mode }, .{ .text = p.route } });
-        if (!try q.step()) continue;
-        const mid = try q.text(a, 0);
-        const status = try q.text(a, 1);
-        if (try q.step()) continue;
+        const found = try q.step();
+        const mid = if (found) try q.text(a, 0) else null;
+        const status = if (found) try q.text(a, 1) else "";
+        var unique = found and !try q.step();
+        if (unique) {
+            // One echo cannot account for two overlapping identical sends,
+            // including a direct target and an existing chat for that recipient.
+            var competing = try j.db.prepare("SELECT 1 FROM send_requests r JOIN messages m ON m.id=? JOIN conversations c ON c.id=m.conversation_id WHERE r.id!=? AND r.epoch=? AND r.state IN ('dispatching','unknown','submitted') AND r.message_id IS NULL AND m.source_row>r.source_floor AND m.text=json_extract(r.record,'$.text') AND m.date_ns BETWEEN (r.dispatch_ms-2000-978307200000)*1000000 AND (r.dispatch_ms+?-978307200000)*1000000 AND ((r.mode='chat' AND c.route=r.route) OR (r.mode='direct' AND (SELECT count(*) FROM participants WHERE conversation_id=c.id)=1 AND EXISTS(SELECT 1 FROM participants WHERE conversation_id=c.id AND address=r.route))) LIMIT 1");
+            defer competing.close();
+            try competing.bind(&.{ .{ .text = mid.? }, .{ .text = v.request_id }, .{ .text = v.server_epoch }, .{ .int = observation_window_ms } });
+            unique = !try competing.step();
+        }
+        const candidate = if (unique) mid else null;
+        if (!unique or u.now() < p.time + observation_window_ms) {
+            if (!u.eq(v.candidate_message_id orelse "", candidate orelse "")) {
+                v.candidate_message_id = candidate;
+                _ = try j.updateRequest(a, v);
+            }
+            continue;
+        }
         v.message_id = mid;
+        v.candidate_message_id = null;
         v.state = if (u.eq(status, "delivered")) .delivered else if (u.eq(status, "failed")) .failed else .submitted;
         v.error_info = if (v.state == .failed) .{ .code = "observed_failure", .message = "Messages reported failure.", .outcome = .uncertain } else null;
         _ = try j.updateRequest(a, v);
