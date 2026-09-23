@@ -125,7 +125,8 @@ and the database directly and therefore needs no administrative certificate.
 ## Install, restart, and verify
 
 For local builds, create a persistent code-signing identity once **in Terminal
-on the Mac** (the certificate trust prompt cannot be approved over SSH):
+on the Mac**, as the logged-in user without `sudo` (the certificate trust prompt
+cannot be approved over SSH):
 
 ```sh
 .tools/python/bin/python3 packaging/macos/signing.py setup

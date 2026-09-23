@@ -25,18 +25,21 @@ def main():
         originals = []
         for name in ('true', 'false'):
             target = root/name
-            shutil.copy2('/usr/bin/'+name, target)
+            # Copy executable bytes, not the protected flags of Apple's files.
+            shutil.copyfile('/usr/bin/'+name, target)
+            target.chmod(0o755)
             sign(target)
-            subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '-R', expected, str(target)], check=True)
+            subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '-R', '='+expected, str(target)], check=True)
             signature = subprocess.run(['/usr/bin/codesign', '-d', '-r-', str(target)], capture_output=True, text=True, check=True)
             originals.append(next(line for line in signature.stdout.splitlines() if 'designated =>' in line))
         assert originals[0] == originals[1], 'Different builds must retain the same designated requirement'
         assert (root/'true').read_bytes() != (root/'false').read_bytes()
         # The bundle identifier alone cannot impersonate the persistent identity.
         impostor = root/'impostor'
-        shutil.copy2('/usr/bin/true', impostor)
+        shutil.copyfile('/usr/bin/true', impostor)
+        impostor.chmod(0o755)
         sign(impostor, identity='-')
-        rejected = subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '-R', expected, str(impostor)], capture_output=True)
+        rejected = subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '-R', '='+expected, str(impostor)], capture_output=True)
         assert rejected.returncode != 0
         try:
             sign(impostor, directory=root/'missing')

@@ -49,6 +49,8 @@ def requirement(fingerprint):
 
 
 def load(directory):
+    if sys.platform == 'darwin' and os.geteuid() == 0:
+        raise RuntimeError('Run signing commands as the Mac login user, without sudo')
     private_directory(directory)
     config = read_json(directory/'identity.json')
     if set(config) != {'certificate_sha1', 'label'} or config['label'] != LABEL:
@@ -76,10 +78,12 @@ def sign(bundle, entitlements=None, *, identity=None, directory=None):
         try:
             command += [config['certificate_sha1'], '--keychain', keychain,
                         '--identifier', LABEL, '--timestamp=none',
-                        '--requirements', 'designated => '+requirement(config['certificate_sha1'])]
+                        # The leading '=' makes this inline requirement text;
+                        # otherwise codesign interprets it as a file path.
+                        '--requirements', '=designated => '+requirement(config['certificate_sha1'])]
             if entitlements: command += ['--entitlements', entitlements]
             run(command + [bundle])
-            run(['/usr/bin/codesign', '--verify', '--strict', '-R', requirement(config['certificate_sha1']), bundle])
+            run(['/usr/bin/codesign', '--verify', '--strict', '-R', '='+requirement(config['certificate_sha1']), bundle])
         finally:
             run(['/usr/bin/security', 'lock-keychain', keychain])
     run(['/usr/bin/codesign', '--verify', '--strict', bundle])
@@ -87,6 +91,7 @@ def sign(bundle, entitlements=None, *, identity=None, directory=None):
 
 def setup(directory):
     if sys.platform != 'darwin': raise RuntimeError('Local signing setup must run on the Mac')
+    if os.geteuid() == 0: raise RuntimeError('Run signing commands as the Mac login user, without sudo')
     os.umask(0o077)
     directory = directory.absolute()
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
