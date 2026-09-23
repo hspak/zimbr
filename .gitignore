@@ -1,0 +1,9 @@
+.zig-cache/
+zig-out/
+.tools/
+.local/
+*.db
+*.db-shm
+*.db-wal
+__pycache__/
+.DS_Store

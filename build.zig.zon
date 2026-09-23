@@ -1,0 +1,7 @@
+.{
+    .name = .zimbr,
+    .fingerprint = 0x9aa1f6bc7ed51f5b,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .paths = .{ "build.zig", "build.zig.zon", "src", "tests", "packaging", "tools", "docs", "README.md", "DESIGN.md" },
+}

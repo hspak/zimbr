@@ -1,7 +1,8 @@
 # iMessage relay design
 
-Status: proposed design; implementation and macOS 27 compatibility have not yet
-been validated.
+Status: design specification. The macOS relay implementation is in progress;
+current implementation and macOS 27 acceptance evidence are tracked in
+[docs/mac-validation.md](docs/mac-validation.md). Linux client work is pending.
 
 Build a small, self-hosted system that uses an always-on Mac mini, signed into
 Messages, to send and receive iMessages from a graphical Linux application.
