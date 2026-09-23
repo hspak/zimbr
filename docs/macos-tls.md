@@ -124,6 +124,49 @@ and the database directly and therefore needs no administrative certificate.
 
 ## Install, restart, and verify
 
+For local builds, create a persistent code-signing identity once **in Terminal
+on the Mac** (the certificate trust prompt cannot be approved over SSH):
+
+```sh
+.tools/python/bin/python3 packaging/macos/signing.py setup
+```
+
+The helper creates a dedicated private Keychain under
+`~/.config/zimbr-code-signing`, generates a ten-year self-signed code-signing
+certificate, and trusts it only for the current user's code-signing policy.
+It preserves the login Keychain and its search list. The signing key stays on the
+Mac, is imported as non-extractable, and is unrelated to the relay's TLS CA or
+device credentials. Setup can be rerun to finish an interrupted setup; it reuses
+the same certificate and key. Preserve this directory with secure Mac backups.
+
+The installer reuses this identity by default, unlocking its dedicated Keychain
+only while signing. The designated requirement pins both the certificate and
+`com.hsp.zimbr.relay`, so different builds retain the same code identity. A missing
+identity stops installation rather than silently switching to ad-hoc signing.
+Use `--identity NAME_OR_SHA1` for a separately managed signing identity;
+`--identity -` explicitly opts into disposable ad-hoc builds.
+
+After the first switch from ad-hoc signing, remove and re-add
+`~/Applications/Zimbr Relay.app` in Full Disk Access and approve Messages
+Automation if requested. Subsequent updates using the same identity should
+retain those grants. Changing the certificate, deleting the signing state, or
+returning to ad-hoc signing requires new grants. This local identity is for this
+Mac; it does not provide Developer ID distribution or notarization.
+
+To resume after approving the certificate trust prompt, verify that two different
+binaries retain the same identity, then install and restart the relay:
+
+```sh
+.tools/python/bin/python3 tests/mac_signing.py
+.tools/python/bin/python3 packaging/macos/install.py --install --start
+```
+
+After restoring Full Disk Access for the newly signed app, restart it with:
+
+```sh
+launchctl kickstart -k "gui/$(id -u)/com.hsp.zimbr.relay"
+```
+
 First stage and inspect, then install:
 
 ```sh
@@ -146,8 +189,8 @@ are unchanged. Future upgrades can reuse installed material by omitting
 
 The LaunchAgent has `RunAtLoad`, `KeepAlive`, and the existing Aqua login-session
 requirement. The installer verifies the actual process's configured listener;
-failed startup leaves it stopped for repair. Ad-hoc builds may need Full Disk
-Access and Automation grants refreshed. Check the installed identity, not just
+failed startup leaves it stopped for repair. Keep using the persistent signing
+identity across builds. Check the installed identity, not just
 a terminal/development executable:
 
 ```sh

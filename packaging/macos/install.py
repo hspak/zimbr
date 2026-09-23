@@ -17,6 +17,7 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT/'tools'))
 from tls_support import private_path, read_json
+from signing import default_directory, sign
 LABEL = 'com.hsp.zimbr.relay'
 
 
@@ -68,7 +69,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--install', action='store_true')
     p.add_argument('--start', action='store_true')
-    p.add_argument('--identity', default='-', help='codesign identity; default ad-hoc')
+    p.add_argument('--identity', help='Explicit codesign identity override; use - only for disposable ad-hoc builds')
+    p.add_argument('--signing-directory', type=Path, default=default_directory(), help='Persistent local signing state (created by signing.py setup)')
     p.add_argument('--binary', type=Path, default=ROOT/'zig-out/bin/relay')
     p.add_argument('--tls-config', type=Path, help='Validated relay configuration/material to install (default: existing installed config)')
     p.add_argument('--admin-config', type=Path, help='Optional separately enrolled Mac administrative identity to install')
@@ -108,8 +110,7 @@ def main():
     with (contents/'Info.plist').open('wb') as f: plistlib.dump(info, f)
     entitlements = staging/'entitlements.plist'
     with entitlements.open('wb') as f: plistlib.dump({'com.apple.security.automation.apple-events': True}, f)
-    subprocess.run(['codesign', '--force', '--sign', args.identity, '--identifier', LABEL, '--entitlements', str(entitlements), str(bundle)], check=True)
-    subprocess.run(['codesign', '--verify', '--strict', str(bundle)], check=True)
+    sign(bundle, entitlements, identity=args.identity, directory=args.signing_directory)
     config = {'Label': LABEL, 'ProgramArguments': [str(destination/'Contents/MacOS/relay'), 'serve', '--config', str(data/'relay.json')], 'RunAtLoad': True, 'KeepAlive': True, 'ThrottleInterval': 30, 'ProcessType': 'Background', 'LimitLoadToSessionType': 'Aqua', 'WorkingDirectory': str(data), 'StandardOutPath': str(data/'relay.log'), 'StandardErrorPath': str(data/'relay.log'), 'Umask': 0o077, 'EnvironmentVariables': {'HOME': str(home)}}
     plist = staging/(LABEL+'.plist')
     with plist.open('wb') as f: plistlib.dump(config, f)
