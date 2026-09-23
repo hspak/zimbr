@@ -11,7 +11,9 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #ifdef __APPLE__
+#include <sys/attr.h>
 #include <sys/event.h>
+#include <uuid/uuid.h>
 #elif defined(__linux__)
 #include <sys/inotify.h>
 #endif
@@ -48,8 +50,25 @@ int zr_timestamp(int64_t ns, char *out, size_t cap) {
 }
 int zr_file_identity(const char *path, char *out, size_t cap) {
     struct stat s;
+#ifdef __APPLE__
+    // st_dev changes when APFS volumes are renumbered at boot. Persist the
+    // volume UUID and file identity instead of treating a reboot as replacement.
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    struct attrlist attrs = { .bitmapcount = ATTR_BIT_MAP_COUNT, .volattr = ATTR_VOL_INFO | ATTR_VOL_UUID };
+    struct { uint32_t length; uuid_t uuid; } volume;
+    int rc = fstat(fd, &s);
+    if (!rc) rc = fgetattrlist(fd, &attrs, &volume, sizeof(volume), 0);
+    close(fd);
+    if (rc || volume.length != sizeof(volume) || uuid_is_null(volume.uuid)) return -1;
+    uuid_string_t uuid;
+    uuid_unparse_lower(volume.uuid, uuid);
+    int n = snprintf(out, cap, "mac-v1:%s:%llu:%lld:%ld", uuid,
+        (unsigned long long)s.st_ino, (long long)s.st_birthtimespec.tv_sec, s.st_birthtimespec.tv_nsec);
+#else
     if (stat(path, &s)) return -1;
     int n = snprintf(out, cap, "%llu:%llu", (unsigned long long)s.st_dev, (unsigned long long)s.st_ino);
+#endif
     return n > 0 && (size_t)n < cap ? n : -1;
 }
 int zr_secure_file(const char *path, const void *data, size_t length, int replace) {
@@ -149,48 +168,6 @@ int64_t zr_monotonic_ms(void) {
     struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
     return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
-ptrdiff_t zr_recv(int fd, void *buffer, size_t length, int64_t deadline_ms) {
-    for (;;) {
-        int64_t left = deadline_ms - zr_monotonic_ms();
-        if (left <= 0) return -1;
-        struct pollfd p = { .fd = fd, .events = POLLIN };
-        int rc = poll(&p, 1, left > 10000 ? 10000 : (int)left);
-        if (rc < 0 && errno == EINTR) continue;
-        if (rc <= 0) return -1;
-        ssize_t n = recv(fd, buffer, length, 0);
-        if (n < 0 && errno == EINTR) continue;
-        return n;
-    }
-}
-int zr_send(int fd, const void *buffer, size_t length) {
-    size_t offset = 0; int64_t deadline = zr_monotonic_ms() + 10000;
-    while (offset < length) {
-        int64_t left = deadline - zr_monotonic_ms();
-        if (left <= 0) return -1;
-        struct pollfd p = { .fd = fd, .events = POLLOUT };
-        int rc = poll(&p, 1, (int)left);
-        if (rc < 0 && errno == EINTR) continue;
-        if (rc <= 0) return -1;
-#ifdef MSG_NOSIGNAL
-        int flags = MSG_NOSIGNAL;
-#else
-        int flags = 0;
-#endif
-        ssize_t n = send(fd, (const char *)buffer + offset, length - offset, flags);
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) return -1;
-        offset += (size_t)n;
-    }
-    return 0;
-}
-int zr_socket_closed(int fd) {
-    struct pollfd p = { .fd = fd, .events = POLLIN };
-    if (poll(&p, 1, 0) <= 0) return 0;
-    if (p.revents & (POLLHUP | POLLERR | POLLNVAL)) return 1;
-    char byte;
-    return recv(fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT) == 0;
-}
-
 // File notifications are hints only: callers always re-read SQLite and retain
 // a periodic reconciliation scan. Watch the database and its WAL/journal,
 // including replacement and sidecar creation; never watch SHM reader traffic.

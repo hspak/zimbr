@@ -1,11 +1,11 @@
 # Zimbr
 
 A Zig 0.16 relay for the Messages account on a logged-in Mac. It reads Apple's
-SQLite database without modifying it and sends text through a bounded Messages
-AppleScript subprocess. The Linux client now requires direct HTTPS with mTLS.
-The relay transport migration is being implemented separately on macOS; the
-old relay in this checkout is not compatible with the new client. See the
-[migration plan](docs/mtls-migration.md) and [Linux setup](docs/linux-mtls.md).
+SQLite database without modifying it, exposes a TLS 1.3 HTTPS/SSE API requiring
+an enrolled client certificate, and sends through a bounded Messages AppleScript
+subprocess. Both transport implementations are present; provisioning and test
+handoff issues found while combining them are recorded in
+[the client review](docs/linux-mtls-review.md).
 
 The Linux desktop client uses Zig, Clay, raylib, and Pango. It supports conversation
 browsing, cached history, live updates, direct messages, existing-conversation
@@ -125,8 +125,9 @@ zig-out/bin/client-probe --data-dir /path/to/client-data
 `test-client` runs store, SSE, and Unicode text tests without a GPU. The Python
 client integration suite uses the actual client worker, temporary device/CA
 certificates, and an authenticated TLS test adapter in front of the existing
-fixture relay. The adapter is temporary Linux test infrastructure pending the
-native relay migration. It covers history, pagination, direct/group sends, echo merging, uncertain outcomes,
+fixture relay. The adapter still expects the old plaintext fake relay and must
+be replaced with direct native TLS before running the combined client integration
+suites. It covers history, pagination, direct/group sends, echo merging, uncertain outcomes,
 crashes, expired cursors, and epoch changes. A Wayland screenshot
 can be exported with `zimbr --screenshot /path/to/image.png --frames 90`.
 
@@ -150,39 +151,44 @@ for benchmarks, reliability constraints, and remaining platform validation.
 
 ## Relay build and test
 
-Install Zig **0.16.0** and Apple's Command Line Tools. The build uses the selected
-macOS SDK (`xcrun --show-sdk-path`) and system SQLite, with no GUI dependencies.
-The Zig version and SDK setup follow the sibling Flamez project, without depending
-on its source tree.
+Install Zig **0.16.0**, Apple's Command Line Tools, and a target build of
+**OpenSSL 3.5 LTS** with static archives. This migration packages 3.5.8; use current
+3.5 security patches and rebuild/re-sign the app when updating OpenSSL. The relay
+uses system SQLite and has no GUI or Homebrew runtime dependency.
 
 ```sh
-zig build relay fake-relay
-zig build test
+zig build relay fake-relay test -Dopenssl-prefix=/absolute/openssl-3.5
+python3 -m pip install -r tools/requirements-tls.txt
 python3 tests/integration.py
+python3 tests/relay_tls.py
 python3 tests/mac_acceptance_test.py
+ZIMBR_MKCERT=/path/to/mkcert python3 tests/cert_management.py
 zig fmt --check build.zig src
-zig build macos-check -Dtarget=x86_64-macos
 ```
 
-For a cross build, pass `-Dmacos-sdk=/path/to/MacOSX.sdk`. `fake-relay` and the core
-unit tests also have a Linux build path, requiring system SQLite development
-headers/library; Linux execution is covered by the fixture integration suites.
-The real relay remains independent of GUI libraries.
+Python network tests/tools require TLS 1.3 support (`ssl.HAS_TLSv1_3`); Apple's
+bundled LibreSSL Python is insufficient. For cross builds, supply target-architecture
+OpenSSL archives with `-Dopenssl-prefix`, `-Dtarget`, and
+`-Dmacos-sdk=/path/to/MacOSX.sdk`. Native and fake relays use the same TLS wrapper.
+Linux execution of the combined pair remains separate validation work.
 
-The tests use temporary synthetic databases. They cover HTTP authentication,
-Unicode and independent Foundation archive fixtures, stable pagination, delayed
-joins, event replay, transaction rollback, persistence failures, idempotency,
-observed delivery, uncertain correlation, stalled and interrupted dispatch,
-source replacement, and token rotation. They never modify the real Messages DB.
+The Mac owns certificate issuance and enrollment; clients follow the
+[certificate management contract](docs/certificate-management.md).
 
-## Existing macOS installation (pre-mTLS)
+Tests use only synthetic Messages databases and temporary CAs, never installed in
+system trust. They cover authentication before HTTP, certificate purpose/time,
+strict configuration, connection bounds, SSE recovery, renewal/revocation,
+idempotency, interrupted dispatch, and journal persistence.
 
-This section records the old relay behavior pending the macOS migration. Do not
-use it to deploy the new Linux client; use the coordinated migration plan.
+## Install and permissions
 
 ```sh
-python3 packaging/macos/install.py                 # stage app and plist
-python3 packaging/macos/install.py --install --start
+# First provision certificates/configurations: docs/macos-tls.md
+python3 packaging/macos/install.py --tls-config /private/staging/relay.json \
+  --admin-config /private/staging/admin.json --openssl-license /openssl-source/LICENSE.txt
+python3 packaging/macos/install.py --install --start \
+  --tls-config /private/staging/relay.json --admin-config /private/staging/admin.json \
+  --openssl-license /openssl-source/LICENSE.txt
 ```
 
 This installs `~/Applications/Zimbr Relay.app` and the user LaunchAgent
@@ -190,7 +196,12 @@ This installs `~/Applications/Zimbr Relay.app` and the user LaunchAgent
 and starts it now. It starts automatically when this user logs in after a reboot,
 restarts if it exits, and continues running with the screen locked. Messages needs
 the user's graphical login session before the relay can operate.
-The installer preserves the journal and token on upgrades.
+The installer validates credentials and signs the app before stopping the old
+process, takes a consistent journal backup, and preserves its epoch and send IDs.
+It installs TLS material in owner-only directories outside the app and deletes
+the obsolete token. The CA signing key is never installed. Subsequent upgrades
+may omit `--tls-config` to retain the installed credentials. Startup failures
+leave the relay stopped for repair.
 It uses ad-hoc signing by default; pass `--identity 'SIGNING IDENTITY'` to use a
 persistent signing identity. Ad-hoc rebuilds may require granting permissions
 again. The executable path and bundle identifier remain stable.
@@ -219,14 +230,14 @@ Automation is probed only after database reads succeed. It does not send a test
 message automatically. Screen locking must be tested separately from logging out.
 After logout/reboot, this agent requires the user's graphical login session.
 
-## Existing macOS operation (pre-mTLS)
+## Operation
 
 ```sh
 zig-out/bin/relay setup
 zig-out/bin/relay doctor
 zig-out/bin/relay probe
 zig-out/bin/relay serve
-zig-out/bin/relay rotate-token
+zig-out/bin/relay check-config
 ```
 
 `doctor` and `probe` report aggregate database/decoder diagnostics, without
@@ -234,18 +245,37 @@ printing message content or participant addresses. Only `--check-automation`
 performs the optional no-send Automation probe. Real sends require API requests.
 
 Options are `--data-dir PATH`, `--messages-db PATH` (always read-only in `relay`),
-`--port PORT`, and `--event-limit COUNT`. `serve --read-only` disables all
-automation/sending while exposing the read API, for local integration diagnostics. The default data directory is
-`~/Library/Application Support/Zimbr`; its permissions are 0700. The bearer token
-is 32 random bytes encoded as 64 hexadecimal characters in a 0600 `token` file.
-Token rotation is atomic; existing streams close at their next heartbeat. A
-process lock prevents two relay instances from dispatching from the same journal.
+`--config PATH`, and `--event-limit COUNT`. The default configuration is
+`~/Library/Application Support/Zimbr/relay.json`. `setup` creates private state
+and initializes the journal; it does not generate credentials. `check-config`
+validates TLS configuration without opening Messages or a listener. `doctor`
+also reports certificate expiry, fingerprint, enabled-device count, and integration
+readiness. `serve --read-only` disables automation/sending while retaining mTLS.
 
-The pre-migration relay binds **127.0.0.1** and requires its bearer token on every
-API endpoint. Its old SSH transport is incompatible with the current Linux
-client. Replace it with the matching mTLS relay before cutover; server-side setup,
-smoke tools, and authorization are owned by the macOS migration. The relay's
-plaintext journal still relies on Mac account/disk protections at rest.
+Every route requires a valid clientAuth leaf from the dedicated CA and an enabled
+SHA-256 leaf fingerprint. Configuration explicitly selects an IP to bind; failed
+binds and invalid/missing configuration are errors. TLS 1.3 and HTTP/1.1 are required,
+with session resumption and early data disabled. Bearer tokens grant no access.
+Certificates, keys, and configuration must be owner-only files in 0700 directories,
+with no symlinks. The journal retains plaintext normalized history under the Mac
+account's filesystem protections.
+
+Read status using the separately enrolled Mac administrative identity:
+
+```sh
+python3 - <<'PYTLS'
+import sys
+from pathlib import Path
+sys.path.insert(0, 'tools')
+from mac_acceptance import Client
+print(Client(Path.home()/'Library/Application Support/Zimbr').request('/v1/status'))
+PYTLS
+```
+
+See [certificate provisioning, renewal, and revocation](docs/macos-tls.md).
+Device changes are local administrative actions applied by a verified restart;
+existing streams and pooled connections close with the old process. Certificate
+expiry closes active sessions as well as rejecting new connections.
 
 Stop/start the agent with `launchctl bootout gui/$(id -u)/com.hsp.zimbr.relay` and
 `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hsp.zimbr.relay.plist`.
@@ -297,8 +327,10 @@ without requiring a restart or invoking the send again. Queued requests can resu
 only after route/epoch revalidation. Query by the original request ID after a
 network failure. Idempotency identities are never automatically pruned.
 
-Source inode changes, high-water regressions, or anchor GUID mismatches rebuild
-normalized source state under a new epoch. Old queued/in-flight requests become
+On macOS, the source identity uses a persistent volume UUID, inode, and birth
+time, so reboot-time device renumbering preserves the journal. Source identity
+changes, high-water regressions, or anchor GUID mismatches rebuild normalized
+source state under a new epoch. Old queued/in-flight requests become
 held `unknown` requests with `source_reset`, retaining their request IDs. Clients
 must explicitly synchronize again. Conservative invalidation may also occur for
 a benign database replacement or deletion of the anchor record.

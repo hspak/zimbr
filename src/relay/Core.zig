@@ -84,15 +84,18 @@ pub fn ingest(self: *Self, a: u.Allocator) !void {
     var live = try j.position(a, "live");
     var reset = false;
     if (stored_identity) |identity| {
-        reset = !u.eq(identity, source.identity) or high < live;
+        const legacy_candidate = !u.eq(identity, source.identity) and live > 0 and source.legacyIdentityCandidate(identity);
+        reset = (!u.eq(identity, source.identity) and !legacy_candidate) or high < live;
         if (!reset and live > 0) {
             const current = try source.guid(a, live);
             const saved = try j.progress(a, "anchor");
-            reset = current == null or saved == null or !u.eq(current.?, saved.?);
+            reset = current == null or saved == null or saved.?.len == 0 or !u.eq(current.?, saved.?);
         }
         if (reset) {
             try j.reset(a);
             live = 0;
+        } else if (legacy_candidate) {
+            try j.setProgress("identity", source.identity);
         }
     }
     if (stored_identity == null or reset) {

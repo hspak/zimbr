@@ -11,6 +11,7 @@ import tempfile
 import time
 import uuid
 from urllib.parse import urlencode
+from tls_support import Credentials
 
 
 def screen_locked():
@@ -37,18 +38,17 @@ def save_evidence(path, value):
 
 
 class Client:
-    def __init__(self,data_dir,port=8731):
-        self.token=(data_dir/'token').read_text().strip()
-        self.port=port
+    def __init__(self,data_dir,tls_config=None):
+        self.credentials=Credentials(tls_config or data_dir/'admin.json')
 
     def connect(self,path,body=None):
-        connection=http.client.HTTPConnection('127.0.0.1',self.port,timeout=20)
-        headers={'Authorization':'Bearer '+self.token}
+        connection=self.credentials.connection(timeout=20)
+        headers={}
         if body is not None:headers['Content-Type']='application/json'
         try:
             connection.request('POST' if body is not None else 'GET',path,json.dumps(body).encode() if body is not None else None,headers)
             response=connection.getresponse()
-            if response.status>=400:
+            if response.status>=300:
                 value=json.loads(response.read())
                 raise RuntimeError(value.get('error_info',{}).get('code','http_error'))
             return connection,response
@@ -90,6 +90,7 @@ def main():
     parser.add_argument('--restart',action='store_true',help='Restart only com.hsp.zimbr.relay after the send checks')
     parser.add_argument('--wait-for-lock',type=int,metavar='SECONDS',help='Wait for the user to lock the screen, then verify one existing-chat send while locked')
     parser.add_argument('--data-dir',type=Path,default=Path.home()/'Library/Application Support/Zimbr')
+    parser.add_argument('--tls-config',type=Path,help='Administrative HTTPS credential config (default: DATA/admin.json)')
     parser.add_argument('--output',type=Path,default=Path('.local/mac-acceptance.json'))
     args=parser.parse_args()
     if not args.confirm_send:parser.error('--confirm-send is required for a real-account test')
@@ -97,7 +98,7 @@ def main():
     if args.wait_for_lock is not None and (args.wait_for_lock<=0 or not args.conversation):parser.error('--wait-for-lock requires a positive timeout and --conversation')
     if args.output.exists():parser.error('Evidence already exists; inspect saved request IDs or choose a new --output instead of blindly repeating sends')
     os.umask(0o077)
-    client=Client(args.data_dir);request=client.request
+    client=Client(args.data_dir,args.tls_config);request=client.request
     status=request('/v1/status')
     if not status['capabilities']['send_direct']:raise RuntimeError('Integration not ready: '+','.join(status['degraded_reasons']))
     if args.wait_for_lock:

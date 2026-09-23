@@ -1,0 +1,2 @@
+# Provisioning and synthetic certificates only. Runtime API helpers use stdlib ssl.
+cryptography>=45,<47

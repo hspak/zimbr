@@ -1,10 +1,17 @@
 # Linux mTLS setup and handoff
 
 The Linux client requires direct HTTPS with TLS 1.3, HTTP/1.1, and a device
-certificate. The macOS relay migration is separate work; the current relay in
-this checkout still serves the old transport and cannot accept this client.
-Deploy the new client only with the matching mTLS relay described in
-[the migration plan](mtls-migration.md). No client fallback or tunnel is used.
+certificate. The macOS relay implementation is also present in the combined
+worktree and is installed on the Mac. The client provisioning flow and temporary
+relay adapter still need the corrections in [the integration review](linux-mtls-review.md)
+before the two-host cutover. No client fallback or tunnel is used.
+
+The Mac owns issuance and enrollment policy. Follow the authoritative
+[certificate management contract](certificate-management.md): request an
+explicit device SAN such as `linux-desktop.zimbr.invalid`, have the Mac signer
+validate that exact name, and validate the returned SAN during import. The
+commands below describe the incoming client helper; at `218d87c`, its request
+and import implementations need those changes before this workflow can complete.
 
 ## Provision a Linux device
 
@@ -31,7 +38,8 @@ inspect the CSR's signature, non-CA constraint, digital-signature key usage,
 and clientAuth EKU and reject unexpected extensions before signing. With the
 dedicated Zimbr `CAROOT`, sign using mkcert's `-csr` support; do not combine
 `-csr` with `-client`, run `mkcert -install`, or reuse a general development CA.
-The relay-side signer and allowlist management belong to the macOS work.
+Use the existing Mac `tools/tls_admin.py sign --role client --name ...` and
+`enroll` commands from the certificate contract for issuance and access.
 
 Return the issued device certificate and public `rootCA.pem`. Authenticate the
 CA's entire-DER SHA-256 fingerprint over trusted SSH or an independent channel
@@ -123,6 +131,12 @@ both API and SSE connections. An OpenSSL callback replaces the entire trust
 store, including default lookup methods, with the configured dedicated CA.
 Connections are reused only inside one immutable credential configuration.
 
+The native `fake-relay` and relay unit tests require OpenSSL **3.5 LTS** headers
+and libraries, matching the server wrapper. If the Linux system libraries use a
+different minor version, supply a target OpenSSL 3.5 build using
+`-Dopenssl-prefix=/absolute/openssl-3.5` in the command below. See
+[the relay build instructions](macos-tls.md#build).
+
 ```sh
 zig build test client client-probe fake-relay
 python3 tests/client_tls.py
@@ -136,12 +150,14 @@ zig fmt --check build.zig src
 
 Python client harnesses require `cryptography` and use ephemeral CAs; no test CA
 is installed in system trust stores. `tests/tls_fixture.py` supplies authenticated
-TLS endpoints. Until the macOS relay work lands, its test-only adapter forwards
-synthetic payloads to the existing fake relay over loopback. This validates the
-real Linux worker, persistence, and HTTP/SSE fault handling; it does **not** prove
-the future relay's TLS wrapper, enrollment, revocation, handshake limits, or
-signed LaunchAgent behavior. Keep the existing server tests until that work
-converts them. Replace the adapter with the native TLS fake relay at integration.
+TLS endpoints. Its test-only adapter still forwards synthetic payloads to the
+old fake relay over plaintext loopback; the current native fake relay no longer
+supports that transport. Convert these integration consumers to the native TLS
+fake relay before rerunning, using `tests/relay_fixture.py` and
+`tests/integration.py` as references. Earlier adapter results cover the Linux
+worker, persistence, and HTTP/SSE fault handling but do **not** establish native
+relay TLS, enrollment, revocation, handshake limits, or signed LaunchAgent
+behavior. Current server evidence is in [macOS TLS operation](macos-tls.md).
 
 The server contract is unchanged API v1 payloads/cursors/request IDs behind a
 TLS 1.3, HTTP/1.1 origin. Both API and event connections present the device leaf;

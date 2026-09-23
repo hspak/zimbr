@@ -7,13 +7,23 @@ from pathlib import Path
 import socket
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 from fixture import create, add_message
+from relay_fixture import Fixture
 
 ROOT=Path(__file__).resolve().parents[1]
 BIN=ROOT/'zig-out/bin/fake-relay'
+
+@contextmanager
+def database(path):
+    db=sqlite3.connect(path)
+    try:
+        with db: yield db
+    finally: db.close()
 
 def wait_for(fn, timeout=20):
     deadline=time.monotonic()+timeout
@@ -27,17 +37,18 @@ def wait_for(fn, timeout=20):
 
 def main():
     with tempfile.TemporaryDirectory(prefix='zimbr-test-') as folder:
-        root=Path(folder);source=root/'source.db';data=root/'data';create(source)
+        root=Path(folder).resolve();source=root/'source.db';data=root/'data';create(source)
         s=socket.socket();s.bind(('127.0.0.1',0));port=s.getsockname()[1];s.close()
-        common=['--data-dir',str(data),'--messages-db',str(source),'--port',str(port)]
+        tls=Fixture(root,port)
+        common=['--data-dir',str(data),'--messages-db',str(source),'--config',str(tls.config)]
         subprocess.run([str(BIN),'setup',*common],check=True,stdout=subprocess.DEVNULL)
-        token=(data/'token').read_text();assert (data/'token').stat().st_mode & 0o777==0o600
+        assert not (data/'token').exists()
         log=open(root/'relay.log','w+')
         proc=None
         def start():return subprocess.Popen([str(BIN),'serve',*common],stdout=log,stderr=log)
         def request(path, body=None, auth=True, method=None, headers=None):
-            c=http.client.HTTPConnection('127.0.0.1',port,timeout=4)
-            h={'Authorization':'Bearer '+token} if auth else {}
+            c=tls.connection(auth=auth)
+            h={}
             if body is not None:h['Content-Type']='application/json'
             h.update(headers or {})
             c.request(method or ('POST' if body is not None else 'GET'),path,json.dumps(body).encode() if body is not None else None,h)
@@ -48,23 +59,25 @@ def main():
         def send(text, target=None):
             return {'request_id':str(uuid.uuid4()),'server_epoch':snapshot()['server_epoch'],'target':target or {'recipient':{'address':'alice@example.invalid','service':'imessage'}},'text':text}
         def sql(statement,args=()):
-            with sqlite3.connect(data/'relay.db') as db:return db.execute(statement,args).fetchall()
+            with database(data/'relay.db') as db:return db.execute(statement,args).fetchall()
         try:
             proc=start();wait_for(ready)
-            # A reused socket must still authenticate each request independently.
-            persistent=http.client.HTTPConnection('127.0.0.1',port,timeout=4)
-            persistent.request('GET','/v1/status',headers={'Authorization':'Bearer '+token})
+            # A pooled HTTPS connection retains the authenticated device identity.
+            persistent=tls.connection()
+            persistent.request('GET','/v1/status',headers={})
             response=persistent.getresponse();assert response.status==200;response.read()
             original_socket=persistent.sock
-            persistent.request('GET','/v1/sync',headers={'Authorization':'Bearer '+token})
+            persistent.request('GET','/v1/sync',headers={})
             response=persistent.getresponse();assert response.status==200;response.read()
             assert persistent.sock is original_socket and original_socket is not None
             persistent.request('GET','/v1/status',headers={'Authorization':'Bearer '+'0'*64})
-            response=persistent.getresponse();assert response.status==401;response.read();persistent.close()
+            response=persistent.getresponse();assert response.status==200;response.read();persistent.close()
             duplicate=subprocess.run([str(BIN),'serve',*common],capture_output=True,timeout=5)
             assert duplicate.returncode!=0 and b'AlreadyRunning' in duplicate.stderr
-            assert request('/v1/status',auth=False)[0]==401
-            assert request('/v1/events?after=bad',auth=False)[0]==401
+            for path in ('/v1/status','/v1/events?after=bad'):
+                try: request(path,auth=False)
+                except (OSError,http.client.HTTPException): pass
+                else: raise AssertionError('Missing client certificate was accepted')
             wait_for(lambda:sql('SELECT count(*) FROM messages')[0][0]==244)
             conversations=request('/v1/conversations?limit=2')[1]
             assert len(conversations['conversations'])==2 and conversations['next']
@@ -85,15 +98,15 @@ def main():
             assert {'text','unsupported','attachment','reaction','system'}<=kinds
             assert all('source' not in m and 'date_ns' not in m for m in page['messages'])
             before=snapshot();old_count=sql('SELECT count(*) FROM messages')[0][0]
-            with sqlite3.connect(source) as db:
+            with database(source) as db:
                 delayed=add_message(db,'Delayed join',chat=None)
                 add_message(db,'Arrived between snapshot and stream',date=1)
             wait_for(lambda:sql('SELECT count(*) FROM messages')[0][0]==old_count+1)
-            with sqlite3.connect(source) as db:db.execute('INSERT INTO chat_message_join VALUES(1,?)',(delayed,))
+            with database(source) as db:db.execute('INSERT INTO chat_message_join VALUES(1,?)',(delayed,))
             wait_for(lambda:sql('SELECT count(*) FROM messages')[0][0]==old_count+2)
             # Replay a cursor captured before the insertion, using actual SSE framing.
-            c=http.client.HTTPConnection('127.0.0.1',port,timeout=5)
-            c.request('GET','/v1/events?after='+before['cursor'],headers={'Authorization':'Bearer '+token})
+            c=tls.connection(timeout=5)
+            c.request('GET','/v1/events?after='+before['cursor'],headers={})
             r=c.getresponse();assert r.status==200
             observed=[]
             while len(observed)<2:
@@ -104,22 +117,22 @@ def main():
             r.close();c.close();time.sleep(.3);assert len({e['record']['id'] for e in observed})==2
             # Recent reconciliation can discover rows ahead of the 100-row
             # live scan. Their first events must still allow live notifications.
-            with sqlite3.connect(source) as db:
+            with database(source) as db:
                 for index in range(220):add_message(db,'Live burst '+str(index))
             wait_for(lambda:sql("SELECT count(*) FROM messages WHERE text LIKE 'Live burst %'")[0][0]==220)
             first_events=sql("SELECT origin,min(sequence) FROM events WHERE type='message.upsert' AND json_extract(record,'$.text') LIKE 'Live burst %' GROUP BY json_extract(record,'$.id')")
             assert len(first_events)==220 and all(origin=='live' for origin,_ in first_events)
             assert request('/v1/events?after='+before['cursor'],headers={'Last-Event-ID':snapshot()['cursor']})[0]==400
             assert request('/v1/conversations?limit=201')[0]==400
-            oversized=http.client.HTTPConnection('127.0.0.1',port,timeout=4)
-            oversized.request('POST','/v1/messages',b'x'*65537,{'Authorization':'Bearer '+token,'Content-Type':'application/json'})
+            oversized=tls.connection()
+            oversized.request('POST','/v1/messages',b'x'*65537,{'Content-Type':'application/json'})
             assert oversized.getresponse().status==413;oversized.close()
             assert request('/v1/conversations?limit=2&limit=3')[0]==400
             # Streams are capped independently of normal request connections.
             streams=[]
             for _ in range(8):
-                connection=http.client.HTTPConnection('127.0.0.1',port,timeout=4)
-                connection.request('GET','/v1/events?after='+snapshot()['cursor'],headers={'Authorization':'Bearer '+token})
+                connection=tls.connection()
+                connection.request('GET','/v1/events?after='+snapshot()['cursor'],headers={})
                 response=connection.getresponse();assert response.status==200
                 streams.append((connection,response))
             assert request('/v1/events?after='+snapshot()['cursor'])[0]==503
@@ -131,14 +144,14 @@ def main():
             # process restart and must never execute the same request again.
             lost_result=send('[fake:stall]');assert request('/v1/messages',lost_result)[0]==202
             wait_for(lambda:request('/v1/send-requests/'+lost_result['request_id'])[1]['state']=='dispatching')
-            with sqlite3.connect(data/'relay.db') as db:
+            with database(data/'relay.db') as db:
                 db.execute("CREATE TRIGGER lose_dispatch_result BEFORE UPDATE ON send_requests WHEN OLD.id='"+lost_result['request_id']+"' AND NEW.state!='dispatching' BEGIN SELECT RAISE(ABORT,'injected_after_dispatch'); END")
             def source_count(text):
-                with sqlite3.connect(source) as db:return db.execute('SELECT count(*) FROM message WHERE text=?',(text,)).fetchone()[0]
+                with database(source) as db:return db.execute('SELECT count(*) FROM message WHERE text=?',(text,)).fetchone()[0]
             wait_for(lambda:source_count(lost_result['text'])==1)
             time.sleep(.4)
             assert request('/v1/send-requests/'+lost_result['request_id'])[1]['state']=='dispatching'
-            with sqlite3.connect(data/'relay.db') as db:db.execute('DROP TRIGGER lose_dispatch_result')
+            with database(data/'relay.db') as db:db.execute('DROP TRIGGER lose_dispatch_result')
             wait_for(lambda:request('/v1/send-requests/'+lost_result['request_id'])[1]['state']=='unknown',timeout=4)
             assert request('/v1/messages',lost_result)[0]==200
             assert source_count(lost_result['text'])==1
@@ -160,7 +173,7 @@ def main():
             assert request('/v1/messages',group)[0]==202
             ambiguous=send('[fake:unknown]');assert request('/v1/messages',ambiguous)[0]==202
             wait_for(lambda:request('/v1/send-requests/'+ambiguous['request_id'])[1]['state']=='unknown')
-            with sqlite3.connect(source) as db:
+            with database(source) as db:
                 add_message(db,ambiguous['text'],is_from_me=1,is_sent=1,is_delivered=1)
                 add_message(db,ambiguous['text'],is_from_me=1,is_sent=1,is_delivered=1)
             rejected=send('[fake:reject]');assert request('/v1/messages',rejected)[0]==202
@@ -187,9 +200,22 @@ def main():
             assert snapshot()['server_epoch']==old['server_epoch']
             assert sql('SELECT id FROM messages ORDER BY id')==known
             assert request('/v1/messages',v)[0]==200
+            if sys.platform == 'darwin':
+                # A reboot can renumber the same APFS volume. Upgrade old
+                # device:inode identities only with the matching row/GUID anchor.
+                proc.terminate();proc.wait(timeout=5)
+                stable=sql("SELECT value FROM ingestion_progress WHERE key='identity'")[0][0]
+                assert stable.startswith('mac-v1:')
+                with database(data/'relay.db') as db:
+                    db.execute("UPDATE ingestion_progress SET value=? WHERE key='identity'",(f'{source.stat().st_dev+1}:{source.stat().st_ino}',))
+                proc=start();wait_for(ready)
+                assert snapshot()['server_epoch']==old['server_epoch']
+                assert sql('SELECT id FROM messages ORDER BY id')==known
+                assert sql("SELECT value FROM ingestion_progress WHERE key='identity'")[0][0]==stable
+                assert request('/v1/messages',v)[0]==200
             # Expiry is explicit over HTTP and never removes the idempotency record.
             proc.terminate();proc.wait(timeout=5)
-            with sqlite3.connect(data/'relay.db') as db:db.execute('UPDATE events SET created_ms=0')
+            with database(data/'relay.db') as db:db.execute('UPDATE events SET created_ms=0')
             proc=start();wait_for(ready)
             assert request('/v1/events?after='+old['server_epoch']+':0')[0]==410
             assert request('/v1/messages',v)[0]==200
@@ -203,7 +229,7 @@ def main():
             assert request('/v1/send-requests/'+queued['request_id'])[1]['state']=='queued'
             begun=time.monotonic();assert request('/v1/status')[0]==200
             assert time.monotonic()-begun<1
-            with sqlite3.connect(source) as db:add_message(db,'ingested during stalled send')
+            with database(source) as db:add_message(db,'ingested during stalled send')
             wait_for(lambda:sql("SELECT count(*) FROM messages WHERE text='ingested during stalled send'")[0][0]==1,timeout=2.5)
             proc.kill();proc.wait(timeout=5);proc=start();wait_for(ready)
             assert request('/v1/send-requests/'+interrupted['request_id'])[1]['state']=='unknown'
@@ -218,13 +244,20 @@ def main():
             assert request('/v1/events?after='+old['cursor'])[0]==409
             assert request('/v1/messages',v)[0]==409
             assert sql('SELECT count(*) FROM send_requests')[0][0]>=4
-            # Token rotation invalidates credentials; unauthorized requests expose no content.
-            subprocess.run([str(BIN),'rotate-token',*common],check=True,stdout=subprocess.DEVNULL)
-            assert request('/v1/status')[0]==401
-            token=(data/'token').read_text();assert request('/v1/status')[0]==200
-            print('PASS: HTTP auth, pagination, import, delayed joins, SSE overlap, Unicode, send idempotency, result persistence failure, queued recovery, restart, interrupted dispatch, source reset, token rotation')
+            if sys.platform == 'darwin':
+                # An inode match alone must not authorize legacy migration.
+                old_reset=snapshot()['server_epoch']
+                proc.terminate();proc.wait(timeout=5)
+                with database(data/'relay.db') as db:
+                    db.execute("UPDATE ingestion_progress SET value=? WHERE key='identity'",(f'{source.stat().st_dev+1}:{source.stat().st_ino}',))
+                    db.execute("UPDATE ingestion_progress SET value='changed-source-anchor' WHERE key='anchor'")
+                proc=start();wait_for(ready)
+                assert snapshot()['server_epoch']!=old_reset
+            print('PASS: mTLS, pagination, import, delayed joins, SSE overlap, Unicode, send idempotency, result persistence failure, queued recovery, restart, interrupted dispatch, source identity and reset')
         except Exception:
-            log.flush();log.seek(0);print(log.read());raise
+            log.flush();log.seek(0);print(log.read())
+            print('Synthetic request states:',sql("SELECT state,record FROM send_requests"))
+            raise
         finally:
             if proc and proc.poll() is None:proc.terminate();proc.wait(timeout=5)
             log.close()

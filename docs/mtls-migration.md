@@ -1,10 +1,12 @@
 **Direct HTTPS with mandatory mTLS — migration design**
 
-Proposed on 2026-09-23 against the HTTP-through-SSH release. The Linux client
-implementation and setup are described in [linux-mtls.md](linux-mtls.md). Server
-implementation and coordinated deployment remain separate macOS work. One coordinated release replaces that
-transport and its shared bearer token. There is no compatibility listener or
-automatic downgrade. The HTTP v1 payloads, durable cursors, send request IDs,
+Proposed on 2026-09-23 against the HTTP-through-SSH release. The macOS relay and
+Linux client implementations are both present. See [macOS operation](macos-tls.md),
+[Linux setup](linux-mtls.md), and the [integration review](linux-mtls-review.md).
+The Mac is authoritative for [certificate management](certificate-management.md);
+client provisioning must follow that issuance and enrollment contract.
+Linux execution and device provisioning remain on the Linux host.
+There is no compatibility listener or automatic downgrade. The HTTP v1 payloads, durable cursors, send request IDs,
 relay journal, client cache, and drafts retain their current semantics.
 
 The target connection is:

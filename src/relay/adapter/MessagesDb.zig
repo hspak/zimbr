@@ -26,6 +26,20 @@ pub fn open(a: u.Allocator, path: [:0]const u8) !Self {
 pub fn close(self: Self) void {
     self.db.close();
 }
+pub fn legacyIdentityCandidate(self: Self, saved: []const u8) bool {
+    // Only upgrades from the old decimal device:inode format qualify. Core
+    // additionally requires the saved nonempty row/GUID anchor to match before
+    // adopting this volume UUID. Different modern identities always reset.
+    if (!std.mem.startsWith(u8, self.identity, "mac-v1:")) return false;
+    var old = std.mem.splitScalar(u8, saved, ':');
+    _ = std.fmt.parseInt(u64, old.next() orelse return false, 10) catch return false;
+    const inode = std.fmt.parseInt(u64, old.next() orelse return false, 10) catch return false;
+    if (old.next() != null) return false;
+    var current = std.mem.splitScalar(u8, self.identity, ':');
+    _ = current.next(); // version
+    _ = current.next(); // volume UUID
+    return inode == (std.fmt.parseInt(u64, current.next() orelse return false, 10) catch return false);
+}
 pub fn high(self: Self) !i64 {
     return self.db.scalar("SELECT coalesce(max(ROWID),0) FROM message");
 }

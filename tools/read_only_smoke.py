@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Read-only development-identity API smoke test; no automation and no sends."""
+import argparse
 import http.client
 import json
 from pathlib import Path
@@ -7,22 +8,26 @@ import subprocess
 import tempfile
 import time
 
+from tls_support import Credentials
+
 ROOT=Path(__file__).resolve().parents[1]
 BIN=ROOT/'zig-out/bin/relay'
 
 def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--relay-config',type=Path,required=True,help='TLS relay config with an unused explicit local port')
+    parser.add_argument('--tls-config',type=Path,required=True,help='Enrolled administrative HTTPS credentials')
+    args=parser.parse_args()
+    credentials=Credentials(args.tls_config)
     with tempfile.TemporaryDirectory(prefix='zimbr-read-probe-') as temporary:
         data=Path(temporary)
         subprocess.run([str(BIN),'setup','--data-dir',str(data)],check=True,stdout=subprocess.DEVNULL)
-        token=(data/'token').read_text().strip()
-        import socket
-        sock=socket.socket();sock.bind(('127.0.0.1',0));port=sock.getsockname()[1];sock.close()
         def request(path):
-            c=http.client.HTTPConnection('127.0.0.1',port,timeout=8)
-            c.request('GET',path,headers={'Authorization':'Bearer '+token})
+            c=credentials.connection(timeout=8)
+            c.request('GET',path)
             r=c.getresponse();assert r.status==200;body=json.loads(r.read());c.close();return body
         with (data/'log').open('w+') as log:
-            def start():return subprocess.Popen([str(BIN),'serve','--read-only','--data-dir',str(data),'--port',str(port)],stdout=log,stderr=log)
+            def start():return subprocess.Popen([str(BIN),'serve','--read-only','--data-dir',str(data),'--config',str(args.relay_config)],stdout=log,stderr=log)
             proc=start()
             try:
                 deadline=time.monotonic()+30

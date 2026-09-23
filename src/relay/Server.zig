@@ -3,14 +3,16 @@ const u = @import("../common.zig");
 const t = @import("../protocol/types.zig");
 const Core = @import("Core.zig");
 const Transport = @import("Transport.zig");
+const Tls = @import("Tls.zig");
 const Self = @This();
 core: *Core,
-token_path: [:0]const u8,
-port: u16 = 8731,
+tls: Tls,
+handshakes: std.atomic.Value(usize) = .init(0),
 pub fn run(self: *Self) !void {
-    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", self.port);
+    const address = try std.Io.net.IpAddress.parse(self.tls.config.listen_address, self.tls.config.port);
     var listener = try address.listen(self.core.io, .{ .reuse_address = true });
     defer listener.deinit(self.core.io);
+    std.debug.print("relay: HTTPS mTLS listening on {s}:{d}\n", .{ self.tls.config.listen_address, self.tls.config.port });
     while (!self.core.stop.load(.acquire)) {
         const stream = try listener.accept(self.core.io);
         if (self.core.connections.fetchAdd(1, .acq_rel) >= 32) {
@@ -18,8 +20,15 @@ pub fn run(self: *Self) !void {
             stream.close(self.core.io);
             continue;
         }
+        if (self.handshakes.fetchAdd(1, .acq_rel) >= 4) {
+            _ = self.handshakes.fetchSub(1, .acq_rel);
+            _ = self.core.connections.fetchSub(1, .acq_rel);
+            stream.close(self.core.io);
+            continue;
+        }
         const thread = std.Thread.spawn(.{}, connection, .{ self, stream }) catch {
             stream.close(self.core.io);
+            _ = self.handshakes.fetchSub(1, .acq_rel);
             _ = self.core.connections.fetchSub(1, .acq_rel);
             continue;
         };
@@ -29,22 +38,27 @@ pub fn run(self: *Self) !void {
 fn connection(self: *Self, stream: std.Io.net.Stream) void {
     defer _ = self.core.connections.fetchSub(1, .acq_rel);
     defer stream.close(self.core.io);
-    u.c.zr_socket_timeout(stream.socket.handle);
+    const connection_tls = Tls.c.zr_tls_accept(self.tls.context, stream.socket.handle);
+    _ = self.handshakes.fetchSub(1, .acq_rel);
+    const peer = connection_tls orelse return;
+    defer Tls.c.zr_tls_free(peer);
     var read_buf: [16384]u8 = undefined;
     var write_buf: [8192]u8 = undefined;
-    var reader = Transport.Reader.init(stream.socket.handle, &read_buf);
-    var writer = Transport.Writer.init(stream.socket.handle, &write_buf);
+    var reader = Transport.Reader.init(peer, &read_buf);
+    var writer = Transport.Writer.init(peer, &write_buf);
     var server = std.http.Server.init(&reader.interface, &writer.interface);
     // Reuse authenticated HTTP connections across bounded requests. Each
     // request still gets fresh authorization, a deadline, and its own arena.
     for (0..64) |request_index| {
         reader.deadline = u.c.zr_monotonic_ms() + 10000;
+        if (Tls.c.zr_tls_valid(peer) == 0) return;
         var req = server.receiveHead() catch return;
+        if (Tls.c.zr_tls_valid(peer) == 0) return;
         if (request_index == 63) req.head.keep_alive = false;
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
-        self.handle(arena.allocator(), &req, stream.socket.handle) catch |err| {
-            if (err == error.WriteFailed or err == error.ReadFailed or err == error.EndOfStream) return;
+        self.handle(arena.allocator(), &req, peer) catch |err| {
+            if (err == error.WriteFailed or err == error.ReadFailed or err == error.EndOfStream or err == error.CertificateExpired) return;
             const mapping = mapError(err);
             const body = u.json(arena.allocator(), .{ .error_info = t.SafeError{ .code = mapping.code, .message = mapping.message } }) catch return;
             req.head.keep_alive = false;
@@ -54,32 +68,16 @@ fn connection(self: *Self, stream: std.Io.net.Stream) void {
         if (!req.head.keep_alive or server.reader.state != .ready) return;
     }
 }
-fn token(self: *Self) ![64]u8 {
-    var buf: [66]u8 = undefined;
-    const n = u.c.zr_read_secret(self.token_path, &buf, buf.len);
-    if (n < 0) return error.ConfigurationRequired;
-    const value = std.mem.trim(u8, buf[0..@intCast(n)], "\r\n");
-    if (value.len != 64) return error.ConfigurationRequired;
-    for (value) |ch| if (!std.ascii.isHex(ch)) return error.ConfigurationRequired;
-    return value[0..64].*;
-}
-fn handle(self: *Self, a: u.Allocator, req: *std.http.Server.Request, fd: c_int) !void {
-    var auth: ?[]const u8 = null;
+fn handle(self: *Self, a: u.Allocator, req: *std.http.Server.Request, peer: *Tls.c.ZrTls) !void {
     var last: ?[]const u8 = null;
     var headers = req.iterateHeaders();
     while (headers.next()) |h| {
-        if (std.ascii.eqlIgnoreCase(h.name, "authorization")) {
-            if (auth != null) return error.Unauthorized;
-            auth = h.value;
-        }
         if (std.ascii.eqlIgnoreCase(h.name, "last-event-id")) {
             if (last != null) return error.InvalidRequest;
             last = try a.dupe(u8, h.value);
         }
     }
-    const expected = try self.token();
-    const authorization = auth orelse return error.Unauthorized;
-    if (authorization.len != 71 or !std.mem.startsWith(u8, authorization, "Bearer ") or !std.crypto.timing_safe.eql([64]u8, authorization[7..71].*, expected)) return error.Unauthorized;
+    if (req.head.version != .@"HTTP/1.1") return error.InvalidRequest;
     if (req.head.transfer_compression != .identity) return error.InvalidRequest;
     if ((req.head.content_length orelse 0) > t.max_body) return error.BodyTooLarge;
     if (req.head.method == .GET and ((req.head.content_length orelse 0) != 0 or req.head.transfer_encoding == .chunked)) return error.InvalidRequest;
@@ -91,7 +89,7 @@ fn handle(self: *Self, a: u.Allocator, req: *std.http.Server.Request, fd: c_int)
         const after = try param(a, query, "after");
         if (after != null and last != null and !u.eq(after.?, last.?)) return error.InvalidRequest;
         const cursor = after orelse last orelse return error.InvalidRequest;
-        try self.events(req, cursor, expected, fd);
+        try self.events(req, cursor, peer);
         return;
     }
     var input: ?t.SendInput = null;
@@ -102,6 +100,7 @@ fn handle(self: *Self, a: u.Allocator, req: *std.http.Server.Request, fd: c_int)
         const body = body_reader.allocRemaining(a, .limited(t.max_body)) catch |err| return if (err == error.StreamTooLong) error.BodyTooLarge else error.InvalidRequest;
         input = (std.json.parseFromSlice(t.SendInput, a, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return error.InvalidRequest).value;
     } else if (req.head.method != .GET) return error.NotFound;
+    if (Tls.c.zr_tls_valid(peer) == 0) return error.CertificateExpired;
     var response: []const u8 = undefined;
     var status: std.http.Status = .ok;
     {
@@ -139,7 +138,7 @@ fn handle(self: *Self, a: u.Allocator, req: *std.http.Server.Request, fd: c_int)
     }
     try respond(req, response, status);
 }
-fn events(self: *Self, req: *std.http.Server.Request, start: []const u8, initial_token: [64]u8, fd: c_int) !void {
+fn events(self: *Self, req: *std.http.Server.Request, start: []const u8, peer: *Tls.c.ZrTls) !void {
     if (self.core.streams.fetchAdd(1, .acq_rel) >= 8) {
         _ = self.core.streams.fetchSub(1, .acq_rel);
         return error.TooManyStreams;
@@ -162,7 +161,7 @@ fn events(self: *Self, req: *std.http.Server.Request, start: []const u8, initial
     var heartbeat = u.now();
     while (!self.core.stop.load(.acquire)) {
         const observed = self.core.changed.observe();
-        if (u.c.zr_socket_closed(fd) != 0) return;
+        if (Tls.c.zr_tls_closed(peer) != 0 or Tls.c.zr_tls_valid(peer) == 0) return;
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
         const a = arena.allocator();
@@ -185,8 +184,6 @@ fn events(self: *Self, req: *std.http.Server.Request, start: []const u8, initial
             stream.flush() catch return;
         }
         if (u.now() - heartbeat >= 15000) {
-            const current_token = self.token() catch return;
-            if (!std.crypto.timing_safe.eql([64]u8, current_token, initial_token)) return;
             stream.writer.writeAll(": heartbeat\n\n") catch return;
             stream.writer.flush() catch return;
             stream.flush() catch return;
@@ -230,7 +227,6 @@ fn param(a: u.Allocator, query: []const u8, key: []const u8) !?[]const u8 {
 const ErrorMapping = struct { status: std.http.Status, code: []const u8, message: []const u8 };
 fn mapError(err: anyerror) ErrorMapping {
     return switch (err) {
-        error.Unauthorized => .{ .status = .unauthorized, .code = "unauthorized", .message = "A valid bearer token is required." },
         error.InvalidRequest => .{ .status = .bad_request, .code = "invalid_request", .message = "The request is invalid." },
         error.UnsupportedTarget => .{ .status = .bad_request, .code = "unsupported_target", .message = "Only explicit iMessage targets are supported." },
         error.RequestConflict => .{ .status = .conflict, .code = "request_conflict", .message = "This request ID already has a different payload." },

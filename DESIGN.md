@@ -1,7 +1,8 @@
 # iMessage relay design
 
 Status: design specification, with relay and Linux client implementations available.
-Current macOS acceptance evidence is tracked in [docs/mac-validation.md](docs/mac-validation.md);
+Current macOS TLS evidence is tracked in [docs/macos-tls.md](docs/macos-tls.md);
+the earlier Messages acceptance record is [docs/mac-validation.md](docs/mac-validation.md).
 Linux build, verification, and text-backend limitations are documented in [README.md](README.md).
 
 Build a small, self-hosted system that uses an always-on Mac mini, signed into
@@ -23,9 +24,11 @@ must remain visible as unsupported content rather than silently disappearing.
 The Mac remains the endpoint that communicates with Apple's iMessage service.
 The relay exposes our own API; Linux never receives Apple account credentials.
 Connectivity uses direct HTTPS with mandatory device certificates (TLS 1.3,
-HTTP/1.1). The Linux implementation is complete; relay implementation is separate
-macOS work. [The migration contract](docs/mtls-migration.md) supersedes the old
-SSH/bearer-token transport; [Linux setup](docs/linux-mtls.md) documents provisioning.
+HTTP/1.1). Both transport implementations are present; the Linux provisioning
+and test handoff still needs the corrections in [the integration review](docs/linux-mtls-review.md).
+[The migration contract](docs/mtls-migration.md) supersedes the old SSH/bearer-token
+transport. The Mac defines [certificate policy](docs/certificate-management.md);
+[Linux setup](docs/linux-mtls.md) documents the client workflow.
 
 ```mermaid
 flowchart LR
@@ -161,6 +164,12 @@ At first startup:
 Maintain separate progress for historical import and live scanning. Records can
 arrive with old message timestamps, so do not use timestamps alone to decide
 whether a message is new.
+
+On macOS, identify the source file by its persistent volume UUID, inode, and
+birth time. Device numbers can change at reboot and must not cause a source
+reset. Upgrade a legacy device/inode identity only when the inode and saved
+nonempty row/GUID anchor match. A new modern identity, a regressed high-water
+mark, or a missing/changed anchor still requires a new epoch.
 
 Scanning must also account for existing rows that become complete later:
 
@@ -312,18 +321,26 @@ References:
 
 ### 1.8. Security and service operation
 
-Bind the relay to an explicitly configured reachable address; bind failure must
-not select another interface. Authenticate TLS peers before parsing HTTP using a
-dedicated CA and an enabled SHA-256 fingerprint of the device leaf's entire DER.
-Use locally generated leaf keys and setup-time mkcert CSR signing. Runtime private
-keys and security configuration are owned 0600 files in 0700 directories. Keep
-the CA signing key outside runtime directories. The relay implementation and its
-lifecycle/handshake acceptance checks belong to the macOS migration.
+Bind only the explicit IP in the private relay configuration, with no wildcard
+fallback. Require TLS 1.3 and HTTP/1.1 on every route. OpenSSL 3.5 is statically
+linked into the Mac app; the fake relay uses the same verification and transport.
 
-The Mac can read message plaintext, and the client cache will also contain
-plaintext. Apple's iMessage encryption terminates at the Mac; the relay-to-client
-connection is a separate protected hop. The transport uses mutually authenticated TLS in transit and
-the operating systems' account and disk protections at rest.
+A dedicated mkcert CA signs locally generated server/client CSRs after strict
+extension/purpose/SAN validation. Never install this CA into system trust.
+The relay requires a valid clientAuth chain and an enabled SHA-256 leaf fingerprint
+before parsing HTTP. Subject names and labels are not authorization. Keep keys
+and security configuration in owner-only files under 0700 directories, without
+symlinks. The CA key stays in administrative storage outside runtime directories.
+
+An atomic allowlist update followed by a verified LaunchAgent restart applies
+enrollment, renewal, or revocation and closes established sessions. Session
+resumption and early data are disabled. Check leaf validity for each HTTP request
+and throughout SSE. Cap connections at 32 and handshakes at 4, with a 5-second
+handshake deadline and 10-second application read/write deadlines.
+
+The Mac and client caches contain plaintext. Apple's iMessage encryption
+terminates at the Mac; TLS protects the separate relay-to-client hop. Operating
+system account and disk protections apply at rest.
 
 Logs should contain operation IDs, error categories, durations, and counts.
 Exclude message bodies, private keys, and raw participant addresses by default.
@@ -334,10 +351,9 @@ concurrent streams, and subprocess output. Disconnect slow event consumers rathe
 than allowing unbounded memory growth; their durable cursor permits recovery.
 If the relay cannot persist a send request, reject it before dispatch.
 
-Device renewal replaces credentials and reconnects without resetting the cache.
-Revocation requires applying the relay allowlist and completing its restart so
-existing connections close. A private network supplies reachability; mTLS supplies
-peer authentication.
+Device renewal preserves client state. Revocation requires an allowlist update
+and completed relay restart. Private networking supplies reachability and mTLS
+supplies peer authentication.
 
 ### 1.9. Mac acceptance checks
 

@@ -4,6 +4,7 @@ const t = @import("protocol/types.zig");
 const Journal = @import("relay/Journal.zig");
 const Core = @import("relay/Core.zig");
 const Server = @import("relay/Server.zig");
+const Tls = @import("relay/Tls.zig");
 const Adapter = if (@import("options").fake) @import("relay/adapter/fake.zig") else @import("relay/adapter/macos.zig");
 const fake = @import("options").fake;
 pub fn main(init: std.process.Init) void {
@@ -19,7 +20,7 @@ fn run(init: std.process.Init) !void {
     var data: []const u8 = try std.fmt.allocPrint(a, "{s}/Library/Application Support/Zimbr", .{home});
     var source: []const u8 = try std.fmt.allocPrint(a, "{s}/Library/Messages/chat.db", .{home});
     var source_explicit = false;
-    var port: u16 = 8731;
+    var config_path: ?[]const u8 = null;
     var event_limit: i64 = 100000;
     var check_automation = false;
     var read_only = false;
@@ -38,9 +39,8 @@ fn run(init: std.process.Init) !void {
         if (u.eq(args[i], "--data-dir")) data = args[i + 1] else if (u.eq(args[i], "--messages-db")) {
             source = args[i + 1];
             source_explicit = true;
-        } else if (u.eq(args[i], "--port")) {
-            port = try std.fmt.parseInt(u16, args[i + 1], 10);
-            if (port == 0) return error.InvalidArguments;
+        } else if (u.eq(args[i], "--config")) {
+            config_path = args[i + 1];
         } else if (u.eq(args[i], "--event-limit")) {
             event_limit = try std.fmt.parseInt(i64, args[i + 1], 10);
             if (event_limit < 100) return error.InvalidArguments;
@@ -49,33 +49,28 @@ fn run(init: std.process.Init) !void {
     }
     if (fake and (!source_explicit or !std.fs.path.isAbsolute(source))) return error.ExplicitFixturePathRequired;
     const source_path = try a.dupeZ(u8, source);
-    const token_path = try std.fmt.allocPrintSentinel(a, "{s}/token", .{data}, 0);
+    const tls_path = config_path orelse try std.fmt.allocPrint(a, "{s}/relay.json", .{data});
     const db_path = try std.fmt.allocPrintSentinel(a, "{s}/relay.db", .{data}, 0);
-    if (u.eq(cmd, "setup") or u.eq(cmd, "rotate-token")) {
+    if (u.eq(cmd, "setup")) {
         _ = u.c.umask(0o077);
         try std.Io.Dir.cwd().createDirPath(init.io, data);
         const dz = try a.dupeZ(u8, data);
         if (u.c.chmod(dz, 0o700) != 0) return error.PermissionRequired;
-        var random: [32]u8 = undefined;
-        if (u.c.zr_random(&random, random.len) != 0) return error.RandomUnavailable;
-        const token = std.fmt.bytesToHex(random, .lower);
-        if (u.eq(cmd, "rotate-token")) {
-            const tmp = try std.fmt.allocPrintSentinel(a, "{s}/token-{s}", .{ data, try u.id(a) }, 0);
-            if (u.c.zr_secure_file(tmp, &token, token.len, 0) != 0) return error.TokenWriteFailed;
-            if (u.c.rename(tmp, token_path) != 0) {
-                _ = u.c.unlink(tmp);
-                return error.TokenWriteFailed;
-            }
-        } else if (u.c.zr_secure_file(token_path, &token, token.len, 0) != 0) {
-            var b: [66]u8 = undefined;
-            if (u.c.zr_read_secret(token_path, &b, b.len) < 64) return error.TokenWriteFailed;
-        }
         const journal = try Journal.open(db_path);
         journal.close();
-        try printJson(a, .{ .configured = true, .token_rotated = u.eq(cmd, "rotate-token") });
+        try printJson(a, .{ .state_initialized = true });
+        return;
+    }
+    if (u.eq(cmd, "check-config")) {
+        const tls = try Tls.load(a, tls_path);
+        defer tls.deinit();
+        try printJson(a, try tls.info(a));
         return;
     }
     if (u.eq(cmd, "doctor") or u.eq(cmd, "probe")) {
+        const tls = try Tls.load(a, tls_path);
+        defer tls.deinit();
+        const tls_info = try tls.info(a);
         const opened = Adapter.open(a, source_path);
         if (opened) |adapter| {
             defer adapter.close();
@@ -88,7 +83,6 @@ fn run(init: std.process.Init) !void {
                     if (m.pending) pending += 1;
                 }
             }
-            var token_buf: [66]u8 = undefined;
             var automation_error: ?[]const u8 = null;
             const automation: ?bool = if (check_automation) blk: {
                 if (fake) break :blk true;
@@ -98,21 +92,24 @@ fn run(init: std.process.Init) !void {
                 };
                 break :blk true;
             } else null;
-            try printJson(a, .{ .database_readable = true, .schema_supported = true, .recent_decoded = decoded, .recent_other = unsupported, .pending = pending, .token_configured = u.c.zr_read_secret(token_path, &token_buf, token_buf.len) == 64, .automation_ready = automation, .automation_error = automation_error, .real_send_verified = false });
+            try printJson(a, .{ .database_readable = true, .schema_supported = true, .recent_decoded = decoded, .recent_other = unsupported, .pending = pending, .tls = tls_info, .automation_ready = automation, .automation_error = automation_error, .real_send_verified = false });
         } else |err| {
-            try printJson(a, .{ .database_readable = false, .error_code = @errorName(err), .automation_ready = false });
+            try printJson(a, .{ .database_readable = false, .tls = tls_info, .error_code = @errorName(err), .automation_ready = false });
             std.process.exit(1);
         }
         return;
     }
     if (!u.eq(cmd, "serve")) {
-        const help = "Usage: relay setup|doctor|probe|serve|rotate-token [--data-dir PATH] [--messages-db PATH] [--port 8731] [--event-limit 100000] [--check-automation] [--read-only]\n";
+        const help = "Usage: relay setup|check-config|doctor|probe|serve [--data-dir PATH] [--messages-db PATH] [--config PATH] [--event-limit 100000] [--check-automation] [--read-only]\n";
         _ = u.c.write(1, help.ptr, help.len);
+        if (!u.eq(cmd, "help")) return error.InvalidCommand;
         return;
     }
     _ = u.c.umask(0o077);
-    var tok: [66]u8 = undefined;
-    if (u.c.zr_read_secret(token_path, &tok, tok.len) != 64) return error.RunSetupFirst;
+    const tls = try Tls.load(a, tls_path);
+    // The TLS context lives as long as detached connection threads.
+    const tls_info = try tls.info(a);
+    if (tls_info.expiry_warning) std.debug.print("relay: certificate expires within 30 days; renew and restart\n", .{});
     if (fake) {
         const db = try @import("relay/Sqlite.zig").open(source_path, true);
         defer db.close();
@@ -132,8 +129,7 @@ fn run(init: std.process.Init) !void {
         const sender = try std.Thread.spawn(.{}, Core.senderLoop, .{core});
         sender.detach();
     }
-    var server: Server = .{ .core = core, .token_path = token_path, .port = port };
-    std.debug.print("relay: listening on 127.0.0.1:{d}\n", .{port});
+    var server: Server = .{ .core = core, .tls = tls };
     try server.run();
 }
 fn printJson(a: u.Allocator, value: anytype) !void {

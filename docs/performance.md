@@ -1,8 +1,10 @@
 # Messaging performance
 
-Recorded results below predate mTLS. The current Linux performance harness uses
-temporary certificates and an authenticated TLS fixture adapter pending the
-separate relay migration; reruns measure that additional fixture hop.
+The measurements below describe the pre-mTLS release. Both transport
+implementations are now present, but the Linux performance harness still uses
+the old fake-relay adapter and needs the changes described in
+[the integration review](linux-mtls-review.md) before rerunning. Current Mac
+transport/deployment checks are in [macOS TLS operation](macos-tls.md).
 
 The critical path is the whole system: observing Apple's database, committing
 the relay journal, transporting changes, committing the client cache, publishing

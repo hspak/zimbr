@@ -1,14 +1,13 @@
-//! Bounded POSIX transport beneath Zig's standard HTTP parser. In Zig 0.16 the
-//! stock threaded socket reader treats EAGAIN from SO_RCVTIMEO as an invariant
-//! failure, so timeout handling stays here until that API supports deadlines.
+//! Deadline-bounded TLS I/O beneath Zig's existing HTTP parser.
 const std = @import("std");
 const u = @import("../common.zig");
+const tls = @import("Tls.zig").c;
 pub const Reader = struct {
     interface: std.Io.Reader,
-    fd: c_int,
+    connection: *tls.ZrTls,
     deadline: i64,
-    pub fn init(fd: c_int, buffer: []u8) Reader {
-        return .{ .fd = fd, .deadline = u.c.zr_monotonic_ms() + 10000, .interface = .{ .buffer = buffer, .seek = 0, .end = 0, .vtable = &.{ .stream = stream, .readVec = readVec } } };
+    pub fn init(connection: *tls.ZrTls, buffer: []u8) Reader {
+        return .{ .connection = connection, .deadline = u.c.zr_monotonic_ms() + 10000, .interface = .{ .buffer = buffer, .seek = 0, .end = 0, .vtable = &.{ .stream = stream, .readVec = readVec } } };
     }
     fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
         const dest = limit.slice(try w.writableSliceGreedy(1));
@@ -22,7 +21,7 @@ pub const Reader = struct {
         var vectors: [8][]u8 = undefined;
         const count, const data_size = try r.writableVector(&vectors, data);
         _ = count;
-        const n = u.c.zr_recv(self.fd, vectors[0].ptr, vectors[0].len, self.deadline);
+        const n = tls.zr_tls_read(self.connection, vectors[0].ptr, vectors[0].len, self.deadline);
         if (n < 0) return error.ReadFailed;
         if (n == 0) return error.EndOfStream;
         const size: usize = @intCast(n);
@@ -35,9 +34,9 @@ pub const Reader = struct {
 };
 pub const Writer = struct {
     interface: std.Io.Writer,
-    fd: c_int,
-    pub fn init(fd: c_int, buffer: []u8) Writer {
-        return .{ .fd = fd, .interface = .{ .buffer = buffer, .vtable = &.{ .drain = drain } } };
+    connection: *tls.ZrTls,
+    pub fn init(connection: *tls.ZrTls, buffer: []u8) Writer {
+        return .{ .connection = connection, .interface = .{ .buffer = buffer, .vtable = &.{ .drain = drain } } };
     }
     fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
         const self: *Writer = @alignCast(@fieldParentPtr("interface", w));
@@ -55,6 +54,6 @@ pub const Writer = struct {
         return n;
     }
     fn send(self: *Writer, bytes: []const u8) !void {
-        if (u.c.zr_send(self.fd, bytes.ptr, bytes.len) != 0) return error.WriteFailed;
+        if (tls.zr_tls_write(self.connection, bytes.ptr, bytes.len) != 0) return error.WriteFailed;
     }
 };
