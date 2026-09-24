@@ -8,14 +8,14 @@ The Linux worker is tested directly against the native mTLS relay.
 
 The Linux desktop client uses Zig, Clay, raylib, and Pango. It supports conversation
 browsing, cached history, live updates, direct messages, existing-conversation
-replies, Unicode drafts, and send recovery. Real-account acceptance is tracked in
-[docs/mac-validation.md](docs/mac-validation.md); installation alone does not prove
+replies, Unicode drafts, desktop notifications, and send recovery. Real-account
+acceptance is tracked in [docs/mac-validation.md](docs/mac-validation.md); installation alone does not prove
 send routing or locked-screen operation.
 
 ## Linux client
 
 Use Zig **0.16.0**, `pkg-config`, and development headers/libraries for SQLite,
-libcurl (7.88+ with the OpenSSL 3 backend), OpenSSL 3, Pango/Cairo, OpenGL,
+libcurl (7.88+ with the OpenSSL 3 backend), OpenSSL 3, Pango/Cairo, GLib/GIO, OpenGL,
 Wayland, and xkbcommon. Clay and raylib are pinned in
 `build.zig.zon`; Flamez is not a build or runtime dependency. Install a system
 sans-serif font and an emoji font for the scripts you use.
@@ -32,6 +32,23 @@ Linux uses Wayland exclusively. The GUI was rendered at 125% desktop scaling
 and uses `zimbr` as its application ID. Movement, scrolling, and navigation target
 120 FPS, returning to idle rendering after half a second without activity. The
 background worker continues to receive messages while rendering sleeps.
+
+Incoming live messages show desktop notifications while Zimbr is running, including
+when its window is unfocused or minimized. Notifications use the
+[freedesktop notification service](https://specifications.freedesktop.org/notification/latest-single/)
+on the session D-Bus: KDE Plasma provides it; on Hyprland, run a notification daemon
+such as mako, dunst, or SwayNotificationCenter. Install the desktop entry and icon
+with the installer above so the desktop can identify Zimbr in notification settings.
+Your desktop controls notification sounds, expiration, and Do Not Disturb.
+
+Alerts contain a conversation/sender name and a short message preview. History
+imports, outgoing messages, repeated events, and messages being read in the focused
+conversation do not alert. Reading the conversation dismisses its current alert.
+Where the daemon supports actions, clicking an alert opens its conversation and
+uses the supplied Wayland activation token to request focus; the compositor decides
+whether to raise the window. Hidden conversations still notify. Closing Zimbr stops
+message receipt and notifications; there is no background service. A missing or
+unresponsive notification daemon does not interrupt messaging.
 
 The bottom-right FPS counter is disabled by default. Enable it with
 `zig build client -Dfps-counter=true` or `zig build run -Dfps-counter=true`.
@@ -131,7 +148,7 @@ to a draft for deliberate retry. Sending again after an uncertain result can
 create a duplicate. A relay epoch reset preserves drafts and outbox identities;
 orphaned drafts remain discoverable as **Recovered draft**. Local unread markers
 do not change Apple's read receipts. Attachments and unsupported content remain
-visible as placeholders; downloads and notifications are not implemented.
+visible as placeholders; attachment downloads are not implemented.
 
 Linux verification:
 
@@ -160,6 +177,16 @@ uses mTLS on both the worker and relay sides of its intermediary. It covers
 history, pagination, direct/group sends, echo merging, uncertain outcomes,
 crashes, expired cursors, and epoch changes. A Wayland screenshot
 can be exported with `zimbr --screenshot /path/to/image.png --frames 90`.
+
+`python3 tests/client_notifications.py` tests the production notification backend
+against a mock freedesktop service on a private D-Bus session. It requires a C
+compiler, `pkg-config`, `dbus-run-session`, and Python GObject bindings (`python-gobject`
+or `python3-gi`). It checks payloads, preview escaping, actions, Wayland tokens,
+dismissal, absent/restarted daemons, timeouts, and shutdown. `test-client` also checks
+notification eligibility, duplicate suppression, and transaction rollback.
+After building `client` and `fake-relay`, add `--gui` to exercise the complete
+synthetic relay-to-notification flow on Wayland, including click-to-open,
+activation-token forwarding, and quiet restart.
 
 Long messages display a preview of up to 4 KiB or 64 lines; the original remains
 in the cache and selecting the message then pressing Ctrl+C copies its full text.
@@ -380,7 +407,7 @@ formats are visible as unsupported; it does not interpret the full attribute
 object graph. Attachments are metadata placeholders; no file paths or bytes are
 served. Reactions and system rows remain distinct content kinds. Historical
 edits/deletions, reactions as actions, group administration, read receipts, Contacts,
-notifications, and attachment transfer remain outside v1.
+and attachment transfer remain outside v1.
 
 ## Real-account validation
 

@@ -53,6 +53,8 @@ fn run(init: std.process.Init) !void {
     rl.setConfigFlags(.{ .window_resizable = true, .window_highdpi = true });
     rl.initWindow(1120, 780, "Zimbr");
     defer rl.closeWindow();
+    bridge.zc_activation_init();
+    defer bridge.zc_activation_free();
     // Let Wayland deliver its initial scale before caching any text textures.
     rl.pollInputEvents();
     rl.setWindowMinSize(780, 560);
@@ -64,6 +66,8 @@ fn run(init: std.process.Init) !void {
     defer worker.shutdown();
     var app = App{ .worker = &worker, .enter_to_send = config.enter_to_send, .show_details = config.details };
     defer app.deinit();
+    app.notifications = bridge.zc_notifications_new(App.notificationAction, &app);
+    defer bridge.zc_notifications_free(app.notifications);
     var frames: usize = 0;
     var last_draw: i64 = 0;
     var active_until: f64 = 0;
@@ -72,7 +76,9 @@ fn run(init: std.process.Init) !void {
     var last_mouse = rl.getMousePosition();
     var last_window = WindowMetrics{};
     while (!rl.windowShouldClose()) {
+        bridge.zc_notifications_poll();
         try app.update();
+        app.deliverNotifications();
         const generation = if (app.view) |v| v.generation else 0;
         const revision = app.composer.revision + app.search.revision + app.recipient.revision;
         const mouse = rl.getMousePosition();
@@ -111,6 +117,7 @@ fn run(init: std.process.Init) !void {
 }
 const App = struct {
     worker: *Worker,
+    notifications: ?*bridge.ZcNotifications = null,
     enter_to_send: bool = true,
     view: ?*Worker.View = null,
     text: Text = .{},
@@ -156,7 +163,7 @@ const App = struct {
     notice_until: i64 = 0,
     message_selection: MessageSelection = .{},
     dragging: bool = false,
-    was_focused: bool = true,
+    was_reading: ?bool = null,
     show_details: bool = false,
     show_hidden: bool = false,
     details_scroll: f32 = 0,
@@ -181,6 +188,33 @@ const App = struct {
         s.notice = msg;
         s.notice_until = u.now() + 7000;
     }
+    fn notificationAction(context: ?*anyopaque, chat: [*c]const u8, token: [*c]const u8) callconv(.c) void {
+        const s: *App = @ptrCast(@alignCast(context.?));
+        s.select(std.mem.span(chat)) catch {
+            s.info("Could not open the conversation. Please try again.");
+            return;
+        };
+        s.show_hidden = s.selectedHidden() orelse false;
+        s.search.set("") catch {};
+        s.layout_pending = true;
+        rl.restoreWindow();
+        if (bridge.zc_activation_activate(rl.getWindowHandle(), token) == 0) rl.setWindowFocused();
+    }
+    fn readingConversation(s: *const App) bool {
+        return rl.isWindowFocused() and !rl.isWindowMinimized() and s.following and !s.show_details and !s.new_mode;
+    }
+    fn deliverNotifications(s: *App) void {
+        while (s.worker.takeNotification()) |n| {
+            defer n.destroy();
+            if (s.readingConversation() and u.eq(s.key, n.chat)) continue;
+            bridge.zc_notifications_show(s.notifications, n.chat, n.summary, n.body);
+        }
+        if (s.readingConversation()) {
+            const key = a.dupeZ(u8, s.key) catch return;
+            defer a.free(key);
+            bridge.zc_notifications_dismiss(s.notifications, key);
+        }
+    }
     fn saveDraft(s: *App) !void {
         if (s.draft_dirty and s.key.len > 0) {
             try s.worker.push(.{ .kind = .draft, .key = s.key, .text = s.composer.text.items });
@@ -190,7 +224,7 @@ const App = struct {
     fn select(s: *App, key: []const u8) !void {
         s.show_details = false;
         try s.saveDraft();
-        try s.worker.push(.{ .kind = .select, .key = key });
+        try s.worker.push(.{ .kind = .select, .key = key, .text = if (rl.isWindowFocused() and !rl.isWindowMinimized()) "yes" else "no" });
         s.message_selection.clear();
         a.free(s.key);
         s.key = try a.dupe(u8, key);
@@ -287,10 +321,10 @@ const App = struct {
         }
         try s.reconcileSelection();
         if (s.draft_dirty and u.now() - s.draft_at > 300) try s.saveDraft();
-        const focused = rl.isWindowFocused();
-        if (focused != s.was_focused) {
-            s.worker.push(.{ .kind = .viewed, .text = if (focused and s.following and !s.show_details) "yes" else "no" }) catch {};
-            s.was_focused = focused;
+        const reading = s.readingConversation();
+        if (s.was_reading == null or reading != s.was_reading.?) {
+            s.worker.push(.{ .kind = .viewed, .text = if (reading) "yes" else "no" }) catch return;
+            s.was_reading = reading;
         }
         const ctrl = rl.isKeyDown(.left_control) or rl.isKeyDown(.right_control);
         const shift = rl.isKeyDown(.left_shift) or rl.isKeyDown(.right_shift);

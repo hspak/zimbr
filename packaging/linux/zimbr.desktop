@@ -7,3 +7,4 @@ Icon=zimbr
 Terminal=false
 Categories=Network;InstantMessaging;
 StartupWMClass=zimbr
+X-GNOME-UsesNotifications=true

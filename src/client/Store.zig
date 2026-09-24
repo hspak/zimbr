@@ -137,11 +137,16 @@ fn requestState(s: Self, a: u.Allocator, raw: []const u8) !void {
 }
 pub const Event = struct { cursor: []const u8, sequence: []const u8, type: []const u8, origin: []const u8, record: std.json.Value };
 pub fn event(s: Self, a: u.Allocator, raw: []const u8, frame_id: []const u8, frame_type: []const u8, viewed: []const u8) !void {
+    _ = try s.eventNotification(a, raw, frame_id, frame_type, viewed);
+}
+// The returned message is only eligible for delivery AFTER the caller's batch
+// transaction commits. Its strings belong to a, just like parsed event records.
+pub fn eventNotification(s: Self, a: u.Allocator, raw: []const u8, frame_id: []const u8, frame_type: []const u8, viewed: []const u8) !?t.Message {
     const e = (try std.json.parseFromSlice(Event, a, raw, .{ .ignore_unknown_fields = true })).value;
     const epoch = try s.get(a, "epoch");
     const seq = try t.parseCursor(e.cursor, epoch);
     if (!u.eq(e.cursor, frame_id) or !u.eq(e.type, frame_type) or seq != try std.fmt.parseInt(i64, e.sequence, 10)) return error.InvalidEvent;
-    if (seq <= try t.parseCursor(try s.get(a, "cursor"), epoch)) return;
+    if (seq <= try t.parseCursor(try s.get(a, "cursor"), epoch)) return null;
     const kind = if (u.eq(e.type, "conversation.upsert")) "conversation" else if (u.eq(e.type, "message.upsert")) "message" else if (u.eq(e.type, "send_request.updated")) "request" else return error.UnknownEvent;
     const record = try u.json(a, e.record);
     // The network worker may own a batch transaction. Standalone callers keep
@@ -150,16 +155,21 @@ pub fn event(s: Self, a: u.Allocator, raw: []const u8, frame_id: []const u8, fra
     if (owns_transaction) try s.db.exec("BEGIN IMMEDIATE");
     errdefer if (owns_transaction) s.db.exec("ROLLBACK") catch {};
     _ = try s.upsert(a, kind, record);
-    if (u.eq(kind, "message") and u.eq(e.origin, "live")) {
+    var notification: ?t.Message = null;
+    if (u.eq(kind, "message")) {
         const m = (try std.json.parseFromSlice(t.Message, a, record, .{ .ignore_unknown_fields = true })).value;
         if (m.direction == .incoming) {
             try s.exec("INSERT OR IGNORE INTO live_seen VALUES(?)", &.{.{ .text = m.id }});
             const first = u.c.sqlite3_changes(s.db.handle) > 0;
-            if (first and !u.eq(m.conversation_id, viewed)) try s.exec("INSERT INTO unread VALUES(?,1) ON CONFLICT(chat) DO UPDATE SET count=count+1", &.{.{ .text = m.conversation_id }});
+            if (first and u.eq(e.origin, "live") and !u.eq(m.conversation_id, viewed)) {
+                try s.exec("INSERT INTO unread VALUES(?,1) ON CONFLICT(chat) DO UPDATE SET count=count+1", &.{.{ .text = m.conversation_id }});
+                notification = m;
+            }
         }
     }
     try s.set("cursor", e.cursor);
     if (owns_transaction) try s.db.exec("COMMIT");
+    return notification;
 }
 pub fn persistSend(s: Self, a: u.Allocator, key: []const u8, input: t.SendInput) !void {
     try t.validate(input);

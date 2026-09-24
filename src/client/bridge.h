@@ -1,6 +1,16 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+typedef struct ZcNotifications ZcNotifications;
+typedef void (*ZcNotificationAction)(void *, const char *chat, const char *activation_token);
+ZcNotifications *zc_notifications_new(ZcNotificationAction action, void *context);
+void zc_notifications_poll(void);
+void zc_notifications_show(ZcNotifications *, const char *chat, const char *summary, const char *body);
+void zc_notifications_dismiss(ZcNotifications *, const char *chat);
+void zc_notifications_free(ZcNotifications *);
+void zc_activation_init(void);
+int zc_activation_activate(void *surface, const char *token);
+void zc_activation_free(void);
 typedef struct ZcNet ZcNet;
 typedef int (*ZcStreamFn)(void *, const char *, size_t);
 enum ZcFailure { ZC_OK, ZC_NETWORK, ZC_SERVER_TRUST, ZC_CREDENTIALS, ZC_CLIENT_REJECTED, ZC_TLS, ZC_HTTP, ZC_CONFIG };

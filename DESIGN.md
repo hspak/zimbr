@@ -18,8 +18,9 @@ Mac. Creating or administering groups is outside the first version.
 
 Attachments appear as descriptive placeholders initially. Attachment transfer,
 reactions, editing, unsending, typing indicators, Apple read-receipt control,
-contact-name lookup, and notifications are later features. Unknown message kinds
-must remain visible as unsupported content rather than silently disappearing.
+and contact-name lookup are later features. Linux desktop notifications are
+supported while the client is running. Unknown message kinds must remain visible
+as unsupported content rather than silently disappearing.
 
 The Mac remains the endpoint that communicates with Apple's iMessage service.
 The relay exposes our own API; Linux never receives Apple account credentials.
@@ -726,10 +727,18 @@ Cross-compile checks supplement, but do not replace, the Mac acceptance checks.
 
 ### 2.9. Extension points
 
-**Linux notifications.** Consume committed incoming live-message events after
-deduplication. Suppress historical imports, outgoing messages, and messages already
-being viewed. Desktop notifications require a running process; background receipt
-after closing the window needs an explicit background mode or separate user service.
+**Linux notifications (implemented).** The worker queues owned previews only after
+the event batch commits. Durable live-message deduplication suppresses replay,
+historical imports, outgoing messages, and messages already being viewed. A bounded
+queue independent of replaceable snapshots feeds an asynchronous GIO client for
+`org.freedesktop.Notifications`; notification failures never interrupt synchronization.
+The GUI escapes previews when body markup is supported, advertises the `zimbr`
+desktop entry and `im.received` category, and dismisses alerts when read. Default
+actions select the conversation; `ActivationToken` is passed to `xdg_activation_v1`
+on the existing Wayland display. Daemon capabilities and notification IDs reset
+when the service changes. Desktop notifications require a running process;
+background receipt after closing the window still needs an explicit background
+mode or separate user service.
 
 **Android.** Reuse the wire protocol and synchronization semantics. Sharing Zig
 model code is optional; the Android UI and lifecycle integration can be native.

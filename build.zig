@@ -28,8 +28,8 @@ fn clientModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     const m = b.createModule(.{ .root_source_file = b.path(root), .target = target, .optimize = optimize, .link_libc = true });
     m.addIncludePath(b.path("src"));
     m.addIncludePath(b.path("src/client"));
-    m.addCSourceFiles(.{ .files = &.{ "src/platform.c", "src/client/bridge.c" }, .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-    for ([_][]const u8{ "sqlite3", "libcurl", "openssl", "pangocairo" }) |lib| m.linkSystemLibrary(lib, .{});
+    m.addCSourceFiles(.{ .files = &.{ "src/platform.c", "src/client/bridge.c", "src/client/notifications.c" }, .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+    for ([_][]const u8{ "sqlite3", "libcurl", "openssl", "pangocairo", "gio-2.0" }) |lib| m.linkSystemLibrary(lib, .{});
     return m;
 }
 fn client(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
@@ -60,6 +60,16 @@ fn client(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     };
     artifact.root_module.link_objects.items.len = retained;
     const m = clientModule(b, target, optimize, "src/client_main.zig");
+    // Use the protocol XML already pinned with raylib/GLFW.
+    const activation_xml = artifact.root_module.owner.path("src/external/glfw/deps/wayland/xdg-activation-v1.xml");
+    const activation_header = b.addSystemCommand(&.{ "wayland-scanner", "client-header" });
+    activation_header.addFileArg(activation_xml);
+    m.addIncludePath(activation_header.addOutputFileArg("xdg-activation-v1-client-protocol.h").dirname());
+    const activation_code = b.addSystemCommand(&.{ "wayland-scanner", "private-code" });
+    activation_code.addFileArg(activation_xml);
+    m.addCSourceFile(.{ .file = activation_code.addOutputFileArg("xdg-activation-v1-protocol.c") });
+    m.addCSourceFile(.{ .file = b.path("src/client/activation.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+    m.linkSystemLibrary("wayland-client", .{});
     const client_options = b.addOptions();
     client_options.addOption([]const u8, "version", @import("build.zig.zon").version);
     client_options.addOption(bool, "fps_counter", fps_counter);

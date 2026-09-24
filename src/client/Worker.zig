@@ -5,6 +5,7 @@ const c = @import("c.zig").api;
 const Config = @import("Config.zig");
 const Store = @import("Store.zig");
 const Sse = @import("Sse.zig");
+const Notification = @import("Notification.zig");
 const Self = @This();
 const SharedSnapshot = @import("SharedSnapshot.zig");
 const a = std.heap.page_allocator;
@@ -64,6 +65,8 @@ io: std.Io,
 config: Config,
 mutex: std.Io.Mutex = .init,
 commands: std.ArrayList(Command) = .empty,
+notifications: std.ArrayList(*Notification) = .empty,
+batch_notifications: std.ArrayList(*Notification) = .empty,
 view: ?*View = null,
 stop: std.atomic.Value(bool) = .init(false),
 thread: ?std.Thread = null,
@@ -131,6 +134,15 @@ pub fn shutdown(s: *Self) void {
     if (s.shared) |shared| shared.release();
     for (s.commands.items) |cmd| freeCommand(cmd);
     s.commands.deinit(a);
+    for (s.notifications.items) |n| n.destroy();
+    s.notifications.deinit(a);
+    for (s.batch_notifications.items) |n| n.destroy();
+    s.batch_notifications.deinit(a);
+}
+pub fn takeNotification(s: *Self) ?*Notification {
+    s.mutex.lockUncancelable(s.io);
+    defer s.mutex.unlock(s.io);
+    return if (s.notifications.items.len > 0) s.notifications.orderedRemove(0) else null;
 }
 pub fn push(s: *Self, cmd: Command) !void {
     s.mutex.lockUncancelable(s.io);
@@ -259,6 +271,10 @@ fn receive(ctx: ?*anyopaque, bytes: [*c]const u8, len: usize) callconv(.c) c_int
     return 1;
 }
 fn receiveBatch(s: *Self, bytes: []const u8) !void {
+    defer {
+        for (s.batch_notifications.items) |n| n.destroy();
+        s.batch_notifications.clearRetainingCapacity();
+    }
     // Commit complete frames from one network delivery together. A malformed
     // frame or failed commit rolls back records, unread state, and cursor;
     // reconnect replays from the last durable cursor.
@@ -266,9 +282,23 @@ fn receiveBatch(s: *Self, bytes: []const u8) !void {
     errdefer s.store.db.exec("ROLLBACK") catch {};
     try s.sse.feed(bytes, s, event);
     try s.store.db.exec("COMMIT");
+    // Never publish side effects for a rolled-back frame or cursor update.
+    s.mutex.lockUncancelable(s.io);
+    defer s.mutex.unlock(s.io);
+    for (s.batch_notifications.items) |n| {
+        if (s.notifications.items.len == 64) s.notifications.orderedRemove(0).destroy();
+        s.notifications.append(a, n) catch n.destroy();
+    }
+    s.batch_notifications.clearRetainingCapacity();
 }
 fn event(s: *Self, arena: u.Allocator, raw: []const u8, id: []const u8, kind: []const u8) !void {
-    try s.store.event(arena, raw, id, kind, if (s.viewed) s.selected else "");
+    if (try s.store.eventNotification(arena, raw, id, kind, if (s.viewed) s.selected else "")) |message| {
+        const notification = Notification.create(s.store, message) catch null;
+        if (notification) |n| {
+            if (s.batch_notifications.items.len == 64) s.batch_notifications.orderedRemove(0).destroy();
+            s.batch_notifications.append(a, n) catch n.destroy();
+        }
+    }
     s.last_event_ms = u.now();
     s.dirty = true;
     s.content_dirty = true;
@@ -547,9 +577,9 @@ fn drain(s: *Self) !void {
                 s.redirect_from = "";
                 if (s.selected.len > 0) a.free(s.selected);
                 s.selected = try a.dupe(u8, cmd.key);
-                s.viewed = true;
+                s.viewed = !u.eq(cmd.text, "no");
                 try s.store.set("selected", cmd.key);
-                try s.store.read(cmd.key);
+                if (s.viewed) try s.store.read(cmd.key);
                 s.need_history = cmd.key.len > 0;
                 s.older = false;
             },
@@ -798,6 +828,73 @@ test "an invalid frame rolls back the complete network batch for safe replay" {
     try worker.receiveBatch(frame);
     try std.testing.expectEqual(@as(i64, 1), try worker.store.db.scalar("SELECT count(*) FROM records"));
     try std.testing.expectEqualStrings(epoch ++ ":1", try worker.store.get(arena.allocator(), "cursor"));
+}
+
+test "notifications follow committed live events, never replay, history, outgoing or viewed messages" {
+    const epoch = "12345678-1234-1234-1234-123456789012";
+    var worker = Self{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
+    worker.store = try Store.open(":memory:");
+    defer worker.store.close();
+    defer worker.shutdown();
+    defer worker.sse.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    try worker.store.beginSync(epoch, epoch ++ ":0");
+    _ = try worker.store.upsert(ar, "conversation", "{\"id\":\"chat\",\"title\":\"Friends 👋\",\"service\":\"imessage\"}");
+    var message = t.Message{ .id = "first", .conversation_id = "chat", .sender = "peer", .direction = .incoming, .service = "imessage", .timestamp = "2026-01-01T00:00:00Z", .kind = .text, .text = "Hello <b>literal</b> & 👋", .decoding = .plain, .observed_status = .received };
+    const frame = try notificationFrame(ar, epoch, 1, "live", message);
+    try std.testing.expectError(error.InvalidFrame, worker.receiveBatch(try std.mem.concat(ar, u8, &.{ frame, "data: invalid\n\n" })));
+    try std.testing.expect(worker.takeNotification() == null);
+    worker.sse.deinit();
+    try worker.store.db.exec("CREATE TRIGGER reject_cursor BEFORE UPDATE ON meta WHEN NEW.key='cursor' BEGIN SELECT RAISE(ABORT,'failure'); END");
+    try std.testing.expectError(error.DatabaseFailure, worker.receiveBatch(frame));
+    try std.testing.expect(worker.takeNotification() == null);
+    try worker.store.db.exec("DROP TRIGGER reject_cursor");
+    worker.sse.deinit();
+    try worker.receiveBatch(frame);
+    // Replacing snapshots must not consume or duplicate a queued alert.
+    try worker.publish();
+    try worker.publish();
+    const first = worker.takeNotification().?;
+    defer first.destroy();
+    try std.testing.expectEqualStrings("Friends 👋", first.summary);
+    try std.testing.expectEqualStrings("Hello <b>literal</b> & 👋", first.body);
+    try std.testing.expectEqualStrings("chat", first.chat);
+    try worker.receiveBatch(frame);
+    message.revision = "2";
+    try worker.receiveBatch(try notificationFrame(ar, epoch, 2, "live", message));
+    message.id = "history";
+    try worker.receiveBatch(try notificationFrame(ar, epoch, 3, "historical_import", message));
+    message.revision = "4";
+    try worker.receiveBatch(try notificationFrame(ar, epoch, 4, "live", message));
+    message.id = "outgoing";
+    message.direction = .outgoing;
+    try worker.receiveBatch(try notificationFrame(ar, epoch, 5, "live", message));
+    message.id = "viewed";
+    message.direction = .incoming;
+    worker.viewed = true;
+    worker.selected = "chat";
+    try worker.receiveBatch(try notificationFrame(ar, epoch, 6, "live", message));
+    worker.viewed = false;
+    try worker.receiveBatch(try notificationFrame(ar, epoch, 7, "live", message));
+    try std.testing.expect(worker.takeNotification() == null);
+    // Loading an HTTP history page ahead of a live SSE event must not swallow it.
+    message.id = "history-race";
+    message.text = null;
+    message.kind = .attachment;
+    _ = try worker.store.upsert(ar, "message", try u.json(ar, message));
+    try worker.receiveBatch(try notificationFrame(ar, epoch, 8, "live", message));
+    const attachment = worker.takeNotification().?;
+    defer attachment.destroy();
+    try std.testing.expectEqualStrings("Attachment", attachment.body);
+    try std.testing.expect(worker.takeNotification() == null);
+}
+
+fn notificationFrame(ar: u.Allocator, epoch: []const u8, sequence: i64, origin: []const u8, message: t.Message) ![]const u8 {
+    const cursor = try t.cursor(ar, epoch, sequence);
+    const payload = try u.json(ar, .{ .cursor = cursor, .sequence = try std.fmt.allocPrint(ar, "{d}", .{sequence}), .type = "message.upsert", .origin = origin, .record = message });
+    return std.fmt.allocPrint(ar, "id: {s}\nevent: message.upsert\ndata: {s}\n\n", .{ cursor, payload });
 }
 
 test "an unresolved submission holds new text until the original ID has an authoritative outcome" {
