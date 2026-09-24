@@ -431,6 +431,9 @@ fn schedule(s: *Self) !void {
             s.recovery_at = u.now() + 5000;
             try s.request(.recover, try std.fmt.allocPrint(ar, "/v1/send-requests/{s}", .{s.job_key}), null);
         }
+    } else if (u.now() >= s.hydration_at and try s.hydrateSend(ar)) {
+        // A linked echo can arrive through reconciliation before its request.
+        // Fetch that one message even when its conversation is not cached.
     } else if (s.need_history and s.selected.len > 0 and !std.mem.startsWith(u8, s.selected, "new:")) {
         try s.requestHistory(ar);
     } else if (s.enrichment_request) |cmd| {
@@ -473,7 +476,16 @@ fn requestHistory(s: *Self, ar: u.Allocator) !void {
     s.job_older = s.older;
     const next = if (s.older) try s.store.nextPage(ar, s.selected) else @as(?[]const u8, "");
     s.older = false;
-    if (next) |cursor| try s.request(.history, try std.fmt.allocPrint(ar, "/v1/conversations/{s}/messages?limit=100{s}{s}{s}", .{ s.selected, if (cursor.len > 0) "&before=" else "", try encode(ar, cursor), if (s.text_first_history) "&content=text" else "" }), null);
+    if (next) |cursor| try s.request(.history, try std.fmt.allocPrint(ar, "/v1/conversations/{s}/messages?limit={d}{s}{s}{s}", .{ s.selected, Store.recent_history_limit, if (cursor.len > 0) "&before=" else "", try encode(ar, cursor), if (s.text_first_history) "&content=text" else "" }), null);
+}
+fn hydrateSend(s: *Self, ar: u.Allocator) !bool {
+    var q = try s.store.db.prepare("SELECT " ++ Store.echo_id_sql ++ " AS id FROM outbox WHERE epoch=(SELECT value FROM meta WHERE key='epoch') AND " ++ Store.echo_id_sql ++ " IS NOT NULL AND NOT EXISTS(SELECT 1 FROM records m WHERE m.kind='message' AND m.id=" ++ Store.echo_id_sql ++ ") ORDER BY rowid DESC LIMIT 1");
+    defer q.close();
+    if (!try q.step()) return false;
+    try s.setJobKey(q.bytes(0));
+    s.hydration_at = u.now() + 5000;
+    try s.request(.hydrate, try std.fmt.allocPrint(ar, "/v1/messages/{s}", .{try encode(ar, s.job_key)}), null);
+    return true;
 }
 fn hydrate(s: *Self, ar: u.Allocator) !bool {
     const cmd = s.hydration_request orelse return false;
@@ -859,12 +871,13 @@ fn drain(s: *Self) !void {
                     s.recovery_at = 0;
                     s.status = "Checking the previous send's original request ID · new message kept as a draft";
                 } else {
-                    const direct = std.mem.startsWith(u8, cmd.key, "new:");
+                    const target: t.Target = if (std.mem.startsWith(u8, cmd.key, "new:")) .{ .recipient = .{ .address = cmd.recipient, .service = "imessage" } } else try s.store.sendTarget(ar, cmd.key);
+                    const direct = target.recipient != null;
                     if ((direct and !s.send_direct) or (!direct and !s.reply_existing)) {
                         s.status = "Sending unavailable · message kept as a draft";
                         try s.store.saveDraft(cmd.key, cmd.text);
                     } else {
-                        const input = t.SendInput{ .request_id = try u.id(ar), .server_epoch = try s.store.get(ar, "epoch"), .target = if (direct) .{ .recipient = .{ .address = cmd.recipient, .service = "imessage" } } else .{ .conversation_id = cmd.key }, .text = cmd.text };
+                        const input = t.SendInput{ .request_id = try u.id(ar), .server_epoch = try s.store.get(ar, "epoch"), .target = target, .text = cmd.text };
                         try s.store.persistSend(ar, cmd.key, input);
                         try s.setJobKey(input.request_id);
                         try s.request(.send, "/v1/messages", try u.json(ar, input));

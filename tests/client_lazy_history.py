@@ -19,6 +19,7 @@ OTHER = '22222222-2222-2222-2222-222222222222'
 PHOTO = '33333333-3333-3333-3333-333333333333'
 OLDER = '44444444-4444-4444-4444-444444444444'
 OTHER_MESSAGE = '55555555-5555-5555-5555-555555555555'
+ECHO = '66666666-6666-6666-6666-666666666666'
 
 
 def main():
@@ -29,6 +30,7 @@ def main():
         contacts_held, contacts_release = threading.Event(), threading.Event()
         metadata_held, metadata_release = threading.Event(), threading.Event()
         metadata_requests = []
+        submissions, echo_requests = [], []
         fail_metadata = False
 
         def message(mid, chat, text, deferred=False):
@@ -46,6 +48,12 @@ def main():
                 self.send_header('Content-Length', str(len(raw)))
                 self.end_headers()
                 self.wfile.write(raw)
+
+            def do_POST(self):
+                assert self.path == '/v1/messages'
+                value = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                submissions.append(dict(value, state='delivered', revision='41', message_id=ECHO))
+                self.response(submissions[-1], 202)
 
             def do_GET(self):
                 path = urlsplit(self.path)
@@ -71,6 +79,17 @@ def main():
                         self.send_header('Connection', 'close')
                         self.end_headers()
                         self.close_connection = True
+                        # Relay backfill/reconciliation must not populate the
+                        # local archive, even while a conversation is open.
+                        for index in range(40):
+                            value = message(f'archive-{index}', CHAT, 'Unrequested older history')
+                            value['timestamp'] = '2010-01-01T00:00:00Z'
+                            sequence = str(index + 1)
+                            cursor = EPOCH + ':' + sequence
+                            event = dict(cursor=cursor, sequence=sequence, type='message.upsert',
+                                         origin='historical_import' if index % 2 else 'reconciliation',
+                                         record=value)
+                            self.wfile.write(f'id: {cursor}\nevent: message.upsert\ndata: {json.dumps(event)}\n\n'.encode())
                         for _ in range(200):
                             self.wfile.write(b': heartbeat\n\n')
                             self.wfile.flush()
@@ -98,6 +117,13 @@ def main():
                         value['kind'] = 'attachment'
                         value['attachments'] = [dict(id='photo', name='Photo', mime_type='image/png', bytes='1')]
                         return self.response(value)
+                    if path.path == '/v1/messages/' + ECHO:
+                        echo_requests.append(ECHO)
+                        value = message(ECHO, OTHER, submissions[-1]['text'])
+                        value.update(direction='outgoing', observed_status='delivered')
+                        return self.response(value)
+                    if path.path.startswith('/v1/send-requests/') and submissions:
+                        return self.response(submissions[-1])
                     return super().do_GET()
                 except (BrokenPipeError, ConnectionResetError):
                     self.close_connection = True
@@ -124,6 +150,10 @@ def main():
             assert metadata_requests == [], 'Offscreen metadata must not load automatically'
             contacts_release.set()
             probe.until(lambda v: v['online'], timeout=5)
+            probe.until(lambda v: v['diagnostics']['cursor'] == EPOCH + ':40', timeout=3)
+            with sqlite3.connect(data/'client.db') as db:
+                assert db.execute("SELECT count(*) FROM records WHERE kind='message'").fetchone()[0] == 1
+                assert db.execute('SELECT count(*) FROM unread').fetchone()[0] == 0
 
             probe.command(kind='hydrate', key=CHAT, text=json.dumps([PHOTO]))
             assert metadata_held.wait(timeout=5)
@@ -148,7 +178,15 @@ def main():
             wait(lambda: not record(PHOTO).get('metadata_deferred'), timeout=8)
             assert record(PHOTO)['attachments'][0]['id'] == 'photo'
             assert record(PHOTO)['text'] == 'Caption renders before the photo 👋'
-            print('PASS: text before contacts/media, visible-only metadata, older-history and selection preemption, metadata failure isolation and retry')
+            # A send result can reference an echo outside cached history. Fetch
+            # that message by ID and resolve the direct conversation, never POST again.
+            direct = 'new:echo@example.invalid'
+            probe.command(kind='select', key=direct)
+            probe.command(kind='send', key=direct, recipient='echo@example.invalid', text='Fixture echo')
+            probe.until(lambda v: v['selected'] == OTHER and v['pending'] == 0, timeout=8)
+            assert record(ECHO)['text'] == 'Fixture echo'
+            assert len(submissions) == 1 and echo_requests == [ECHO]
+            print('PASS: background archive stays uncached, explicit older history, uncached send echo recovery, text before contacts/media, visible-only metadata, selection preemption and metadata failure isolation')
         finally:
             contacts_release.set()
             metadata_release.set()

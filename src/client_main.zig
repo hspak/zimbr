@@ -5,6 +5,7 @@ const client_options = @import("client_options");
 const u = @import("common.zig");
 const t = @import("protocol/types.zig");
 const Config = @import("client/Config.zig");
+const Store = @import("client/Store.zig");
 const Worker = @import("client/Worker.zig");
 const Editor = @import("client/Editor.zig");
 const MessageSelection = @import("client/MessageSelection.zig");
@@ -539,7 +540,7 @@ const App = struct {
     fn readOnlyChat(s: *const App) bool {
         if (std.mem.startsWith(u8, s.key, "new:")) return false;
         if (s.view) |v| for (v.snapshot.chats) |chat| {
-            if (u.eq(chat.value.id, s.key)) return !chat.value.sendable;
+            if (u.eq(chat.value.id, s.key)) return !chat.value.sendable and Store.selfRecipient(chat.value) == null;
         };
         return false;
     }
@@ -547,8 +548,10 @@ const App = struct {
         const v = s.view orelse return false;
         if (!v.online or s.send_wait or s.key.len == 0 or !u.eq(s.loaded_key, s.key) or std.mem.trim(u8, s.composer.text.items, " \r\n\t").len == 0) return false;
         if (std.mem.startsWith(u8, s.key, "new:")) return v.send_direct;
-        if (!v.reply_existing) return false;
-        for (v.snapshot.chats) |chat| if (u.eq(chat.value.id, s.key)) return chat.value.sendable;
+        for (v.snapshot.chats) |chat| if (u.eq(chat.value.id, s.key)) {
+            if (Store.selfRecipient(chat.value) != null) return v.send_direct;
+            return v.reply_existing and chat.value.sendable;
+        };
         return false;
     }
     fn send(s: *App) !void {
@@ -599,7 +602,7 @@ const App = struct {
                 s.text.draw(if (s.show_hidden) "Conversations you hide appear here.\nYou can restore them at any time." else if (s.view != null and s.view.?.snapshot.chats.len > 0) "Open Hidden to restore a conversation,\nor start a new message." else "Connect to your Mac to get started.\nYour cached messages stay available offline.", r.x + 36, r.y + r.height / 2 - 4, 16, r.width - 72, theme.colors.muted, theme.colors.paper);
             }
             endClip();
-            s.drawComposer(areas.composer);
+            s.drawComposer(areas.composer, ar);
         }
         const footer = areas.sidebar_footer;
         rl.drawRectangleRec(footer, theme.colors.sidebar);
@@ -615,15 +618,7 @@ const App = struct {
         rl.drawCircleV(.{ .x = footer.x + sidebar_padding + sidebar_icon_inset + sidebar_icon_size / 2, .y = dot_y }, 3, if (online) theme.colors.success else theme.colors.danger);
         s.text.drawLine(status, status_x, status_y, 11, status_width, theme.colors.muted, theme.colors.sidebar);
         const fps_width: f32 = if (client_options.fps_counter) 72 else 0;
-        // Keep transient feedback in the composer's hint line without reserving
-        // a second footer or repeating the sidebar's connection status.
-        if (u.now() < s.notice_until) {
-            const warning_visible = s.duplicate_risk and s.key.len > 0 and !s.new_mode and !s.show_details;
-            var notice = composerFooter(areas.composer);
-            if (warning_visible) notice.height /= 2;
-            rl.drawRectangleRec(notice, theme.colors.paper);
-            s.drawFooterLabel(display.label(ar, s.notice), notice, theme.colors.muted);
-        }
+        if (s.show_details) s.drawNotice(areas.composer, ar);
         if (client_options.fps_counter) {
             var buffer: [32]u8 = undefined;
             const fps = std.fmt.bufPrint(&buffer, "{d} FPS", .{rl.getFPS()}) catch unreachable;
@@ -773,8 +768,7 @@ const App = struct {
         const safe = display.prefix(name, 128, 1);
         var ascii = [_]u8{if (safe.len > 0 and std.ascii.isAlphabetic(safe[0])) std.ascii.toUpper(safe[0]) else '+'};
         const initial: []const u8 = if (safe.len > 0 and safe[0] >= 128) safe[0..bridge.zc_text_boundary(safe.ptr, safe.len, 0, 1)] else &ascii;
-        const measured = s.text.lineSize(initial, size, r.width);
-        s.text.drawLine(initial, r.x + (r.width - measured.x) / 2, r.y + (r.height - measured.y) / 2, size, r.width, style.label, null);
+        s.text.drawLineCentered(initial, r, size, style.label, null);
     }
     fn detailSection(s: *App, label: []const u8, r: rl.Rectangle, y: *f32) void {
         y.* += 18;
@@ -1427,10 +1421,13 @@ const App = struct {
             .attachment => |item| if (item.image != null) imageSize(item.image, width).y + 28 else 48,
             .card => |card| 76 + (if (card.summary != null) @as(f32, 54) else 0) + (if (card.image) |asset| imageSize(asset, width - 24).y + 8 else 0),
             .reactions => |chips| blk: {
+                var arena = std.heap.ArenaAllocator.init(a);
+                defer arena.deinit();
                 var x: f32 = 0;
                 var rows: f32 = 1;
                 for (chips) |chip| {
-                    const w = s.chipWidth(chip, width);
+                    const label = std.fmt.allocPrint(arena.allocator(), "{s} {d}", .{ chip.label, chip.actors.len }) catch chip.label;
+                    const w = s.chipWidth(label, width);
                     if (x > 0 and x + w > width) {
                         x = 0;
                         rows += 1;
@@ -1442,8 +1439,8 @@ const App = struct {
             .more => 30,
         };
     }
-    fn chipWidth(s: *App, chip: Content.Chip, width: f32) f32 {
-        return @min(width, s.text.lineSize(chip.label, 15, width).x + 42);
+    fn chipWidth(s: *App, label: []const u8, width: f32) f32 {
+        return @min(width, s.text.lineSize(label, 15, @max(1, width - 16)).x + 16);
     }
     fn richControl(s: *App, r: rl.Rectangle) bool {
         const index = s.rich_count;
@@ -1553,14 +1550,15 @@ const App = struct {
                     var x = r.x;
                     var top = r.y;
                     for (chips) |chip| {
-                        const w = s.chipWidth(chip, r.width);
+                        const label = std.fmt.allocPrint(ar, "{s} {d}", .{ chip.label, chip.actors.len }) catch chip.label;
+                        const w = s.chipWidth(label, r.width);
                         if (x > r.x and x + w > r.x + r.width) {
                             x = r.x;
                             top += 32;
                         }
                         const chip_r = rl.Rectangle{ .x = x, .y = top, .width = w, .height = 28 };
                         rl.drawRectangleRounded(chip_r, 0.6, 8, theme.colors.incoming);
-                        s.text.drawLine(std.fmt.allocPrint(ar, "{s} {d}", .{ chip.label, chip.actors.len }) catch chip.label, x + 8, top + 3, 15, w - 16, theme.colors.ink, theme.colors.incoming);
+                        s.text.drawLineCentered(label, .{ .x = x + 8, .y = top, .width = @max(1, w - 16), .height = chip_r.height }, 15, theme.colors.ink, theme.colors.incoming);
                         if (s.richControl(chip_r)) {
                             s.showContentDetail(s.reactionDetail(ar, chip), null);
                             s.detail_reaction_message = a.dupe(u8, m.id) catch "";
@@ -1691,11 +1689,19 @@ const App = struct {
         s.text.drawSelection(row.text, x, y, 16, width, color, if (active) @min(selection.anchor, selection.caret) else 0, if (active) @max(selection.anchor, selection.caret) else 0, background);
     }
     fn composerHeight(s: *App) f32 {
-        // Measure one line at the current display scale, then add the editor
-        // padding and the shared sidebar footer height.
-        // Round up so fractional layout arithmetic cannot create a scrollbar
-        // for a draft that fits exactly into the single-line viewport.
-        return @ceil(s.text.height("Ag", 16, 400)) + 22 + layout.composer_top_padding + layout.footer_height;
+        const one_line = s.text.height("Ag", 16, 400);
+        var height = one_line;
+        if (!s.readOnlyChat() and s.key.len > 0 and !s.new_mode) {
+            const pane = rl.Rectangle{ .x = 0, .y = 0, .width = layout.conversationWidth(@floatFromInt(rl.getScreenWidth())), .height = 0 };
+            const editor = composerEditor(composerBox(pane));
+            // Match the editor's wrapping width, including its scrollbar gutter.
+            const width = editor.width - 22 - Scrollbar.gutter;
+            const caret = s.text.caret(s.composer.text.items, width, s.composer.caret);
+            const content_height = @max(s.text.height(s.composer.text.items, 16, width), caret.y + caret.height);
+            height = std.math.clamp(content_height, one_line, s.text.height("Ag\nAg\nAg", 16, 400));
+        }
+        // Round up so fractional layout arithmetic cannot scroll a fitting draft.
+        return @ceil(height) + 22 + layout.composer_top_padding + layout.footer_height;
     }
     fn composerBox(r: rl.Rectangle) rl.Rectangle {
         return .{ .x = r.x + 20, .y = r.y + layout.composer_top_padding, .width = r.width - 40, .height = r.height - layout.composer_top_padding - layout.footer_height };
@@ -1715,11 +1721,34 @@ const App = struct {
         const size = s.text.lineSize(label, 11, r.width);
         s.text.drawLine(label, r.x, r.y + (r.height - size.y) / 2, 11, r.width, color, theme.colors.paper);
     }
-    fn drawComposer(s: *App, r: rl.Rectangle) void {
+    fn drawNotice(s: *App, r: rl.Rectangle, ar: u.Allocator) void {
+        if (u.now() >= s.notice_until) return;
+        const warning_visible = s.duplicate_risk and s.key.len > 0 and !s.new_mode and !s.show_details;
+        var notice = composerFooter(r);
+        if (warning_visible) notice.height /= 2;
+        rl.drawRectangleRec(notice, theme.colors.paper);
+        s.drawFooterLabel(display.label(ar, s.notice), notice, theme.colors.muted);
+    }
+    fn drawComposer(s: *App, r: rl.Rectangle, ar: u.Allocator) void {
         rl.drawRectangleRec(r, theme.colors.paper);
+        // Draw footer feedback first so the input always appears above it.
+        s.drawNotice(r, ar);
         if (s.key.len == 0 or s.new_mode) return;
         const box = composerBox(r);
         const read_only = s.readOnlyChat();
+        if (!read_only) {
+            var footer = composerFooter(r);
+            if (s.duplicate_risk and u.now() < s.notice_until) {
+                footer.height /= 2;
+                footer.y += footer.height;
+            }
+            if (s.duplicate_risk) {
+                s.drawFooterLabel("Earlier send may have succeeded. Sending again may duplicate it.", footer, theme.colors.danger);
+            } else if (u.now() >= s.notice_until) {
+                const hint = if (s.enter_to_send) "Enter to send · Shift+Enter for a new line" else "Ctrl+Enter to send · Enter for a new line";
+                s.drawFooterLabel(hint, footer, theme.colors.muted);
+            }
+        }
         const background = if (read_only) theme.colors.incoming else theme.colors.surface;
         rl.drawRectangleRounded(box, 0.12, 8, background);
         const editor = composerEditor(box);
@@ -1730,7 +1759,7 @@ const App = struct {
         }
         rl.drawRectangleRoundedLinesEx(box, 0.12, 8, 1, if (!read_only and s.focus == .composer) theme.colors.focus else theme.colors.line);
         if (read_only) return;
-        const send_button = rl.Rectangle{ .x = r.x + r.width - layout.action_right_padding - 76, .y = box.y + (box.height - 28) / 2, .width = 76, .height = 28 };
+        const send_button = rl.Rectangle{ .x = r.x + r.width - layout.action_right_padding - 76, .y = box.y + box.height - 36, .width = 76, .height = 28 };
         const enabled = s.canSend();
         const hot = hover(send_button);
         const bg = if (enabled) theme.colors.success else theme.colors.incoming;
@@ -1741,17 +1770,6 @@ const App = struct {
         if (hot and enabled) {
             rl.setMouseCursor(.pointing_hand);
             if (rl.isMouseButtonPressed(.left)) s.send() catch s.info("Could not queue message. Your draft is retained.");
-        }
-        var footer = composerFooter(r);
-        if (s.duplicate_risk and u.now() < s.notice_until) {
-            footer.height /= 2;
-            footer.y += footer.height;
-        }
-        if (s.duplicate_risk) {
-            s.drawFooterLabel("Earlier send may have succeeded. Sending again may duplicate it.", footer, theme.colors.danger);
-        } else {
-            const hint = if (s.enter_to_send) "Enter to send · Shift+Enter for a new line" else "Ctrl+Enter to send · Enter for a new line";
-            s.drawFooterLabel(hint, footer, theme.colors.muted);
         }
     }
     fn inputBox(s: *App, e: *Editor, r: rl.Rectangle, placeholder: []const u8, focus: @FieldType(App, "focus"), multiline: bool) void {
@@ -1967,7 +1985,6 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     _ = clay.initialize(.init(try arena.allocator().alloc(u8, clay.minMemorySize())), .{ .w = 1120, .h = 780 }, .{ .error_handler_function = clayError });
     var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/zimbr-ui-test" } };
     defer worker.shutdown();
-    const Store = @import("client/Store.zig");
     var chats: [32]Store.Chat = undefined;
     for (&chats, 0..) |*chat, i| chat.* = .{
         .value = .{ .id = try std.fmt.allocPrint(arena.allocator(), "fixture-{d}", .{i}), .service = "imessage", .title = try std.fmt.allocPrint(arena.allocator(), "Conversation {d} long wrapped label", .{i}), .last_activity = "2026-01-01T00:00:00Z", .sendable = true },
@@ -2179,6 +2196,21 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     try std.testing.expectEqual(theme.colors.incoming, rl.getImageColor(disabled, @intFromFloat((disabled_box.x + 5) * scale), @intFromFloat((disabled_box.y + disabled_box.height / 2) * scale)));
     clickTestFrame(&app, areas.composer.x + areas.composer.width - layout.action_right_padding - 38, disabled_box.y + disabled_box.height / 2);
     for (worker.commands.items) |command| try std.testing.expect(command.kind != .send);
+    // You uses direct iMessage capability even if its grouped route is disabled.
+    const participants = chats[0].value.participants;
+    chats[0].value.is_self = true;
+    chats[0].value.participants = &.{"self@example.invalid"};
+    view.reply_existing = false;
+    view.send_direct = true;
+    try std.testing.expect(!app.readOnlyChat() and app.canSend());
+    view.online = false;
+    try std.testing.expect(!app.canSend());
+    view.online = true;
+    view.send_direct = false;
+    try std.testing.expect(!app.canSend());
+    chats[0].value.is_self = false;
+    chats[0].value.participants = participants;
+    try std.testing.expect(app.readOnlyChat());
     chats[0].value.sendable = true;
     view.online = false;
     view.reply_existing = false;
@@ -2235,7 +2267,6 @@ fn expectScrollbarPixel(shot: rl.Image, viewport: rl.Rectangle, content: f64, of
 }
 
 test "shared message presentations survive replaced views and refresh edited text" {
-    const Store = @import("client/Store.zig");
     const SharedSnapshot = @import("client/SharedSnapshot.zig");
     const store = try Store.open(":memory:");
     defer store.close();
@@ -2674,7 +2705,6 @@ test "reading anchor follows the visible image part when an earlier image gains 
 }
 
 test "metadata and reaction rows cannot create a new-message indicator" {
-    const Store = @import("client/Store.zig");
     const old_chats = [_]Store.Chat{.{ .value = .{ .id = "chat", .service = "imessage" }, .preview = "Caption", .unread = 0 }};
     var next_chats = old_chats;
     const old = Store.Snapshot{ .chats = &old_chats, .messages = &.{}, .pending = &.{}, .selected = "chat", .draft = "", .epoch = "epoch", .more = false };

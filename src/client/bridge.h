@@ -55,6 +55,7 @@ ZcText *zc_text_new_with_options(const char *text, int length, double size, int 
 void zc_text_free(ZcText *text);
 int zc_text_width(ZcText *text);
 int zc_text_height(ZcText *text);
+double zc_text_ink_center_x(ZcText *text);
 double zc_text_ink_center_y(ZcText *text);
 unsigned char *zc_text_pixels(ZcText *text, unsigned color, int start, int end, int top, int height);
 unsigned char *zc_text_pixels_on(ZcText *text, unsigned color, int start, int end, int top, int height, unsigned background);

@@ -5,6 +5,7 @@ const Sqlite = @import("../relay/Sqlite.zig");
 const Directory = @import("IdentityDirectory.zig");
 const display = @import("display.zig");
 const Self = @This();
+pub const recent_history_limit = 100;
 db: Sqlite,
 pub fn open(path: [:0]const u8) !Self {
     const db = try Sqlite.open(path, false);
@@ -48,7 +49,38 @@ pub fn open(path: [:0]const u8) !Self {
         );
         try db.exec("COMMIT");
     }
-    return .{ .db = db };
+    const store = Self{ .db = db };
+    try store.migrateHistoryCache();
+    return store;
+}
+fn migrateHistoryCache(s: Self) !void {
+    if (try s.db.scalar("SELECT count(*) FROM meta WHERE key='lazy_history_cache_v1'") > 0) return;
+    try s.db.exec("BEGIN IMMEDIATE");
+    errdefer s.db.exec("ROLLBACK") catch {};
+    // Older clients copied background reconciliation into the cache. Keep a
+    // recent window per displayed thread and every locally linked send echo.
+    try s.db.exec(std.fmt.comptimePrint(
+        \\CREATE TEMP TABLE cache_prune AS
+        \\SELECT id,thread FROM (
+        \\ SELECT m.id,coalesce(c.chat,m.chat) AS thread,
+        \\ row_number() OVER (PARTITION BY coalesce(c.chat,m.chat) ORDER BY m.sort_key DESC,m.id DESC) AS position
+        \\ FROM records m LEFT JOIN records c ON c.kind='conversation' AND c.id=m.chat WHERE m.kind='message'
+        \\) WHERE position>{d} AND id NOT IN (
+        \\ SELECT json_extract(record,'$.message_id') FROM outbox WHERE json_extract(record,'$.message_id') IS NOT NULL
+        \\ UNION SELECT json_extract(record,'$.candidate_message_id') FROM outbox WHERE json_extract(record,'$.candidate_message_id') IS NOT NULL
+        \\);
+        \\DELETE FROM pages WHERE chat IN (SELECT thread FROM cache_prune)
+        \\ OR chat IN (SELECT id FROM records WHERE kind='conversation' AND chat IN (SELECT thread FROM cache_prune));
+        \\DELETE FROM enrichment_cache WHERE message_id IN (SELECT id FROM cache_prune);
+        \\DELETE FROM enrichment_pages WHERE message_id IN (SELECT id FROM cache_prune);
+        \\DELETE FROM records WHERE kind='message' AND id IN (SELECT id FROM cache_prune);
+    , .{recent_history_limit}));
+    const removed = u.c.sqlite3_changes(s.db.handle) > 0;
+    try s.db.exec("DROP TABLE cache_prune");
+    try s.set("lazy_history_cache_v1", "1");
+    try s.db.exec("COMMIT");
+    // Reclaim the old archive's pages once, outside the migration transaction.
+    if (removed) s.db.exec("VACUUM") catch {};
 }
 pub fn close(s: Self) void {
     s.db.close();
@@ -98,6 +130,23 @@ pub fn threadKey(s: Self, a: u.Allocator, key: []const u8) ![]const u8 {
 // Members retain their original IDs, message ownership, and send payloads.
 // The existing indexed chat column holds the relay's presentation thread ID.
 pub const thread_cte = "WITH members AS (SELECT ?1 AS id UNION SELECT id FROM records WHERE kind='conversation' AND chat=coalesce((SELECT chat FROM records WHERE kind='conversation' AND id=?1),?1)) ";
+pub fn selfRecipient(chat: t.Conversation) ?[]const u8 {
+    if (!chat.is_self or !u.eq(chat.service, "imessage")) return null;
+    for (chat.participants) |address| if (t.validAddress(address)) return address;
+    return null;
+}
+pub fn sendTarget(s: Self, a: u.Allocator, key: []const u8) !t.Target {
+    // The merged self thread's display ID may not resolve to an AppleScript
+    // chat. Address its most recently active verified member directly instead.
+    var q = try s.db.prepare(thread_cte ++ "SELECT record FROM records WHERE kind='conversation' AND id IN (SELECT id FROM members) AND EXISTS(SELECT 1 FROM records selected WHERE selected.kind='conversation' AND selected.id=?1 AND json_extract(selected.record,'$.is_self')=1 AND json_extract(selected.record,'$.service')='imessage') ORDER BY sort_key DESC,id DESC");
+    defer q.close();
+    try q.bind(&.{.{ .text = key }});
+    while (try q.step()) {
+        const chat = try std.json.parseFromSliceLeaky(t.Conversation, a, q.bytes(0), .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+        if (selfRecipient(chat)) |address| return .{ .recipient = .{ .address = address, .service = "imessage" } };
+    }
+    return .{ .conversation_id = key };
+}
 fn mergeThreadState(s: Self, a: u.Allocator, key: []const u8) !void {
     const canonical = try s.threadKey(a, key);
     var q = try s.db.prepare(thread_cte ++ "SELECT d.key,d.text FROM drafts d WHERE d.key IN (SELECT id FROM members) AND d.key!=?1 ORDER BY d.key");
@@ -228,10 +277,18 @@ pub fn eventNotification(s: Self, a: u.Allocator, raw: []const u8, frame_id: []c
     const owns_transaction = u.c.sqlite3_get_autocommit(s.db.handle) != 0;
     if (owns_transaction) try s.db.exec("BEGIN IMMEDIATE");
     errdefer if (owns_transaction) s.db.exec("ROLLBACK") catch {};
-    _ = try s.upsert(a, kind, record);
     var notification: ?t.Message = null;
     if (u.eq(kind, "message")) {
         const m = (try std.json.parseFromSlice(t.Message, a, record, .{ .ignore_unknown_fields = true })).value;
+        if (u.eq(e.origin, "live") or try s.cacheBackgroundMessage(m)) _ = try s.upsert(a, kind, record);
+        if (!display.resolvedReaction(m)) try s.savePreview(a, try u.json(a, t.ConversationPreview{
+            .conversation_id = m.conversation_id,
+            .message_id = m.id,
+            .revision = m.revision,
+            .timestamp = m.timestamp,
+            .kind = @tagName(m.kind),
+            .text = display.prefix(display.summary(a, m), 1024, 1),
+        }));
         if (m.direction == .incoming and m.kind != .reaction and m.reaction_event == null) {
             try s.exec("INSERT OR IGNORE INTO live_seen VALUES(?)", &.{.{ .text = m.id }});
             const first = u.c.sqlite3_changes(s.db.handle) > 0;
@@ -240,10 +297,22 @@ pub fn eventNotification(s: Self, a: u.Allocator, raw: []const u8, frame_id: []c
                 notification = m;
             }
         }
-    }
+    } else _ = try s.upsert(a, kind, record);
     try s.set("cursor", e.cursor);
     if (owns_transaction) try s.db.exec("COMMIT");
     return notification;
+}
+fn cacheBackgroundMessage(s: Self, m: t.Message) !bool {
+    var existing = try s.db.prepare("SELECT 1 FROM records WHERE kind='message' AND id=?");
+    defer existing.close();
+    try existing.bind(&.{.{ .text = m.id }});
+    if (try existing.step()) return true;
+    // Reconciliation may discover a recent message between history requests.
+    // It must not extend the cache backwards into unrequested older history.
+    var recent = try s.db.prepare(thread_cte ++ std.fmt.comptimePrint("SELECT 1 FROM (SELECT sort_key,id FROM records WHERE kind='message' AND chat IN (SELECT id FROM members) ORDER BY sort_key DESC,id DESC LIMIT {d}) WHERE (sort_key,id)<=(?2,?3) LIMIT 1", .{recent_history_limit}));
+    defer recent.close();
+    try recent.bind(&.{ .{ .text = m.conversation_id }, .{ .text = m.timestamp }, .{ .text = m.id } });
+    return try recent.step();
 }
 pub fn persistSend(s: Self, a: u.Allocator, key: []const u8, input: t.SendInput) !void {
     try t.validate(input);
@@ -267,7 +336,7 @@ pub fn savePreview(s: Self, a: u.Allocator, raw: []const u8) !void {
     const value = (try std.json.parseFromSlice(t.ConversationPreview, a, raw, .{ .ignore_unknown_fields = true })).value;
     const revision = std.fmt.parseInt(i64, value.revision, 10) catch return error.InvalidRecord;
     if (revision < 0 or value.conversation_id.len == 0 or value.message_id.len == 0 or value.text.len > 1024) return error.InvalidRecord;
-    try s.exec("INSERT INTO previews(chat,record) VALUES(?,?) ON CONFLICT(chat) DO UPDATE SET record=excluded.record WHERE previews.record IS NULL OR CAST(json_extract(excluded.record,'$.revision') AS INTEGER)>CAST(json_extract(previews.record,'$.revision') AS INTEGER)", &.{ .{ .text = value.conversation_id }, .{ .text = raw } });
+    try s.exec("INSERT INTO previews(chat,record) VALUES(?,?) ON CONFLICT(chat) DO UPDATE SET record=excluded.record WHERE previews.record IS NULL OR (json_extract(excluded.record,'$.timestamp'),json_extract(excluded.record,'$.message_id'))>(json_extract(previews.record,'$.timestamp'),json_extract(previews.record,'$.message_id')) OR (json_extract(excluded.record,'$.message_id')=json_extract(previews.record,'$.message_id') AND CAST(json_extract(excluded.record,'$.revision') AS INTEGER)>CAST(json_extract(previews.record,'$.revision') AS INTEGER))", &.{ .{ .text = value.conversation_id }, .{ .text = raw } });
 }
 pub fn nextPage(s: Self, a: u.Allocator, chat: []const u8) !?[]const u8 {
     var q = try s.db.prepare("SELECT cursor FROM pages WHERE chat=?");
@@ -383,7 +452,7 @@ pub fn snapshotWithMessages(s: Self, a: u.Allocator, selected_key: []const u8, s
     }
     return .{ .chats = chats.items, .messages = shared_messages orelse messages.items, .pending = pending.items, .selected = try a.dupe(u8, selected), .draft = try s.draft(a, selected), .epoch = try s.get(a, "epoch"), .more = (try s.nextPage(a, selected)) != null, .directory = try s.directory(a) };
 }
-const echo_id_sql = "coalesce(json_extract(outbox.record,'$.message_id'),CASE WHEN outbox.state='unknown' AND outbox.epoch=(SELECT value FROM meta WHERE key='epoch') THEN json_extract(outbox.record,'$.candidate_message_id') END)";
+pub const echo_id_sql = "coalesce(json_extract(outbox.record,'$.message_id'),CASE WHEN outbox.state='unknown' AND outbox.epoch=(SELECT value FROM meta WHERE key='epoch') THEN json_extract(outbox.record,'$.candidate_message_id') END)";
 const enriched_record = "coalesce((SELECT e.record FROM enrichment_cache e WHERE e.message_id=records.id AND e.revision=records.revision),record)";
 const enrichment_serial = "coalesce((SELECT e.serial FROM enrichment_cache e WHERE e.message_id=records.id AND e.revision=records.revision),0)";
 const history_tail = " FROM records WHERE kind='message' AND chat NOT IN (SELECT id FROM members) AND id IN (SELECT " ++ echo_id_sql ++ " FROM outbox WHERE draft_key IN (SELECT id FROM members) AND record IS NOT NULL) ORDER BY sort_key,id";

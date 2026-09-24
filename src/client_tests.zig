@@ -79,6 +79,49 @@ test "self thread upgrade preserves both histories drafts unread and immutable s
     try std.testing.expectEqualStrings("Edited combined draft", try s.draft(a, alias));
 }
 
+test "You sends to a verified self address while other conversations keep their routes" {
+    const t = @import("protocol/types.zig");
+    const s = try Store.open(":memory:");
+    defer s.close();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    const root = epoch;
+    const alias = "22345678-1234-1234-1234-123456789012";
+    try s.beginSync(epoch, epoch ++ ":0");
+    const older = t.Conversation{ .id = root, .service = "imessage", .participants = &.{"self@example.invalid"}, .is_self = true, .thread_id = root, .last_activity = "2026-01-01T00:00:00Z", .sendable = false };
+    const recent = t.Conversation{ .id = alias, .service = "imessage", .participants = &.{"+14155550124"}, .is_self = true, .thread_id = root, .last_activity = "2026-01-02T00:00:00Z", .sendable = true };
+    for ([_]t.Conversation{ older, recent }) |chat| _ = try s.upsert(ar, "conversation", try u.json(ar, chat));
+    for ([_][]const u8{ root, alias }) |key| {
+        const target = try s.sendTarget(ar, key);
+        try std.testing.expect(target.conversation_id == null);
+        try std.testing.expectEqualStrings("+14155550124", target.recipient.?.address);
+        try std.testing.expectEqualStrings("imessage", target.recipient.?.service);
+    }
+    const snapshot = try s.snapshot(ar, root);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.chats.len);
+    try std.testing.expectEqualStrings(root, snapshot.selected);
+    try std.testing.expect(Store.selfRecipient(snapshot.chats[0].value) != null);
+
+    // A matching display name, SMS chat, or invalid address is not an exception.
+    var other = t.Conversation{ .id = "other", .service = "imessage", .title = "You", .participants = &.{"peer@example.invalid"}, .sendable = false };
+    _ = try s.upsert(ar, "conversation", try u.json(ar, other));
+    try std.testing.expect(Store.selfRecipient(other) == null);
+    try std.testing.expectEqualStrings("other", (try s.sendTarget(ar, "other")).conversation_id.?);
+    other.is_self = true;
+    other.service = "sms";
+    other.revision = "1";
+    _ = try s.upsert(ar, "conversation", try u.json(ar, other));
+    try std.testing.expect(Store.selfRecipient(other) == null);
+    try std.testing.expectEqualStrings("other", (try s.sendTarget(ar, "other")).conversation_id.?);
+    other.service = "imessage";
+    other.participants = &.{"invalid address"};
+    other.revision = "2";
+    _ = try s.upsert(ar, "conversation", try u.json(ar, other));
+    try std.testing.expect(Store.selfRecipient(other) == null);
+    try std.testing.expectEqualStrings("other", (try s.sendTarget(ar, "other")).conversation_id.?);
+}
+
 test "hidden conversations survive restart and live updates without losing history or drafts" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -157,6 +200,127 @@ test "historical imports do not create unread markers; epoch reset preserves dra
     try s.beginSync(changed, changed ++ ":0");
     try std.testing.expectEqualStrings("Draft 👩‍💻\nCafé", try s.draft(a, "c1"));
     try std.testing.expectEqual(@as(i64, 1), try s.db.scalar("SELECT count(*) FROM outbox WHERE state='unknown'"));
+}
+
+test "background history advances sync and previews without filling the message cache" {
+    const t = @import("protocol/types.zig");
+    const s = try Store.open(":memory:");
+    defer s.close();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    try s.beginSync(epoch, epoch ++ ":0");
+    _ = try s.upsert(ar, "conversation", "{\"id\":\"c1\",\"service\":\"imessage\"}");
+    var m = try std.json.parseFromSliceLeaky(t.Message, ar, message, .{});
+    for (0..200) |i| {
+        m.id = try std.fmt.allocPrint(ar, "archive-{d}", .{i});
+        m.revision = try u.decimal(ar, @intCast(i + 1));
+        m.timestamp = if (i == 0) "2020-01-01T00:00:00Z" else "2010-01-01T00:00:00Z";
+        const cursor = try t.cursor(ar, epoch, @intCast(i + 1));
+        const raw = try u.json(ar, .{ .cursor = cursor, .sequence = m.revision, .type = "message.upsert", .origin = if (i % 2 == 0) "historical_import" else "reconciliation", .record = m });
+        try std.testing.expect(try s.eventNotification(ar, raw, cursor, "message.upsert", "") == null);
+    }
+    try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM records WHERE kind='message'"));
+    try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM unread"));
+    try std.testing.expectEqualStrings(epoch ++ ":200", try s.get(ar, "cursor"));
+    var preview = try s.db.prepare("SELECT json_extract(record,'$.message_id') FROM previews WHERE chat='c1'");
+    defer preview.close();
+    _ = try preview.step();
+    try std.testing.expectEqualStrings("archive-0", preview.bytes(0));
+
+    // An explicit history page is retained and later edits still update it.
+    _ = try s.upsert(ar, "message", try u.json(ar, m));
+    m.revision = "201";
+    m.text = "Edited requested history";
+    const edited = try u.json(ar, .{ .cursor = epoch ++ ":201", .sequence = "201", .type = "message.upsert", .origin = "reconciliation", .record = m });
+    try s.event(ar, edited, epoch ++ ":201", "message.upsert", "");
+    try std.testing.expectEqualStrings("Edited requested history", (try s.snapshot(ar, "c1")).messages[0].text.?);
+    m.id = "live";
+    m.revision = "202";
+    m.timestamp = "2026-01-01T00:00:00Z";
+    const live = try u.json(ar, .{ .cursor = epoch ++ ":202", .sequence = "202", .type = "message.upsert", .origin = "live", .record = m });
+    try std.testing.expect((try s.eventNotification(ar, live, epoch ++ ":202", "message.upsert", "")) != null);
+    try std.testing.expect((try s.eventNotification(ar, live, epoch ++ ":202", "message.upsert", "")) == null);
+    try std.testing.expectEqual(@as(i64, 2), try s.db.scalar("SELECT count(*) FROM records WHERE kind='message'"));
+    try std.testing.expectEqual(@as(i64, 1), try s.db.scalar("SELECT count FROM unread WHERE chat='c1'"));
+}
+
+test "legacy history cache trims once per thread while preserving drafts sends and requested pages" {
+    const t = @import("protocol/types.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    const path = try std.fmt.allocPrintSentinel(ar, ".zig-cache/tmp/{s}/client.db", .{tmp.sub_path}, 0);
+    const root = epoch;
+    const alias = "22345678-1234-1234-1234-123456789012";
+    const input = t.SendInput{ .request_id = epoch, .server_epoch = epoch, .target = .{ .conversation_id = alias }, .text = "Saved send" };
+    var saved_payload: []const u8 = undefined;
+    {
+        const s = try Store.open(path);
+        defer s.close();
+        try s.beginSync(epoch, epoch ++ ":200");
+        for ([_][]const u8{ root, alias }) |id| _ = try s.upsert(ar, "conversation", try u.json(ar, t.Conversation{ .id = id, .is_self = true, .thread_id = root, .service = "imessage" }));
+        var m = try std.json.parseFromSliceLeaky(t.Message, ar, message, .{});
+        for (0..150) |i| {
+            m.id = try std.fmt.allocPrint(ar, "m-{d:0>3}", .{i});
+            m.conversation_id = if (i % 2 == 0) root else alias;
+            _ = try s.upsert(ar, "message", try u.json(ar, m));
+        }
+        try s.persistSend(ar, root, input);
+        try s.saveDraft(root, "Keep draft 👋");
+        _ = try s.upsert(ar, "request", try u.json(ar, t.SendRequest{ .request_id = input.request_id, .server_epoch = epoch, .target = input.target, .text = input.text, .state = .unknown, .candidate_message_id = "m-000" }));
+        var payload = try s.db.prepare("SELECT payload FROM outbox");
+        defer payload.close();
+        _ = try payload.step();
+        saved_payload = try payload.text(ar, 0);
+        try s.page(root, "old-page");
+        try s.exec("INSERT INTO unread VALUES(?,3)", &.{.{ .text = root }});
+        try s.db.exec("INSERT INTO enrichment_pages VALUES('m-001','1','attachments','[]',NULL); INSERT INTO enrichment_cache VALUES('m-001',1,'{}',1)");
+        try s.db.exec("DELETE FROM meta WHERE key='lazy_history_cache_v1'");
+    }
+    {
+        const s = try Store.open(path);
+        defer s.close();
+        try std.testing.expectEqual(@as(i64, 101), try s.db.scalar("SELECT count(*) FROM records WHERE kind='message'"));
+        try std.testing.expectEqual(@as(i64, 1), try s.db.scalar("SELECT count(*) FROM records WHERE kind='message' AND id='m-000'"));
+        try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM enrichment_cache"));
+        try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM enrichment_pages"));
+        try std.testing.expectEqualStrings("", (try s.nextPage(ar, root)).?);
+        try std.testing.expectEqualStrings("Keep draft 👋", try s.draft(ar, root));
+        try std.testing.expectEqualStrings(epoch ++ ":200", try s.get(ar, "cursor"));
+        try std.testing.expectEqual(@as(i64, 3), try s.db.scalar("SELECT count FROM unread"));
+        var payload = try s.db.prepare("SELECT payload FROM outbox");
+        defer payload.close();
+        _ = try payload.step();
+        try std.testing.expectEqualStrings(saved_payload, payload.bytes(0));
+        // The pinned old echo must not let reconciliation refill the archive.
+        var background = try std.json.parseFromSliceLeaky(t.Message, ar, message, .{});
+        background.id = "m-010";
+        background.conversation_id = alias;
+        background.revision = "201";
+        const old_event = try u.json(ar, .{ .cursor = epoch ++ ":201", .sequence = "201", .type = "message.upsert", .origin = "reconciliation", .record = background });
+        try s.event(ar, old_event, epoch ++ ":201", "message.upsert", root);
+        try std.testing.expectEqual(@as(i64, 101), try s.db.scalar("SELECT count(*) FROM records WHERE kind='message'"));
+        // A newly discovered message inside the recent window is still useful.
+        background.id = "m-999";
+        background.revision = "202";
+        const recent_event = try u.json(ar, .{ .cursor = epoch ++ ":202", .sequence = "202", .type = "message.upsert", .origin = "reconciliation", .record = background });
+        try s.event(ar, recent_event, epoch ++ ":202", "message.upsert", root);
+        try std.testing.expectEqual(@as(i64, 102), try s.db.scalar("SELECT count(*) FROM records WHERE kind='message'"));
+        // History explicitly requested after the migration survives reopening.
+        var older = try std.json.parseFromSliceLeaky(t.Message, ar, message, .{});
+        older.id = "requested-old";
+        older.conversation_id = alias;
+        older.timestamp = "2010-01-01T00:00:00Z";
+        _ = try s.upsert(ar, "message", try u.json(ar, older));
+        try s.page(root, "requested-page");
+    }
+    const reopened = try Store.open(path);
+    defer reopened.close();
+    try std.testing.expectEqual(@as(i64, 103), try reopened.db.scalar("SELECT count(*) FROM records WHERE kind='message'"));
+    try std.testing.expectEqualStrings("requested-page", (try reopened.nextPage(ar, root)).?);
 }
 
 test "sidebar projections never replace full messages or roll back newer previews" {

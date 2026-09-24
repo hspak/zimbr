@@ -63,12 +63,23 @@ share a left-aligned feed with square avatars, sender labels, timestamps, and
 outgoing delivery checkmarks: one for sent, two for delivered.
 Pending and uncertain sends stay in the timeline at their original send time;
 older cached sends use an estimated position from nearby history.
-The compact composer shows one text line with Send alongside, and its bottom
-aligns with the conversation list. Longer drafts scroll within the input. The
-conversation pane extends to the bottom of the window.
+The compact composer grows from one to three text lines, then scrolls for longer
+drafts. Send stays the same size at the bottom right, and the input's bottom
+aligns with the conversation list. The conversation pane extends to the bottom
+of the window.
 Read-only chats show a disabled grey composer; any existing draft is preserved.
 Verified phone/email self chats appear together as **You**, with both histories
 and addresses searchable. Existing saved drafts are combined without truncation.
+The **You** conversation sends directly to its most recently active verified self
+address, so sending still works when Messages cannot resolve the merged chat ID.
+Opening a conversation loads its latest 100 messages. Older history loads when
+you scroll back and remains available offline. Background relay imports and
+reconciliation update sidebar previews and cached messages without copying the
+full archive into the local cache. Live messages continue to arrive normally.
+On the first launch after this update, existing cached history is trimmed to the
+latest 100 messages per conversation, including merged self chats; drafts, send
+records, and their linked message echoes are preserved. Older messages remain on
+the Mac and can be fetched again by scrolling back.
 Connection status appears in the sidebar. **Details** in the navigation rail
 (Ctrl+D) includes **Reconnect** in its header and opens
 a scrollable pane with connection and retry status, relay capabilities, saved
@@ -363,6 +374,44 @@ Automation is probed only after database reads succeed. It does not send a test
 message automatically. Screen locking must be tested separately from logging out.
 After logout/reboot, this agent requires the user's graphical login session.
 
+## Update the running relay
+
+Run this on the Mac, in Terminal or over SSH as the user who runs the relay.
+Keep that user logged into the Mac's graphical session. These commands assume
+the checkout is at `~/code/zimbr` and use the Apple Silicon Zig, OpenSSL, and
+Python installations under `.tools`; adjust those paths for another setup.
+Commit or stash local changes first. If the pull cannot fast-forward, resolve
+the checkout before retrying.
+
+```sh
+(
+  set -eu
+  cd "$HOME/code/zimbr"
+  git switch main
+  git pull --ff-only
+
+  .tools/zig-aarch64-macos-0.16.0/zig build relay test test-macos-enrichment \
+    -Doptimize=ReleaseFast \
+    -Dopenssl-prefix="$PWD/.tools/openssl-3.5"
+
+  .tools/python/bin/python3 packaging/macos/install.py --install --start \
+    --openssl-license "$PWD/.tools/openssl-build/openssl-3.5.8/LICENSE.txt"
+
+  launchctl print "gui/$(id -u)/com.hsp.zimbr.relay"
+  "$HOME/Applications/Zimbr Relay.app/Contents/MacOS/relay" doctor
+)
+```
+
+The commands stop if a step fails. The install step replaces the app used by
+LaunchAgent and restarts the service with the rebuilt executable. It reuses the
+installed credentials and persistent signing identity, preserves existing
+messages and routes, and backs up the journal under
+`~/Library/Application Support/Zimbr/backups/`.
+
+Check that `launchctl print` reports `state = running`, then review the installed
+relay's `doctor` output for configuration and Messages access problems. The
+installer also checks that the restarted service opens its configured listener.
+
 ## Operation
 
 ```sh
@@ -447,8 +496,9 @@ History queries also enqueue bounded source reconciliation.
 Conversation records may include `is_self` (default `false`) and `thread_id`
 (default `null`). A verified reciprocal pair of local addresses on one Messages
 account shares the older source chat's relay ID as its thread ID. Clients group
-those records for presentation; each conversation ID and send route remains
-valid. History requested through either member includes both histories, with
+those records for presentation; each conversation retains its own ID and source
+route. The Linux client uses a verified self address for new sends from **You**.
+History requested through either member includes both histories, with
 original message IDs and `conversation_id` values and one shared pagination order.
 On a grouping change, clients restart history pagination. Matching contact names
 alone never combines conversations.

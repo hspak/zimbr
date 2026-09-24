@@ -123,6 +123,17 @@ def main():
             wait(lambda: view().get('selected') == ids[5] and view().get('messages') == 100)
             command(kind='older')
             wait(lambda: view().get('messages') == 130)
+            # The merged You ID is presentation state. New sends address the
+            # latest verified self member directly, preserving that display ID.
+            command(kind='send', key=ids[5], text='Fixture self reply')
+            wait(lambda: rows("SELECT count(*) FROM outbox WHERE state='delivered'", path=client/'client.db')[0][0] == 1)
+            saved = rows('SELECT draft_key,payload FROM outbox', path=client/'client.db')[0]
+            target = json.loads(saved[1])['target']
+            assert saved[0] == ids[5] and view()['selected'] == ids[5]
+            assert target['conversation_id'] is None
+            assert target['recipient'] == dict(address='+14155550124', service='imessage')
+            assert rows("SELECT mode FROM send_requests WHERE json_extract(payload,'$.text')='Fixture self reply'") == [('direct',)]
+            assert rows("SELECT j.chat_id FROM message m JOIN chat_message_join j ON m.ROWID=j.message_id WHERE m.text='Fixture self reply'", path=source) == [(6,)]
             # Synthetic dispatch must use the existing any route, never create a chat.
             send = {'request_id': str(uuid.uuid4()), 'server_epoch': epoch,
                     'target': {'conversation_id': ids[2]}, 'text': 'Fixture group reply'}
@@ -143,7 +154,7 @@ def main():
             assert status == 400 and blocked['error_info']['code'] == 'unsupported_target', (status, blocked)
             assert original_ids <= {row[0] for row in rows('SELECT id FROM messages')}
             assert request('/v1/sync')[1]['server_epoch'] == epoch
-            print('Conversation regressions passed: service selection, exact route, self grouping, pagination, worker, and immutable IDs.')
+            print('Conversation regressions passed: verified self direct sends, service selection, exact group route, self grouping, pagination, worker, and immutable IDs.')
         finally:
             if worker is not None:
                 if worker.poll() is None:
