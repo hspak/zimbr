@@ -1,0 +1,710 @@
+{
+  "date": "2026-09-24",
+  "baseline_commit": "42b694369fe728d8db23b8700fc11e5912336500",
+  "host": "AMD Ryzen AI Max+ 395, Linux x86_64; not M1 measurements",
+  "kernel": "7.2.6-arch2-1-strixhalo",
+  "compiler": "Zig 0.16.0",
+  "libraries": {
+    "pangocairo": "1.58.2",
+    "libjpeg": "3.2.0",
+    "libpng": "1.6.58",
+    "libcurl": "8.22.0",
+    "openssl": "3.6.4"
+  },
+  "method": "Candidates tested sequentially; each baseline includes earlier retained candidates. Three pairs per candidate, before/after then after/before then before/after. One warm-up batch and 15 timed batches per process. Decoded-image and bounded raster-tile FNV-1a checksums, plus layout height, must match within each pair.",
+  "keep_criterion": "Repeatable approximately 10% or greater reduction in complete CPU raster, cached-file decode, or text layout time on representative workloads, with identical output.",
+  "excludes": [
+    "GPU upload and presentation",
+    "network transfer",
+    "M1 runtime measurements"
+  ],
+  "final_source_sha256": {
+    "src/client/bridge.c": "a2a807a651c3c860177bb723c4df546ccc1bb4e1fef869a40b4f5e9c20e84c4c",
+    "src/client/media.c": "6081dcd431f0b6f2a0da3798607c3cd54d7c7ed45b8b2d937fa0edeba9cc1d3f"
+  },
+  "trials": [
+    {
+      "case": "raster",
+      "build": "Zig cc -O3 -march=native",
+      "pairs": 3,
+      "batches_per_process": 15,
+      "comparison_statistic": "median of three per-process medians, microseconds per complete operation",
+      "equal_output": true,
+      "source_sha256": {
+        "before": {
+          "bridge.c": "5d49977a1dc461e9c686f7f0c7ceb676671a5b1f1b7f7057ec68af7004c27ae7",
+          "media.c": "646814d47f1bb32310de9405ae9563f0c42587161f6e5c59aa381afcd843c771"
+        },
+        "after": {
+          "bridge.c": "ff17cdc437d63a094f5fa009b900dbfc38fb750b1857232d0b3065f156f93813",
+          "media.c": "646814d47f1bb32310de9405ae9563f0c42587161f6e5c59aa381afcd843c771"
+        }
+      },
+      "comparison": {
+        "short": {
+          "before": 4.125,
+          "after": 2.948,
+          "reduction_percent": 28.53,
+          "pair_reductions_percent": [
+            26.67,
+            27.87,
+            31.29
+          ]
+        },
+        "unicode": {
+          "before": 53.525,
+          "after": 36.438,
+          "reduction_percent": 31.92,
+          "pair_reductions_percent": [
+            30.73,
+            32.03,
+            32.66
+          ]
+        },
+        "long_hidpi": {
+          "before": 830.409,
+          "after": 453.302,
+          "reduction_percent": 45.41,
+          "pair_reductions_percent": [
+            42.98,
+            46.82,
+            46.54
+          ]
+        },
+        "transparent": {
+          "before": 88.008,
+          "after": 83.294,
+          "reduction_percent": 5.36,
+          "pair_reductions_percent": [
+            5.15,
+            4.85,
+            5.54
+          ]
+        }
+      },
+      "runs": [
+        {
+          "before": {
+            "short": {
+              "case": "short",
+              "p50_us": 4.125,
+              "p95_us": 4.88,
+              "checksum": "0abc2fc78c6f0a55"
+            },
+            "unicode": {
+              "case": "unicode",
+              "p50_us": 53.525,
+              "p95_us": 53.621,
+              "checksum": "49fc38e1fdd6ba4f"
+            },
+            "long_hidpi": {
+              "case": "long_hidpi",
+              "p50_us": 802.66,
+              "p95_us": 808.551,
+              "checksum": "f3564628c91b3c9e"
+            },
+            "transparent": {
+              "case": "transparent",
+              "p50_us": 87.818,
+              "p95_us": 88.477,
+              "checksum": "c1860c3d2a42c565"
+            }
+          },
+          "after": {
+            "short": {
+              "case": "short",
+              "p50_us": 3.025,
+              "p95_us": 3.418,
+              "checksum": "0abc2fc78c6f0a55"
+            },
+            "unicode": {
+              "case": "unicode",
+              "p50_us": 37.079,
+              "p95_us": 37.775,
+              "checksum": "49fc38e1fdd6ba4f"
+            },
+            "long_hidpi": {
+              "case": "long_hidpi",
+              "p50_us": 457.707,
+              "p95_us": 477.929,
+              "checksum": "f3564628c91b3c9e"
+            },
+            "transparent": {
+              "case": "transparent",
+              "p50_us": 83.294,
+              "p95_us": 88.161,
+              "checksum": "c1860c3d2a42c565"
+            }
+          }
+        },
+        {
+          "after": {
+            "short": {
+              "case": "short",
+              "p50_us": 2.948,
+              "p95_us": 3.043,
+              "checksum": "0abc2fc78c6f0a55"
+            },
+            "unicode": {
+              "case": "unicode",
+              "p50_us": 36.438,
+              "p95_us": 37.379,
+              "checksum": "49fc38e1fdd6ba4f"
+            },
+            "long_hidpi": {
+              "case": "long_hidpi",
+              "p50_us": 453.302,
+              "p95_us": 471.417,
+              "checksum": "f3564628c91b3c9e"
+            },
+            "transparent": {
+              "case": "transparent",
+              "p50_us": 84.664,
+              "p95_us": 85.523,
+              "checksum": "c1860c3d2a42c565"
+            }
+          },
+          "before": {
+            "short": {
+              "case": "short",
+              "p50_us": 4.087,
+              "p95_us": 4.461,
+              "checksum": "0abc2fc78c6f0a55"
+            },
+            "unicode": {
+              "case": "unicode",
+              "p50_us": 53.607,
+              "p95_us": 56.474,
+              "checksum": "49fc38e1fdd6ba4f"
+            },
+            "long_hidpi": {
+              "case": "long_hidpi",
+              "p50_us": 852.336,
+              "p95_us": 943.455,
+              "checksum": "f3564628c91b3c9e"
+            },
+            "transparent": {
+              "case": "transparent",
+              "p50_us": 88.98,
+              "p95_us": 95.335,
+              "checksum": "c1860c3d2a42c565"
+            }
+          }
+        },
+        {
+          "before": {
+            "short": {
+              "case": "short",
+              "p50_us": 4.257,
+              "p95_us": 5.503,
+              "checksum": "0abc2fc78c6f0a55"
+            },
+            "unicode": {
+              "case": "unicode",
+              "p50_us": 53.476,
+              "p95_us": 53.737,
+              "checksum": "49fc38e1fdd6ba4f"
+            },
+            "long_hidpi": {
+              "case": "long_hidpi",
+              "p50_us": 830.409,
+              "p95_us": 855.811,
+              "checksum": "f3564628c91b3c9e"
+            },
+            "transparent": {
+              "case": "transparent",
+              "p50_us": 88.008,
+              "p95_us": 88.1,
+              "checksum": "c1860c3d2a42c565"
+            }
+          },
+          "after": {
+            "short": {
+              "case": "short",
+              "p50_us": 2.925,
+              "p95_us": 2.954,
+              "checksum": "0abc2fc78c6f0a55"
+            },
+            "unicode": {
+              "case": "unicode",
+              "p50_us": 36.013,
+              "p95_us": 36.334,
+              "checksum": "49fc38e1fdd6ba4f"
+            },
+            "long_hidpi": {
+              "case": "long_hidpi",
+              "p50_us": 443.904,
+              "p95_us": 478.235,
+              "checksum": "f3564628c91b3c9e"
+            },
+            "transparent": {
+              "case": "transparent",
+              "p50_us": 83.132,
+              "p95_us": 83.288,
+              "checksum": "c1860c3d2a42c565"
+            }
+          }
+        }
+      ],
+      "decision": "keep",
+      "note": "The big-endian branch was corrected to rotate ARGB into RGBA after measurement; this does not affect the measured little-endian build. The transparent path is unchanged and is a control."
+    },
+    {
+      "case": "jpeg",
+      "build": "Zig cc -O3 -march=native",
+      "pairs": 3,
+      "batches_per_process": 15,
+      "comparison_statistic": "median of three per-process medians, microseconds per complete operation",
+      "equal_output": true,
+      "source_sha256": {
+        "before": {
+          "bridge.c": "a2a807a651c3c860177bb723c4df546ccc1bb4e1fef869a40b4f5e9c20e84c4c",
+          "media.c": "646814d47f1bb32310de9405ae9563f0c42587161f6e5c59aa381afcd843c771"
+        },
+        "after": {
+          "bridge.c": "a2a807a651c3c860177bb723c4df546ccc1bb4e1fef869a40b4f5e9c20e84c4c",
+          "media.c": "6081dcd431f0b6f2a0da3798607c3cd54d7c7ed45b8b2d937fa0edeba9cc1d3f"
+        }
+      },
+      "comparison": {
+        "avatar": {
+          "before": 37.022,
+          "after": 34.043,
+          "reduction_percent": 8.05,
+          "pair_reductions_percent": [
+            26.37,
+            0.46,
+            10.18
+          ]
+        },
+        "photo": {
+          "before": 5449.616,
+          "after": 4109.807,
+          "reduction_percent": 24.59,
+          "pair_reductions_percent": [
+            24.56,
+            23.09,
+            26.77
+          ]
+        },
+        "large_photo": {
+          "before": 9745.665,
+          "after": 7250.242,
+          "reduction_percent": 25.61,
+          "pair_reductions_percent": [
+            25.61,
+            23.64,
+            27.58
+          ]
+        },
+        "grayscale": {
+          "before": 1758.914,
+          "after": 1403.571,
+          "reduction_percent": 20.2,
+          "pair_reductions_percent": [
+            20.2,
+            19.87,
+            22.82
+          ]
+        }
+      },
+      "runs": [
+        {
+          "before": {
+            "avatar": {
+              "case": "avatar",
+              "p50_us": 46.236,
+              "p95_us": 49.263,
+              "checksum": "64300feb72f048f9"
+            },
+            "photo": {
+              "case": "photo",
+              "p50_us": 5449.616,
+              "p95_us": 5578.585,
+              "checksum": "dc1f55d3aea661cd"
+            },
+            "large_photo": {
+              "case": "large_photo",
+              "p50_us": 9745.665,
+              "p95_us": 9856.948,
+              "checksum": "be2507edc32e644b"
+            },
+            "grayscale": {
+              "case": "grayscale",
+              "p50_us": 1758.914,
+              "p95_us": 1860.781,
+              "checksum": "c3fc53b56a745010"
+            }
+          },
+          "after": {
+            "avatar": {
+              "case": "avatar",
+              "p50_us": 34.043,
+              "p95_us": 37.724,
+              "checksum": "64300feb72f048f9"
+            },
+            "photo": {
+              "case": "photo",
+              "p50_us": 4111.215,
+              "p95_us": 4197.241,
+              "checksum": "dc1f55d3aea661cd"
+            },
+            "large_photo": {
+              "case": "large_photo",
+              "p50_us": 7250.242,
+              "p95_us": 7356.028,
+              "checksum": "be2507edc32e644b"
+            },
+            "grayscale": {
+              "case": "grayscale",
+              "p50_us": 1403.571,
+              "p95_us": 1419.982,
+              "checksum": "c3fc53b56a745010"
+            }
+          }
+        },
+        {
+          "after": {
+            "avatar": {
+              "case": "avatar",
+              "p50_us": 34.298,
+              "p95_us": 37.494,
+              "checksum": "64300feb72f048f9"
+            },
+            "photo": {
+              "case": "photo",
+              "p50_us": 4081.87,
+              "p95_us": 4140.499,
+              "checksum": "dc1f55d3aea661cd"
+            },
+            "large_photo": {
+              "case": "large_photo",
+              "p50_us": 7203.728,
+              "p95_us": 7374.072,
+              "checksum": "be2507edc32e644b"
+            },
+            "grayscale": {
+              "case": "grayscale",
+              "p50_us": 1404.1,
+              "p95_us": 1578.971,
+              "checksum": "c3fc53b56a745010"
+            }
+          },
+          "before": {
+            "avatar": {
+              "case": "avatar",
+              "p50_us": 34.456,
+              "p95_us": 36.27,
+              "checksum": "64300feb72f048f9"
+            },
+            "photo": {
+              "case": "photo",
+              "p50_us": 5307.573,
+              "p95_us": 5515.809,
+              "checksum": "dc1f55d3aea661cd"
+            },
+            "large_photo": {
+              "case": "large_photo",
+              "p50_us": 9434.179,
+              "p95_us": 9662.863,
+              "checksum": "be2507edc32e644b"
+            },
+            "grayscale": {
+              "case": "grayscale",
+              "p50_us": 1752.33,
+              "p95_us": 1786.553,
+              "checksum": "c3fc53b56a745010"
+            }
+          }
+        },
+        {
+          "before": {
+            "avatar": {
+              "case": "avatar",
+              "p50_us": 37.022,
+              "p95_us": 40.411,
+              "checksum": "64300feb72f048f9"
+            },
+            "photo": {
+              "case": "photo",
+              "p50_us": 5612.114,
+              "p95_us": 5652.426,
+              "checksum": "dc1f55d3aea661cd"
+            },
+            "large_photo": {
+              "case": "large_photo",
+              "p50_us": 10040.423,
+              "p95_us": 10226.751,
+              "checksum": "be2507edc32e644b"
+            },
+            "grayscale": {
+              "case": "grayscale",
+              "p50_us": 1805.276,
+              "p95_us": 1824.298,
+              "checksum": "c3fc53b56a745010"
+            }
+          },
+          "after": {
+            "avatar": {
+              "case": "avatar",
+              "p50_us": 33.253,
+              "p95_us": 34.548,
+              "checksum": "64300feb72f048f9"
+            },
+            "photo": {
+              "case": "photo",
+              "p50_us": 4109.807,
+              "p95_us": 4234.828,
+              "checksum": "dc1f55d3aea661cd"
+            },
+            "large_photo": {
+              "case": "large_photo",
+              "p50_us": 7270.931,
+              "p95_us": 7378.099,
+              "checksum": "be2507edc32e644b"
+            },
+            "grayscale": {
+              "case": "grayscale",
+              "p50_us": 1393.338,
+              "p95_us": 1418.565,
+              "checksum": "c3fc53b56a745010"
+            }
+          }
+        }
+      ],
+      "decision": "keep"
+    },
+    {
+      "case": "layout",
+      "build": "Zig cc -O3 -march=native",
+      "pairs": 3,
+      "batches_per_process": 15,
+      "comparison_statistic": "median of three per-process medians, microseconds per complete operation",
+      "equal_output": true,
+      "source_sha256": {
+        "before": {
+          "bridge.c": "a2a807a651c3c860177bb723c4df546ccc1bb4e1fef869a40b4f5e9c20e84c4c",
+          "media.c": "6081dcd431f0b6f2a0da3798607c3cd54d7c7ed45b8b2d937fa0edeba9cc1d3f"
+        },
+        "after": {
+          "bridge.c": "c2863b78aeb61a86d214c5918aa062548962127965bab86660e10ef76bb7ed53",
+          "media.c": "6081dcd431f0b6f2a0da3798607c3cd54d7c7ed45b8b2d937fa0edeba9cc1d3f"
+        }
+      },
+      "comparison": {
+        "short_ascii": {
+          "before": 9.823,
+          "after": 9.564,
+          "reduction_percent": 2.64,
+          "pair_reductions_percent": [
+            3.0,
+            2.64,
+            1.37
+          ]
+        },
+        "ascii_4k": {
+          "before": 999.999,
+          "after": 976.925,
+          "reduction_percent": 2.31,
+          "pair_reductions_percent": [
+            2.34,
+            1.19,
+            2.47
+          ]
+        },
+        "long_draft": {
+          "before": 62098.167,
+          "after": 61725.756,
+          "reduction_percent": 0.6,
+          "pair_reductions_percent": [
+            0.6,
+            0.48,
+            1.3
+          ]
+        },
+        "mixed_unicode": {
+          "before": 1674.957,
+          "after": 1724.841,
+          "reduction_percent": -2.98,
+          "pair_reductions_percent": [
+            0.9,
+            -2.98,
+            -4.71
+          ]
+        }
+      },
+      "runs": [
+        {
+          "before": {
+            "short_ascii": {
+              "case": "short_ascii",
+              "p50_us": 9.77,
+              "p95_us": 11.47,
+              "checksum": "85766876ecfd1c1c"
+            },
+            "ascii_4k": {
+              "case": "ascii_4k",
+              "p50_us": 999.999,
+              "p95_us": 1008.581,
+              "checksum": "e826d4dba37dbd4f"
+            },
+            "long_draft": {
+              "case": "long_draft",
+              "p50_us": 62098.167,
+              "p95_us": 64166.525,
+              "checksum": "57ba8d50d49d3456"
+            },
+            "mixed_unicode": {
+              "case": "mixed_unicode",
+              "p50_us": 1714.351,
+              "p95_us": 1717.802,
+              "checksum": "0a3ebea7c89fa5ab"
+            }
+          },
+          "after": {
+            "short_ascii": {
+              "case": "short_ascii",
+              "p50_us": 9.477,
+              "p95_us": 9.576,
+              "checksum": "85766876ecfd1c1c"
+            },
+            "ascii_4k": {
+              "case": "ascii_4k",
+              "p50_us": 976.564,
+              "p95_us": 980.165,
+              "checksum": "e826d4dba37dbd4f"
+            },
+            "long_draft": {
+              "case": "long_draft",
+              "p50_us": 61725.756,
+              "p95_us": 61894.058,
+              "checksum": "57ba8d50d49d3456"
+            },
+            "mixed_unicode": {
+              "case": "mixed_unicode",
+              "p50_us": 1698.913,
+              "p95_us": 1703.065,
+              "checksum": "0a3ebea7c89fa5ab"
+            }
+          }
+        },
+        {
+          "after": {
+            "short_ascii": {
+              "case": "short_ascii",
+              "p50_us": 9.564,
+              "p95_us": 9.645,
+              "checksum": "85766876ecfd1c1c"
+            },
+            "ascii_4k": {
+              "case": "ascii_4k",
+              "p50_us": 976.925,
+              "p95_us": 980.944,
+              "checksum": "e826d4dba37dbd4f"
+            },
+            "long_draft": {
+              "case": "long_draft",
+              "p50_us": 61455.683,
+              "p95_us": 63113.247,
+              "checksum": "57ba8d50d49d3456"
+            },
+            "mixed_unicode": {
+              "case": "mixed_unicode",
+              "p50_us": 1724.841,
+              "p95_us": 1789.116,
+              "checksum": "0a3ebea7c89fa5ab"
+            }
+          },
+          "before": {
+            "short_ascii": {
+              "case": "short_ascii",
+              "p50_us": 9.823,
+              "p95_us": 10.723,
+              "checksum": "85766876ecfd1c1c"
+            },
+            "ascii_4k": {
+              "case": "ascii_4k",
+              "p50_us": 988.737,
+              "p95_us": 990.026,
+              "checksum": "e826d4dba37dbd4f"
+            },
+            "long_draft": {
+              "case": "long_draft",
+              "p50_us": 61754.45,
+              "p95_us": 63161.739,
+              "checksum": "57ba8d50d49d3456"
+            },
+            "mixed_unicode": {
+              "case": "mixed_unicode",
+              "p50_us": 1674.957,
+              "p95_us": 1677.968,
+              "checksum": "0a3ebea7c89fa5ab"
+            }
+          }
+        },
+        {
+          "before": {
+            "short_ascii": {
+              "case": "short_ascii",
+              "p50_us": 10.192,
+              "p95_us": 11.275,
+              "checksum": "85766876ecfd1c1c"
+            },
+            "ascii_4k": {
+              "case": "ascii_4k",
+              "p50_us": 1045.783,
+              "p95_us": 1051.086,
+              "checksum": "e826d4dba37dbd4f"
+            },
+            "long_draft": {
+              "case": "long_draft",
+              "p50_us": 64414.426,
+              "p95_us": 64797.663,
+              "checksum": "57ba8d50d49d3456"
+            },
+            "mixed_unicode": {
+              "case": "mixed_unicode",
+              "p50_us": 1668.857,
+              "p95_us": 1776.823,
+              "checksum": "0a3ebea7c89fa5ab"
+            }
+          },
+          "after": {
+            "short_ascii": {
+              "case": "short_ascii",
+              "p50_us": 10.052,
+              "p95_us": 10.224,
+              "checksum": "85766876ecfd1c1c"
+            },
+            "ascii_4k": {
+              "case": "ascii_4k",
+              "p50_us": 1019.947,
+              "p95_us": 1064.021,
+              "checksum": "e826d4dba37dbd4f"
+            },
+            "long_draft": {
+              "case": "long_draft",
+              "p50_us": 63574.165,
+              "p95_us": 65010.237,
+              "checksum": "57ba8d50d49d3456"
+            },
+            "mixed_unicode": {
+              "case": "mixed_unicode",
+              "p50_us": 1747.426,
+              "p95_us": 1750.958,
+              "checksum": "0a3ebea7c89fa5ab"
+            }
+          }
+        }
+      ],
+      "decision": "drop",
+      "discarded_candidate_patch": "--- a/src/client/bridge.c\n+++ b/src/client/bridge.c\n@@ -424,7 +424,25 @@\n     // Character wrapping bounds that cost for URLs and pasted machine output.\n     int char_wrap = 0, marks = 0, lines = 1;\n     const char *word = text;\n-    for (const char *p = text; p < text + length; p = g_utf8_next_char(p)) {\n+    for (const char *p = text; p < text + length;) {\n+        // Printable ASCII cannot add combining marks or line separators.\n+        // Check whole blocks before falling back to Unicode classification.\n+        if (text + length - p >= 16) {\n+            typedef unsigned char Bytes __attribute__((vector_size(16)));\n+            Bytes bytes; memcpy(&bytes,p,sizeof(bytes));\n+            if (!__builtin_reduce_or((bytes < 32) | (bytes > 126))) {\n+                for (int i=0; i<16; ++i) {\n+                    if (p[i] == ' ') word = p+i;\n+                    if (p+i - word > 512) char_wrap = 1;\n+                }\n+                marks = 0; p += 16; continue;\n+            }\n+        }\n+        if ((unsigned char)*p >= 32 && (unsigned char)*p <= 126) {\n+            if (*p == ' ') word = p;\n+            if (p - word > 512) char_wrap = 1;\n+            marks = 0; ++p; continue;\n+        }\n         gunichar ch = g_utf8_get_char(p);\n         if ((ch == '\\n' || ch == '\\r' || ch == 0x2028 || ch == 0x2029) && ++lines > 2048) return NULL;\n         GUnicodeType type = g_unichar_type(ch);\n@@ -434,6 +452,7 @@\n         } else marks = 0;\n         if (g_unichar_isspace(ch)) word = p;\n         if (p - word > 512) char_wrap = 1;\n+        p = g_utf8_next_char(p);\n     }\n     ZcText *t = calloc(1, sizeof(*t)); if (!t) return NULL; t->scale = scale; t->subpixel = subpixel;\n     cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);\n"
+    }
+  ],
+  "verification": {
+    "client_tests_passed": 53,
+    "wayland_gui_tests_passed": 38,
+    "media_transport_suite": "passed, including truncated JPEG regression",
+    "client_build": "ReleaseFast native passed"
+  }
+}

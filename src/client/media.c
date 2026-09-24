@@ -115,19 +115,36 @@ static int decode_jpeg(const unsigned char *bytes, size_t length, ZcPixels *outp
     jpeg_mem_src(&image,bytes,(unsigned long)length);
     int ok=0;
     if (jpeg_read_header(&image,TRUE)!=JPEG_HEADER_OK || image.image_width>2560 || image.image_height>2560 || !dimensions((int)image.image_width,(int)image.image_height)) goto end;
+#ifdef JCS_ALPHA_EXTENSIONS
+    // libjpeg-turbo converts directly into the texture, including opaque alpha,
+    // using its SIMD color conversion without an intermediate RGB row.
+    image.out_color_space=JCS_EXT_RGBA;
+    const int components=4;
+#else
     image.out_color_space=JCS_RGB;
-    if (!jpeg_start_decompress(&image) || image.output_components!=3) goto end;
+    const int components=3;
+#endif
+    if (!jpeg_start_decompress(&image) || image.output_components!=components) goto end;
     output->width=(int)image.output_width; output->height=(int)image.output_height;
     output->bytes=(size_t)output->width*output->height*4;
     output->data=malloc(output->bytes); if (!output->data) goto end;
-    unsigned char line[2560*3]; JSAMPROW row=line;
+#ifndef JCS_ALPHA_EXTENSIONS
+    unsigned char line[2560*3];
+#endif
     while (image.output_scanline<image.output_height) {
         size_t y=image.output_scanline;
+#ifdef JCS_ALPHA_EXTENSIONS
+        JSAMPROW row=output->data+y*output->width*4;
+#else
+        JSAMPROW row=line;
+#endif
         if (jpeg_read_scanlines(&image,&row,1)!=1) goto end;
+#ifndef JCS_ALPHA_EXTENSIONS
         for (int x=0;x<output->width;x++) {
             unsigned char *dst=output->data+(y*output->width+x)*4;
             dst[0]=line[x*3]; dst[1]=line[x*3+1]; dst[2]=line[x*3+2]; dst[3]=255;
         }
+#endif
     }
     ok=jpeg_finish_decompress(&image) && error.base.num_warnings==0;
 end:

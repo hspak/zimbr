@@ -66,6 +66,7 @@ def main():
                     elif mode=='mime': mime='image/gif'
                     elif mode=='oversize': data=b'x'*(8*1024*1024+1)
                     elif mode=='jpeg': data=JPEG; mime='image/jpeg'
+                    elif mode=='jpeg_truncated': data=JPEG[:-2]; mime='image/jpeg'
                     self.send_response(status); self.send_header('Content-Type',mime)
                     self.send_header('Content-Length',str(len(data)))
                     if mode=='redirect': self.send_header('Location','https://localhost:%d/never-follow' % self.server.server_port)
@@ -94,7 +95,7 @@ def main():
             assert cache.exists()
             assert fetch(good)['state']=='ready' and counts[good['id']]==1
             jpeg=fetch(asset('jpeg')); assert jpeg['state']=='ready' and (jpeg['width'],jpeg['height'])==(4,3),jpeg
-            for mode,expected in [('truncated','failed'),('corrupt','failed'),('huge','failed'),('mime','failed'),('oversize','failed'),('redirect','failed'),('retired','retired'),('pending','pending'),('unavailable','failed'),('denied','denied')]:
+            for mode,expected in [('truncated','failed'),('jpeg_truncated','failed'),('corrupt','failed'),('huge','failed'),('mime','failed'),('oversize','failed'),('redirect','failed'),('retired','retired'),('pending','pending'),('unavailable','failed'),('denied','denied')]:
                 result=fetch(asset(mode)); assert result['state']==expected,(mode,result)
                 assert not (root/'client/media'/result['key']).exists(),mode
             assert not any('/never-follow' in row[0] for row in server.requests)

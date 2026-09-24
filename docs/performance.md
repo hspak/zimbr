@@ -27,6 +27,10 @@ Opaque Pango/Cairo surfaces need only a channel swap before upload; skipping
 unpremultiplication removes three integer divisions per pixel. Transparent text
 keeps its existing conversion and antialiasing behavior.
 
+The subsequent [client SIMD trials](client-simd.md) retained vectorized opaque
+pixel conversion and direct JPEG RGBA output after three comparisons each. An
+ASCII layout fast path was measured and removed for insufficient gains.
+
 Both owned databases and the read-only Messages reader reuse compiled SQL in a
 connection-owned cache of at most 256 idle statements. Checked-out statements are
 exclusive, nested identical queries get independent cursors, and close resets

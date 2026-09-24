@@ -543,13 +543,20 @@ unsigned char *zc_text_pixels_on(ZcText *t, unsigned color, int start, int end, 
     if (status != CAIRO_STATUS_SUCCESS) { zc_text_clear_pixels(t); return NULL; }
     unsigned char *pixels = cairo_image_surface_get_data(t->surface) + (top - raster_top)*cairo_image_surface_get_stride(t->surface);
     // Cairo is premultiplied native ARGB; raylib expects straight RGBA.
+    const int width = t->width;
     const int stride = cairo_image_surface_get_stride(t->surface);
     if ((background & 255) == 255) {
-        // Opaque text is already straight alpha. This simple channel swap can
-        // auto-vectorize; avoid three integer divisions per pixel on UI text.
-        for (int y=0; y<height; ++y) for (int x=0; x<t->width; ++x) {
+        // A whole-pixel expression lets the compiler use SIMD shuffles.
+        // memcpy keeps unaligned access and C aliasing rules well defined.
+        for (int y=0; y<height; ++y) for (int x=0; x<width; ++x) {
             unsigned char *p = pixels+y*stride+x*4;
-            unsigned char b=p[0]; p[0]=p[2]; p[2]=b;
+            uint32_t pixel; memcpy(&pixel,p,sizeof(pixel));
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+            pixel=(pixel & 0xff00ff00u) | ((pixel & 0xffu)<<16) | ((pixel>>16)&0xffu);
+#else
+            pixel=(pixel<<8) | (pixel>>24);
+#endif
+            memcpy(p,&pixel,sizeof(pixel));
         }
     } else {
         for (int y=0; y<height; ++y) for (int x=0; x<t->width; ++x) {

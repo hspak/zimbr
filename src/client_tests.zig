@@ -770,16 +770,20 @@ test "RGB glyph edges use opaque backgrounds and transparent text stays grayscal
     // Independent RGB coverages cannot be stored in one transparent alpha.
     try std.testing.expect(c.zc_text_pixels(rgb, 0xffffffff, 0, 0, 0, height) == null);
     var chromatic: usize = 0;
-    for ([_]u32{ 0x000000ff, 0xffffffff }) |background| {
+    for ([_]u32{ 0x000000ff, 0xffffffff, 0x123456ff }) |background| {
         const foreground = (background ^ 0xffffff00);
         const pixels = c.zc_text_pixels_on(rgb, foreground, 0, 0, 0, height, background);
         try std.testing.expect(pixels != null);
         var i: usize = 0;
         while (i < bytes) : (i += 4) {
             try std.testing.expectEqual(@as(u8, 255), pixels[i + 3]);
-            if (pixels[i] != pixels[i + 1] or pixels[i + 1] != pixels[i + 2]) chromatic += 1;
+            // Only neutral colors distinguish LCD coverage from the background.
+            if ((background == 0x000000ff or background == 0xffffffff) and
+                (pixels[i] != pixels[i + 1] or pixels[i + 1] != pixels[i + 2])) chromatic += 1;
         }
         try std.testing.expectEqual(@as(u8, @intCast(background >> 24)), pixels[0]);
+        try std.testing.expectEqual(@as(u8, @truncate(background >> 16)), pixels[1]);
+        try std.testing.expectEqual(@as(u8, @truncate(background >> 8)), pixels[2]);
     }
     const gray = c.zc_text_new(text.ptr, text.len, 16, 300, 1) orelse return error.NoLayout;
     defer c.zc_text_free(gray);
