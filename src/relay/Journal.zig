@@ -85,6 +85,7 @@ pub fn conversation(self: Self, a: u.Allocator, source: []const u8, row: i64, ro
     try find.bind(&.{.{ .text = source }});
     const exists = try find.step();
     v.id = if (exists) try find.text(a, 0) else try u.id(a);
+    if (v.is_self and v.thread_id == null) v.thread_id = v.id;
     v.revision = "0";
     const content = try u.json(a, v);
     if (exists and u.eq(find.bytes(1), content)) {
@@ -226,9 +227,28 @@ pub fn prune(self: Self, count_limit: i64) !void {
     try self.commit();
 }
 pub const Page = struct { records: []std.json.Value, next: ?[]const u8 };
+pub const thread_members = "SELECT id FROM conversations WHERE coalesce(json_extract(record,'$.thread_id'),id)=coalesce((SELECT coalesce(json_extract(record,'$.thread_id'),id) FROM conversations WHERE id=?),?)";
+pub fn threadMembers(self: Self, a: u.Allocator, id: []const u8) ![][]const u8 {
+    var q = try self.db.prepare(thread_members);
+    defer q.close();
+    try q.bind(&.{ .{ .text = id }, .{ .text = id } });
+    var members: std.ArrayList([]const u8) = .empty;
+    while (try q.step()) try members.append(a, try q.text(a, 0));
+    return members.toOwnedSlice(a);
+}
 pub fn page(self: Self, a: u.Allocator, conversation_id: ?[]const u8, before: ?[]const u8, limit: usize) !Page {
+    return self.pageContent(a, conversation_id, before, limit, false);
+}
+
+pub fn pageContent(self: Self, a: u.Allocator, conversation_id: ?[]const u8, before: ?[]const u8, limit: usize, text_only: bool) !Page {
+    // Strip optional arrays in SQLite, before allocating/parsing the response.
+    // Keep reaction_event: it determines whether a source row is displayed.
+    const projection = "CASE WHEN coalesce(json_array_length(record,'$.attachments'),0)>0 OR coalesce(json_array_length(record,'$.link_previews'),0)>0 OR coalesce(json_array_length(record,'$.reactions'),0)>0 OR coalesce(json_extract(record,'$.enrichment.attachments.total'),0)>0 OR coalesce(json_extract(record,'$.enrichment.previews.total'),0)>0 OR coalesce(json_extract(record,'$.enrichment.reactions.total'),0)>0 THEN json_set(json_remove(record,'$.attachments','$.link_previews','$.reactions','$.parts','$.enrichment'),'$.metadata_deferred',json('true')) ELSE record END";
     var s = try self.db.prepare(if (conversation_id != null)
-        "SELECT record,date_ns,id FROM messages WHERE conversation_id=? AND (date_ns<? OR (date_ns=? AND id<?)) ORDER BY date_ns DESC,id DESC LIMIT ?"
+        if (text_only)
+            "SELECT " ++ projection ++ ",date_ns,id FROM messages WHERE conversation_id IN (" ++ thread_members ++ ") AND (date_ns<? OR (date_ns=? AND id<?)) ORDER BY date_ns DESC,id DESC LIMIT ?"
+        else
+            "SELECT record,date_ns,id FROM messages WHERE conversation_id IN (" ++ thread_members ++ ") AND (date_ns<? OR (date_ns=? AND id<?)) ORDER BY date_ns DESC,id DESC LIMIT ?"
     else
         "SELECT record,0,id FROM conversations WHERE id<? ORDER BY id DESC LIMIT ?");
     defer s.close();
@@ -241,7 +261,7 @@ pub fn page(self: Self, a: u.Allocator, conversation_id: ?[]const u8, before: ?[
             key = b[split + 1 ..];
             if (!t.uuid(key)) return error.InvalidRequest;
         }
-        try s.bind(&.{ .{ .text = id }, .{ .int = date }, .{ .int = date }, .{ .text = key }, .{ .int = @intCast(limit + 1) } });
+        try s.bind(&.{ .{ .text = id }, .{ .text = id }, .{ .int = date }, .{ .int = date }, .{ .text = key }, .{ .int = @intCast(limit + 1) } });
     } else try s.bind(&.{ .{ .text = before orelse "~" }, .{ .int = @intCast(limit + 1) } });
     var items: std.ArrayList(std.json.Value) = .empty;
     var next_key: ?[]const u8 = null;

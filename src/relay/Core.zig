@@ -198,16 +198,17 @@ const ImportBatch = struct {
     rebased: bool = false,
 };
 fn importChat(self: *Self, a: u.Allocator, batch: *ImportBatch, row: i64, origin: []const u8, complete: bool) !?[]const u8 {
-    const cached = try batch.chats.getOrPut(a, row);
-    if (!cached.found_existing) {
-        // The source read transaction fixes metadata for this entire batch.
-        // Resolve and journal each conversation once, including the chat scan.
-        cached.value_ptr.* = if (try batch.source.chat(a, row, complete)) |chat|
-            try self.journal.conversation(a, chat.source, chat.row, chat.route, chat.value, origin)
-        else
-            null;
+    if (batch.chats.get(row)) |cached| return cached;
+    var result: ?[]const u8 = null;
+    if (try batch.source.chat(a, row, complete)) |chat| {
+        var value = chat.value;
+        if (chat.thread_row) |canonical| if (canonical < row) {
+            value.thread_id = try self.importChat(a, batch, canonical, origin, complete);
+        };
+        result = try self.journal.conversation(a, chat.source, chat.row, chat.route, value, origin);
     }
-    return cached.value_ptr.*;
+    try batch.chats.put(a, row, result);
+    return result;
 }
 fn importRow(self: *Self, a: u.Allocator, batch: *ImportBatch, row: i64, origin: []const u8, complete: bool) !void {
     if ((try batch.rows.getOrPut(a, row)).found_existing) return;

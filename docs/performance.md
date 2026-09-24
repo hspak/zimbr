@@ -64,6 +64,17 @@ flowchart LR
   revision, timestamp, kind, and at most 256 text characters. Projections live in a
   separate cache table and cannot overwrite canonical message text. Older relays
   omit the field; the client then uses the original per-conversation fallback.
+- **Text-first history:** relays advertising `text_first_history_v1` accept
+  `content=text` on history requests. Responses retain full text, message IDs,
+  revisions, timestamps, and reaction-row visibility, while deferring attachment,
+  link-preview, reaction, and part arrays. The GUI requests canonical metadata
+  through `GET /v1/messages/{id}` for visible messages; image downloads and decoding
+  remain on the separate media worker. Selection, older history, and sends preempt
+  metadata GETs. Metadata failures leave text usable and retry with a delay.
+  Contact-directory bootstrap also yields to history. A same-revision metadata
+  response upgrades the cached text projection without erasing newer text or
+  metadata already received through the event stream. Older relays keep the
+  original history behavior.
 
 ## Reliability constraints
 

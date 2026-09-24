@@ -102,6 +102,8 @@ def main():
             assert rows("SELECT value FROM meta WHERE key='identity_bootstrapped'")==[('1',)]
             cid = rows("SELECT id FROM records WHERE kind='conversation' AND json_extract(record,'$.participants[0]')='alice@example.invalid' AND json_array_length(json_extract(record,'$.participants'))=1")[0][0]
             command(kind='select', key=cid)
+            wait(lambda:record().get('id'))
+            command(kind='hydrate', key=cid, text=json.dumps([record()['id']]))
             wait(lambda:record().get('attachments'))
             command(kind='draft', key=cid, text='Draft survives enrichment')
             asset=record()['attachments'][0]['image']

@@ -15,6 +15,70 @@ comptime {
 const u = @import("common.zig");
 const epoch = "12345678-1234-1234-1234-123456789012";
 const message = "{\"id\":\"m1\",\"revision\":\"2\",\"conversation_id\":\"c1\",\"sender\":\"test@example.invalid\",\"direction\":\"incoming\",\"service\":\"imessage\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"kind\":\"text\",\"text\":\"Hello 👋\",\"decoding\":\"plain\",\"observed_status\":\"received\"}";
+test "self thread upgrade preserves both histories drafts unread and immutable sends" {
+    const t = @import("protocol/types.zig");
+    const Shared = @import("client/SharedSnapshot.zig");
+    const s = try Store.open(":memory:");
+    defer s.close();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = epoch;
+    const alias = "22345678-1234-1234-1234-123456789012";
+    try s.beginSync(epoch, epoch ++ ":0");
+    for ([_][]const u8{ root, alias, "unrelated" }) |id| {
+        _ = try s.upsert(a, "conversation", try u.json(a, t.Conversation{ .id = id, .service = "imessage", .title = "Same contact name", .participants = &.{id}, .sendable = true }));
+        var m = try std.json.parseFromSliceLeaky(t.Message, a, message, .{});
+        m.id = id;
+        m.conversation_id = id;
+        _ = try s.upsert(a, "message", try u.json(a, m));
+    }
+    const input = t.SendInput{ .request_id = epoch, .server_epoch = epoch, .target = .{ .conversation_id = alias }, .text = "Unresolved send" };
+    try s.persistSend(a, alias, input);
+    try s.saveDraft(root, "Phone draft");
+    try s.saveDraft(alias, "Email draft 👋");
+    try s.page(root, null);
+    try s.page(alias, "old-cursor");
+    try s.exec("INSERT INTO unread VALUES(?,2),(?,3)", &.{ .{ .text = root }, .{ .text = alias } });
+    const previous = try Shared.create(s, root, 1, null);
+    defer previous.release();
+    try std.testing.expectEqual(@as(usize, 3), previous.snapshot.chats.len);
+    // Alias first models reversed bootstrap pages and upgrades with cached data.
+    for ([_][]const u8{ alias, root }) |id| _ = try s.upsert(a, "conversation", try u.json(a, t.Conversation{ .id = id, .revision = "3", .service = "imessage", .participants = &.{id}, .sendable = true, .is_self = true, .thread_id = root }));
+    const next = try Shared.create(s, root, 2, previous);
+    defer next.release();
+    try std.testing.expectEqual(@as(usize, 2), next.snapshot.chats.len);
+    try std.testing.expectEqual(@as(usize, 2), next.snapshot.messages.len);
+    try std.testing.expectEqual(@as(usize, 1), next.snapshot.pending.len);
+    try std.testing.expectEqualStrings(alias, next.snapshot.pending[0].input.target.conversation_id.?);
+    try std.testing.expectEqualStrings("Phone draft\n\nEmail draft 👋", next.snapshot.draft);
+    try std.testing.expectEqualStrings("", (try s.nextPage(a, root)).?);
+    try std.testing.expectEqualStrings(root, (try s.snapshot(a, alias)).selected);
+    for (next.snapshot.chats) |chat| if (u.eq(chat.value.id, root)) {
+        try std.testing.expectEqual(@as(i64, 5), chat.unread);
+        try std.testing.expectEqual(@as(usize, 2), chat.value.participants.len);
+        try std.testing.expectEqualStrings("You", next.snapshot.directory.conversation(a, chat.value));
+        try std.testing.expect(next.snapshot.directory.matches(chat.value, alias));
+    };
+    try s.setHidden(alias, true);
+    try std.testing.expectEqual(@as(i64, 2), try s.db.scalar("SELECT count(*) FROM hidden_chats"));
+    try s.setHidden(root, false);
+    try s.read(alias);
+    try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM unread"));
+    var incoming = try std.json.parseFromSliceLeaky(t.Message, a, message, .{});
+    incoming.id = "new-self-message";
+    incoming.conversation_id = alias;
+    const notification = try @import("client/Notification.zig").create(s, incoming);
+    defer notification.destroy();
+    try std.testing.expectEqualStrings(root, notification.chat);
+    try std.testing.expectEqualStrings("You", notification.summary);
+    const ev = try u.json(a, .{ .cursor = epoch ++ ":4", .sequence = "4", .type = "message.upsert", .origin = "live", .record = incoming });
+    try std.testing.expect((try s.eventNotification(a, ev, epoch ++ ":4", "message.upsert", root)) == null);
+    try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM unread"));
+    try s.saveDraft(root, "Edited combined draft");
+    try std.testing.expectEqualStrings("Edited combined draft", try s.draft(a, alias));
+}
+
 test "hidden conversations survive restart and live updates without losing history or drafts" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

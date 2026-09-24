@@ -9,7 +9,7 @@ const Notification = @import("Notification.zig");
 const Self = @This();
 const SharedSnapshot = @import("SharedSnapshot.zig");
 const a = std.heap.page_allocator;
-pub const Command = struct { kind: enum { select, draft, send, older, reconnect, check, viewed, hide, unhide, enrichment }, key: []const u8 = "", text: []const u8 = "", recipient: []const u8 = "" };
+pub const Command = struct { kind: enum { select, draft, send, older, reconnect, check, viewed, hide, unhide, enrichment, hydrate }, key: []const u8 = "", text: []const u8 = "", recipient: []const u8 = "" };
 pub const Readiness = struct { ready: bool = false, reason: []const u8 = "", permission: ?[]const u8 = null, stale: bool = false, last_refresh_ms: ?i64 = null };
 pub const RelayStatus = struct {
     event_extensions: []const []const u8 = &.{},
@@ -36,6 +36,7 @@ pub const RelayStatus = struct {
         stored_link_previews_v1: bool = false,
         reactions_v1: bool = false,
         contact_avatars_v1: bool = false,
+        text_first_history_v1: bool = false,
         group_creation: bool = false,
     },
     degraded_reasons: []const []const u8,
@@ -105,10 +106,14 @@ content_generation: u64 = 0,
 credential_generation: u64 = 0,
 generation: u64 = 0,
 ack: u64 = 0,
-job: enum { idle, status, sync, chats, identities, history, preview, send, recover, enrichment } = .idle,
+job: enum { idle, status, sync, chats, identities, history, preview, send, recover, enrichment, hydrate } = .idle,
 job_key: []const u8 = "",
 enrichment_request: ?Command = null,
 enrichment_after: []const u8 = "",
+hydration_request: ?Command = null,
+hydration_at: i64 = 0,
+text_first_history: bool = false,
+identities_before: ?[]const u8 = null,
 preview_at: i64 = 0,
 recover_row: i64 = 0,
 need_history: bool = false,
@@ -229,6 +234,8 @@ fn work(s: *Self) !void {
         a.free(s.job_key);
         if (s.enrichment_request) |cmd| freeCommand(cmd);
         a.free(s.enrichment_after);
+        if (s.hydration_request) |cmd| freeCommand(cmd);
+        if (s.identities_before) |before| a.free(before);
         a.free(s.redirect_from);
     }
     try s.publish();
@@ -348,6 +355,12 @@ fn event(s: *Self, arena: u.Allocator, raw: []const u8, id: []const u8, kind: []
             s.batch_notifications.append(a, n) catch n.destroy();
         }
     }
+    if (u.eq(kind, "conversation.upsert") and s.selected.len > 0) {
+        if (try s.store.nextPage(arena, try s.store.threadKey(arena, s.selected))) |next| if (next.len == 0) {
+            s.need_history = true;
+            s.older = false;
+        };
+    }
     s.last_event_ms = u.now();
     s.dirty = true;
     s.content_dirty = true;
@@ -396,6 +409,14 @@ fn schedule(s: *Self) !void {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const ar = arena.allocator();
+    // Contact bootstrap retains its cursor and extension handshake, but text
+    // history can run between pages or preempt an in-flight directory GET.
+    if (!s.need_sync) if (s.identities_before) |before| {
+        if (s.need_history and s.selected.len > 0 and !std.mem.startsWith(u8, s.selected, "new:")) {
+            try s.requestHistory(ar);
+        } else try s.request(.identities, try std.fmt.allocPrint(ar, "/v1/identities?limit=200{s}{s}", .{ if (before.len > 0) "&before=" else "", try encode(ar, before) }), null);
+        return;
+    };
     if (!s.online) {
         if (s.stream_active) return;
         if (s.need_sync) {
@@ -410,6 +431,8 @@ fn schedule(s: *Self) !void {
             s.recovery_at = u.now() + 5000;
             try s.request(.recover, try std.fmt.allocPrint(ar, "/v1/send-requests/{s}", .{s.job_key}), null);
         }
+    } else if (s.need_history and s.selected.len > 0 and !std.mem.startsWith(u8, s.selected, "new:")) {
+        try s.requestHistory(ar);
     } else if (s.enrichment_request) |cmd| {
         const next = try s.store.enrichmentNext(ar, cmd.key, cmd.recipient, cmd.text);
         if (next) |after| {
@@ -420,13 +443,6 @@ fn schedule(s: *Self) !void {
             freeCommand(cmd);
             s.enrichment_request = null;
         }
-    } else if (s.need_history and s.selected.len > 0 and !std.mem.startsWith(u8, s.selected, "new:")) {
-        s.need_history = false;
-        try s.setJobKey(s.selected);
-        s.job_older = s.older;
-        const next = if (s.older) try s.store.nextPage(ar, s.selected) else @as(?[]const u8, "");
-        s.older = false;
-        if (next) |cursor| try s.request(.history, try std.fmt.allocPrint(ar, "/v1/conversations/{s}/messages?limit=100{s}{s}", .{ s.selected, if (cursor.len > 0) "&before=" else "", try encode(ar, cursor) }), null);
     } else if (u.now() >= s.status_at) {
         try s.request(.status, "/v1/status", null);
     } else if (u.now() >= s.recovery_at) {
@@ -439,15 +455,40 @@ fn schedule(s: *Self) !void {
             try s.setJobKey(q.bytes(0));
             try s.request(.recover, try std.fmt.allocPrint(ar, "/v1/send-requests/{s}", .{s.job_key}), null);
         } else s.recover_row = 0;
+    } else if (u.now() >= s.hydration_at and try s.hydrate(ar)) {
+        // One visible message per cancellable request, after text and recovery.
     } else if (u.now() >= s.preview_at) {
         s.preview_at = u.now() + 100;
         var q = try s.store.db.prepare("SELECT c.id FROM records c WHERE c.kind='conversation' AND NOT EXISTS(SELECT 1 FROM records m WHERE m.kind='message' AND m.chat=c.id) AND NOT EXISTS(SELECT 1 FROM previews p WHERE p.chat=c.id) ORDER BY c.sort_key DESC LIMIT 1");
         defer q.close();
         if (try q.step()) {
             try s.setJobKey(q.bytes(0));
-            try s.request(.preview, try std.fmt.allocPrint(ar, "/v1/conversations/{s}/messages?limit=1", .{s.job_key}), null);
+            try s.request(.preview, try std.fmt.allocPrint(ar, "/v1/conversations/{s}/messages?limit=1{s}", .{ s.job_key, if (s.text_first_history) "&content=text" else "" }), null);
         } else s.preview_at = u.now() + 30000;
     }
+}
+fn requestHistory(s: *Self, ar: u.Allocator) !void {
+    s.need_history = false;
+    try s.setJobKey(s.selected);
+    s.job_older = s.older;
+    const next = if (s.older) try s.store.nextPage(ar, s.selected) else @as(?[]const u8, "");
+    s.older = false;
+    if (next) |cursor| try s.request(.history, try std.fmt.allocPrint(ar, "/v1/conversations/{s}/messages?limit=100{s}{s}{s}", .{ s.selected, if (cursor.len > 0) "&before=" else "", try encode(ar, cursor), if (s.text_first_history) "&content=text" else "" }), null);
+}
+fn hydrate(s: *Self, ar: u.Allocator) !bool {
+    const cmd = s.hydration_request orelse return false;
+    if (!u.eq(cmd.key, s.selected)) return false;
+    const ids = try std.json.parseFromSliceLeaky([]const []const u8, ar, cmd.text, .{});
+    for (ids[0..@min(ids.len, 64)]) |id| {
+        var q = try s.store.db.prepare("SELECT json_extract(record,'$.metadata_deferred') FROM records WHERE kind='message' AND id=?");
+        defer q.close();
+        try q.bind(&.{.{ .text = id }});
+        if (!try q.step() or q.int(0) != 1) continue;
+        try s.setJobKey(id);
+        try s.request(.hydrate, try std.fmt.allocPrint(ar, "/v1/messages/{s}", .{try encode(ar, id)}), null);
+        return true;
+    }
+    return false;
 }
 fn attach(s: *Self, ar: u.Allocator) !void {
     if (s.stream_active) return;
@@ -482,6 +523,12 @@ fn complete(s: *Self) !void {
     s.job = .idle;
     if (job != .status) s.content_dirty = true;
     if (status < 200 or status >= 300) {
+        if (job == .hydrate and status != 401 and status != 403 and (status != 0 or request_error.kind == c.ZC_NETWORK)) {
+            // Optional metadata failures leave text and the live stream usable.
+            s.hydration_at = u.now() + 5000;
+            s.dirty = true;
+            return;
+        }
         if (job == .enrichment) {
             if (s.enrichment_request) |cmd| freeCommand(cmd);
             s.enrichment_request = null;
@@ -519,6 +566,11 @@ fn complete(s: *Self) !void {
     if (s.auth_blocked and job != .send and job != .recover) return;
     s.handleResponse(ar, job, raw) catch |err| {
         std.log.warn("client response: {s}", .{@errorName(err)});
+        if (job == .hydrate) {
+            s.hydration_at = u.now() + 5000;
+            s.dirty = true;
+            return;
+        }
         if (job == .history and u.eq(s.job_key, s.selected)) {
             s.need_history = true;
             s.older = s.job_older;
@@ -550,6 +602,7 @@ fn handleResponse(s: *Self, ar: u.Allocator, job: @FieldType(Self, "job"), raw: 
             };
             const changed_extension = identities != s.want_identities;
             s.want_identities = identities;
+            s.text_first_history = v.capabilities.text_first_history_v1;
             if (!identities) try s.store.set("identity_bootstrapped", "0");
             const contacts = v.enrichment_readiness.identity_directory_v1;
             const blocked = !identities or (if (contacts.permission) |p| !u.eq(p, "authorized") else false);
@@ -583,6 +636,8 @@ fn handleResponse(s: *Self, ar: u.Allocator, job: @FieldType(Self, "job"), raw: 
             }
         },
         .sync => {
+            if (s.identities_before) |before| a.free(before);
+            s.identities_before = null;
             const v = (try std.json.parseFromSlice(struct { server_epoch: []const u8, cursor: []const u8 }, ar, raw, .{ .ignore_unknown_fields = true })).value;
             try s.store.beginSync(v.server_epoch, v.cursor);
             s.status = "Downloading conversations…";
@@ -603,7 +658,8 @@ fn handleResponse(s: *Self, ar: u.Allocator, job: @FieldType(Self, "job"), raw: 
             if (v.next) |next| try s.request(.chats, try std.fmt.allocPrint(ar, "/v1/conversations?limit=200&previews=1&before={s}", .{try encode(ar, next)}), null) else {
                 if (s.want_identities) {
                     s.status = "Downloading contact names…";
-                    try s.request(.identities, "/v1/identities?limit=200", null);
+                    s.identities_before = try a.dupe(u8, "");
+                    s.need_history = s.selected.len > 0;
                 } else try s.finishBootstrap(ar);
             }
         },
@@ -614,7 +670,9 @@ fn handleResponse(s: *Self, ar: u.Allocator, job: @FieldType(Self, "job"), raw: 
             for (v.identities) |identity| _ = try s.store.upsert(ar, "identity", try u.json(ar, identity));
             if (v.next == null) try s.store.set("identity_bootstrapped", "1");
             try s.store.db.exec("COMMIT");
-            if (v.next) |next| try s.request(.identities, try std.fmt.allocPrint(ar, "/v1/identities?limit=200&before={s}", .{try encode(ar, next)}), null) else try s.finishBootstrap(ar);
+            if (s.identities_before) |before| a.free(before);
+            s.identities_before = null;
+            if (v.next) |next| s.identities_before = try a.dupe(u8, next) else try s.finishBootstrap(ar);
         },
         .history, .preview => {
             const v = (try std.json.parseFromSlice(struct { messages: []const std.json.Value, next: ?[]const u8 }, ar, raw, .{ .ignore_unknown_fields = true })).value;
@@ -631,6 +689,14 @@ fn handleResponse(s: *Self, ar: u.Allocator, job: @FieldType(Self, "job"), raw: 
                 s.enrichment_request = null;
             }
             _ = try s.store.enrichmentPage(ar, raw, cmd.key, cmd.recipient, std.meta.stringToEnum(@import("Content.zig").Section, cmd.text) orelse return error.InvalidSection, s.enrichment_after);
+        },
+        .hydrate => {
+            const message = try std.json.parseFromSliceLeaky(t.Message, ar, raw, .{ .ignore_unknown_fields = true });
+            if (!u.eq(message.id, s.job_key) or message.metadata_deferred) return error.InvalidRecord;
+            try s.store.db.exec("BEGIN IMMEDIATE");
+            errdefer s.store.db.exec("ROLLBACK") catch {};
+            _ = try s.store.upsert(ar, "message", raw);
+            try s.store.db.exec("COMMIT");
         },
         .send, .recover => {
             _ = try s.store.upsert(ar, "request", raw);
@@ -654,13 +720,13 @@ fn drain(s: *Self) !void {
             break;
         }
         if (s.commands.items[0].kind == .send and s.job != .idle and !s.stop.load(.acquire)) {
-            if (s.online and (s.job == .history or s.job == .preview or s.job == .status or s.job == .recover or s.job == .enrichment)) {
+            if (s.online and (s.job == .history or s.job == .preview or s.job == .status or s.job == .recover or s.job == .enrichment or s.job == .hydrate)) {
                 switch (s.job) {
                     .history => {
                         s.need_history = true;
                         s.older = s.job_older;
                     },
-                    .enrichment => {},
+                    .enrichment, .hydrate => {},
                     .preview => s.preview_at = 0,
                     .status => s.status_at = 0,
                     .recover => {
@@ -682,7 +748,31 @@ fn drain(s: *Self) !void {
         var arena = std.heap.ArenaAllocator.init(a);
         defer arena.deinit();
         const ar = arena.allocator();
+        if ((cmd.kind == .select or cmd.kind == .older) and (s.job == .hydrate or s.job == .enrichment or s.job == .preview or s.job == .identities or (cmd.kind == .select and s.job == .history))) {
+            c.zc_net_cancel_request(s.net.?);
+            s.job = .idle;
+        }
         switch (cmd.kind) {
+            .hydrate => {
+                if (!u.eq(cmd.key, s.selected)) continue;
+                const ids = std.json.parseFromSliceLeaky([]const []const u8, ar, cmd.text, .{}) catch continue;
+                if (ids.len > 64) continue;
+                if (s.job == .hydrate) {
+                    const visible = for (ids) |id| {
+                        if (u.eq(id, s.job_key)) break true;
+                    } else false;
+                    if (!visible) {
+                        c.zc_net_cancel_request(s.net.?);
+                        s.job = .idle;
+                    }
+                }
+                const key = try a.dupe(u8, cmd.key);
+                errdefer a.free(key);
+                const text = try a.dupe(u8, cmd.text);
+                if (s.hydration_request) |previous| freeCommand(previous);
+                s.hydration_request = .{ .kind = .hydrate, .key = key, .text = text };
+                continue;
+            },
             .enrichment => {
                 if (s.enrichment_request == null and std.meta.stringToEnum(@import("Content.zig").Section, cmd.text) != null) {
                     s.enrichment_request = .{ .kind = .enrichment, .key = try a.dupe(u8, cmd.key), .text = try a.dupe(u8, cmd.text), .recipient = try a.dupe(u8, cmd.recipient) };
@@ -693,6 +783,11 @@ fn drain(s: *Self) !void {
                 s.content_dirty = true;
             },
             .select => {
+                if (s.hydration_request) |previous| freeCommand(previous);
+                s.hydration_request = null;
+                s.hydration_at = 0;
+                if (s.enrichment_request) |previous| freeCommand(previous);
+                s.enrichment_request = null;
                 s.content_dirty = true;
                 a.free(s.redirect_from);
                 s.redirect_from = "";
@@ -725,6 +820,8 @@ fn drain(s: *Self) !void {
                 s.need_history = true;
             },
             .reconnect => {
+                if (s.identities_before) |before| a.free(before);
+                s.identities_before = null;
                 if (s.job == .send) {
                     try s.store.outcome(s.job_key, "unknown", "Connection changed. Checking the original request ID before any new submission.");
                     s.content_dirty = true;
@@ -780,10 +877,24 @@ fn drain(s: *Self) !void {
     }
 }
 fn resolveDirect(s: *Self) !void {
-    if (!std.mem.startsWith(u8, s.selected, "new:")) return;
+    if (s.selected.len == 0 or (!s.content_dirty and !std.mem.startsWith(u8, s.selected, "new:"))) return;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const ar = arena.allocator();
+    const canonical = try s.store.threadKey(ar, s.selected);
+    if (!u.eq(canonical, s.selected)) {
+        try s.store.set("selected", canonical);
+        a.free(s.redirect_from);
+        s.redirect_from = try a.dupe(u8, s.selected);
+        a.free(s.selected);
+        s.selected = try a.dupe(u8, canonical);
+        if (s.viewed) try s.store.read(canonical);
+        s.need_history = true;
+        s.older = false;
+        s.dirty = true;
+        s.content_dirty = true;
+    }
+    if (!std.mem.startsWith(u8, s.selected, "new:")) return;
     if ((try s.store.draft(ar, s.selected)).len > 0) return;
     var q = try s.store.db.prepare("SELECT m.chat FROM outbox o JOIN records m ON m.kind='message' AND m.id=json_extract(o.record,'$.message_id') WHERE o.draft_key=? AND o.epoch=? LIMIT 1");
     defer q.close();
@@ -873,6 +984,45 @@ pub fn encode(ar: u.Allocator, raw: []const u8) ![]const u8 {
         if (std.ascii.isAlphanumeric(ch) or std.mem.indexOfScalar(u8, "-_.~", ch) != null) try result.append(ar, ch) else try result.appendSlice(ar, &.{ '%', hex[ch >> 4], hex[ch & 15] });
     }
     return result.items;
+}
+
+test "lazy metadata upgrades a text snapshot without changing its revision or losing newer text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    const store = try Store.open(":memory:");
+    defer store.close();
+    const History = @import("MessageHistory.zig");
+    var message = t.Message{ .id = "message", .revision = "1", .conversation_id = "chat", .sender = "peer", .direction = .incoming, .service = "imessage", .timestamp = "2026-01-01T00:00:00Z", .kind = .attachment, .text = "Caption 👋", .decoding = .plain, .observed_status = .received, .metadata_deferred = true };
+    const projection = try u.json(ar, message);
+    _ = try store.upsert(ar, "message", projection);
+    const text = try History.create(store, "chat", null);
+    defer text.release();
+    try std.testing.expectEqualStrings("Caption 👋", text.presentations[0].text);
+    message.metadata_deferred = false;
+    message.attachments = &.{.{ .id = "photo", .name = "Photo", .mime_type = "image/png", .bytes = "1" }};
+    const full = try u.json(ar, message);
+    _ = try store.upsert(ar, "message", full);
+    const rich = try History.create(store, "chat", text);
+    defer rich.release();
+    try std.testing.expect(rich != text);
+    try std.testing.expectEqual(@as(usize, 1), rich.messages[0].attachments.len);
+    try std.testing.expect(text.messages[0].metadata_deferred);
+    try std.testing.expect(!rich.messages[0].metadata_deferred);
+    _ = try store.upsert(ar, "message", projection);
+    const repeated = try History.create(store, "chat", rich);
+    defer repeated.release();
+    try std.testing.expectEqual(rich, repeated);
+    message.revision = "2";
+    message.text = "Edited caption";
+    message.metadata_deferred = true;
+    message.attachments = &.{};
+    _ = try store.upsert(ar, "message", try u.json(ar, message));
+    _ = try store.upsert(ar, "message", full);
+    const edited = try History.create(store, "chat", rich);
+    defer edited.release();
+    try std.testing.expectEqualStrings("Edited caption", edited.messages[0].text.?);
+    try std.testing.expect(edited.messages[0].metadata_deferred);
 }
 
 test "metadata views share immutable history while edited records replace it" {

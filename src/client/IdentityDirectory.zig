@@ -51,6 +51,7 @@ pub fn actor(s: Self, value: t.ReactionActor) []const u8 {
     return if (value.is_self) "You" else s.name(value.service, value.address orelse "");
 }
 pub fn conversation(s: Self, a: std.mem.Allocator, chat: t.Conversation) []const u8 {
+    if (chat.is_self) return "You";
     if (chat.title.len > 0) return chat.title;
     if (chat.participants.len == 0) return "Conversation";
     if (chat.participants.len == 1) return s.name(chat.service, chat.participants[0]);
@@ -63,6 +64,7 @@ pub fn conversation(s: Self, a: std.mem.Allocator, chat: t.Conversation) []const
     return std.fmt.allocPrint(a, "{s} +{d}", .{ joined, chat.participants.len - 3 }) catch joined;
 }
 pub fn matches(s: Self, chat: t.Conversation, query: []const u8) bool {
+    if (chat.is_self and contains("You", query)) return true;
     if (query.len == 0 or contains(chat.title, query)) return true;
     for (chat.participants) |address| {
         if (contains(address, query) or contains(s.name(chat.service, address), query)) return true;

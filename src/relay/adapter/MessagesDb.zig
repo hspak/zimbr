@@ -17,8 +17,9 @@ pub const Features = struct {
     reaction_target: bool = false,
     reaction_emoji: bool = false,
     reaction_range: bool = false,
+    self_chat_metadata: bool = false,
 };
-pub const SourceConversation = struct { source: []const u8, row: i64, route: []const u8, value: t.Conversation };
+pub const SourceConversation = struct { source: []const u8, row: i64, route: []const u8, thread_row: ?i64 = null, value: t.Conversation };
 pub const AttachmentSource = struct { id: []const u8, filename: []const u8, uti: []const u8, transfer_state: i64 };
 pub const SourceMessage = struct { source: []const u8, row: i64, date: i64, chat_row: i64, value: t.Message, pending: bool, attachment_sources: []const AttachmentSource = &.{}, link_artwork: []const links.Artwork = &.{}, reaction: ?reactions.Observation = null };
 pub fn open(a: u.Allocator, path: [:0]const u8) !Self {
@@ -42,6 +43,7 @@ pub fn open(a: u.Allocator, path: [:0]const u8) !Self {
         .reaction_target = probe(db, "SELECT associated_message_guid FROM message LIMIT 0"),
         .reaction_emoji = probe(db, "SELECT associated_message_emoji FROM message LIMIT 0"),
         .reaction_range = probe(db, "SELECT associated_message_range_location,associated_message_range_length FROM message LIMIT 0"),
+        .self_chat_metadata = probe(db, "SELECT style,account_id,chat_identifier,last_addressed_handle,room_name FROM chat LIMIT 0"),
     } };
 }
 fn probe(db: Db, query: [:0]const u8) bool {
@@ -77,7 +79,7 @@ pub fn guid(self: Self, a: u.Allocator, row: i64) !?[]const u8 {
     return if (try s.step()) try s.text(a, 0) else null;
 }
 pub fn chat(self: Self, a: u.Allocator, row: i64, complete: bool) !?SourceConversation {
-    var s = try self.db.prepare("SELECT guid,service_name,substr(coalesce(display_name,''),1,1024),(SELECT max(m.date) FROM chat_message_join j JOIN message m ON m.ROWID=j.message_id WHERE j.chat_id=c.ROWID) FROM chat c WHERE ROWID=?");
+    var s = try self.db.prepare("SELECT guid," ++ effective_service ++ ",substr(coalesce(display_name,''),1,1024),(SELECT max(m.date) FROM chat_message_join j JOIN message m ON m.ROWID=j.message_id WHERE j.chat_id=c.ROWID) FROM chat c WHERE ROWID=?");
     defer s.close();
     try s.bind(&.{.{ .int = row }});
     if (!try s.step()) return null;
@@ -88,7 +90,39 @@ pub fn chat(self: Self, a: u.Allocator, row: i64, complete: bool) !?SourceConver
     while (try p.step()) try participants.append(a, try p.text(a, 0));
     const source = try s.text(a, 0);
     const service = normalizeService(s.bytes(1));
-    return .{ .source = source, .row = row, .route = source, .value = .{ .participants = try participants.toOwnedSlice(a), .title = try s.text(a, 2), .service = service, .last_activity = if (s.int(3) != 0) try u.timestamp(a, s.int(3)) else null, .history_complete = complete, .sendable = u.eq(service, "imessage") } };
+    const thread_row = if (u.eq(service, "imessage")) try self.selfThread(row) else null;
+    return .{ .source = source, .row = row, .route = source, .thread_row = thread_row, .value = .{ .participants = try participants.toOwnedSlice(a), .title = try s.text(a, 2), .service = service, .last_activity = if (s.int(3) != 0) try u.timestamp(a, s.int(3)) else null, .history_complete = complete, .sendable = u.eq(service, "imessage"), .is_self = thread_row != null } };
+}
+// Modern Messages uses transport-neutral `any` routes. Their chat-level label
+// can lag the actual transport; use the latest ordinary message, never a
+// reaction, system event, or the order in which history happened to be imported.
+const effective_service = "CASE WHEN c.guid LIKE 'any;%' THEN coalesce((SELECT m.service FROM chat_message_join j JOIN message m ON m.ROWID=j.message_id WHERE j.chat_id=c.ROWID AND coalesce(m.associated_message_type,0)=0 AND coalesce(m.item_type,0)=0 AND coalesce(m.is_system_message,0)=0 ORDER BY m.date DESC,m.ROWID DESC LIMIT 1),c.service_name) ELSE c.service_name END";
+
+fn selfThread(self: Self, row: i64) !?i64 {
+    if (!self.features.self_chat_metadata) return null;
+    // Only reciprocal local addresses in single-participant chats on the same
+    // account prove this relationship. Contact names and outgoing handles do not.
+    var q = try self.db.prepare(
+        "SELECT min(c.ROWID,p.ROWID),p.ROWID FROM chat c JOIN chat p ON p.account_id=c.account_id AND p.chat_identifier=c.last_addressed_handle AND p.last_addressed_handle=c.chat_identifier " ++
+            "WHERE c.ROWID=? AND c.ROWID!=p.ROWID AND c.account_id!='' AND c.chat_identifier!='' AND c.last_addressed_handle!='' AND c.chat_identifier!=c.last_addressed_handle " ++
+            "AND c.style=45 AND p.style=45 AND coalesce(c.room_name,'')='' AND coalesce(p.room_name,'')='' " ++
+            "AND (" ++ effective_service ++ ")='iMessage' " ++
+            "AND (SELECT count(*) FROM chat_handle_join WHERE chat_id=c.ROWID)=1 AND (SELECT count(*) FROM chat_handle_join WHERE chat_id=p.ROWID)=1 " ++
+            "AND EXISTS(SELECT 1 FROM chat_handle_join j JOIN handle h ON h.ROWID=j.handle_id WHERE j.chat_id=c.ROWID AND h.id=c.chat_identifier) " ++
+            "AND EXISTS(SELECT 1 FROM chat_handle_join j JOIN handle h ON h.ROWID=j.handle_id WHERE j.chat_id=p.ROWID AND h.id=p.chat_identifier) " ++
+            "AND (SELECT count(*) FROM chat x WHERE x.account_id=c.account_id AND x.chat_identifier=c.chat_identifier AND x.last_addressed_handle=c.last_addressed_handle AND x.style=45)=1 LIMIT 2",
+    );
+    defer q.close();
+    try q.bind(&.{.{ .int = row }});
+    if (!try q.step()) return null;
+    const canonical = q.int(0);
+    const peer = q.int(1);
+    if (try q.step()) return null;
+    var service = try self.db.prepare("SELECT " ++ effective_service ++ " FROM chat c WHERE ROWID=?");
+    defer service.close();
+    try service.bind(&.{.{ .int = peer }});
+    if (!try service.step() or !u.eq(service.bytes(0), "iMessage")) return null;
+    return canonical;
 }
 pub fn chatRows(self: Self, a: u.Allocator, after: i64) ![]i64 {
     var s = try self.db.prepare("SELECT ROWID FROM chat WHERE ROWID>? ORDER BY ROWID LIMIT 100");
@@ -213,7 +247,7 @@ fn normalizeService(s: []const u8) []const u8 {
 pub fn validateRoute(self: Self, mode: []const u8, destination: []const u8) !void {
     if (u.eq(mode, "direct")) return;
     if (!u.eq(mode, "chat")) return error.UnsupportedTarget;
-    var q = try self.db.prepare("SELECT count(*) FROM chat WHERE guid=? AND service_name='iMessage'");
+    var q = try self.db.prepare("SELECT count(*) FROM chat c WHERE guid=? AND (" ++ effective_service ++ ")='iMessage'");
     defer q.close();
     try q.bind(&.{.{ .text = destination }});
     _ = try q.step();

@@ -277,8 +277,16 @@ fn work(s: *Self) !void {
                                 if (data.value.retryable) {
                                     result.state = .pending;
                                     result.retry_at = u.now() + @as(i64, @intCast(std.math.clamp(data.value.retry_after orelse 2, 2, 30))) * 1000;
+                                    setReason(result, "Preparing image…");
                                 }
-                                if (data.value.asset) |asset| setReason(result, if (asset.availability == .not_local) "Not on the Mac · open Messages there, then retry" else asset.reason orelse @tagName(asset.availability));
+                                if (data.value.asset) |asset| setReason(result, switch (asset.availability) {
+                                    .pending => "Preparing image…",
+                                    .not_local => "Not on the Mac · open Messages there, then retry",
+                                    .unsupported => "Image format not supported",
+                                    .oversized => "Image is too large to preview",
+                                    .retired => "Photo changed · refreshing message",
+                                    .ready, .unavailable => if (data.value.retryable) "Image temporarily unavailable · retrying" else "Image unavailable · retry",
+                                });
                             }
                         }
                     } else if (status == 503 or status == 0 or failure.curl_code != 0 or status >= 500) {

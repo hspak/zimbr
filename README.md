@@ -67,6 +67,8 @@ The compact composer shows one text line with Send alongside, and its bottom
 aligns with the conversation list. Longer drafts scroll within the input. The
 conversation pane extends to the bottom of the window.
 Read-only chats show a disabled grey composer; any existing draft is preserved.
+Verified phone/email self chats appear together as **You**, with both histories
+and addresses searchable. Existing saved drafts are combined without truncation.
 Connection status appears in the sidebar. **Details** in the navigation rail
 (Ctrl+D) includes **Reconnect** in its header and opens
 a scrollable pane with connection and retry status, relay capabilities, saved
@@ -187,7 +189,9 @@ python3 tests/cert_management.py  # real mkcert required
 python3 tests/client_native_tls.py
 python3 tests/client_tls.py
 python3 tests/client_integration.py
+python3 tests/conversations.py
 python3 tests/client_transport.py
+python3 tests/client_lazy_history.py
 python3 tests/client_enrichment.py
 python3 tests/client_enrichment_protocol.py
 python3 tests/client_media_transport.py
@@ -439,6 +443,20 @@ by immutable relay ID; history pages descend by `(source timestamp, relay ID)`.
 Treat `next` and event cursors as opaque strings and URL-encode them. Fetch a sync
 cursor **before** fetching snapshots, then replay after it; merge by ID/revision.
 History queries also enqueue bounded source reconciliation.
+
+Conversation records may include `is_self` (default `false`) and `thread_id`
+(default `null`). A verified reciprocal pair of local addresses on one Messages
+account shares the older source chat's relay ID as its thread ID. Clients group
+those records for presentation; each conversation ID and send route remains
+valid. History requested through either member includes both histories, with
+original message IDs and `conversation_id` values and one shared pagination order.
+On a grouping change, clients restart history pagination. Matching contact names
+alone never combines conversations.
+
+For Messages' transport-neutral `any;…` routes, the latest ordinary message
+determines the service, falling back to the chat label when no such message exists.
+Reactions and system events do not change that classification. Dispatch rechecks
+the same source rule and retains the existing enabled-iMessage-account checks.
 
 Enrichment fields are additive. Complete empty arrays clear older aggregates;
 `null` means unsupplied. Inline metadata has a combined 32 KiB budget and exposes

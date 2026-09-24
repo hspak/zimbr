@@ -148,6 +148,7 @@ const App = struct {
     history_arena: std.heap.ArenaAllocator = .init(a),
     history_rows: []HistoryRow = &.{},
     history_generation: ?u64 = null,
+    hydration_at: i64 = 0,
     layout_pending: bool = false,
     height_budget: usize = 0,
     height_deadline: i64 = 0,
@@ -336,8 +337,15 @@ const App = struct {
             }
             s.view = v;
             if (s.key.len == 0 and v.snapshot.selected.len > 0) s.key = try a.dupe(u8, v.snapshot.selected);
-            if (std.mem.startsWith(u8, s.key, "new:") and u.eq(s.key, v.redirect_from) and v.snapshot.selected.len > 0) {
-                if (s.draft_dirty or (s.composer.text.items.len > 0 and !s.send_wait)) {
+            if (u.eq(s.key, v.redirect_from) and s.key.len > 0 and v.snapshot.selected.len > 0) {
+                if (!std.mem.startsWith(u8, s.key, "new:") and s.draft_dirty) {
+                    // Save the last edit under its old key before switching;
+                    // the worker merges it with any other saved self draft.
+                    try s.saveDraft();
+                    try s.worker.push(.{ .kind = .select, .key = s.key });
+                    return;
+                }
+                if (std.mem.startsWith(u8, s.key, "new:") and (s.draft_dirty or (s.composer.text.items.len > 0 and !s.send_wait))) {
                     try s.saveDraft();
                     try s.worker.push(.{ .kind = .select, .key = s.key });
                 } else {
@@ -735,7 +743,7 @@ const App = struct {
                 const bg = if (selected) theme.colors.selected else if (hot) theme.colors.avatar else theme.colors.sidebar;
                 if (selected or hot) rl.drawRectangleRounded(row, 0.2, 8, bg);
                 const name = display.label(ar, v.snapshot.directory.conversation(ar, chat.value));
-                if (chat.value.participants.len > 1) {
+                if (!chat.value.is_self and chat.value.participants.len > 1) {
                     s.text.drawLine("#", row.x + 11, row.y + 5, 20, 20, if (selected) theme.colors.ink else theme.colors.muted, bg);
                 } else {
                     s.drawPeerAvatar(.{ .x = row.x + sidebar_icon_inset, .y = row.y + 6, .width = sidebar_icon_size, .height = sidebar_icon_size }, name, theme.participant(chat.value.id, &.{}), 12, chat.value.service, if (chat.value.participants.len == 1) chat.value.participants[0] else "");
@@ -877,7 +885,7 @@ const App = struct {
         } else if (s.view) |v| for (v.snapshot.chats) |chat| {
             if (u.eq(chat.value.id, s.key)) {
                 title = v.snapshot.directory.conversation(ar, chat.value);
-                subtitle = if (chat.value.participants.len > 1) std.fmt.allocPrint(ar, "{d} participants  ·  {s}", .{ chat.value.participants.len, if (chat.value.sendable) "iMessage" else "Read only" }) catch "Group conversation" else if (chat.value.sendable) "iMessage" else "Read only · unsupported service";
+                subtitle = if (!chat.value.is_self and chat.value.participants.len > 1) std.fmt.allocPrint(ar, "{d} participants  ·  {s}", .{ chat.value.participants.len, if (chat.value.sendable) "iMessage" else "Read only" }) catch "Group conversation" else if (chat.value.sendable) "iMessage" else "Read only · unsupported service";
                 break;
             }
         };
@@ -1222,6 +1230,17 @@ const App = struct {
         }
         if (v.snapshot.messages.len == 0 and v.snapshot.pending.len == 0) s.text.draw(if (v.loading_history) "Loading history…" else if (v.online) "The start of something good.\nWrite your first message below." else "No cached messages in this conversation.", r.x + 40, r.y + 90, 17, r.width - 80, theme.colors.muted, theme.colors.paper);
         const visible = s.visibleHistory(rows, r.height);
+        if (v.online and u.now() >= s.hydration_at) {
+            // Visibility, not history size, bounds lazy metadata requests.
+            var ids: std.ArrayList([]const u8) = .empty;
+            for (rows[visible.start..visible.end]) |row| {
+                if (!row.pending and v.snapshot.messages[row.source_index].metadata_deferred and ids.items.len < 64) ids.append(ar, row.id) catch {};
+            }
+            if (u.json(ar, ids.items)) |raw| {
+                s.worker.push(.{ .kind = .hydrate, .key = s.key, .text = raw }) catch {};
+            } else |_| {}
+            s.hydration_at = u.now() + 250;
+        }
         for (rows[visible.start..visible.end]) |row| {
             if (row.pending) continue;
             const m = v.snapshot.messages[row.source_index];

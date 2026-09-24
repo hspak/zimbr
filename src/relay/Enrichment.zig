@@ -183,6 +183,43 @@ pub fn persist(j: Journal, id: []const u8, prepared: Prepared) !void {
 }
 
 pub const Page = struct { message_id: []const u8, revision: []const u8, section: Section, items: []const std.json.Value, total: usize, next: ?[]const u8 };
+
+test "text-first history preserves captions and cursors without inline metadata" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const j = try Journal.open(":memory:");
+    defer j.close();
+    const cid = try j.conversation(a, "chat", 1, "route", .{ .service = "imessage" }, "historical_import");
+    var message = t.Message{ .conversation_id = cid, .sender = "peer", .service = "imessage", .direction = .incoming, .timestamp = "2026-01-01T00:00:00Z", .kind = .text, .text = "Older text", .decoding = .plain, .observed_status = .received };
+    try j.message(a, "plain", 1, 1, message, "historical_import");
+    const attachments = try a.alloc(t.Attachment, 32);
+    for (attachments, 0..) |*item, i| item.* = .{ .id = try u.decimal(a, @intCast(i)), .name = "Photo " ++ "x" ** 200, .mime_type = "image/png", .bytes = "123" };
+    message.kind = .attachment;
+    message.text = "Caption 👩🏽‍💻 stays immediately available";
+    message.attachments = attachments;
+    message.link_previews = &.{.{ .id = "link", .part_id = "link", .title = "Stored preview", .state = .complete }};
+    message.reactions = &.{.{ .id = "reaction", .actor = .{ .service = "imessage" }, .key = "heart" }};
+    try j.message(a, "rich", 2, 2, message, "historical_import");
+    const full_page = try j.page(a, cid, null, 1);
+    const text_page = try j.pageContent(a, cid, null, 1, true);
+    const full_message = try std.json.parseFromSliceLeaky(t.Message, a, try u.json(a, full_page.records[0]), .{});
+    const text_message = try std.json.parseFromSliceLeaky(t.Message, a, try u.json(a, text_page.records[0]), .{});
+    try std.testing.expect(text_message.metadata_deferred);
+    try std.testing.expect(!full_message.metadata_deferred);
+    try std.testing.expectEqualStrings(full_message.text.?, text_message.text.?);
+    try std.testing.expectEqualStrings(full_message.revision, text_message.revision);
+    try std.testing.expectEqualStrings(full_page.next.?, text_page.next.?);
+    try std.testing.expectEqual(@as(usize, 0), text_message.attachments.len);
+    try std.testing.expect(text_message.parts == null and text_message.reactions == null and text_message.link_previews == null);
+    try std.testing.expect((try u.json(a, text_page)).len * 4 < (try u.json(a, full_page)).len);
+    const older = try j.pageContent(a, cid, text_page.next, 1, true);
+    const plain = try std.json.parseFromSliceLeaky(t.Message, a, try u.json(a, older.records[0]), .{});
+    try std.testing.expect(!plain.metadata_deferred);
+    try std.testing.expectEqualStrings("Older text", plain.text.?);
+    try std.testing.expect(older.next == null);
+}
+
 pub fn page(j: Journal, a: u.Allocator, id: []const u8, section: Section, revision: []const u8, after: ?[]const u8, limit: usize) !Page {
     const rev = std.fmt.parseInt(i64, revision, 10) catch return error.InvalidRequest;
     if (rev < 0) return error.InvalidRequest;

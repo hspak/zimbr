@@ -25,7 +25,7 @@ pub fn create(store: Store, message: t.Message) !*Self {
     }
     const summary = try ar.dupeZ(u8, display.prefix(if (title.len > 0) title else "New message", 256, 1));
     const body = try ar.dupeZ(u8, display.prefix(display.summary(ar, message), 1024, 4));
-    const chat = try ar.dupeZ(u8, message.conversation_id);
+    const chat = try ar.dupeZ(u8, try store.threadKey(ar, message.conversation_id));
     const result = try a.create(Self);
     result.* = .{ .arena = arena, .chat = chat, .summary = summary, .body = body };
     return result;

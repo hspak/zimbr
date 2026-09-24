@@ -26,6 +26,7 @@ pub fn open(path: [:0]const u8) !Self {
         \\CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY,epoch TEXT NOT NULL,draft_key TEXT NOT NULL,payload TEXT NOT NULL,state TEXT NOT NULL,detail TEXT NOT NULL DEFAULT '',record TEXT);
     );
     if (try db.scalar("SELECT count(*) FROM pragma_table_info('previews') WHERE name='record'") == 0) try db.exec("ALTER TABLE previews ADD COLUMN record TEXT");
+    try db.exec("UPDATE records SET chat=id WHERE kind='conversation' AND chat=''");
     if (try db.scalar("SELECT count(*) FROM pragma_table_info('outbox') WHERE name='sent_at'") == 0) {
         try db.exec("BEGIN IMMEDIATE");
         errdefer db.exec("ROLLBACK") catch {};
@@ -70,19 +71,59 @@ pub fn set(s: Self, key: []const u8, value: []const u8) !void {
 pub fn draft(s: Self, a: u.Allocator, key: []const u8) ![]const u8 {
     var q = try s.db.prepare("SELECT text FROM drafts WHERE key=?");
     defer q.close();
-    try q.bind(&.{.{ .text = key }});
+    try q.bind(&.{.{ .text = try s.threadKey(a, key) }});
     return if (try q.step()) try q.text(a, 0) else "";
 }
 pub fn saveDraft(s: Self, key: []const u8, value: []const u8) !void {
     if (value.len > t.max_text or !std.unicode.utf8ValidateSlice(value)) return error.InvalidDraft;
-    try s.exec("INSERT INTO drafts VALUES(?,?) ON CONFLICT(key) DO UPDATE SET text=excluded.text", &.{ .{ .text = key }, .{ .text = value } });
+    const owns_transaction = u.c.sqlite3_get_autocommit(s.db.handle) != 0;
+    if (owns_transaction) try s.db.exec("BEGIN IMMEDIATE");
+    errdefer if (owns_transaction) s.db.exec("ROLLBACK") catch {};
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const canonical = try s.threadKey(arena.allocator(), key);
+    // An edit queued under an old alias must not discard the other saved draft.
+    if (!u.eq(canonical, key) and value.len > 0) {
+        try s.exec("INSERT INTO drafts VALUES(?,?) ON CONFLICT(key) DO UPDATE SET text=excluded.text", &.{ .{ .text = key }, .{ .text = value } });
+        try s.mergeThreadState(arena.allocator(), canonical);
+    } else try s.exec("INSERT INTO drafts VALUES(?,?) ON CONFLICT(key) DO UPDATE SET text=excluded.text", &.{ .{ .text = canonical }, .{ .text = value } });
+    if (owns_transaction) try s.db.exec("COMMIT");
+}
+pub fn threadKey(s: Self, a: u.Allocator, key: []const u8) ![]const u8 {
+    var q = try s.db.prepare("SELECT c.chat FROM records c JOIN records root ON root.kind='conversation' AND root.id=c.chat WHERE c.kind='conversation' AND c.id=?");
+    defer q.close();
+    try q.bind(&.{.{ .text = key }});
+    return if (try q.step()) try q.text(a, 0) else key;
+}
+// Members retain their original IDs, message ownership, and send payloads.
+// The existing indexed chat column holds the relay's presentation thread ID.
+pub const thread_cte = "WITH members AS (SELECT ?1 AS id UNION SELECT id FROM records WHERE kind='conversation' AND chat=coalesce((SELECT chat FROM records WHERE kind='conversation' AND id=?1),?1)) ";
+fn mergeThreadState(s: Self, a: u.Allocator, key: []const u8) !void {
+    const canonical = try s.threadKey(a, key);
+    var q = try s.db.prepare(thread_cte ++ "SELECT d.key,d.text FROM drafts d WHERE d.key IN (SELECT id FROM members) AND d.key!=?1 ORDER BY d.key");
+    defer q.close();
+    try q.bind(&.{.{ .text = canonical }});
+    var aliases: std.ArrayList([]const u8) = .empty;
+    var combined = try s.draft(a, canonical);
+    while (try q.step()) {
+        try aliases.append(a, try q.text(a, 0));
+        const other = try q.text(a, 1);
+        if (other.len > 0 and !u.eq(combined, other)) combined = if (combined.len == 0) other else try std.fmt.allocPrint(a, "{s}\n\n{s}", .{ combined, other });
+    }
+    if (aliases.items.len > 0) {
+        // Preserve both drafts even if their combined length exceeds the send
+        // limit; the composer can shorten them, but migration never truncates.
+        try s.exec("INSERT INTO drafts VALUES(?,?) ON CONFLICT(key) DO UPDATE SET text=excluded.text", &.{ .{ .text = canonical }, .{ .text = combined } });
+        for (aliases.items) |alias| try s.exec("DELETE FROM drafts WHERE key=?", &.{.{ .text = alias }});
+    }
+    try s.exec(thread_cte ++ "UPDATE outbox SET draft_key=?1 WHERE draft_key IN (SELECT id FROM members)", &.{.{ .text = canonical }});
 }
 pub fn read(s: Self, chat: []const u8) !void {
-    try s.exec("DELETE FROM unread WHERE chat=?", &.{.{ .text = chat }});
+    try s.exec(thread_cte ++ "DELETE FROM unread WHERE chat IN (SELECT id FROM members)", &.{.{ .text = chat }});
 }
 pub fn setHidden(s: Self, key: []const u8, hidden: bool) !void {
     if (key.len == 0) return error.InvalidConversation;
-    try s.exec(if (hidden) "INSERT OR IGNORE INTO hidden_chats VALUES(?)" else "DELETE FROM hidden_chats WHERE key=?", &.{.{ .text = key }});
+    try s.exec(if (hidden) thread_cte ++ "INSERT OR IGNORE INTO hidden_chats SELECT id FROM members" else thread_cte ++ "DELETE FROM hidden_chats WHERE key IN (SELECT id FROM members)", &.{.{ .text = key }});
 }
 pub fn beginSync(s: Self, epoch: []const u8, cursor: []const u8) !void {
     if (!t.uuid(epoch)) return error.InvalidEpoch;
@@ -112,17 +153,20 @@ pub fn upsert(s: Self, a: u.Allocator, kind: []const u8, raw: []const u8) !bool 
     var rev: []const u8 = undefined;
     var chat: []const u8 = "";
     var sort: []const u8 = "";
+    var metadata_deferred = false;
     if (u.eq(kind, "conversation")) {
         const v = (try std.json.parseFromSlice(t.Conversation, a, raw, .{ .ignore_unknown_fields = true })).value;
         id = v.id;
         rev = v.revision;
         sort = v.last_activity orelse "";
+        chat = if (v.is_self and v.thread_id != null and t.uuid(v.thread_id.?)) v.thread_id.? else v.id;
     } else if (u.eq(kind, "message")) {
         const v = (try std.json.parseFromSlice(t.Message, a, raw, .{ .ignore_unknown_fields = true })).value;
         id = v.id;
         rev = v.revision;
         chat = v.conversation_id;
         sort = v.timestamp;
+        metadata_deferred = v.metadata_deferred;
     } else if (u.eq(kind, "request")) {
         const v = (try std.json.parseFromSlice(t.SendRequest, a, raw, .{ .ignore_unknown_fields = true })).value;
         id = v.request_id;
@@ -133,20 +177,32 @@ pub fn upsert(s: Self, a: u.Allocator, kind: []const u8, raw: []const u8) !bool 
     } else return error.InvalidRecord;
     const revision = try std.fmt.parseInt(i64, rev, 10);
     if (revision < 0 or id.len == 0) return error.InvalidRecord;
-    var existing = try s.db.prepare("SELECT revision,record FROM records WHERE kind=? AND id=?");
+    var existing = try s.db.prepare("SELECT revision,record,chat FROM records WHERE kind=? AND id=?");
     defer existing.close();
     try existing.bind(&.{ .{ .text = kind }, .{ .text = id } });
     const fresh = !(try existing.step());
-    if (!fresh and existing.int(0) >= revision) {
+    // A full record may upgrade a text projection at the same revision. A
+    // delayed projection can never erase metadata already received via SSE.
+    const upgrade = !fresh and u.eq(kind, "message") and !metadata_deferred and existing.int(0) == revision and
+        (try std.json.parseFromSliceLeaky(struct { metadata_deferred: bool = false }, a, existing.bytes(1), .{ .ignore_unknown_fields = true })).metadata_deferred;
+    if (!fresh and existing.int(0) >= revision and !upgrade) {
         if (u.eq(kind, "request")) try s.requestState(a, existing.bytes(1));
         return false;
     }
+    const regrouped = u.eq(kind, "conversation") and (fresh or !u.eq(existing.bytes(2), chat));
     try s.exec("INSERT INTO records VALUES(?,?,?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET revision=excluded.revision,chat=excluded.chat,sort_key=excluded.sort_key,record=excluded.record", &.{ .{ .text = kind }, .{ .text = id }, .{ .int = revision }, .{ .text = chat }, .{ .text = sort }, .{ .text = raw } });
     if (u.eq(kind, "message")) {
         try s.exec("DELETE FROM enrichment_cache WHERE message_id=?", &.{.{ .text = id }});
         try s.exec("DELETE FROM enrichment_pages WHERE message_id=?", &.{.{ .text = id }});
+        // Invalidate immutable history reuse even though the relay revision
+        // did not change. Later overflow pages keep incrementing this serial.
+        if (upgrade) try s.exec("INSERT INTO enrichment_cache VALUES(?,?,?,1)", &.{ .{ .text = id }, .{ .int = revision }, .{ .text = raw } });
     }
     if (u.eq(kind, "request")) try s.requestState(a, raw);
+    if (regrouped) {
+        try s.exec(thread_cte ++ "DELETE FROM pages WHERE chat IN (SELECT id FROM members)", &.{.{ .text = id }});
+        try s.mergeThreadState(a, id);
+    }
     return fresh;
 }
 fn requestState(s: Self, a: u.Allocator, raw: []const u8) !void {
@@ -179,7 +235,7 @@ pub fn eventNotification(s: Self, a: u.Allocator, raw: []const u8, frame_id: []c
         if (m.direction == .incoming and m.kind != .reaction and m.reaction_event == null) {
             try s.exec("INSERT OR IGNORE INTO live_seen VALUES(?)", &.{.{ .text = m.id }});
             const first = u.c.sqlite3_changes(s.db.handle) > 0;
-            if (first and u.eq(e.origin, "live") and !u.eq(m.conversation_id, viewed)) {
+            if (first and u.eq(e.origin, "live") and !u.eq(try s.threadKey(a, m.conversation_id), try s.threadKey(a, viewed))) {
                 try s.exec("INSERT INTO unread VALUES(?,1) ON CONFLICT(chat) DO UPDATE SET count=count+1", &.{.{ .text = m.conversation_id }});
                 notification = m;
             }
@@ -237,7 +293,8 @@ pub fn snapshot(s: Self, a: u.Allocator, selected: []const u8) !Snapshot {
 }
 // A shared history owns these immutable messages for at least this snapshot's
 // lifetime. Other callers can still request a fully arena-owned snapshot.
-pub fn snapshotWithMessages(s: Self, a: u.Allocator, selected: []const u8, shared_messages: ?[]const t.Message) !Snapshot {
+pub fn snapshotWithMessages(s: Self, a: u.Allocator, selected_key: []const u8, shared_messages: ?[]const t.Message) !Snapshot {
+    const selected = try s.threadKey(a, selected_key);
     var chats: std.ArrayList(Chat) = .empty;
     var messages: std.ArrayList(t.Message) = .empty;
     var pending: std.ArrayList(Pending) = .empty;
@@ -261,6 +318,43 @@ pub fn snapshotWithMessages(s: Self, a: u.Allocator, selected: []const u8, share
         }
         try chats.append(a, .{ .value = v, .preview = preview, .unread = q.int(1), .hidden = q.int(4) != 0 });
     }
+    var by_id: std.StringHashMapUnmanaged(usize) = .empty;
+    for (chats.items, 0..) |chat, index| try by_id.put(a, chat.value.id, index);
+    var grouped: std.ArrayList(Chat) = .empty;
+    var by_thread: std.StringHashMapUnmanaged(usize) = .empty;
+    for (chats.items) |chat| {
+        const root = if (chat.value.is_self and chat.value.thread_id != null) by_id.get(chat.value.thread_id.?) else null;
+        const key = if (root) |index| chats.items[index].value.id else chat.value.id;
+        const entry = try by_thread.getOrPut(a, key);
+        if (!entry.found_existing) {
+            entry.value_ptr.* = grouped.items.len;
+            var first = chat;
+            if (root) |index| {
+                first.value = chats.items[index].value;
+                first.value.last_activity = chat.value.last_activity;
+                first.value.history_complete = chat.value.history_complete;
+                first.value.participants = chat.value.participants;
+            }
+            try grouped.append(a, first);
+        } else {
+            const merged = &grouped.items[entry.value_ptr.*];
+            merged.unread += chat.unread;
+            merged.hidden = merged.hidden and chat.hidden;
+            merged.value.history_complete = merged.value.history_complete and chat.value.history_complete;
+            var participants: std.ArrayList([]const u8) = .empty;
+            try participants.appendSlice(a, merged.value.participants);
+            for (chat.value.participants) |address| {
+                var exists = false;
+                for (participants.items) |previous| if (u.eq(previous, address)) {
+                    exists = true;
+                    break;
+                };
+                if (!exists) try participants.append(a, address);
+            }
+            merged.value.participants = try participants.toOwnedSlice(a);
+        }
+    }
+    chats = grouped;
     // Local drafts without a current server conversation remain discoverable
     // after an epoch reset or while composing a new direct conversation.
     var drafts = try s.db.prepare("SELECT key,EXISTS(SELECT 1 FROM hidden_chats h WHERE h.key=local.key) FROM (SELECT key FROM drafts WHERE text!='' UNION SELECT draft_key AS key FROM outbox WHERE state!='delivered') local WHERE NOT EXISTS(SELECT 1 FROM records WHERE kind='conversation' AND id=local.key)");
@@ -274,13 +368,13 @@ pub fn snapshotWithMessages(s: Self, a: u.Allocator, selected: []const u8, share
     if (shared_messages == null) {
         var ms = try s.db.prepare(history_query);
         defer ms.close();
-        try ms.bind(&.{ .{ .text = selected }, .{ .text = selected }, .{ .text = selected } });
+        try ms.bind(&.{.{ .text = selected }});
         while (try ms.step()) try messages.append(a, (try std.json.parseFromSlice(t.Message, a, ms.bytes(0), .{ .ignore_unknown_fields = true, .allocate = .alloc_always })).value);
     }
     // The observed echo supplies the sole visible status, including while the
     // relay finishes checking a provisional match. Keep the durable request
     // unchanged so withdrawing the hint restores its unresolved bubble.
-    var ps = try s.db.prepare("SELECT payload,state,detail,record,sent_at FROM outbox WHERE draft_key=? AND NOT EXISTS(SELECT 1 FROM records m WHERE m.kind='message' AND m.id=" ++ echo_id_sql ++ ") ORDER BY rowid");
+    var ps = try s.db.prepare(thread_cte ++ "SELECT payload,state,detail,record,sent_at FROM outbox WHERE draft_key IN (SELECT id FROM members) AND NOT EXISTS(SELECT 1 FROM records m WHERE m.kind='message' AND m.id=" ++ echo_id_sql ++ ") ORDER BY rowid");
     defer ps.close();
     try ps.bind(&.{.{ .text = selected }});
     while (try ps.step()) {
@@ -292,8 +386,9 @@ pub fn snapshotWithMessages(s: Self, a: u.Allocator, selected: []const u8, share
 const echo_id_sql = "coalesce(json_extract(outbox.record,'$.message_id'),CASE WHEN outbox.state='unknown' AND outbox.epoch=(SELECT value FROM meta WHERE key='epoch') THEN json_extract(outbox.record,'$.candidate_message_id') END)";
 const enriched_record = "coalesce((SELECT e.record FROM enrichment_cache e WHERE e.message_id=records.id AND e.revision=records.revision),record)";
 const enrichment_serial = "coalesce((SELECT e.serial FROM enrichment_cache e WHERE e.message_id=records.id AND e.revision=records.revision),0)";
-pub const history_query = "SELECT " ++ enriched_record ++ ",id,revision,sort_key," ++ enrichment_serial ++ " FROM records WHERE kind='message' AND chat=? UNION ALL SELECT " ++ enriched_record ++ ",id,revision,sort_key," ++ enrichment_serial ++ " FROM records WHERE kind='message' AND chat!=? AND id IN (SELECT " ++ echo_id_sql ++ " FROM outbox WHERE draft_key=? AND record IS NOT NULL) ORDER BY sort_key,id";
-pub const history_versions_query = "SELECT NULL,id,revision,sort_key," ++ enrichment_serial ++ " FROM records WHERE kind='message' AND chat=? UNION ALL SELECT NULL,id,revision,sort_key," ++ enrichment_serial ++ " FROM records WHERE kind='message' AND chat!=? AND id IN (SELECT " ++ echo_id_sql ++ " FROM outbox WHERE draft_key=? AND record IS NOT NULL) ORDER BY sort_key,id";
+const history_tail = " FROM records WHERE kind='message' AND chat NOT IN (SELECT id FROM members) AND id IN (SELECT " ++ echo_id_sql ++ " FROM outbox WHERE draft_key IN (SELECT id FROM members) AND record IS NOT NULL) ORDER BY sort_key,id";
+pub const history_query = thread_cte ++ "SELECT " ++ enriched_record ++ ",id,revision,sort_key," ++ enrichment_serial ++ " FROM records WHERE kind='message' AND chat IN (SELECT id FROM members) UNION ALL SELECT " ++ enriched_record ++ ",id,revision,sort_key," ++ enrichment_serial ++ history_tail;
+pub const history_versions_query = thread_cte ++ "SELECT NULL,id,revision,sort_key," ++ enrichment_serial ++ " FROM records WHERE kind='message' AND chat IN (SELECT id FROM members) UNION ALL SELECT NULL,id,revision,sort_key," ++ enrichment_serial ++ history_tail;
 pub const message_query = "SELECT " ++ enriched_record ++ " FROM records WHERE kind='message' AND id=?";
 
 pub fn enrichmentNext(s: Self, a: u.Allocator, id: []const u8, revision: []const u8, section: []const u8) !?[]const u8 {

@@ -57,7 +57,7 @@ pub fn create(store: Store, selected: []const u8, previous: ?*Self) !*Self {
     if (previous) |old| try records.ensureTotalCapacity(ar, old.records.len);
     var query = try store.db.prepare(if (previous == null) Store.history_query else Store.history_versions_query);
     defer query.close();
-    try query.bind(&.{ .{ .text = selected }, .{ .text = selected }, .{ .text = selected } });
+    try query.bind(&.{.{ .text = selected }});
     var lookup = try store.db.prepare(Store.message_query);
     defer lookup.close();
     var unchanged = previous != null;

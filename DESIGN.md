@@ -150,6 +150,16 @@ Use raw phone numbers and email addresses as display identities initially.
 Names derived from Contacts are optional enrichment and require separate access.
 Only explicitly identified iMessage conversations are sendable in this version;
 there is no automatic SMS fallback.
+For transport-neutral `any;…` chats, use the latest ordinary message's service
+instead of a stale chat label, with the same check repeated before dispatch.
+The exact chat route and enabled iMessage account checks still apply.
+
+Reciprocal local addresses in single-participant chats on the same account can
+identify a self-chat pair. Publish a shared optional `thread_id` and `is_self`
+for client grouping, preserving both conversation IDs and their send routes.
+History through either member includes both chats in one pagination order;
+messages retain their original IDs and conversation ownership. Contact names
+alone do not establish this relationship.
 
 ### 1.4. Importing history and detecting changes
 

@@ -105,6 +105,9 @@ pub const Conversation = struct {
     last_activity: ?[]const u8 = null,
     history_complete: bool = false,
     sendable: bool = false,
+    // Presentation grouping only; IDs and send routes remain distinct.
+    thread_id: ?[]const u8 = null,
+    is_self: bool = false,
 };
 pub const Attachment = struct {
     id: []const u8,
@@ -135,6 +138,9 @@ pub const Message = struct {
     link_previews: ?[]const LinkPreview = null,
     reactions: ?[]const Reaction = null,
     reaction_event: ?ReactionEvent = null,
+    // Text-first history projection; GET /v1/messages/{id} supplies metadata.
+    // Absent/false on canonical records, including those from older relays.
+    metadata_deferred: bool = false,
 };
 pub const Target = struct {
     conversation_id: ?[]const u8 = null,

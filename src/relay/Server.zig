@@ -152,6 +152,7 @@ fn handle(self: *Self, a: u.Allocator, req: *std.http.Server.Request, peer: *Tls
                     .stored_link_previews_v1 = true,
                     .reactions_v1 = true,
                     .contact_avatars_v1 = true,
+                    .text_first_history_v1 = true,
                 },
                 .enrichment_readiness = .{
                     .identity_directory_v1 = contacts,
@@ -186,11 +187,27 @@ fn handle(self: *Self, a: u.Allocator, req: *std.http.Server.Request, peer: *Tls
             const id = path[18 .. path.len - 9];
             if (!t.uuid(id)) return error.InvalidRequest;
             if (try j.getRecord(a, .conversation, id) == null) return error.NotFound;
-            try j.execute("INSERT OR IGNORE INTO reconcile_chats(conversation_id) VALUES(?)", &.{.{ .text = id }});
-            if (self.core.assets_service != null) try Assets.prioritizeConversation(j, id);
-            try @import("Reactions.zig").prioritize(j, id);
-            const p = try j.page(a, id, try param(a, query, "before"), try pageLimit(a, query));
+            const text_only = u.eq((try param(a, query, "content")) orelse "", "text");
+            for (try j.threadMembers(a, id)) |member| {
+                try j.execute("INSERT OR IGNORE INTO reconcile_chats(conversation_id) VALUES(?)", &.{.{ .text = member }});
+                if (!text_only) {
+                    if (self.core.assets_service != null) try Assets.prioritizeConversation(j, member);
+                    try @import("Reactions.zig").prioritize(j, member);
+                }
+            }
+            const p = try j.pageContent(a, id, try param(a, query, "before"), try pageLimit(a, query), text_only);
             response = try u.json(a, .{ .messages = p.records, .next = p.next });
+        } else if (std.mem.startsWith(u8, path, "/v1/messages/")) {
+            const id = path[13..];
+            if (!t.uuid(id)) return error.InvalidRequest;
+            var message = try j.db.prepare("SELECT record,source FROM messages WHERE id=?");
+            defer message.close();
+            try message.bind(&.{.{ .text = id }});
+            if (!try message.step()) return error.NotFound;
+            response = try message.text(a, 0);
+            // Only visible messages request fresh media and reaction metadata.
+            if (self.core.assets_service != null) try j.execute("UPDATE asset_sources SET check_ms=0 WHERE id IN(SELECT asset_id FROM asset_owners WHERE owner_id=? AND kind IN('message','preview'))", &.{.{ .text = message.bytes(1) }});
+            try j.execute("UPDATE reaction_sources SET check_ms=0 WHERE target_guid=? AND retired=0", &.{.{ .text = message.bytes(1) }});
         } else if (std.mem.startsWith(u8, path, "/v1/send-requests/")) {
             const id = path[18..];
             if (!t.uuid(id)) return error.InvalidRequest;
