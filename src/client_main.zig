@@ -1195,8 +1195,9 @@ const App = struct {
         return footer;
     }
     fn drawFooterLabel(s: *App, label: []const u8, r: rl.Rectangle, color: rl.Color) void {
+        // Keep all footer hints, notices, and warnings aligned to the left edge.
         const size = s.text.lineSize(label, 11, r.width);
-        s.text.drawLine(label, r.x + (r.width - size.x) / 2, r.y + (r.height - size.y) / 2, 11, r.width, color, theme.colors.paper);
+        s.text.drawLine(label, r.x, r.y + (r.height - size.y) / 2, 11, r.width, color, theme.colors.paper);
     }
     fn drawComposer(s: *App, r: rl.Rectangle) void {
         rl.drawRectangleRec(r, theme.colors.paper);
@@ -1234,8 +1235,7 @@ const App = struct {
             s.drawFooterLabel("Earlier send may have succeeded. Sending again may duplicate it.", footer, theme.colors.danger);
         } else {
             const hint = if (s.enter_to_send) "Enter to send · Shift+Enter for a new line" else "Ctrl+Enter to send · Enter for a new line";
-            const hint_size = s.text.lineSize(hint, 11, footer.width);
-            s.text.drawLine(hint, footer.x, footer.y + (footer.height - hint_size.y) / 2, 11, footer.width, theme.colors.muted, theme.colors.paper);
+            s.drawFooterLabel(hint, footer, theme.colors.muted);
         }
     }
     fn inputBox(s: *App, e: *Editor, r: rl.Rectangle, placeholder: []const u8, focus: @FieldType(App, "focus"), multiline: bool) void {
