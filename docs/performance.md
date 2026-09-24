@@ -70,11 +70,71 @@ macOS UUID generation uses `arc4random_buf`, avoiding a `/dev/urandom` open/read
 sequence for every UUID. This is also the native primitive used by Apple's
 [system random generator](https://developer.apple.com/documentation/swift/systemrandomnumbergenerator).
 
-These changes have Linux runtime coverage and M1 code-generation checks. The
-macOS C boundary and complete app still need a native build and runtime profiling;
-the numbers below are **not M1 measurements**. Profile real ingestion, foreground
-requests during backfill, media conversion, and idle wakeups on the Mac before
-drawing conclusions about its throughput or power use.
+The original timing tables below describe the Linux run. The native review
+follow-up validates M1 builds and isolated ingestion; foreground requests during
+backfill and idle energy still need measurement on the deployed relay.
+
+### Native review follow-up
+
+The QoS split exposed a scheduling risk: Zig 0.16's macOS `std.Io.Mutex` waits
+without identifying its owner, so a waiting user request cannot promote the
+utility thread holding Core's lock. Core now uses `os_unfair_lock` on macOS and
+keeps `std.Io.Mutex` elsewhere. All callers are dedicated OS threads, and Core's
+address stays fixed. Apple's [lock contract](https://github.com/apple-oss-distributions/libplatform/blob/main/include/os/lock.h)
+describes ownership tracking for priority-inversion resolution. The critical
+section still spans ingestion; this fixes the missing donation mechanism and
+does not establish a bound on request latency.
+
+Sequence increments now use the prepared statement cache. Ordinary anchors are
+trimmed once per ingestion transaction, preserving the four oldest and twelve
+newest candidates. A duplicate GUID can replace an unretained candidate, matching
+the previous per-row cleanup; it cannot move a retained anchor. Differential
+tests cover ascending, descending, and interleaved batches with duplicate GUIDs.
+
+Unchanged source messages use a cache of at most 4,096 fingerprints in a temporary
+SQLite table. SHA-256 covers the complete decoded input, source row, and date,
+including delivery status, conversation joins, attachments, previews, and reaction
+observations. A hit skips old-record parsing, enrichment reconstruction, and
+canonical serialization. Slot collisions evict entries; lookups still require
+the complete source identity. Worker calls to `Journal.message` invalidate that
+source's entry, source resets clear the table, and SQLite rolls cache mutations
+back with the ingestion transaction. Reopening the journal starts an empty cache,
+so a new binary always applies its current normalization rules. Source decoding
+and source connection/schema probes still run on each scan.
+
+Native ReleaseSafe relay and fake-relay builds pass, as do the fake-adapter tests
+(30 passed, one expected native-Contacts skip), native tests (31 passed), and
+integration, hostile-message, reaction, link, Contacts, and media suites. Added
+coverage checks allocation-free warmed hits, mutable fields and delayed joins,
+rollback and failed event publication, reset, worker aggregate/image preservation,
+and shared-lock exclusion across thread priorities. Reaction and media suites
+also cover deletion, row reuse, restart, source replacement, and work completing
+after an epoch change.
+
+Native Apple M1, Zig 0.16.0 ReleaseFast, three sequential pairs per fixture with
+alternating order, comparing `42b6943` with this follow-up:
+
+| Fixture / measurement | Reviewed commit | Follow-up | Time reduction |
+| --- | ---: | ---: | ---: |
+| Basic schema, initial ingestion | 5.937 s | 5.278 s | 11.1% |
+| Optional columns, initial ingestion | 6.137 s | 5.417 s | 11.7% |
+| Basic schema, unchanged scan | 39.46 ms | 32.67 ms | 17.2% |
+| Optional columns, unchanged scan | 40.26 ms | 32.14 ms | 20.2% |
+
+Each initial measurement drains 10,004 messages across four chats into a fresh
+on-disk WAL/FULL journal. Historical text is 1,024 bytes; the optional-column
+fixture mostly leaves those columns null. Initial times are medians of three
+runs; unchanged times are medians of three per-run medians over 15 scans. Both
+variants include identical lightweight SQL counters. Every run checks all
+10,004 messages, the retained anchor boundaries, SQLite integrity, and foreign
+keys. The local reproduction artifacts are `.local/perf-review/run_resolved.py`
+and `.local/perf-review/resolved-results.json`.
+
+These measurements call `Core.ingest` directly, without background workers,
+HTTP traffic, thread QoS, or launchd scheduling. They measure ingestion and
+reconciliation work, not deployed send latency or energy. Source connection
+reuse remains a separate opportunity; the statement cache's associativity
+stays unchanged because the review found no useful gain from four ways.
 
 ### Measurements and reproduction
 

@@ -198,6 +198,7 @@ test {
     _ = @import("relay/adapter/link_preview.zig");
     _ = @import("relay/adapter/reactions.zig");
     _ = @import("relay/Journal.zig");
+    _ = @import("relay/Mutex.zig");
     _ = Contacts;
     _ = Assets;
 }

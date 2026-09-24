@@ -83,9 +83,57 @@ pub fn noLongerReaction(j: Journal, a: u.Allocator, guid: []const u8) !?t.Reacti
     return event;
 }
 pub fn anchor(j: Journal, guid: []const u8, row: i64) !void {
-    try j.execute("INSERT OR IGNORE INTO ordinary_anchors VALUES(?,?)", &.{ .{ .int = row }, .{ .text = guid } });
+    // Each source row is visited once per batch. A duplicate GUID may reuse a
+    // candidate that per-row trimming would already have discarded, but must
+    // never move one of the retained anchors.
+    try j.execute("INSERT OR IGNORE INTO ordinary_anchors VALUES(?,?) ON CONFLICT(source) DO UPDATE SET source_row=excluded.source_row WHERE ordinary_anchors.source_row NOT IN(SELECT source_row FROM ordinary_anchors ORDER BY source_row LIMIT 4) AND ordinary_anchors.source_row NOT IN(SELECT source_row FROM ordinary_anchors ORDER BY source_row DESC LIMIT 12) AND NOT EXISTS(SELECT 1 FROM ordinary_anchors WHERE source_row=excluded.source_row)", &.{ .{ .int = row }, .{ .text = guid } });
+}
+pub fn trimAnchors(j: Journal) !void {
     // Retain independent old and recent ordinary messages across cursor moves.
-    try j.db.exec("DELETE FROM ordinary_anchors WHERE source_row NOT IN(SELECT source_row FROM ordinary_anchors ORDER BY source_row LIMIT 4) AND source_row NOT IN(SELECT source_row FROM ordinary_anchors ORDER BY source_row DESC LIMIT 12)");
+    // Run once inside the ingestion transaction, before committing its progress.
+    try j.execute("DELETE FROM ordinary_anchors WHERE source_row NOT IN(SELECT source_row FROM ordinary_anchors ORDER BY source_row LIMIT 4) AND source_row NOT IN(SELECT source_row FROM ordinary_anchors ORDER BY source_row DESC LIMIT 12)", &.{});
+}
+
+test "batched anchors match per-row retention with duplicate GUIDs and rollback" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const j = try Journal.open(":memory:");
+    defer j.close();
+    try j.db.exec("CREATE TEMP TABLE reference_anchors(source_row INTEGER PRIMARY KEY,source TEXT NOT NULL UNIQUE)");
+    // Ascending live pages, descending backfill, and interleaved reconciliation.
+    // Repeated GUIDs collide both with retained and already-discarded anchors.
+    for (0..3) |order| {
+        try j.db.exec("DELETE FROM ordinary_anchors; DELETE FROM reference_anchors");
+        for (0..3) |batch| {
+            try j.begin();
+            for (0..96) |i| {
+                const n = batch * 96 + i;
+                const row: i64 = @intCast(1 + switch (order) {
+                    0 => n,
+                    1 => 287 - n,
+                    else => (n * 101) % 288,
+                });
+                const guid = try u.decimal(a, @mod(row, 37));
+                try anchor(j, guid, row);
+                try j.execute("INSERT OR IGNORE INTO reference_anchors VALUES(?,?)", &.{ .{ .int = row }, .{ .text = guid } });
+                try j.db.exec("DELETE FROM reference_anchors WHERE source_row NOT IN(SELECT source_row FROM reference_anchors ORDER BY source_row LIMIT 4) AND source_row NOT IN(SELECT source_row FROM reference_anchors ORDER BY source_row DESC LIMIT 12)");
+            }
+            try trimAnchors(j);
+            try std.testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM (SELECT * FROM ordinary_anchors EXCEPT SELECT * FROM reference_anchors)"));
+            try std.testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM (SELECT * FROM reference_anchors EXCEPT SELECT * FROM ordinary_anchors)"));
+            try j.commit();
+        }
+        try j.begin();
+        try anchor(j, "new-boundary", 1000);
+        try trimAnchors(j);
+        j.rollback();
+        try std.testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM (SELECT * FROM ordinary_anchors EXCEPT SELECT * FROM reference_anchors)"));
+        try j.begin();
+        try j.reset(a);
+        try j.commit();
+        try std.testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM ordinary_anchors"));
+    }
 }
 pub fn anchorsMatch(j: Journal, a: u.Allocator, source: Source) !usize {
     var q = try j.db.prepare("SELECT source_row,source FROM ordinary_anchors");

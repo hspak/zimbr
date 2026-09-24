@@ -16,7 +16,7 @@ contacts_status: @import("adapter/Contacts.zig").Status = .{},
 source_features: Adapter.Source.Features = .{},
 assets_service: ?@import("Assets.zig") = null,
 assets_reason: []const u8 = "starting",
-mutex: std.Io.Mutex = .init,
+mutex: @import("Mutex.zig") = .init,
 read_ready: bool = false,
 automation_ready: bool = fake,
 automation_error: []const u8 = "automation_unverified",
@@ -185,6 +185,7 @@ pub fn ingest(self: *Self, a: u.Allocator) !void {
         for (try Reactions.missingTargets(j, a, source)) |row| try self.importRow(a, &batch, row, "reconciliation", complete);
         try Reactions.project(j, a);
     }
+    try Reactions.trimAnchors(j);
     try j.backfillIdentities(a);
     try j.commit();
     self.read_ready = true;
@@ -246,7 +247,7 @@ fn importRow(self: *Self, batch_a: u.Allocator, batch: *ImportBatch, row: i64, o
             if (self.assets_service != null) try @import("Assets.zig").previews(j, a, m.source, &v, m.link_artwork);
             if (m.reaction) |obs| v.reaction_event = try Reactions.observe(j, a, m.source, m.row, m.date, cid, obs);
             if (source.features.reaction_target and m.value.kind != .reaction) v.reaction_event = try Reactions.noLongerReaction(j, a, m.source);
-            try j.message(a, m.source, m.row, m.date, v, event_origin);
+            try j.sourceMessage(a, m.source, m.row, m.date, v, event_origin);
             if (m.value.kind != .reaction) {
                 try Reactions.anchor(j, m.source, m.row);
                 try Reactions.targetImported(j, m.source, cid);

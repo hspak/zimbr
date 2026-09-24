@@ -25,6 +25,9 @@ pub fn open(path: [:0]const u8) !Self {
     if (version < 1 or version > 6) return error.SchemaUnsupported;
     if (version < 6) try db.exec("UPDATE relay_meta SET version=6");
     try db.exec("COMMIT");
+    // Connection-local and bounded: normalization changes take effect on reopen.
+    // SQLite rolls cache writes back with the ingestion transaction.
+    try db.exec("CREATE TEMP TABLE source_message_cache(slot INTEGER PRIMARY KEY,source TEXT NOT NULL UNIQUE,fingerprint BLOB NOT NULL)");
     return .{ .db = db };
 }
 pub fn close(self: Self) void {
@@ -56,7 +59,7 @@ pub fn sequence(self: Self) !i64 {
     return self.db.scalar("SELECT sequence FROM relay_meta");
 }
 pub fn next(self: Self) !i64 {
-    try self.db.exec("UPDATE relay_meta SET sequence=sequence+1");
+    try self.execute("UPDATE relay_meta SET sequence=sequence+1", &.{});
     return self.sequence();
 }
 pub fn progress(self: Self, a: u.Allocator, key: []const u8) !?[]const u8 {
@@ -102,7 +105,26 @@ pub fn conversation(self: Self, a: u.Allocator, source: []const u8, row: i64, ro
     try self.event(seq, "conversation.upsert", record, origin);
     return v.id;
 }
+/// Only source ingestion uses this shortcut. Hash the entire decoded input,
+/// including joined metadata and mutable status, before merging worker state.
+/// Worker writes invalidate it in message(); resets and rollback are atomic.
+pub fn sourceMessage(self: Self, a: u.Allocator, source: []const u8, row: i64, date: i64, value: t.Message, origin: []const u8) !void {
+    var buffer: [4096]u8 = undefined;
+    var hash: std.Io.Writer.Hashing(std.crypto.hash.sha2.Sha256) = .init(&buffer);
+    try std.json.Stringify.value(.{ .row = row, .date = date, .value = value }, .{}, &hash.writer);
+    try hash.writer.flush();
+    const fingerprint = hash.hasher.finalResult();
+    {
+        var cached = try self.db.prepare("SELECT fingerprint FROM source_message_cache WHERE source=?");
+        defer cached.close();
+        try cached.bind(&.{.{ .text = source }});
+        if (try cached.step() and u.eq(cached.bytes(0), &fingerprint)) return;
+    }
+    try self.message(a, source, row, date, value, origin);
+    try self.execute("INSERT OR REPLACE INTO source_message_cache VALUES(?,?,?)", &.{ .{ .int = @intCast(std.hash.Wyhash.hash(0, source) % 4096) }, .{ .text = source }, .{ .blob = &fingerprint } });
+}
 pub fn message(self: Self, a: u.Allocator, source: []const u8, row: i64, date: i64, value: t.Message, origin: []const u8) !void {
+    try self.execute("DELETE FROM source_message_cache WHERE source=?", &.{.{ .text = source }});
     var v = value;
     if (v.direction == .incoming) _ = try self.observeIdentity(a, v.service, v.sender);
     if (v.reaction_event) |ev| if (!ev.actor.is_self) {
@@ -193,6 +215,7 @@ pub fn recover(self: Self, a: u.Allocator) !void {
 }
 pub fn reset(self: Self, a: u.Allocator) !void {
     // Caller owns a transaction. Preserve all idempotency identities, hold queued sends.
+    try self.execute("DELETE FROM source_message_cache", &.{});
     var s = try self.db.prepare("SELECT record FROM send_requests WHERE state IN ('queued','dispatching','submitted','unknown')");
     defer s.close();
     var items: std.ArrayList(t.SendRequest) = .empty;
@@ -458,6 +481,90 @@ test "atomic ingestion rollback preserves progress, records, and event sequence"
     try j.message(a, "private-message", 4, 1, value, "reconciliation");
     try std.testing.expectEqual(changes, u.c.sqlite3_total_changes64(j.db.handle));
 }
+test "unchanged source skips normalization but mutable fields and joins are imported" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const j = try Self.open(":memory:");
+    defer j.close();
+    const cid = try j.conversation(a, "chat", 1, "route", .{ .service = "imessage" }, "historical_import");
+    var value = t.Message{ .conversation_id = cid, .sender = "", .direction = .outgoing, .service = "imessage", .timestamp = "2026-01-01T00:00:00Z", .kind = .text, .text = "Caption", .decoding = .plain, .observed_status = .sent };
+    try j.sourceMessage(a, "message", 1, 10, value, "live");
+    const changes = u.c.sqlite3_total_changes64(j.db.handle);
+    // Full normalization allocates. A warmed source hit must need no arena.
+    try j.sourceMessage(std.testing.failing_allocator, "message", 1, 10, value, "reconciliation");
+    try std.testing.expectEqual(changes, u.c.sqlite3_total_changes64(j.db.handle));
+    var seq = try j.sequence();
+    value.observed_status = .delivered;
+    try j.sourceMessage(a, "message", 1, 10, value, "reconciliation");
+    try std.testing.expectEqual(seq + 1, try j.sequence());
+    seq = try j.sequence();
+    value.attachments = &.{.{ .id = "attachment", .name = "Photo", .mime_type = "image/png", .bytes = "100" }};
+    try j.sourceMessage(a, "message", 1, 10, value, "reconciliation");
+    try std.testing.expectEqual(seq + 1, try j.sequence());
+    seq = try j.sequence();
+    value.link_previews = &.{.{ .id = "preview", .part_id = "preview", .title = "Delayed preview", .state = .complete }};
+    try j.sourceMessage(a, "message", 1, 10, value, "reconciliation");
+    try std.testing.expectEqual(seq + 1, try j.sequence());
+    seq = try j.sequence();
+    value.conversation_id = try j.conversation(a, "other-chat", 2, "other-route", .{ .service = "imessage" }, "reconciliation");
+    try j.sourceMessage(a, "message", 1, 10, value, "reconciliation");
+    try std.testing.expectEqual(seq + 2, try j.sequence());
+    seq = try j.sequence();
+    value.text = "Edited caption";
+    try j.sourceMessage(a, "message", 1, 10, value, "reconciliation");
+    try std.testing.expectEqual(seq + 1, try j.sequence());
+    seq = try j.sequence();
+    try j.sourceMessage(a, "message", 9, 10, value, "reconciliation");
+    try std.testing.expectEqual(seq, try j.sequence());
+    try std.testing.expectEqual(@as(i64, 9), try j.db.scalar("SELECT source_row FROM messages"));
+    try j.sourceMessage(std.testing.failing_allocator, "message", 9, 10, value, "reconciliation");
+}
+
+test "source cache follows rollback, failed publication, and source reset" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const j = try Self.open(":memory:");
+    defer j.close();
+    const cid = try j.conversation(a, "chat", 1, "route", .{ .service = "imessage" }, "historical_import");
+    const value = t.Message{ .conversation_id = cid, .sender = "", .direction = .outgoing, .service = "imessage", .timestamp = "2026-01-01T00:00:00Z", .kind = .text, .text = "Caption", .decoding = .plain, .observed_status = .sent };
+    const seq = try j.sequence();
+    try j.begin();
+    try j.sourceMessage(a, "message", 1, 10, value, "live");
+    j.rollback();
+    try std.testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM source_message_cache"));
+    try std.testing.expectEqual(seq, try j.sequence());
+    try j.db.exec("CREATE TEMP TRIGGER fail_event BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'fixture'); END");
+    try j.begin();
+    try std.testing.expectError(error.DatabaseFailure, j.sourceMessage(a, "message", 1, 10, value, "live"));
+    j.rollback();
+    try j.db.exec("DROP TRIGGER fail_event");
+    try std.testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM messages"));
+    try std.testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM source_message_cache"));
+    try j.begin();
+    try j.sourceMessage(a, "message", 1, 10, value, "live");
+    try j.commit();
+    var edited = value;
+    edited.text = "Uncommitted edit";
+    try j.begin();
+    try j.sourceMessage(a, "message", 1, 10, edited, "reconciliation");
+    j.rollback();
+    try j.sourceMessage(std.testing.failing_allocator, "message", 1, 10, value, "reconciliation");
+    try j.begin();
+    try j.reset(a);
+    j.rollback();
+    try j.sourceMessage(std.testing.failing_allocator, "message", 1, 10, value, "reconciliation");
+    try j.begin();
+    try j.reset(a);
+    try j.commit();
+    try std.testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM source_message_cache"));
+    edited.conversation_id = try j.conversation(a, "chat", 1, "route", .{ .service = "imessage" }, "historical_import");
+    try j.sourceMessage(a, "message", 1, 10, edited, "historical_import");
+    try std.testing.expectEqual(@as(i64, 1), try j.db.scalar("SELECT count(*) FROM messages"));
+    try std.testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM main.sqlite_master WHERE name='source_message_cache'"));
+}
+
 test "durable sends retain idempotency after recovery and event pruning" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

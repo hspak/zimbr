@@ -305,13 +305,35 @@ test "overflow is lossless, revision-bound, and preserves captions and independe
     // Source refresh has no reaction field; it must retain all 150 canonical
     // items, including those that did not fit in the inline record.
     const revision = try j.sequence();
-    try j.message(a, "message", 1, 10, base, "reconciliation");
+    try j.sourceMessage(a, "message", 1, 10, base, "reconciliation");
     try std.testing.expectEqual(revision, try j.sequence());
+    try j.sourceMessage(std.testing.failing_allocator, "message", 1, 10, base, "reconciliation");
     try std.testing.expectEqual(@as(usize, 150), (try load(j, a, .reactions, first.id)).?.len);
     v.reactions = &.{};
     try j.message(a, "message", 1, 10, v, "reconciliation");
+    // A worker change invalidates the source fingerprint. Reconciliation must
+    // preserve the worker's empty aggregate, then warm the shortcut again.
+    const worker_revision = try j.sequence();
+    try std.testing.expectError(error.OutOfMemory, j.sourceMessage(std.testing.failing_allocator, "message", 1, 10, base, "reconciliation"));
+    try j.sourceMessage(a, "message", 1, 10, base, "reconciliation");
+    try j.sourceMessage(std.testing.failing_allocator, "message", 1, 10, base, "reconciliation");
+    try std.testing.expectEqual(worker_revision, try j.sequence());
     try std.testing.expectError(error.EnrichmentRestartRequired, page(j, a, first.id, .attachments, first.revision, p.next, 2));
     try std.testing.expectEqual(@as(usize, 0), (try load(j, a, .reactions, first.id)).?.len);
+    const ready = try a.dupe(t.Attachment, attachments);
+    ready[0].image = .{ .id = "asset", .version = "1", .variant = .inline_image, .availability = .ready };
+    ready[0].viewer = .{ .id = "asset", .version = "1", .variant = .viewer, .availability = .ready };
+    v.attachments = ready;
+    v.link_previews = &.{.{ .id = "preview", .part_id = "preview", .title = "Worker preview", .state = .complete }};
+    try j.message(a, "message", 1, 10, v, "reconciliation");
+    const media_revision = try j.sequence();
+    try j.sourceMessage(a, "message", 1, 10, base, "reconciliation");
+    try j.sourceMessage(std.testing.failing_allocator, "message", 1, 10, base, "reconciliation");
+    try std.testing.expectEqual(media_revision, try j.sequence());
+    const retained = (try load(j, a, .attachments, first.id)).?;
+    try std.testing.expectEqual(.ready, retained[0].image.?.availability);
+    try std.testing.expectEqual(.ready, retained[0].viewer.?.availability);
+    try std.testing.expectEqualStrings("Worker preview", (try load(j, a, .previews, first.id)).?[0].title.?);
 }
 
 test "large escaped metadata stays within a bounded preparation arena" {
