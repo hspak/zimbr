@@ -4,6 +4,10 @@ const Editor = @import("client/Editor.zig");
 const Sse = @import("client/Sse.zig");
 comptime {
     _ = @import("client/Config.zig");
+    _ = @import("client/Content.zig");
+    _ = @import("client/Media.zig");
+    _ = @import("client/Links.zig");
+    _ = @import("client/IdentityDirectory.zig");
     _ = @import("client/Worker.zig");
     _ = @import("client/display.zig");
     _ = @import("client/MessageSelection.zig");
@@ -543,4 +547,91 @@ test "fractional scale tiles match full text rendering including selection and b
             try std.testing.expectEqualSlices(u8, full[width * top * 4 ..][0 .. width * 128 * 4], tile[0 .. width * 128 * 4]);
         }
     };
+}
+
+test "identity events are negotiated, revision merged, atomic and cleared on reset" {
+    const s = try Store.open(":memory:");
+    defer s.close();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    try s.beginSync(epoch, epoch ++ ":0");
+    const identity = "{\"id\":\"person\",\"revision\":\"7\",\"service\":\"imessage\",\"address\":\"test@example.invalid\",\"display_name\":\"Renamed 👋\",\"match_state\":\"matched\"}";
+    const ev = "{\"cursor\":\"" ++ epoch ++ ":7\",\"sequence\":\"7\",\"type\":\"identity.upsert\",\"origin\":\"reconciliation\",\"record\":" ++ identity ++ "}";
+    try std.testing.expectError(error.UnknownEvent, s.event(ar, ev, epoch ++ ":7", "identity.upsert", ""));
+    try s.set("accepted_extensions", "identity-v1");
+    try s.event(ar, ev, epoch ++ ":7", "identity.upsert", "");
+    const stale = try std.mem.replaceOwned(u8, ar, identity, "\"7\"", "\"1\"");
+    _ = try s.upsert(ar, "identity", stale);
+    try std.testing.expectEqualStrings("Renamed 👋", (try s.directory(ar)).name("imessage", "test@example.invalid"));
+    try std.testing.expectEqual(@as(i64, 7), try s.db.scalar("SELECT revision FROM identities"));
+    try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM unread"));
+    try s.db.exec("CREATE TRIGGER reject_identity_cursor BEFORE UPDATE ON meta WHEN NEW.key='cursor' BEGIN SELECT RAISE(ABORT,'failure'); END");
+    const cleared = "{\"id\":\"person\",\"revision\":\"8\",\"service\":\"imessage\",\"address\":\"test@example.invalid\",\"match_state\":\"unavailable\"}";
+    const next = try u.json(ar, .{ .cursor = epoch ++ ":8", .sequence = "8", .type = "identity.upsert", .origin = "reconciliation", .record = try std.json.parseFromSliceLeaky(std.json.Value, ar, cleared, .{}) });
+    try std.testing.expectError(error.DatabaseFailure, s.event(ar, next, epoch ++ ":8", "identity.upsert", ""));
+    try std.testing.expectEqual(@as(i64, 7), try s.db.scalar("SELECT revision FROM identities"));
+    try s.db.exec("DROP TRIGGER reject_identity_cursor");
+    try s.event(ar, next, epoch ++ ":8", "identity.upsert", "");
+    try std.testing.expectEqualStrings("test@example.invalid", (try s.directory(ar)).name("imessage", "test@example.invalid"));
+    try s.saveDraft("c1", "Keep draft");
+    try s.beginSync(epoch, epoch ++ ":8");
+    try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM identities"));
+    try std.testing.expectEqualStrings("Keep draft", try s.draft(ar, "c1"));
+    try std.testing.expectEqualStrings("0", try s.get(ar, "identity_bootstrapped"));
+}
+
+test "reaction rows and enrichment changes do not alert or create unread" {
+    const s = try Store.open(":memory:");
+    defer s.close();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    try s.beginSync(epoch, epoch ++ ":0");
+    const reaction = try std.mem.replaceOwned(u8, ar, message, "\"kind\":\"text\"", "\"kind\":\"reaction\"");
+    const ev = try std.fmt.allocPrint(ar, "{{\"cursor\":\"{s}:1\",\"sequence\":\"1\",\"type\":\"message.upsert\",\"origin\":\"live\",\"record\":{s}}}", .{ epoch, reaction });
+    try std.testing.expect(try s.eventNotification(ar, ev, epoch ++ ":1", "message.upsert", "") == null);
+    try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM unread"));
+}
+
+test "overflow pages extend immutable presentations and stale pages cannot restore cleared enrichment" {
+    const t = @import("protocol/types.zig");
+    const Shared = @import("client/SharedSnapshot.zig");
+    const s = try Store.open(":memory:");
+    defer s.close();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    try s.beginSync(epoch, epoch ++ ":0");
+    var m = try std.json.parseFromSliceLeaky(t.Message, ar, message, .{});
+    m.enrichment = .{ .state = .complete, .attachments = .{ .total = 2, .complete = false } };
+    const item = t.Attachment{ .id = "a", .name = "a.png", .mime_type = "image/png", .bytes = "10" };
+    m.attachments = &.{item};
+    _ = try s.upsert(ar, "message", try u.json(ar, m));
+    const first = try Shared.create(s, "c1", 1, null);
+    defer first.release();
+    const page = try u.json(ar, .{ .message_id = m.id, .revision = m.revision, .section = "attachments", .items = &.{item}, .total = 2, .next = "next" });
+    try std.testing.expect(try s.enrichmentPage(ar, page, m.id, m.revision, .attachments, ""));
+    var second_item = item;
+    second_item.id = "b";
+    const final_page = try u.json(ar, .{ .message_id = m.id, .revision = m.revision, .section = "attachments", .items = &.{second_item}, .total = 2, .next = @as(?[]const u8, null) });
+    try std.testing.expect(try s.enrichmentPage(ar, final_page, m.id, m.revision, .attachments, "next"));
+    const expanded = try Shared.create(s, "c1", 2, first);
+    defer expanded.release();
+    try std.testing.expectEqual(@as(usize, 2), expanded.snapshot.messages[0].attachments.len);
+    try std.testing.expect(expanded.snapshot.messages[0].enrichment.?.attachments.complete);
+    try std.testing.expectEqual(@as(usize, 1), first.snapshot.messages[0].attachments.len);
+    try std.testing.expect(first.history != expanded.history);
+    try std.testing.expectEqualStrings("Hello 👋", expanded.snapshot.messages[0].text.?);
+    m.revision = "3";
+    m.attachments = &.{};
+    m.reactions = &.{};
+    m.enrichment = .{ .state = .complete };
+    _ = try s.upsert(ar, "message", try u.json(ar, m));
+    try std.testing.expect(!try s.enrichmentPage(ar, final_page, m.id, "2", .attachments, "next"));
+    const cleared = try Shared.create(s, "c1", 3, expanded);
+    defer cleared.release();
+    try std.testing.expectEqual(@as(usize, 0), cleared.snapshot.messages[0].attachments.len);
+    try std.testing.expectEqual(@as(usize, 0), cleared.snapshot.messages[0].reactions.?.len);
+    try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM enrichment_cache"));
 }

@@ -46,8 +46,18 @@ pub fn record(a: std.mem.Allocator, m: t.Message) []const u8 {
     return message(a, content(a, m));
 }
 fn content(a: std.mem.Allocator, m: t.Message) []const u8 {
+    if (m.reaction_event) |event| {
+        const state = switch (event.resolution) {
+            .pending => "Target not available yet",
+            .resolved => "Target message is not loaded yet",
+            .unavailable => "Target unavailable",
+            .unsupported => "Unsupported reaction",
+            .malformed => "Reaction target could not be decoded",
+        };
+        return std.fmt.allocPrint(a, "Reaction {s} · {s}{s}{s}", .{ event.emoji orelse event.key orelse "", state, if (m.text != null) "\n" else "", m.text orelse "" }) catch state;
+    }
     if (m.text) |text| if (text.len > 0) {
-        if (m.kind == .text) return text;
+        if (m.kind == .text or m.kind == .attachment) return text;
         if (m.kind == .reaction or m.kind == .system or m.kind == .unsupported)
             return std.fmt.allocPrint(a, "{s} · {s}", .{ if (m.kind == .reaction) "Reaction" else if (m.kind == .system) "Conversation update" else "Unsupported content", text }) catch text;
     };
@@ -85,4 +95,27 @@ test "display limits preserve UTF8 and never change full message content" {
     try std.testing.expectEqualStrings("a" ** 32, prefix("a" ** 32 ++ "\ntrailing", 64, 1));
     try std.testing.expectEqualStrings("a" ** 32, prefix("a" ** 32 ++ "\u{2028}trailing", 64, 1));
     try std.testing.expectEqualStrings("a" ** 32, prefix("a" ** 32 ++ "\x00trailing", 64, 2));
+}
+
+/// Captions always win; image arrival never changes notification eligibility.
+pub fn summary(a: std.mem.Allocator, m: t.Message) []const u8 {
+    if (m.text) |text| if (text.len > 0) return text;
+    var photos: usize = 0;
+    for (m.attachments) |item| if (!item.preview_artwork and (item.image != null or std.mem.startsWith(u8, item.mime_type, "image/"))) {
+        photos += 1;
+    };
+    if (photos == 1) return "Photo";
+    if (photos > 1) return std.fmt.allocPrint(a, "{d} photos", .{photos}) catch "Photos";
+    return switch (m.kind) {
+        .attachment => "Attachment",
+        .reaction => "Reaction",
+        .system => "Conversation update",
+        .empty => "Empty message",
+        else => "Unsupported message",
+    };
+}
+
+pub fn resolvedReaction(m: t.Message) bool {
+    const event = m.reaction_event orelse return false;
+    return event.resolution == .resolved and event.target_message_id != null;
 }

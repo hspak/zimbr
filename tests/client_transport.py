@@ -55,7 +55,7 @@ def main():
                     result=conn.getresponse()
                     if result.status==401:faults['auth']+=1
                     if self.path.startswith('/v1/events') and result.status==200:
-                        self.send_response(200);self.send_header('Content-Type','text/event-stream');self.send_header('Connection','close');self.end_headers()
+                        self.send_response(200);self.send_header('Content-Type','text/event-stream');self.send_header('Zimbr-Event-Extensions',result.getheader('Zimbr-Event-Extensions',''));self.send_header('Connection','close');self.end_headers()
                         if faults['stream']:
                             faults['stream']=False
                             self.wfile.write(b'id: incomplete\nevent: message.upsert\ndata: {"record":');self.wfile.flush();self.close_connection=True;return

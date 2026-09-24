@@ -10,6 +10,10 @@ const Editor = @import("client/Editor.zig");
 const MessageSelection = @import("client/MessageSelection.zig");
 const Text = @import("client/Text.zig");
 const display = @import("client/display.zig");
+const Content = @import("client/Content.zig");
+const Links = @import("client/Links.zig");
+const Media = @import("client/Media.zig");
+const ImageCache = @import("client/ImageCache.zig");
 const theme = @import("client/theme.zig");
 const layout = @import("client/layout.zig");
 const Scrollbar = @import("client/Scrollbar.zig");
@@ -64,8 +68,12 @@ fn run(init: std.process.Init) !void {
     var worker = Worker{ .io = init.io, .config = config };
     try worker.start();
     defer worker.shutdown();
+    var media = Media{ .io = init.io, .config = config };
+    const media_ready = if (media.start()) true else |_| false;
+    defer if (media_ready) media.shutdown();
     var app = App{ .worker = &worker, .enter_to_send = config.enter_to_send, .show_details = config.details };
     defer app.deinit();
+    if (media_ready) app.media = &media;
     app.notifications = bridge.zc_notifications_new(App.notificationAction, &app);
     defer bridge.zc_notifications_free(app.notifications);
     var frames: usize = 0;
@@ -118,6 +126,19 @@ fn run(init: std.process.Init) !void {
 const App = struct {
     worker: *Worker,
     notifications: ?*bridge.ZcNotifications = null,
+    media: ?*Media = null,
+    images: ImageCache = .{},
+    viewer_message: []const u8 = "",
+    viewer_attachment: usize = 0,
+    detail_body: ?[:0]const u8 = null,
+    detail_url: ?[:0]const u8 = null,
+    detail_reaction_message: []const u8 = "",
+    detail_reaction_part: []const u8 = "",
+    detail_reaction_label: []const u8 = "",
+    content_detail_scroll: f32 = 0,
+    rich_count: usize = 0,
+    rich_consumed: bool = false,
+    rich_focus: ?usize = null,
     enter_to_send: bool = true,
     view: ?*Worker.View = null,
     text: Text = .{},
@@ -152,6 +173,10 @@ const App = struct {
     history_anchor: []const u8 = "",
     anchor_offset: f64 = 0,
     anchor_pending: bool = false,
+    anchor_block: []const u8 = "",
+    anchor_block_offset: f64 = 0,
+    anchor_block_kind: std.meta.Tag(@FieldType(Content.Block, "value")) = .text,
+    history_width: f32 = 0,
     following: bool = true,
     message_count: usize = 0,
     new_messages: bool = false,
@@ -171,6 +196,9 @@ const App = struct {
     capture_frame: bool = false,
     captured: ?rl.Image = null,
     fn deinit(s: *App) void {
+        s.closeContentDetail();
+        a.free(s.viewer_message);
+        s.images.deinit();
         if (s.captured) |shot| rl.unloadImage(shot);
         if (s.view) |v| v.destroy();
         s.text.deinit();
@@ -183,6 +211,7 @@ const App = struct {
         a.free(s.loaded_key);
         s.message_selection.clear();
         a.free(s.history_anchor);
+        a.free(s.anchor_block);
     }
     fn info(s: *App, msg: []const u8) void {
         s.notice = msg;
@@ -222,6 +251,8 @@ const App = struct {
         }
     }
     fn select(s: *App, key: []const u8) !void {
+        s.closeViewer();
+        s.closeContentDetail();
         s.show_details = false;
         try s.saveDraft();
         try s.worker.push(.{ .kind = .select, .key = key, .text = if (rl.isWindowFocused() and !rl.isWindowMinimized()) "yes" else "no" });
@@ -241,7 +272,7 @@ const App = struct {
         s.duplicate_risk = false;
     }
     fn matchesSidebar(s: *const App, chat: @import("client/Store.zig").Chat) bool {
-        return chat.hidden == s.show_hidden and (s.search.text.items.len == 0 or std.ascii.indexOfIgnoreCase(chatName(chat.value), s.search.text.items) != null);
+        return chat.hidden == s.show_hidden and (if (s.view) |v| v.snapshot.directory.matches(chat.value, s.search.text.items) else s.search.text.items.len == 0);
     }
     fn firstSidebarKey(s: *const App) []const u8 {
         if (s.view) |v| for (v.snapshot.chats) |chat| {
@@ -277,16 +308,30 @@ const App = struct {
         // Wait for the worker's persisted snapshot before changing the list.
         try s.worker.push(.{ .kind = if (hidden) .hide else .unhide, .key = s.key });
     }
+    fn newUnread(old: @import("client/Store.zig").Snapshot, next: @import("client/Store.zig").Snapshot) bool {
+        if (!u.eq(old.selected, next.selected)) return false;
+        var before: i64 = 0;
+        var after: i64 = 0;
+        for (old.chats) |chat| if (u.eq(chat.value.id, old.selected)) {
+            before = chat.unread;
+            break;
+        };
+        for (next.chats) |chat| if (u.eq(chat.value.id, next.selected)) {
+            after = chat.unread;
+            break;
+        };
+        return after > before;
+    }
     fn update(s: *App) !void {
         if (s.worker.take()) |v| {
             // Metadata-only views retain the same immutable records, so their
             // history previews and measurements remain valid across updates.
-            const same_history = if (s.view) |old| old.shared != null and v.shared != null and old.shared.?.history == v.shared.?.history and old.snapshot.pending.len == 0 and v.snapshot.pending.len == 0 else false;
+            const same_history = if (s.view) |old| old.shared != null and v.shared != null and old.shared.?.history == v.shared.?.history and old.snapshot.pending.len == 0 and v.snapshot.pending.len == 0 and old.snapshot.directory.fingerprint() == v.snapshot.directory.fingerprint() else false;
             if (same_history and s.history_generation == s.view.?.content_generation) {
                 s.history_generation = v.content_generation;
             } else if (s.view == null or v.content_generation == null or s.view.?.content_generation != v.content_generation) s.history_generation = null;
             if (s.view) |old| {
-                if (!s.following and u.eq(old.snapshot.selected, v.snapshot.selected) and old.snapshot.messages.len > 0 and v.snapshot.messages.len > 0 and !u.eq(old.snapshot.messages[old.snapshot.messages.len - 1].id, v.snapshot.messages[v.snapshot.messages.len - 1].id)) s.new_messages = true;
+                if (!s.following and newUnread(old.snapshot, v.snapshot)) s.new_messages = true;
                 old.destroy();
             }
             s.view = v;
@@ -320,6 +365,11 @@ const App = struct {
             }
         }
         try s.reconcileSelection();
+        s.refreshReactionDetail();
+        if (s.media) |media| if (s.view) |v| {
+            const online = v.online and (if (v.diagnostics.server) |server| server.capabilities.image_assets_v1 else false);
+            if (try media.context(v.snapshot.epoch, s.key, v.credential_generation, online, v.snapshot.directory.available)) s.images.contextChanged(v.snapshot.directory.available);
+        };
         if (s.draft_dirty and u.now() - s.draft_at > 300) try s.saveDraft();
         const reading = s.readingConversation();
         if (s.was_reading == null or reading != s.was_reading.?) {
@@ -328,6 +378,32 @@ const App = struct {
         }
         const ctrl = rl.isKeyDown(.left_control) or rl.isKeyDown(.right_control);
         const shift = rl.isKeyDown(.left_shift) or rl.isKeyDown(.right_shift);
+        if (s.viewer_message.len > 0) {
+            if (rl.isKeyPressed(.escape)) s.closeViewer();
+            if (rl.isKeyPressed(.left)) s.moveViewer(-1);
+            if (rl.isKeyPressed(.right)) s.moveViewer(1);
+            while (rl.getCharPressed() != 0) {}
+            return;
+        }
+        if (s.detail_body) |body| {
+            if (rl.isKeyPressed(.escape)) {
+                s.closeContentDetail();
+                return;
+            }
+            if (ctrl and rl.isKeyPressed(.c)) rl.setClipboardText(s.detail_url orelse body);
+            if (rl.isKeyPressed(.enter)) if (s.detail_url) |url| {
+                _ = bridge.zc_url_open(url);
+            };
+            if (pressed(.page_down) or pressed(.down)) s.content_detail_scroll += 100;
+            if (pressed(.page_up) or pressed(.up)) s.content_detail_scroll -= 100;
+            while (rl.getCharPressed() != 0) {}
+            return;
+        }
+        if (rl.isKeyPressed(.tab) and s.rich_count > 0) {
+            s.focus = .none;
+            const old = s.rich_focus orelse (if (shift) 0 else s.rich_count - 1);
+            s.rich_focus = if (shift) (old + s.rich_count - 1) % s.rich_count else (old + 1) % s.rich_count;
+        }
         if (ctrl and rl.isKeyPressed(.f)) {
             s.message_selection.clear();
             s.focus = .search;
@@ -483,6 +559,10 @@ const App = struct {
         defer arena.deinit();
         const ar = arena.allocator();
         s.text.nextFrame(scale);
+        if (s.media) |media| s.images.nextFrame(media);
+        s.rich_count = 0;
+        s.rich_consumed = false;
+        input_obscured = s.detail_body != null or s.viewer_message.len > 0;
         s.layout_pending = false;
         const areas = layout.frame(@floatFromInt(rl.getScreenWidth()), @floatFromInt(rl.getScreenHeight()), s.composerHeight());
         std.debug.assert(clip_depth == 0);
@@ -542,6 +622,9 @@ const App = struct {
             const band = layout.footer(areas.composer);
             s.drawFooterLabel(fps, .{ .x = band.x + band.width - fps_width, .y = band.y, .width = fps_width - 12, .height = band.height }, theme.colors.muted);
         }
+        input_obscured = false;
+        s.drawContentDetail(ar);
+        s.drawViewer(ar);
         if (s.capture_frame) {
             // Read the completed frame before swapping; Wayland may discard the
             // back buffer afterwards, making post-swap screenshots unreliable.
@@ -651,11 +734,11 @@ const App = struct {
                 const hot = hover(row) and hover(clip);
                 const bg = if (selected) theme.colors.selected else if (hot) theme.colors.avatar else theme.colors.sidebar;
                 if (selected or hot) rl.drawRectangleRounded(row, 0.2, 8, bg);
-                const name = display.label(ar, chatName(chat.value));
+                const name = display.label(ar, v.snapshot.directory.conversation(ar, chat.value));
                 if (chat.value.participants.len > 1) {
                     s.text.drawLine("#", row.x + 11, row.y + 5, 20, 20, if (selected) theme.colors.ink else theme.colors.muted, bg);
                 } else {
-                    s.drawAvatar(.{ .x = row.x + sidebar_icon_inset, .y = row.y + 6, .width = sidebar_icon_size, .height = sidebar_icon_size }, name, theme.participant(chat.value.id, &.{}), 12);
+                    s.drawPeerAvatar(.{ .x = row.x + sidebar_icon_inset, .y = row.y + 6, .width = sidebar_icon_size, .height = sidebar_icon_size }, name, theme.participant(chat.value.id, &.{}), 12, chat.value.service, if (chat.value.participants.len == 1) chat.value.participants[0] else "");
                 }
                 s.text.drawLine(name, row.x + sidebar_text_inset, row.y + 8, 14, row.width - (if (chat.unread > 0) @as(f32, 76) else 46), if (selected or chat.unread > 0) theme.colors.ink else theme.colors.muted, bg);
                 if (chat.unread > 0) {
@@ -679,9 +762,11 @@ const App = struct {
     }
     fn drawAvatar(s: *App, r: rl.Rectangle, name: []const u8, style: theme.Participant, size: i32) void {
         rl.drawRectangleRounded(r, 0.25, 8, style.bubble);
-        var initial = [_]u8{if (name.len > 0 and std.ascii.isAlphabetic(name[0])) std.ascii.toUpper(name[0]) else '+'};
-        const measured = s.text.lineSize(&initial, size, r.width);
-        s.text.drawLine(&initial, r.x + (r.width - measured.x) / 2, r.y + (r.height - measured.y) / 2, size, r.width, style.label, style.bubble);
+        const safe = display.prefix(name, 128, 1);
+        var ascii = [_]u8{if (safe.len > 0 and std.ascii.isAlphabetic(safe[0])) std.ascii.toUpper(safe[0]) else '+'};
+        const initial: []const u8 = if (safe.len > 0 and safe[0] >= 128) safe[0..bridge.zc_text_boundary(safe.ptr, safe.len, 0, 1)] else &ascii;
+        const measured = s.text.lineSize(initial, size, r.width);
+        s.text.drawLine(initial, r.x + (r.width - measured.x) / 2, r.y + (r.height - measured.y) / 2, size, r.width, style.label, style.bubble);
     }
     fn detailSection(s: *App, label: []const u8, r: rl.Rectangle, y: *f32) void {
         y.* += 18;
@@ -740,6 +825,20 @@ const App = struct {
                 s.detailRow("Capabilities", std.fmt.allocPrint(ar, "History: {s} · Live messages: {s}\nDirect sends: {s} · Replies: {s}\nAttachments: {s} · Create groups: {s}", .{ yesNo(caps.read_history), yesNo(caps.live_messages), yesNo(caps.send_direct), yesNo(caps.reply_existing), yesNo(caps.attachments), yesNo(caps.group_creation) }) catch "", clip, &y);
                 s.detailRow("Degraded reasons", if (server.degraded_reasons.len == 0) "None reported at last check" else std.mem.join(ar, "\n", server.degraded_reasons) catch "", clip, &y);
             } else s.detailRow("Server information", "Not yet available. Connect to the relay to load its status.", clip, &y);
+            if (d.server) |server| {
+                s.detailSection("Message enrichment", clip, &y);
+                inline for (.{ "identity_directory_v1", "image_assets_v1", "image_attachments_v1", "stored_link_previews_v1", "reactions_v1", "contact_avatars_v1" }, .{ "Contact names", "Image delivery", "Attached images", "Stored link cards", "Reactions", "Contact photos" }) |field, label| {
+                    const state = @field(server.enrichment_readiness, field);
+                    s.detailRow(label, if (!@field(server.capabilities, field)) "Not supported by this relay" else if (state.ready) "Ready" else if (state.reason.len > 0) state.reason else "Unavailable", clip, &y);
+                }
+                const contacts = server.enrichment_readiness.identity_directory_v1;
+                s.detailRow("Contacts permission", contacts.permission orelse "Not reported", clip, &y);
+                s.detailRow("Contacts freshness", if (contacts.stale) "Cached matches are stale" else if (contacts.last_refresh_ms) |ms| elapsed(ar, ms) else "Not reported", clip, &y);
+            }
+            s.detailSection("Participants", clip, &y);
+            for (v.snapshot.chats) |chat| if (u.eq(chat.value.id, s.key)) {
+                for (chat.value.participants) |address| s.detailRow(v.snapshot.directory.name(chat.value.service, address), address, clip, &y);
+            };
             s.detailSection("Synchronization", clip, &y);
             s.detailRow("Current operation", d.job, clip, &y);
             s.detailRow("Initial download", if (d.bootstrapped) "Complete" else "Pending", clip, &y);
@@ -777,16 +876,22 @@ const App = struct {
             subtitle = "New iMessage conversation";
         } else if (s.view) |v| for (v.snapshot.chats) |chat| {
             if (u.eq(chat.value.id, s.key)) {
-                title = chatName(chat.value);
+                title = v.snapshot.directory.conversation(ar, chat.value);
                 subtitle = if (chat.value.participants.len > 1) std.fmt.allocPrint(ar, "{d} participants  ·  {s}", .{ chat.value.participants.len, if (chat.value.sendable) "iMessage" else "Read only" }) catch "Group conversation" else if (chat.value.sendable) "iMessage" else "Read only · unsupported service";
                 break;
             }
         };
         const hidden = if (s.new_mode) null else s.selectedHidden();
-        const text_width = r.width - (if (hidden != null) @as(f32, 140) else 48);
-        beginClip(.{ .x = r.x + 24, .y = r.y + 8, .width = text_width, .height = 48 });
-        s.text.draw(display.label(ar, title), r.x + 24, r.y + 9, 20, text_width, theme.colors.ink, theme.colors.paper);
-        s.text.draw(subtitle, r.x + 24, r.y + 36, 12, text_width, theme.colors.muted, theme.colors.paper);
+        var title_x = r.x + 24;
+        if (!s.new_mode) if (s.view) |v| for (v.snapshot.chats) |chat| if (u.eq(chat.value.id, s.key) and chat.value.participants.len == 1) {
+            s.drawPeerAvatar(.{ .x = title_x, .y = r.y + 14, .width = 34, .height = 34 }, title, theme.participant(chat.value.participants[0], &.{}), 17, chat.value.service, chat.value.participants[0]);
+            title_x += 46;
+            break;
+        };
+        const text_width = r.width - (title_x - r.x) - (if (hidden != null) @as(f32, 116) else 24);
+        beginClip(.{ .x = title_x, .y = r.y + 8, .width = text_width, .height = 48 });
+        s.text.draw(display.label(ar, title), title_x, r.y + 9, 20, text_width, theme.colors.ink, theme.colors.paper);
+        s.text.draw(subtitle, title_x, r.y + 36, 12, text_width, theme.colors.muted, theme.colors.paper);
         endClip();
         if (hidden) |is_hidden| {
             const label = if (is_hidden) "Unhide" else "Hide";
@@ -804,6 +909,7 @@ const App = struct {
         pending: bool = false,
         source_index: usize = 0,
         top: f64 = 0,
+        blocks: []const Content.Block = &.{},
 
         fn height(row: HistoryRow) f32 {
             return (row.measured orelse 24) + row.padding;
@@ -820,6 +926,7 @@ const App = struct {
     };
     fn prepareHistory(s: *App, inner: f32) ![]HistoryRow {
         const snapshot = s.view.?.snapshot;
+        s.history_width = inner;
         var hash = std.hash.Wyhash.init(0);
         hash.update(snapshot.selected);
         hash.update(std.mem.asBytes(&inner));
@@ -834,38 +941,55 @@ const App = struct {
             s.history_generation = null;
         }
         const generation = s.view.?.content_generation orelse s.view.?.generation;
-        if (s.history_generation == generation and s.history_rows.len == snapshot.messages.len + snapshot.pending.len) return s.history_rows;
+        if (s.history_generation == generation) return s.history_rows;
         _ = s.history_arena.reset(.retain_capacity);
         const ar = s.history_arena.allocator();
         const rows = try ar.alloc(HistoryRow, snapshot.messages.len + snapshot.pending.len);
-        for (snapshot.messages, rows[0..snapshot.messages.len], 0..) |m, *row, i| {
+        var count: usize = 0;
+        for (snapshot.messages, 0..) |m, i| {
+            if (display.resolvedReaction(m)) {
+                const target = m.reaction_event.?.target_message_id.?;
+                const represented = if (s.view.?.shared) |shared| shared.history.index.contains(target) else for (snapshot.messages) |other| {
+                    if (u.eq(other.id, target)) break true;
+                } else false;
+                if (represented) continue;
+            }
+            const row = &rows[count];
+            count += 1;
             const prepared = if (s.view.?.shared) |shared| shared.history.presentations[i] else blk: {
                 const text = messageText(ar, m);
-                break :blk @import("client/MessageHistory.zig").Presentation{ .text = text, .key = std.hash.Wyhash.hash(0, text) };
+                const blocks = try Content.prepare(ar, m);
+                break :blk @import("client/MessageHistory.zig").Presentation{ .text = text, .key = std.hash.Wyhash.hash(0, if (blocks.len == 0) text else try u.json(ar, m)), .blocks = blocks };
             };
             const text = prepared.text;
-            const key = prepared.key;
-            row.* = .{ .id = m.id, .text = text, .key = key, .measured = s.heights.get(key), .padding = 38, .source_index = i };
+            const identity_key = if (m.direction == .incoming) snapshot.directory.presentationKey(m.service, m.sender) else 0;
+            const key = if (identity_key == 0) prepared.key else std.hash.Wyhash.hash(prepared.key, std.mem.asBytes(&identity_key));
+            row.* = .{ .id = m.id, .text = text, .key = key, .measured = s.heights.get(key), .padding = 38, .source_index = i, .blocks = prepared.blocks };
         }
-        for (snapshot.pending, rows[snapshot.messages.len..], 0..) |p, *row, i| {
+        for (snapshot.pending, rows[count..][0..snapshot.pending.len], 0..) |p, *row, i| {
             const text = display.message(ar, p.input.text);
             const key = std.hash.Wyhash.hash(0, text);
             row.* = .{ .id = p.input.request_id, .text = text, .key = key, .measured = s.heights.get(key), .padding = 74, .pending = true, .source_index = i };
         }
-        if (snapshot.pending.len > 0) std.mem.sort(HistoryRow, rows, snapshot, HistoryRow.before);
-        s.history_rows = rows;
+        const active_rows = rows[0 .. count + snapshot.pending.len];
+        if (snapshot.pending.len > 0) std.mem.sort(HistoryRow, active_rows, snapshot, HistoryRow.before);
+        s.history_rows = active_rows;
         s.history_generation = generation;
         if (s.message_selection.id.len > 0) {
             var valid = false;
-            for (rows) |row| {
-                if (!s.message_selection.matches(row.id, row.pending, row.text)) continue;
+            for (active_rows) |row| {
+                var matches = s.message_selection.matches(row.id, row.pending, row.text);
+                for (row.blocks) |block| if (block.value == .text) {
+                    matches = matches or s.message_selection.matches(row.id, row.pending, block.value.text);
+                };
+                if (!matches) continue;
                 const full = if (row.pending) snapshot.pending[row.source_index].input.text else snapshot.messages[row.source_index].text orelse row.text;
                 valid = u.eq(full, s.message_selection.full);
                 break;
             }
             if (!valid) s.message_selection.clear();
         }
-        return rows;
+        return active_rows;
     }
     fn historyLimit(s: *App, viewport: f32) f64 {
         // Keep short histories at the bottom too, so expanding older rows
@@ -886,7 +1010,19 @@ const App = struct {
         var total: f64 = 54;
         for (rows) |*row| {
             row.top = total;
-            if (!s.following and row.pending == s.anchor_pending and u.eq(row.id, s.history_anchor)) s.scroll = total - s.anchor_offset;
+            if (!s.following and row.pending == s.anchor_pending and u.eq(row.id, s.history_anchor)) {
+                s.scroll = total - s.anchor_offset;
+                if (s.anchor_block.len > 0) {
+                    var block_top: f64 = total + 22;
+                    for (row.blocks) |block| {
+                        if (u.eq(blockId(block), s.anchor_block) and std.meta.activeTag(block.value) == s.anchor_block_kind) {
+                            s.scroll = block_top - s.anchor_block_offset;
+                            break;
+                        }
+                        block_top += s.blockHeight(block, s.history_width, false) + 8;
+                    }
+                }
+            }
             total += row.height();
         }
         s.content_height = total;
@@ -906,7 +1042,11 @@ const App = struct {
         }
         if (!s.hasHeightBudget()) return 0;
         s.height_budget -= 1;
-        row.measured = if (visible) s.text.height(row.text, 16, width) else s.text.measure(row.text, 16, width);
+        row.measured = if (row.blocks.len == 0) (if (visible) s.text.height(row.text, 16, width) else s.text.measure(row.text, 16, width)) else blk: {
+            var height: f32 = 0;
+            for (row.blocks) |block| height += s.blockHeight(block, width, visible) + 8;
+            break :blk @max(0, height - 8);
+        };
         s.heights.put(a, row.key, row.measured.?) catch {};
         return row.height() - old;
     }
@@ -964,10 +1104,37 @@ const App = struct {
                     s.anchor_pending = row.pending;
                 }
                 s.anchor_offset = top - s.scroll;
+                var block_top: f64 = top + 22;
+                var block_id: []const u8 = "";
+                if (s.scroll >= block_top) for (row.blocks) |block| {
+                    const height = s.blockHeight(block, s.history_width, false) + 8;
+                    if (block_top + height > s.scroll) {
+                        block_id = blockId(block);
+                        s.anchor_block_kind = std.meta.activeTag(block.value);
+                        s.anchor_block_offset = block_top - s.scroll;
+                        break;
+                    }
+                    block_top += height;
+                };
+                if (!u.eq(block_id, s.anchor_block)) {
+                    const owned = a.dupe(u8, block_id) catch return;
+                    a.free(s.anchor_block);
+                    s.anchor_block = owned;
+                }
                 return;
             }
             top += row.height();
         }
+    }
+    fn blockId(block: Content.Block) []const u8 {
+        if (block.part_id) |id| return id;
+        return switch (block.value) {
+            .attachment => |item| item.id,
+            .card => |card| card.id,
+            .text => "fallback-text",
+            .reactions => "message-reactions",
+            .more => |section| @tagName(section),
+        };
     }
     const HistoryRange = struct { start: usize, end: usize, loading: bool = false };
     fn visibleHistory(s: *App, rows: []const HistoryRow, viewport: f32) HistoryRange {
@@ -1070,9 +1237,9 @@ const App = struct {
                 const bounds = rl.Rectangle{ .x = r.x, .y = y - hover_padding, .width = clip.width, .height = row.height() };
                 const bg = if (hover(bounds)) theme.colors.surface else theme.colors.paper;
                 if (hover(bounds)) rl.drawRectangleRec(bounds, bg);
-                s.drawAvatar(.{ .x = r.x + 20, .y = y, .width = 34, .height = 34 }, if (outgoing) "You" else m.sender, style, 17);
+                s.drawPeerAvatar(.{ .x = r.x + 20, .y = y, .width = 34, .height = 34 }, if (outgoing) "You" else v.snapshot.directory.name(m.service, m.sender), style, 17, m.service, if (outgoing) "" else m.sender);
                 const x = r.x + 66;
-                const name = display.label(ar, if (outgoing) "You" else if (m.sender.len > 0) m.sender else "Unknown sender");
+                const name = display.label(ar, if (outgoing) "You" else v.snapshot.directory.name(m.service, m.sender));
                 const name_width = @min(inner * 0.55, s.text.lineSize(name, 14, inner * 0.55).x);
                 s.text.drawLine(name, x, y, 14, name_width, if (outgoing) theme.colors.ink else style.label, bg);
                 const status: MessageStatus = if (!outgoing) .none else switch (m.observed_status) {
@@ -1082,7 +1249,9 @@ const App = struct {
                 };
                 const stamp_x = x + name_width + 10;
                 s.drawMessageMeta(localTime(ar, m.timestamp, false), status, .{ .x = stamp_x, .y = y + 2, .width = @max(1, inner - name_width - 10), .height = 18 }, bg);
-                s.drawMessageText(row, m.text orelse text, .{ .x = x, .y = y + 22, .width = inner, .height = h }, theme.colors.ink, bg);
+                if (row.blocks.len == 0) {
+                    s.drawMessageText(row, m.text orelse text, .{ .x = x, .y = y + 22, .width = inner, .height = h }, theme.colors.ink, bg);
+                } else s.drawBlocks(row, m, .{ .x = x, .y = y + 22, .width = inner, .height = h }, bg, ar);
             }
         }
         for (rows[visible.start..visible.end]) |row| {
@@ -1118,6 +1287,334 @@ const App = struct {
             s.new_messages = false;
             s.worker.push(.{ .kind = .viewed, .text = "yes" }) catch {};
         };
+    }
+    fn drawPeerAvatar(s: *App, r: rl.Rectangle, name: []const u8, style: theme.Participant, size: i32, service: []const u8, address: []const u8) void {
+        s.drawAvatar(r, name, style, size);
+        if (address.len == 0) return;
+        const view = s.view orelse return;
+        const asset = view.snapshot.directory.avatar(service, address) orelse return;
+        const media = s.media orelse return;
+        const entry = s.images.get(media, asset) orelse return;
+        if (entry.availableTexture()) |texture| ImageCache.draw(texture, r);
+    }
+    fn drawAsset(s: *App, asset: t.AssetRef, r: rl.Rectangle, chat: []const u8) void {
+        const media = s.media orelse {
+            s.text.drawLine("Image cache unavailable", r.x + 8, r.y + 8, 12, @max(1, r.width - 16), theme.colors.muted, theme.colors.incoming);
+            return;
+        };
+        const entry = s.images.get(media, asset) orelse return;
+        if (entry.availableTexture()) |texture| {
+            ImageCache.draw(texture, r);
+        } else {
+            const label = std.mem.sliceTo(&entry.reason, 0);
+            s.text.draw(display.prefix(if (label.len > 0) label else "Loading photo…", 256, 3), r.x + 8, r.y + 8, 12, @max(1, r.width - 16), theme.colors.muted, theme.colors.incoming);
+            if (s.viewer_message.len == 0 and r.width >= 140 and r.height >= 70 and (entry.state == .failed or entry.state == .offline)) {
+                const retry_rect = rl.Rectangle{ .x = r.x + 8, .y = r.y + r.height - 30, .width = 100, .height = 26 };
+                s.text.drawLine("Retry image", retry_rect.x + 4, retry_rect.y + 3, 12, 92, theme.colors.focus, theme.colors.incoming);
+                if (s.richControl(retry_rect)) ImageCache.retry(entry);
+            }
+            if (entry.refresh_owner) {
+                entry.refresh_owner = false;
+                if (u.eq(chat, s.key)) s.worker.push(.{ .kind = .select, .key = chat, .text = if (s.readingConversation()) "yes" else "no" }) catch {};
+            }
+        }
+    }
+    fn openViewer(s: *App, m: t.Message, attachment: []const u8) void {
+        const id = a.dupe(u8, m.id) catch return;
+        s.closeViewer();
+        s.viewer_message = id;
+        for (m.attachments, 0..) |item, i| if (u.eq(item.id, attachment)) {
+            s.viewer_attachment = i;
+            break;
+        };
+        s.focus = .none;
+    }
+    fn closeViewer(s: *App) void {
+        a.free(s.viewer_message);
+        s.viewer_message = "";
+    }
+    fn viewerMessage(s: *App) ?t.Message {
+        if (s.view) |view| for (view.snapshot.messages) |m| if (u.eq(m.id, s.viewer_message)) return m;
+        return null;
+    }
+    fn moveViewer(s: *App, direction: i32) void {
+        const m = s.viewerMessage() orelse return;
+        if (m.attachments.len == 0) return;
+        var i = @min(s.viewer_attachment, m.attachments.len - 1);
+        for (0..m.attachments.len) |_| {
+            i = if (direction < 0) (i + m.attachments.len - 1) % m.attachments.len else (i + 1) % m.attachments.len;
+            if (!m.attachments[i].preview_artwork and m.attachments[i].image != null) {
+                s.viewer_attachment = i;
+                return;
+            }
+        }
+    }
+    fn drawViewer(s: *App, ar: u.Allocator) void {
+        if (s.viewer_message.len == 0) return;
+        const m = s.viewerMessage() orelse {
+            s.closeViewer();
+            return;
+        };
+        if (s.viewer_attachment >= m.attachments.len) {
+            s.closeViewer();
+            return;
+        }
+        const item = m.attachments[s.viewer_attachment];
+        const asset = item.viewer orelse item.image orelse {
+            s.closeViewer();
+            return;
+        };
+        const w: f32 = @floatFromInt(rl.getScreenWidth());
+        const h: f32 = @floatFromInt(rl.getScreenHeight());
+        rl.drawRectangleRec(.{ .x = 0, .y = 0, .width = w, .height = h }, theme.colors.paper);
+        s.text.drawLine(display.label(ar, item.name), 24, 20, 16, w - 160, theme.colors.ink, theme.colors.paper);
+        if (s.button(.{ .x = w - 100, .y = 12, .width = 80, .height = 32 }, "Close", false)) {
+            s.closeViewer();
+            return;
+        }
+        const image_r = rl.Rectangle{ .x = 24, .y = 65, .width = w - 48, .height = h - 130 };
+        s.drawAsset(asset, image_r, m.conversation_id);
+        if (s.button(.{ .x = 24, .y = h - 52, .width = 120, .height = 32 }, "← Previous", false)) s.moveViewer(-1);
+        if (s.button(.{ .x = w - 144, .y = h - 52, .width = 120, .height = 32 }, "Next →", false)) s.moveViewer(1);
+        if (s.media) |media| if (s.images.get(media, asset)) |entry| if (entry.texture == null and (entry.state == .failed or entry.state == .offline)) {
+            if (s.button(.{ .x = w / 2 - 50, .y = h - 52, .width = 100, .height = 32 }, "Retry", false) or rl.isKeyPressed(.r)) ImageCache.retry(entry);
+        };
+        if (asset.still_preview) s.text.drawLine("Still preview", w / 2 - 60, h - 78, 12, 120, theme.colors.muted, theme.colors.paper);
+    }
+    fn imageSize(asset: ?t.AssetRef, width: f32) rl.Vector2 {
+        const w: f32 = if (asset) |v| @floatFromInt(v.width orelse 320) else 320;
+        const h: f32 = if (asset) |v| @floatFromInt(v.height orelse 200) else 200;
+        const scale = @min(@min(@min(width, 480) / @max(1, w), 320 / @max(1, h)), 1);
+        return .{ .x = @max(32, w * scale), .y = @max(32, h * scale) };
+    }
+    fn inlineAsset(item: t.Attachment, size: rl.Vector2, scale: f32) ?t.AssetRef {
+        const inline_image = item.image orelse return null;
+        const viewer = item.viewer orelse return inline_image;
+        const w: f32 = @floatFromInt(inline_image.width orelse 1024);
+        const h: f32 = @floatFromInt(inline_image.height orelse 1024);
+        // Reuse the existing larger variant at high DPI; layout stays anchored
+        // to the inline descriptor and there are still only two cached variants.
+        if (viewer.availability != .retired and (size.x * scale > w or size.y * scale > h) and ((viewer.width orelse 2560) > (inline_image.width orelse 1024) or (viewer.height orelse 2560) > (inline_image.height orelse 1024))) return viewer;
+        return inline_image;
+    }
+    fn blockHeight(s: *App, block: Content.Block, width: f32, visible: bool) f32 {
+        return switch (block.value) {
+            .text => |value| blk: {
+                var arena = std.heap.ArenaAllocator.init(a);
+                defer arena.deinit();
+                const links = Links.inText(arena.allocator(), block.source_text orelse value) catch &.{};
+                break :blk (if (visible) s.text.height(value, 16, width) else s.text.measure(value, 16, width)) + @as(f32, @floatFromInt(links.len)) * 28;
+            },
+            .attachment => |item| if (item.image != null) imageSize(item.image, width).y + 28 else 48,
+            .card => |card| 76 + (if (card.summary != null) @as(f32, 54) else 0) + (if (card.image) |asset| imageSize(asset, width - 24).y + 8 else 0),
+            .reactions => |chips| blk: {
+                var x: f32 = 0;
+                var rows: f32 = 1;
+                for (chips) |chip| {
+                    const w = s.chipWidth(chip, width);
+                    if (x > 0 and x + w > width) {
+                        x = 0;
+                        rows += 1;
+                    }
+                    x += w + 6;
+                }
+                break :blk rows * 32;
+            },
+            .more => 30,
+        };
+    }
+    fn chipWidth(s: *App, chip: Content.Chip, width: f32) f32 {
+        return @min(width, s.text.lineSize(chip.label, 15, width).x + 42);
+    }
+    fn richControl(s: *App, r: rl.Rectangle) bool {
+        const index = s.rich_count;
+        s.rich_count += 1;
+        const focused = s.focus == .none and s.rich_focus == index;
+        if (focused) rl.drawRectangleLinesEx(r, 1, theme.colors.focus);
+        if (s.detail_body != null or s.viewer_message.len > 0 or s.rich_consumed) return false;
+        const hot = hover(r);
+        if (hot) rl.setMouseCursor(.pointing_hand);
+        if ((hot and rl.isMouseButtonPressed(.left)) or (focused and rl.isKeyPressed(.enter))) {
+            s.focus = .none;
+            s.rich_focus = index;
+            s.rich_consumed = true;
+            return true;
+        }
+        return false;
+    }
+    fn showContentDetail(s: *App, body: []const u8, url: ?[:0]const u8) void {
+        const copy = a.dupeZ(u8, body) catch return;
+        s.closeContentDetail();
+        s.detail_body = copy;
+        if (url) |value| s.detail_url = a.dupeZ(u8, value) catch null;
+        s.focus = .none;
+    }
+    fn closeContentDetail(s: *App) void {
+        if (s.detail_body) |value| a.free(value);
+        if (s.detail_url) |value| a.free(value);
+        s.detail_body = null;
+        s.detail_url = null;
+        a.free(s.detail_reaction_message);
+        a.free(s.detail_reaction_part);
+        a.free(s.detail_reaction_label);
+        s.detail_reaction_message = "";
+        s.detail_reaction_part = "";
+        s.detail_reaction_label = "";
+        s.content_detail_scroll = 0;
+    }
+    fn inspectLink(s: *App, link: Links.Target, ar: u.Allocator) void {
+        s.showContentDetail(std.fmt.allocPrint(ar, "{s}\n\n{s}\n\nEnter to open in your browser · Ctrl+C to copy URL", .{ link.hostname, link.url }) catch link.url, link.url);
+    }
+    fn drawBlocks(s: *App, row: HistoryRow, m: t.Message, bounds: rl.Rectangle, bg: rl.Color, ar: u.Allocator) void {
+        var y = bounds.y;
+        for (row.blocks) |block| {
+            const h = s.blockHeight(block, bounds.width, true);
+            const r = rl.Rectangle{ .x = bounds.x, .y = y, .width = bounds.width, .height = h };
+            y += h + 8;
+            if (clip_depth > 0) {
+                const viewport = clip_stack[clip_depth - 1];
+                if (r.y + r.height < viewport.y - 200 or r.y > viewport.y + viewport.height + 200) continue;
+            }
+            switch (block.value) {
+                .text => |value| {
+                    var part_row = row;
+                    part_row.text = value;
+                    const text_h = s.text.height(value, 16, r.width);
+                    s.drawMessageText(part_row, m.text orelse block.source_text orelse value, .{ .x = r.x, .y = r.y, .width = r.width, .height = text_h }, theme.colors.ink, bg);
+                    const links = Links.inText(ar, block.source_text orelse value) catch &.{};
+                    for (links, 0..) |link, i| {
+                        const link_r = rl.Rectangle{ .x = r.x, .y = r.y + text_h + @as(f32, @floatFromInt(i)) * 28, .width = r.width, .height = 26 };
+                        s.text.drawLine(link.url, link_r.x, link_r.y + 3, 13, link_r.width, theme.colors.focus, bg);
+                        if (s.richControl(link_r)) s.inspectLink(link, ar);
+                    }
+                },
+                .attachment => |item| {
+                    if (item.image) |asset| {
+                        const size = imageSize(asset, r.width);
+                        const image_r = rl.Rectangle{ .x = r.x, .y = r.y, .width = size.x, .height = size.y };
+                        rl.drawRectangleRounded(image_r, 0.06, 8, theme.colors.incoming);
+                        s.drawAsset(inlineAsset(item, size, s.text.scale).?, image_r, m.conversation_id);
+                        if (s.richControl(image_r)) s.openViewer(m, item.id);
+                        s.text.drawLine(if (asset.still_preview) "Still preview" else display.label(ar, item.name), r.x, r.y + size.y + 5, 12, r.width, theme.colors.muted, bg);
+                    } else {
+                        s.text.drawLine(display.label(ar, item.name), r.x, r.y, 14, r.width, theme.colors.ink, bg);
+                        s.text.drawLine(std.fmt.allocPrint(ar, "{s} · {s} bytes · preview unavailable", .{ item.mime_type, item.bytes }) catch "Attachment", r.x, r.y + 24, 12, r.width, theme.colors.muted, bg);
+                    }
+                },
+                .card => |card| {
+                    rl.drawRectangleRounded(r, 0.04, 8, theme.colors.incoming);
+                    const link = Links.target(ar, card);
+                    var top = r.y + 10;
+                    if (card.image) |asset| {
+                        const size = imageSize(asset, r.width - 24);
+                        const image_r = rl.Rectangle{ .x = r.x + 12, .y = top, .width = size.x, .height = size.y };
+                        rl.drawRectangleRec(image_r, theme.colors.avatar);
+                        s.drawAsset(asset, image_r, m.conversation_id);
+                        top += size.y + 8;
+                    }
+                    var title_x = r.x + 12;
+                    if (card.icon) |icon| {
+                        if (s.media) |media| if (s.images.get(media, icon)) |entry| if (entry.availableTexture()) |texture| ImageCache.draw(texture, .{ .x = title_x, .y = top, .width = 20, .height = 20 });
+                        title_x += 26;
+                    }
+                    s.text.drawLine(display.label(ar, card.title orelse "Shared link"), title_x, top, 16, r.x + r.width - 12 - title_x, theme.colors.ink, theme.colors.incoming);
+                    top += 25;
+                    s.text.drawLine(if (link) |target| target.hostname else "Link unavailable", r.x + 12, top, 12, r.width - 24, theme.colors.focus, theme.colors.incoming);
+                    top += 20;
+                    if (card.summary) |summary| {
+                        beginClip(.{ .x = r.x + 12, .y = top, .width = r.width - 24, .height = 54 });
+                        s.text.draw(display.prefix(summary, 2048, 3), r.x + 12, top, 13, r.width - 24, theme.colors.muted, theme.colors.incoming);
+                        endClip();
+                    }
+                    if (s.richControl(r)) {
+                        if (link) |target| s.inspectLink(target, ar) else s.showContentDetail(card.original_url orelse card.metadata_url orelse "Stored link metadata is unavailable", null);
+                    }
+                },
+                .reactions => |chips| {
+                    var x = r.x;
+                    var top = r.y;
+                    for (chips) |chip| {
+                        const w = s.chipWidth(chip, r.width);
+                        if (x > r.x and x + w > r.x + r.width) {
+                            x = r.x;
+                            top += 32;
+                        }
+                        const chip_r = rl.Rectangle{ .x = x, .y = top, .width = w, .height = 28 };
+                        rl.drawRectangleRounded(chip_r, 0.6, 8, theme.colors.incoming);
+                        s.text.drawLine(std.fmt.allocPrint(ar, "{s} {d}", .{ chip.label, chip.actors.len }) catch chip.label, x + 8, top + 3, 15, w - 16, theme.colors.ink, theme.colors.incoming);
+                        if (s.richControl(chip_r)) {
+                            s.showContentDetail(s.reactionDetail(ar, chip), null);
+                            s.detail_reaction_message = a.dupe(u8, m.id) catch "";
+                            s.detail_reaction_part = a.dupe(u8, block.part_id orelse "") catch "";
+                            s.detail_reaction_label = a.dupe(u8, chip.label) catch "";
+                        }
+                        x += w + 6;
+                    }
+                },
+                .more => |section| {
+                    const label = std.fmt.allocPrint(ar, "Show more {s}", .{@tagName(section)}) catch "Show more";
+                    s.text.drawLine(label, r.x + 8, r.y + 5, 13, r.width - 16, theme.colors.focus, bg);
+                    if (s.richControl(r)) s.worker.push(.{ .kind = .enrichment, .key = m.id, .recipient = m.revision, .text = @tagName(section) }) catch {};
+                },
+            }
+        }
+    }
+    fn reactionDetail(s: *App, ar: u.Allocator, chip: Content.Chip) []const u8 {
+        var names: std.ArrayList([]const u8) = .empty;
+        for (chip.actors) |actor| {
+            const name = s.view.?.snapshot.directory.actor(actor);
+            names.append(ar, if (actor.is_self) "You (your reaction)" else std.fmt.allocPrint(ar, "{s} · {s}", .{ name, actor.address orelse "Unknown address" }) catch name) catch {};
+        }
+        const people = std.mem.join(ar, "\n", names.items) catch "";
+        return std.fmt.allocPrint(ar, "{s}\n\n{s}{s}", .{ chip.label, people, if (chip.unresolved) "\n\nShown on the whole message: the original message part could not be resolved." else "" }) catch people;
+    }
+    fn refreshReactionDetail(s: *App) void {
+        if (s.detail_reaction_message.len == 0) return;
+        const view = s.view orelse return;
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const ar = arena.allocator();
+        var body: []const u8 = "This reaction is no longer present.";
+        for (view.snapshot.messages, 0..) |m, i| if (u.eq(m.id, s.detail_reaction_message)) {
+            const blocks = if (view.shared) |shared| shared.history.presentations[i].blocks else Content.prepare(ar, m) catch &.{};
+            for (blocks) |block| if (block.value == .reactions and u.eq(block.part_id orelse "", s.detail_reaction_part)) {
+                for (block.value.reactions) |chip| if (u.eq(chip.label, s.detail_reaction_label)) {
+                    body = s.reactionDetail(ar, chip);
+                    break;
+                };
+            };
+            break;
+        };
+        if (!u.eq(body, s.detail_body orelse "")) {
+            const owned = a.dupeZ(u8, body) catch return;
+            if (s.detail_body) |old| a.free(old);
+            s.detail_body = owned;
+        }
+    }
+    fn drawContentDetail(s: *App, ar: u.Allocator) void {
+        const body = s.detail_body orelse return;
+        const width: f32 = @floatFromInt(rl.getScreenWidth());
+        const height: f32 = @floatFromInt(rl.getScreenHeight());
+        rl.drawRectangleRec(.{ .x = 0, .y = 0, .width = width, .height = height }, .{ .r = 0, .g = 0, .b = 0, .a = 190 });
+        const r = rl.Rectangle{ .x = width * 0.1, .y = height * 0.1, .width = width * 0.8, .height = height * 0.8 };
+        rl.drawRectangleRounded(r, 0.03, 8, theme.colors.paper);
+        if (s.button(.{ .x = r.x + r.width - 90, .y = r.y + 10, .width = 80, .height = 30 }, "Close", false)) {
+            s.closeContentDetail();
+            return;
+        }
+        if (s.detail_url) |url| {
+            if (s.button(.{ .x = r.x + 12, .y = r.y + 10, .width = 120, .height = 30 }, "Open link", true)) if (Links.parse(ar, url)) |target| {
+                _ = Links.open(target);
+            };
+            if (s.button(.{ .x = r.x + 142, .y = r.y + 10, .width = 110, .height = 30 }, "Copy URL", false)) rl.setClipboardText(url);
+        }
+        const viewport = rl.Rectangle{ .x = r.x + 20, .y = r.y + 52, .width = r.width - 40, .height = r.height - 72 };
+        const content_height = s.text.height(body, 16, viewport.width);
+        if (hover(viewport)) s.content_detail_scroll -= rl.getMouseWheelMove() * 40;
+        s.content_detail_scroll = std.math.clamp(s.content_detail_scroll, 0, @max(0, content_height - viewport.height));
+        beginClip(viewport);
+        s.text.draw(body, viewport.x, viewport.y - s.content_detail_scroll, 16, viewport.width, theme.colors.ink, theme.colors.paper);
+        endClip();
     }
     const MessageStatus = union(enum) { none, label: []const u8, checks: bool };
     fn drawMessageMeta(s: *App, stamp: []const u8, status: MessageStatus, r: rl.Rectangle, background: rl.Color) void {
@@ -1340,7 +1837,9 @@ fn elapsed(ar: u.Allocator, when: i64) []const u8 {
 fn pressed(key: rl.KeyboardKey) bool {
     return rl.isKeyPressed(key) or rl.isKeyPressedRepeat(key);
 }
+var input_obscured = false;
 fn hover(r: rl.Rectangle) bool {
+    if (input_obscured) return false;
     const point = rl.getMousePosition();
     return rl.checkCollisionPointRec(point, r) and (clip_depth == 0 or rl.checkCollisionPointRec(point, clip_stack[clip_depth - 1]));
 }
@@ -2021,4 +2520,151 @@ test "text remains intact when layouts evict textures queued in the same frame" 
         }
     }
     try std.testing.expect(ink > 100);
+}
+
+test "enriched messages render captions, photos, cards and chips with keyboard viewer controls" {
+    // Clay keeps a process-global pointer; prior tests have freed their arena.
+    const reset_context: *const fn (?*clay.Context) callconv(.c) void = @ptrCast(&clay.setCurrentContext);
+    reset_context(null);
+    defer reset_context(null);
+    rl.setTraceLogLevel(.none);
+    rl.initWindow(1120, 900, "Zimbr enrichment checks");
+    defer rl.closeWindow();
+    rl.pollInputEvents();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    _ = clay.initialize(.init(try ar.alloc(u8, clay.minMemorySize())), .{ .w = 1120, .h = 900 }, .{ .error_handler_function = clayError });
+    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/zimbr-rich-ui-test" } };
+    defer worker.shutdown();
+    var media = Media{ .io = std.testing.io, .config = .{ .data = "" } };
+    defer media.shutdown();
+    _ = try media.context("epoch", "chat", 0, false, true);
+    const photo = t.AssetRef{ .id = "image-1", .version = "v1", .variant = .inline_image, .width = 160, .height = 90, .availability = .ready };
+    var avatar = photo;
+    avatar.id = "avatar";
+    avatar.variant = .avatar;
+    var directory: @import("client/IdentityDirectory.zig") = .{};
+    try directory.put(ar, .{ .id = "person", .revision = "1", .service = "imessage", .address = "peer@example.invalid", .display_name = "Renée 👋", .match_state = .matched, .avatar = avatar });
+    const attachments = [_]t.Attachment{ .{ .id = "one", .name = "One.png", .mime_type = "image/png", .bytes = "100", .image = photo }, .{ .id = "two", .name = "Two.png", .mime_type = "image/png", .bytes = "100", .image = photo } };
+    var messages = [_]t.Message{
+        .{ .id = "target", .revision = "1", .conversation_id = "chat", .sender = "peer@example.invalid", .service = "imessage", .direction = .incoming, .timestamp = "2026-01-01T00:00:00Z", .kind = .attachment, .decoding = .plain, .observed_status = .received, .text = "Caption stays copyable 👩🏽‍💻", .attachments = &attachments, .enrichment = .{ .state = .complete }, .reactions = &.{ .{ .id = "r1", .key = "heart", .emoji = "❤️", .actor = .{ .service = "imessage", .address = "peer@example.invalid" } }, .{ .id = "r2", .key = "heart", .emoji = "❤️", .actor = .{ .service = "imessage", .is_self = true } } }, .link_previews = &.{.{ .id = "card", .part_id = "url", .title = "Stored title <literal>", .original_url = "https://shared.example.invalid/original", .metadata_url = "https://other.example.invalid/final", .state = .complete }} },
+        .{ .id = "raw", .revision = "2", .conversation_id = "chat", .sender = "peer@example.invalid", .service = "imessage", .direction = .incoming, .timestamp = "2026-01-01T00:00:01Z", .kind = .reaction, .decoding = .plain, .observed_status = .received, .reaction_event = .{ .target_message_id = "target", .actor = .{ .service = "imessage", .is_self = true }, .operation = .add, .resolution = .resolved } },
+    };
+    const chats = [_]@import("client/Store.zig").Chat{.{ .value = .{ .id = "chat", .service = "imessage", .participants = &.{"peer@example.invalid"} }, .preview = "Caption", .unread = 0 }};
+    const view = try a.create(Worker.View);
+    view.* = .{ .arena = .init(a), .snapshot = .{ .chats = &chats, .messages = &messages, .pending = &.{}, .selected = "chat", .draft = "", .epoch = "epoch", .more = false, .directory = directory }, .status = "Offline", .online = false, .send_direct = false, .reply_existing = false, .generation = 1, .ack = 0 };
+    var app = App{ .worker = &worker, .media = &media, .view = view, .key = try a.dupe(u8, "chat"), .loaded_key = try a.dupe(u8, "chat"), .focus = .none };
+    defer app.deinit();
+    for ([_]t.AssetRef{ photo, avatar }, [_]rl.Color{ rl.Color.red, rl.Color.sky_blue }) |asset, color| {
+        const pixels = rl.genImageColor(160, 90, color);
+        defer rl.unloadImage(pixels);
+        const texture = try rl.loadTextureFromImage(pixels);
+        try app.images.entries.put(std.heap.c_allocator, media.key(asset), .{ .texture = texture, .bytes = 160 * 90 * 4, .state = .ready });
+        app.images.bytes += 160 * 90 * 4;
+    }
+    for ([_]f32{ 1, 1.25, 2 }) |scale| {
+        for (0..3) |_| app.draw(scale);
+        try std.testing.expectEqual(@as(usize, 1), app.history_rows.len);
+        try std.testing.expect(app.rich_count >= 4);
+        try std.testing.expect(app.images.bytes <= Media.texture_budget);
+    }
+    const areas = layout.frame(1120, 900, app.composerHeight());
+    const row = app.history_rows[0];
+    const x = areas.history.x + 66;
+    var top = areas.history.y + @as(f32, @floatCast(row.top - app.scroll)) + 22;
+    var first_image: ?rl.Rectangle = null;
+    for (row.blocks) |block| {
+        const h = app.blockHeight(block, App.historyTextWidth(areas.history), true);
+        const r = rl.Rectangle{ .x = x, .y = top, .width = 160, .height = h };
+        if (block.value == .attachment and first_image == null) first_image = r;
+        if (block.value == .reactions) {
+            clickTestFrame(&app, r.x + 18, r.y + 14);
+            try std.testing.expect(app.detail_body != null);
+            try std.testing.expect(std.mem.indexOf(u8, app.detail_body.?, "Renée 👋") != null);
+            try std.testing.expect(std.mem.indexOf(u8, app.detail_body.?, "You (your reaction)") != null);
+            try std.testing.expect(std.mem.indexOf(u8, app.detail_body.?, "whole message") != null);
+            try view.snapshot.directory.put(ar, .{ .id = "person", .revision = "2", .service = "imessage", .address = "peer@example.invalid", .display_name = "Renamed peer", .match_state = .matched, .avatar = avatar });
+            app.refreshReactionDetail();
+            try std.testing.expect(std.mem.indexOf(u8, app.detail_body.?, "Renamed peer") != null);
+            view.snapshot.directory.available = false;
+            app.refreshReactionDetail();
+            try std.testing.expect(std.mem.indexOf(u8, app.detail_body.?, "Renamed peer") == null);
+            view.snapshot.directory.available = true;
+            app.closeContentDetail();
+        }
+        if (block.value == .card) {
+            clickTestFrame(&app, r.x + 18, r.y + 14);
+            try std.testing.expectEqualStrings("https://shared.example.invalid/original", app.detail_url.?);
+            app.closeContentDetail();
+        }
+        top += h + 8;
+    }
+    const image_r = first_image.?;
+    const shot = try captureTestFrame(&app, 1);
+    defer rl.unloadImage(shot);
+    const dpi = WindowMetrics.current().scale;
+    try std.testing.expectEqual(rl.Color.red, rl.getImageColor(shot, @intFromFloat((image_r.x + 80) * dpi), @intFromFloat((image_r.y + 45) * dpi)));
+    clickTestFrame(&app, image_r.x + 80, image_r.y + 45);
+    try std.testing.expectEqualStrings("target", app.viewer_message);
+    rl.playAutomationEvent(.{ .frame = 0, .type = 2, .params = .{ @intFromEnum(rl.KeyboardKey.right), 0, 0, 0 } });
+    try app.update();
+    rl.playAutomationEvent(.{ .frame = 0, .type = 1, .params = .{ @intFromEnum(rl.KeyboardKey.right), 0, 0, 0 } });
+    try std.testing.expectEqual(@as(usize, 1), app.viewer_attachment);
+    rl.playAutomationEvent(.{ .frame = 0, .type = 2, .params = .{ @intFromEnum(rl.KeyboardKey.escape), 0, 0, 0 } });
+    try app.update();
+    rl.playAutomationEvent(.{ .frame = 0, .type = 1, .params = .{ @intFromEnum(rl.KeyboardKey.escape), 0, 0, 0 } });
+    try std.testing.expectEqual(@as(usize, 0), app.viewer_message.len);
+    try app.message_selection.begin("target", false, row.blocks[0].value.text, messages[0].text.?, 0);
+    try std.testing.expectEqualStrings(messages[0].text.?, app.message_selection.selected());
+    messages[0].reactions = &.{};
+    messages[0].revision = "3";
+    view.generation += 1;
+    app.draw(1);
+    for (app.history_rows[0].blocks) |block| try std.testing.expect(block.value != .reactions);
+}
+
+test "inline photos reuse the viewer variant only when display pixels need it" {
+    var item = t.Attachment{ .id = "photo", .name = "photo.png", .mime_type = "image/png", .bytes = "1", .image = .{ .id = "photo", .version = "1", .variant = .inline_image, .width = 1024, .height = 768 }, .viewer = .{ .id = "photo", .version = "1", .variant = .viewer, .width = 2560, .height = 1920 } };
+    const size = App.imageSize(item.image, 480);
+    for ([_]f32{ 1, 1.25, 2 }) |scale| try std.testing.expect(App.inlineAsset(item, size, scale).?.variant == .inline_image);
+    try std.testing.expect(App.inlineAsset(item, size, 3).?.variant == .viewer);
+    item.viewer.?.availability = .retired;
+    try std.testing.expect(App.inlineAsset(item, size, 3).?.variant == .inline_image);
+}
+
+test "reading anchor follows the visible image part when an earlier image gains dimensions" {
+    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "" } };
+    defer worker.shutdown();
+    var app = App{ .worker = &worker, .following = false, .history_width = 320 };
+    defer app.deinit();
+    var blocks = [_]Content.Block{
+        .{ .value = .{ .attachment = .{ .id = "first", .name = "", .mime_type = "image/png", .bytes = "0", .image = .{ .id = "a", .version = "1", .variant = .inline_image, .width = 100, .height = 100 } } } },
+        .{ .value = .{ .attachment = .{ .id = "second", .name = "", .mime_type = "image/png", .bytes = "0", .image = .{ .id = "b", .version = "1", .variant = .inline_image, .width = 100, .height = 100 } } } },
+    };
+    var rows = [_]App.HistoryRow{.{ .id = "message", .text = "", .key = 1, .measured = 400, .padding = 38, .blocks = &blocks }};
+    app.scroll = 54 + 22 + 136 + 10;
+    app.positionHistory(&rows, 80);
+    app.rememberHistoryAnchor(&rows);
+    try std.testing.expectEqualStrings("second", app.anchor_block);
+    const before = app.scroll;
+    blocks[0].value.attachment.image.?.height = 300;
+    rows[0].measured = 600;
+    app.positionHistory(&rows, 80);
+    try std.testing.expectApproxEqAbs(before + 200, app.scroll, 0.001);
+}
+
+test "metadata and reaction rows cannot create a new-message indicator" {
+    const Store = @import("client/Store.zig");
+    const old_chats = [_]Store.Chat{.{ .value = .{ .id = "chat", .service = "imessage" }, .preview = "Caption", .unread = 0 }};
+    var next_chats = old_chats;
+    const old = Store.Snapshot{ .chats = &old_chats, .messages = &.{}, .pending = &.{}, .selected = "chat", .draft = "", .epoch = "epoch", .more = false };
+    var next = old;
+    next.chats = &next_chats;
+    next_chats[0].preview = "Updated caption";
+    try std.testing.expect(!App.newUnread(old, next));
+    next_chats[0].unread = 1;
+    try std.testing.expect(App.newUnread(old, next));
+    next.selected = "other";
+    try std.testing.expect(!App.newUnread(old, next));
 }

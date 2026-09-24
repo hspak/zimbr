@@ -4,6 +4,8 @@ const std = @import("std");
 const Config = @import("client/Config.zig");
 const Worker = @import("client/Worker.zig");
 const u = @import("common.zig");
+const Media = @import("client/Media.zig");
+const types = @import("protocol/types.zig");
 pub fn main(init: std.process.Init) !void {
     const config = try Config.parse(init);
     var worker = Worker{ .io = init.io, .config = config };
@@ -38,6 +40,9 @@ pub fn main(init: std.process.Init) !void {
 }
 fn control(init: std.process.Init, worker: *Worker) !void {
     const a = init.arena.allocator();
+    var media = Media{ .io = init.io, .config = worker.config };
+    try media.start();
+    defer media.shutdown();
     var input: std.ArrayList(u8) = .empty;
     _ = u.c.fcntl(0, u.c.F_SETFL, @as(c_int, u.c.O_NONBLOCK));
     while (true) {
@@ -48,10 +53,25 @@ fn control(init: std.process.Init, worker: *Worker) !void {
         while (std.mem.indexOfScalar(u8, input.items, '\n')) |end| {
             const line = input.items[0..end];
             if (u.eq(line, "quit")) return;
-            const cmd = try std.json.parseFromSlice(Worker.Command, a, line, .{});
-            try worker.push(cmd.value);
+            const kind = try std.json.parseFromSliceLeaky(struct { kind: []const u8 }, a, line, .{ .ignore_unknown_fields = true });
+            if (u.eq(kind.kind, "media_context")) {
+                const ctx = try std.json.parseFromSliceLeaky(struct { epoch: []const u8, chat: []const u8 = "", credentials: u64 = 0, online: bool = true, avatars: bool = true }, a, line, .{ .ignore_unknown_fields = true });
+                _ = try media.context(ctx.epoch, ctx.chat, ctx.credentials, ctx.online, ctx.avatars);
+            } else if (u.eq(kind.kind, "media")) {
+                const request = try std.json.parseFromSliceLeaky(struct { asset: types.AssetRef }, a, line, .{ .ignore_unknown_fields = true });
+                try media.request(request.asset);
+            } else {
+                const cmd = try std.json.parseFromSlice(Worker.Command, a, line, .{});
+                try worker.push(cmd.value);
+            }
             std.mem.copyForwards(u8, input.items, input.items[end + 1 ..]);
             input.items.len -= end + 1;
+        }
+        if (media.take()) |result| {
+            defer media.release(result);
+            const raw = try u.json(a, .{ .media = .{ .state = result.state, .key = result.key, .generation = result.generation, .width = result.pixels.width, .height = result.pixels.height, .bytes = result.pixels.bytes, .reason = std.mem.sliceTo(&result.reason, 0) } });
+            _ = u.c.write(1, raw.ptr, raw.len);
+            _ = u.c.write(1, "\n", 1);
         }
         if (worker.take()) |v| {
             defer v.destroy();

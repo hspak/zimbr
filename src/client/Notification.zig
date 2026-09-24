@@ -17,19 +17,14 @@ pub fn create(store: Store, message: t.Message) !*Self {
     var q = try store.db.prepare("SELECT record FROM records WHERE kind='conversation' AND id=?");
     defer q.close();
     try q.bind(&.{.{ .text = message.conversation_id }});
-    var title = message.sender;
+    const directory = try store.directory(ar);
+    var title = directory.name(message.service, message.sender);
     if (try q.step()) {
         const chat = (try std.json.parseFromSlice(t.Conversation, ar, q.bytes(0), .{ .ignore_unknown_fields = true })).value;
-        if (chat.title.len > 0) title = chat.title;
+        title = directory.conversation(ar, chat);
     }
     const summary = try ar.dupeZ(u8, display.prefix(if (title.len > 0) title else "New message", 256, 1));
-    const body = try ar.dupeZ(u8, display.prefix(message.text orelse switch (message.kind) {
-        .attachment => "Attachment",
-        .reaction => "Reaction",
-        .system => "Conversation update",
-        .empty => "Empty message",
-        else => "Unsupported message",
-    }, 1024, 4));
+    const body = try ar.dupeZ(u8, display.prefix(display.summary(ar, message), 1024, 4));
     const chat = try ar.dupeZ(u8, message.conversation_id);
     const result = try a.create(Self);
     result.* = .{ .arena = arena, .chat = chat, .summary = summary, .body = body };
@@ -55,4 +50,41 @@ test "notification previews bound UTF8, lines and NUL without changing source co
     const nul = try create(store, message);
     defer nul.destroy();
     try std.testing.expectEqualStrings("before", nul.body);
+}
+
+test "new notifications resolve names, preserve captions and titles, and respect permission loss" {
+    const store = try Store.open(":memory:");
+    defer store.close();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    const u = @import("../common.zig");
+    const identity = t.Identity{ .id = "person", .revision = "1", .service = "imessage", .address = "peer@example.invalid", .display_name = "Zoë 👋", .match_state = .matched };
+    _ = try store.upsert(ar, "identity", try u.json(ar, identity));
+    var conversation = t.Conversation{ .id = "chat", .revision = "1", .service = "imessage", .participants = &.{identity.address} };
+    _ = try store.upsert(ar, "conversation", try u.json(ar, conversation));
+    const photo = t.Attachment{ .id = "photo", .name = "photo.png", .mime_type = "image/png", .bytes = "123" };
+    var message = t.Message{ .id = "message", .conversation_id = "chat", .sender = identity.address, .direction = .incoming, .service = "imessage", .timestamp = "", .kind = .attachment, .text = "A caption 👋", .decoding = .plain, .observed_status = .received, .attachments = &.{ photo, photo } };
+    const caption = try create(store, message);
+    defer caption.destroy();
+    try std.testing.expectEqualStrings(identity.display_name.?, caption.summary);
+    try std.testing.expectEqualStrings(message.text.?, caption.body);
+    message.text = null;
+    const multiple = try create(store, message);
+    defer multiple.destroy();
+    try std.testing.expectEqualStrings("2 photos", multiple.body);
+    message.attachments = &.{photo};
+    try store.set("contacts_blocked", "1");
+    const denied = try create(store, message);
+    defer denied.destroy();
+    try std.testing.expectEqualStrings(identity.address, denied.summary);
+    try std.testing.expectEqualStrings("Photo", denied.body);
+    // Already queued notifications own their summaries; metadata is not resent.
+    try std.testing.expectEqualStrings(identity.display_name.?, caption.summary);
+    conversation.revision = "2";
+    conversation.title = "Our title";
+    _ = try store.upsert(ar, "conversation", try u.json(ar, conversation));
+    const titled = try create(store, message);
+    defer titled.destroy();
+    try std.testing.expectEqualStrings("Our title", titled.summary);
 }

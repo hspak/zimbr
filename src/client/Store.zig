@@ -2,6 +2,8 @@ const std = @import("std");
 const u = @import("../common.zig");
 const t = @import("../protocol/types.zig");
 const Sqlite = @import("../relay/Sqlite.zig");
+const Directory = @import("IdentityDirectory.zig");
+const display = @import("display.zig");
 const Self = @This();
 db: Sqlite,
 pub fn open(path: [:0]const u8) !Self {
@@ -10,6 +12,9 @@ pub fn open(path: [:0]const u8) !Self {
     try db.exec(
         \\PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
         \\CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+        \\CREATE TABLE IF NOT EXISTS enrichment_cache(message_id TEXT PRIMARY KEY,revision INTEGER NOT NULL,record TEXT NOT NULL,serial INTEGER NOT NULL);
+        \\CREATE TABLE IF NOT EXISTS enrichment_pages(message_id TEXT NOT NULL,section TEXT NOT NULL,revision TEXT NOT NULL,items TEXT NOT NULL,next TEXT,PRIMARY KEY(message_id,section));
+        \\CREATE TABLE IF NOT EXISTS identities(id TEXT PRIMARY KEY,revision INTEGER NOT NULL,service TEXT NOT NULL,address TEXT NOT NULL,record TEXT NOT NULL,UNIQUE(service,address));
         \\CREATE TABLE IF NOT EXISTS records(kind TEXT NOT NULL,id TEXT NOT NULL,revision INTEGER NOT NULL,chat TEXT NOT NULL,sort_key TEXT NOT NULL,record TEXT NOT NULL,PRIMARY KEY(kind,id));
         \\CREATE INDEX IF NOT EXISTS history ON records(kind,chat,sort_key,id);
         \\CREATE TABLE IF NOT EXISTS drafts(key TEXT PRIMARY KEY,text TEXT NOT NULL);
@@ -86,14 +91,23 @@ pub fn beginSync(s: Self, epoch: []const u8, cursor: []const u8) !void {
     errdefer s.db.exec("ROLLBACK") catch {};
     // Drafts and original outbox identities survive reset. Old messages are kept
     // visible while offline; once a fresh sync begins only reconciled records show.
-    try s.db.exec("DELETE FROM records; DELETE FROM unread; DELETE FROM live_seen; DELETE FROM pages; DELETE FROM previews;");
+    try s.db.exec("DELETE FROM enrichment_pages; DELETE FROM enrichment_cache; DELETE FROM identities; DELETE FROM records; DELETE FROM unread; DELETE FROM live_seen; DELETE FROM pages; DELETE FROM previews;");
     try s.exec("UPDATE outbox SET state='unknown',detail='Relay changed. This request will not be sent again automatically.' WHERE epoch!=? AND state NOT IN ('delivered','failed')", &.{.{ .text = epoch }});
     try s.set("epoch", epoch);
     try s.set("cursor", cursor);
     try s.set("bootstrapped", "0");
+    try s.set("identity_bootstrapped", "0");
+    try s.set("accepted_extensions", "");
     try s.db.exec("COMMIT");
 }
 pub fn upsert(s: Self, a: u.Allocator, kind: []const u8, raw: []const u8) !bool {
+    if (u.eq(kind, "identity")) {
+        const v = try std.json.parseFromSliceLeaky(t.Identity, a, raw, .{ .ignore_unknown_fields = true });
+        const revision = try std.fmt.parseInt(i64, v.revision, 10);
+        if (revision < 0 or v.id.len == 0 or v.service.len == 0 or v.address.len == 0) return error.InvalidRecord;
+        try s.exec("INSERT INTO identities VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,record=excluded.record WHERE excluded.revision>identities.revision AND excluded.service=identities.service AND excluded.address=identities.address", &.{ .{ .text = v.id }, .{ .int = revision }, .{ .text = v.service }, .{ .text = v.address }, .{ .text = raw } });
+        return u.c.sqlite3_changes(s.db.handle) > 0;
+    }
     var id: []const u8 = undefined;
     var rev: []const u8 = undefined;
     var chat: []const u8 = "";
@@ -128,6 +142,10 @@ pub fn upsert(s: Self, a: u.Allocator, kind: []const u8, raw: []const u8) !bool 
         return false;
     }
     try s.exec("INSERT INTO records VALUES(?,?,?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET revision=excluded.revision,chat=excluded.chat,sort_key=excluded.sort_key,record=excluded.record", &.{ .{ .text = kind }, .{ .text = id }, .{ .int = revision }, .{ .text = chat }, .{ .text = sort }, .{ .text = raw } });
+    if (u.eq(kind, "message")) {
+        try s.exec("DELETE FROM enrichment_cache WHERE message_id=?", &.{.{ .text = id }});
+        try s.exec("DELETE FROM enrichment_pages WHERE message_id=?", &.{.{ .text = id }});
+    }
     if (u.eq(kind, "request")) try s.requestState(a, raw);
     return fresh;
 }
@@ -147,7 +165,7 @@ pub fn eventNotification(s: Self, a: u.Allocator, raw: []const u8, frame_id: []c
     const seq = try t.parseCursor(e.cursor, epoch);
     if (!u.eq(e.cursor, frame_id) or !u.eq(e.type, frame_type) or seq != try std.fmt.parseInt(i64, e.sequence, 10)) return error.InvalidEvent;
     if (seq <= try t.parseCursor(try s.get(a, "cursor"), epoch)) return null;
-    const kind = if (u.eq(e.type, "conversation.upsert")) "conversation" else if (u.eq(e.type, "message.upsert")) "message" else if (u.eq(e.type, "send_request.updated")) "request" else return error.UnknownEvent;
+    const kind = if (u.eq(e.type, "conversation.upsert")) "conversation" else if (u.eq(e.type, "message.upsert")) "message" else if (u.eq(e.type, "send_request.updated")) "request" else if (u.eq(e.type, "identity.upsert") and u.eq(try s.get(a, "accepted_extensions"), "identity-v1")) "identity" else return error.UnknownEvent;
     const record = try u.json(a, e.record);
     // The network worker may own a batch transaction. Standalone callers keep
     // the same atomic record/cursor guarantee for an individual event.
@@ -158,7 +176,7 @@ pub fn eventNotification(s: Self, a: u.Allocator, raw: []const u8, frame_id: []c
     var notification: ?t.Message = null;
     if (u.eq(kind, "message")) {
         const m = (try std.json.parseFromSlice(t.Message, a, record, .{ .ignore_unknown_fields = true })).value;
-        if (m.direction == .incoming) {
+        if (m.direction == .incoming and m.kind != .reaction and m.reaction_event == null) {
             try s.exec("INSERT OR IGNORE INTO live_seen VALUES(?)", &.{.{ .text = m.id }});
             const first = u.c.sqlite3_changes(s.db.handle) > 0;
             if (first and u.eq(e.origin, "live") and !u.eq(m.conversation_id, viewed)) {
@@ -190,7 +208,7 @@ pub fn page(s: Self, chat: []const u8, cursor: ?[]const u8) !void {
     try s.exec("INSERT INTO pages VALUES(?,?) ON CONFLICT(chat) DO UPDATE SET cursor=excluded.cursor", &.{ .{ .text = chat }, if (cursor) |v| .{ .text = v } else .null_value });
 }
 pub fn savePreview(s: Self, a: u.Allocator, raw: []const u8) !void {
-    const value = (try std.json.parseFromSlice(t.ConversationPreview, a, raw, .{})).value;
+    const value = (try std.json.parseFromSlice(t.ConversationPreview, a, raw, .{ .ignore_unknown_fields = true })).value;
     const revision = std.fmt.parseInt(i64, value.revision, 10) catch return error.InvalidRecord;
     if (revision < 0 or value.conversation_id.len == 0 or value.message_id.len == 0 or value.text.len > 1024) return error.InvalidRecord;
     try s.exec("INSERT INTO previews(chat,record) VALUES(?,?) ON CONFLICT(chat) DO UPDATE SET record=excluded.record WHERE previews.record IS NULL OR CAST(json_extract(excluded.record,'$.revision') AS INTEGER)>CAST(json_extract(previews.record,'$.revision') AS INTEGER)", &.{ .{ .text = value.conversation_id }, .{ .text = raw } });
@@ -212,6 +230,7 @@ pub const Snapshot = struct {
     draft: []const u8,
     epoch: []const u8,
     more: bool,
+    directory: Directory = .{},
 };
 pub fn snapshot(s: Self, a: u.Allocator, selected: []const u8) !Snapshot {
     return s.snapshotWithMessages(a, selected, null);
@@ -222,7 +241,7 @@ pub fn snapshotWithMessages(s: Self, a: u.Allocator, selected: []const u8, share
     var chats: std.ArrayList(Chat) = .empty;
     var messages: std.ArrayList(t.Message) = .empty;
     var pending: std.ArrayList(Pending) = .empty;
-    var q = try s.db.prepare("SELECT c.record,coalesce(u.count,0),(SELECT m.record FROM records m WHERE m.kind='message' AND m.chat=c.id ORDER BY m.sort_key DESC,m.id DESC LIMIT 1),p.record,EXISTS(SELECT 1 FROM hidden_chats h WHERE h.key=c.id) FROM records c LEFT JOIN unread u ON c.id=u.chat LEFT JOIN previews p ON p.chat=c.id WHERE c.kind='conversation' ORDER BY c.sort_key DESC,c.id DESC");
+    var q = try s.db.prepare("SELECT c.record,coalesce(u.count,0),(SELECT m.record FROM records m WHERE m.kind='message' AND m.chat=c.id AND coalesce(json_extract(m.record,'$.reaction_event.resolution'),'')!='resolved' ORDER BY m.sort_key DESC,m.id DESC LIMIT 1),p.record,EXISTS(SELECT 1 FROM hidden_chats h WHERE h.key=c.id) FROM records c LEFT JOIN unread u ON c.id=u.chat LEFT JOIN previews p ON p.chat=c.id WHERE c.kind='conversation' ORDER BY c.sort_key DESC,c.id DESC");
     defer q.close();
     while (try q.step()) {
         const v = (try std.json.parseFromSlice(t.Conversation, a, q.bytes(0), .{ .ignore_unknown_fields = true, .allocate = .alloc_always })).value;
@@ -231,10 +250,10 @@ pub fn snapshotWithMessages(s: Self, a: u.Allocator, selected: []const u8, share
         if (q.bytes(2).len > 0) {
             const m = (try std.json.parseFromSlice(t.Message, a, q.bytes(2), .{ .ignore_unknown_fields = true, .allocate = .alloc_always })).value;
             latest = m;
-            preview = m.text orelse @tagName(m.kind);
+            preview = display.summary(a, m);
         }
         if (q.bytes(3).len > 0) {
-            const p = (try std.json.parseFromSlice(t.ConversationPreview, a, q.bytes(3), .{ .allocate = .alloc_always })).value;
+            const p = (try std.json.parseFromSlice(t.ConversationPreview, a, q.bytes(3), .{ .allocate = .alloc_always, .ignore_unknown_fields = true })).value;
             const newer_position = latest == null or std.mem.order(u8, p.timestamp, latest.?.timestamp) == .gt or
                 (u.eq(p.timestamp, latest.?.timestamp) and std.mem.order(u8, p.message_id, latest.?.id) == .gt);
             const newer_revision = latest != null and u.eq(p.message_id, latest.?.id) and (try std.fmt.parseInt(i64, p.revision, 10)) > (try std.fmt.parseInt(i64, latest.?.revision, 10));
@@ -268,8 +287,78 @@ pub fn snapshotWithMessages(s: Self, a: u.Allocator, selected: []const u8, share
         const record = if (ps.bytes(3).len > 0) (try std.json.parseFromSlice(t.SendRequest, a, ps.bytes(3), .{ .ignore_unknown_fields = true, .allocate = .alloc_always })).value else null;
         try pending.append(a, .{ .input = (try std.json.parseFromSlice(t.SendInput, a, ps.bytes(0), .{ .ignore_unknown_fields = true, .allocate = .alloc_always })).value, .state = try ps.text(a, 1), .detail = try ps.text(a, 2), .record = record, .sent_at = try ps.text(a, 4) });
     }
-    return .{ .chats = chats.items, .messages = shared_messages orelse messages.items, .pending = pending.items, .selected = try a.dupe(u8, selected), .draft = try s.draft(a, selected), .epoch = try s.get(a, "epoch"), .more = (try s.nextPage(a, selected)) != null };
+    return .{ .chats = chats.items, .messages = shared_messages orelse messages.items, .pending = pending.items, .selected = try a.dupe(u8, selected), .draft = try s.draft(a, selected), .epoch = try s.get(a, "epoch"), .more = (try s.nextPage(a, selected)) != null, .directory = try s.directory(a) };
 }
 const echo_id_sql = "coalesce(json_extract(outbox.record,'$.message_id'),CASE WHEN outbox.state='unknown' AND outbox.epoch=(SELECT value FROM meta WHERE key='epoch') THEN json_extract(outbox.record,'$.candidate_message_id') END)";
-pub const history_query = "SELECT record,id,revision,sort_key FROM records WHERE kind='message' AND chat=? UNION ALL SELECT record,id,revision,sort_key FROM records WHERE kind='message' AND chat!=? AND id IN (SELECT " ++ echo_id_sql ++ " FROM outbox WHERE draft_key=? AND record IS NOT NULL) ORDER BY sort_key,id";
-pub const history_versions_query = "SELECT NULL,id,revision,sort_key FROM records WHERE kind='message' AND chat=? UNION ALL SELECT NULL,id,revision,sort_key FROM records WHERE kind='message' AND chat!=? AND id IN (SELECT " ++ echo_id_sql ++ " FROM outbox WHERE draft_key=? AND record IS NOT NULL) ORDER BY sort_key,id";
+const enriched_record = "coalesce((SELECT e.record FROM enrichment_cache e WHERE e.message_id=records.id AND e.revision=records.revision),record)";
+const enrichment_serial = "coalesce((SELECT e.serial FROM enrichment_cache e WHERE e.message_id=records.id AND e.revision=records.revision),0)";
+pub const history_query = "SELECT " ++ enriched_record ++ ",id,revision,sort_key," ++ enrichment_serial ++ " FROM records WHERE kind='message' AND chat=? UNION ALL SELECT " ++ enriched_record ++ ",id,revision,sort_key," ++ enrichment_serial ++ " FROM records WHERE kind='message' AND chat!=? AND id IN (SELECT " ++ echo_id_sql ++ " FROM outbox WHERE draft_key=? AND record IS NOT NULL) ORDER BY sort_key,id";
+pub const history_versions_query = "SELECT NULL,id,revision,sort_key," ++ enrichment_serial ++ " FROM records WHERE kind='message' AND chat=? UNION ALL SELECT NULL,id,revision,sort_key," ++ enrichment_serial ++ " FROM records WHERE kind='message' AND chat!=? AND id IN (SELECT " ++ echo_id_sql ++ " FROM outbox WHERE draft_key=? AND record IS NOT NULL) ORDER BY sort_key,id";
+pub const message_query = "SELECT " ++ enriched_record ++ " FROM records WHERE kind='message' AND id=?";
+
+pub fn enrichmentNext(s: Self, a: u.Allocator, id: []const u8, revision: []const u8, section: []const u8) !?[]const u8 {
+    var q = try s.db.prepare("SELECT next FROM enrichment_pages WHERE message_id=? AND revision=? AND section=?");
+    defer q.close();
+    try q.bind(&.{ .{ .text = id }, .{ .text = revision }, .{ .text = section } });
+    if (!try q.step()) return "";
+    return if (q.bytes(0).len == 0) null else try q.text(a, 0);
+}
+pub fn enrichmentPage(s: Self, a: u.Allocator, raw: []const u8, id: []const u8, revision: []const u8, section: @import("Content.zig").Section, after: []const u8) !bool {
+    const Page = struct { message_id: []const u8, revision: []const u8, section: @import("Content.zig").Section, items: []const std.json.Value, total: usize, next: ?[]const u8 };
+    const page_value = try std.json.parseFromSliceLeaky(Page, a, raw, .{ .ignore_unknown_fields = true });
+    if (!u.eq(page_value.message_id, id) or !u.eq(page_value.revision, revision) or page_value.section != section or (page_value.next != null and (u.eq(page_value.next.?, after) or page_value.items.len == 0))) return error.InvalidEnrichmentPage;
+    try s.db.exec("BEGIN IMMEDIATE");
+    errdefer s.db.exec("ROLLBACK") catch {};
+    var q = try s.db.prepare(message_query);
+    defer q.close();
+    try q.bind(&.{.{ .text = id }});
+    var m: t.Message = if (try q.step()) try std.json.parseFromSliceLeaky(t.Message, a, q.bytes(0), .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) else return error.MissingMessage;
+    if (!u.eq(m.revision, revision)) {
+        try s.db.exec("ROLLBACK");
+        return false;
+    }
+    const expected = try s.enrichmentNext(a, id, revision, @tagName(section));
+    if (expected == null or !u.eq(expected.?, after)) {
+        try s.db.exec("ROLLBACK");
+        return false;
+    }
+    var items: std.ArrayList(std.json.Value) = .empty;
+    if (after.len > 0) {
+        var previous = try s.db.prepare("SELECT items FROM enrichment_pages WHERE message_id=? AND section=? AND revision=?");
+        defer previous.close();
+        try previous.bind(&.{ .{ .text = id }, .{ .text = @tagName(section) }, .{ .text = revision } });
+        if (!try previous.step()) return error.InvalidEnrichmentPage;
+        try items.appendSlice(a, try std.json.parseFromSliceLeaky([]const std.json.Value, a, previous.bytes(0), .{ .allocate = .alloc_always }));
+    }
+    try items.appendSlice(a, page_value.items);
+    if (items.items.len > page_value.total or (page_value.next == null and items.items.len != page_value.total)) return error.InvalidEnrichmentPage;
+    const encoded = try u.json(a, items.items);
+    if (m.enrichment == null) return error.InvalidEnrichmentPage;
+    switch (section) {
+        inline else => |selected| {
+            const field = comptime if (selected == .previews) "link_previews" else @tagName(selected);
+            const T = comptime switch (selected) {
+                .attachments => t.Attachment,
+                .previews => t.LinkPreview,
+                .reactions => t.Reaction,
+                .parts => t.MessagePart,
+            };
+            const values = try std.json.parseFromSliceLeaky([]const T, a, encoded, .{ .ignore_unknown_fields = true });
+            const current: []const T = if (selected == .attachments) m.attachments else @field(m, field) orelse &.{};
+            if (values.len >= current.len or page_value.next == null) @field(m, field) = values;
+            @field(m.enrichment.?, @tagName(selected)) = .{ .total = page_value.total, .complete = page_value.next == null };
+        },
+    }
+    try s.exec("INSERT INTO enrichment_pages VALUES(?,?,?,?,?) ON CONFLICT(message_id,section) DO UPDATE SET revision=excluded.revision,items=excluded.items,next=excluded.next", &.{ .{ .text = id }, .{ .text = @tagName(section) }, .{ .text = revision }, .{ .text = encoded }, if (page_value.next) |next| .{ .text = next } else .null_value });
+    try s.exec("INSERT INTO enrichment_cache VALUES(?,?,?,1) ON CONFLICT(message_id) DO UPDATE SET revision=excluded.revision,record=excluded.record,serial=enrichment_cache.serial+1", &.{ .{ .text = id }, .{ .int = try std.fmt.parseInt(i64, revision, 10) }, .{ .text = try u.json(a, m) } });
+    try s.db.exec("COMMIT");
+    return true;
+}
+
+pub fn directory(s: Self, a: u.Allocator) !Directory {
+    var result = Directory{ .available = !u.eq(try s.get(a, "contacts_blocked"), "1") };
+    var q = try s.db.prepare("SELECT record FROM identities");
+    defer q.close();
+    while (try q.step()) try result.put(a, try std.json.parseFromSliceLeaky(t.Identity, a, q.bytes(0), .{ .ignore_unknown_fields = true, .allocate = .alloc_always }));
+    return result;
+}

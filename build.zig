@@ -42,8 +42,8 @@ fn clientModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     const m = b.createModule(.{ .root_source_file = b.path(root), .target = target, .optimize = optimize, .link_libc = true });
     m.addIncludePath(b.path("src"));
     m.addIncludePath(b.path("src/client"));
-    m.addCSourceFiles(.{ .files = &.{ "src/platform.c", "src/client/bridge.c", "src/client/notifications.c" }, .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-    for ([_][]const u8{ "sqlite3", "libcurl", "openssl", "pangocairo", "gio-2.0" }) |lib| m.linkSystemLibrary(lib, .{});
+    m.addCSourceFiles(.{ .files = &.{ "src/platform.c", "src/client/bridge.c", "src/client/notifications.c", "src/client/media.c" }, .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+    for ([_][]const u8{ "sqlite3", "libcurl", "openssl", "pangocairo", "gio-2.0", "libpng", "libjpeg" }) |lib| m.linkSystemLibrary(lib, .{});
     return m;
 }
 fn client(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {

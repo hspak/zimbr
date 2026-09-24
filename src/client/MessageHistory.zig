@@ -5,9 +5,10 @@ const u = @import("../common.zig");
 const t = @import("../protocol/types.zig");
 const Store = @import("Store.zig");
 const display = @import("display.zig");
+const Content = @import("Content.zig");
 const Self = @This();
 const allocator = if (@import("builtin").is_test) std.testing.allocator else std.heap.c_allocator;
-pub const Presentation = struct { text: []const u8, key: u64 };
+pub const Presentation = struct { text: []const u8, key: u64, blocks: []const Content.Block = &.{} };
 
 const Record = struct {
     refs: std.atomic.Value(usize) = .init(1),
@@ -15,15 +16,17 @@ const Record = struct {
     message: t.Message,
     presentation: Presentation,
     revision: i64,
+    enrichment_serial: i64,
 
-    fn create(raw: []const u8, revision: i64) !*Record {
+    fn create(raw: []const u8, revision: i64, serial: i64) !*Record {
         const record = try allocator.create(Record);
         errdefer allocator.destroy(record);
         var arena = std.heap.ArenaAllocator.init(allocator);
         errdefer arena.deinit();
         const message = try std.json.parseFromSliceLeaky(t.Message, arena.allocator(), raw, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
         const text = display.record(arena.allocator(), message);
-        record.* = .{ .arena = arena, .message = message, .revision = revision, .presentation = .{ .text = text, .key = std.hash.Wyhash.hash(0, text) } };
+        const blocks = try Content.prepare(arena.allocator(), message);
+        record.* = .{ .arena = arena, .message = message, .revision = revision, .enrichment_serial = serial, .presentation = .{ .text = text, .key = std.hash.Wyhash.hash(0, if (blocks.len == 0) text else raw), .blocks = blocks } };
         return record;
     }
     fn retain(record: *Record) *Record {
@@ -55,7 +58,7 @@ pub fn create(store: Store, selected: []const u8, previous: ?*Self) !*Self {
     var query = try store.db.prepare(if (previous == null) Store.history_query else Store.history_versions_query);
     defer query.close();
     try query.bind(&.{ .{ .text = selected }, .{ .text = selected }, .{ .text = selected } });
-    var lookup = try store.db.prepare("SELECT record FROM records WHERE kind='message' AND id=?");
+    var lookup = try store.db.prepare(Store.message_query);
     defer lookup.close();
     var unchanged = previous != null;
     while (try query.step()) {
@@ -69,7 +72,7 @@ pub fn create(store: Store, selected: []const u8, previous: ?*Self) !*Self {
             }
             break :blk old.index.get(id);
         } else null;
-        const record = if (cached != null and cached.?.revision == revision) cached.?.retain() else blk: {
+        const record = if (cached != null and cached.?.revision == revision and cached.?.enrichment_serial == query.int(4)) cached.?.retain() else blk: {
             var raw = query.bytes(0);
             if (previous != null) {
                 _ = u.c.sqlite3_reset(lookup.handle);
@@ -77,7 +80,7 @@ pub fn create(store: Store, selected: []const u8, previous: ?*Self) !*Self {
                 if (!try lookup.step()) return error.MissingMessage;
                 raw = lookup.bytes(0);
             }
-            break :blk try Record.create(raw, revision);
+            break :blk try Record.create(raw, revision, query.int(4));
         };
         errdefer record.release();
         if (unchanged) unchanged = records.items.len < previous.?.records.len and previous.?.records[records.items.len] == record;

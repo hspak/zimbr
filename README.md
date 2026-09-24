@@ -8,14 +8,16 @@ The Linux worker is tested directly against the native mTLS relay.
 
 The Linux desktop client uses Zig, Clay, raylib, and Pango. It supports conversation
 browsing, cached history, live updates, direct messages, existing-conversation
-replies, Unicode drafts, desktop notifications, and send recovery. Real-account
+replies, Unicode drafts, desktop notifications, send recovery, contact names/photos,
+inline images, stored link cards, and reaction chips when supplied by the relay. Real-account
 acceptance is tracked in [docs/mac-validation.md](docs/mac-validation.md); installation alone does not prove
 send routing or locked-screen operation.
 
 ## Linux client
 
 Use Zig **0.16.0**, `pkg-config`, and development headers/libraries for SQLite,
-libcurl (7.88+ with the OpenSSL 3 backend), OpenSSL 3, Pango/Cairo, GLib/GIO, OpenGL,
+libcurl (7.88+ with the OpenSSL 3 backend), OpenSSL 3, Pango/Cairo, GLib/GIO,
+libpng, libjpeg, OpenGL,
 Wayland, and xkbcommon. Clay and raylib are pinned in
 `build.zig.zon`; Flamez is not a build or runtime dependency. Install a system
 sans-serif font and an emoji font for the scripts you use.
@@ -147,9 +149,34 @@ new sends stay as drafts. An uncertain or failed message can be copied
 to a draft for deliberate retry. Sending again after an uncertain result can
 create a duplicate. A relay epoch reset preserves drafts and outbox identities;
 orphaned drafts remain discoverable as **Recovered draft**. Local unread markers
-do not change Apple's read receipts. Attachments and unsupported content remain
-visible as placeholders in the current Linux client; its attachment downloads
-are outside the relay enrichment implementation.
+do not change Apple's read receipts.
+
+Contact names resolve by the original service/address across the sidebar, header,
+senders, reaction details, search, and new notifications. Explicit chat titles stay
+intact; Details keeps participant addresses available. Names and photos remain
+cached offline. A permission revocation learned from the relay clears contact
+presentation; its other messaging features continue independently.
+
+Messages retain captions alongside multiple images, stored URL cards, and reaction
+chips. Click an image for a larger view; Left/Right navigate that message's photos,
+Escape closes, and R retries a failed image. Tab focuses visible image, link, and
+reaction controls; Enter activates them. Reaction details identify each actor,
+including your own reaction and any unresolved target part. Clicking a URL or card
+shows its actual destination and full URL before opening or copying it. Displaying
+a card never fetches a website or remote artwork. Ctrl+C on selected message text
+keeps the original full text. **Show more** loads overflow metadata when needed.
+
+Images use two authenticated transfers on a separate worker, private cache files
+under `media/` in the data directory, a 512 MiB disk limit, and a combined 128 MiB
+image pixel/texture ceiling. Cached images work offline; evicted images download
+again on demand. Reconnect reloads media credentials too. Missing, unsupported,
+corrupt, or oversized images keep a descriptive placeholder. HEIC conversion and
+animated images' still frames come from the Mac; Linux decodes bounded PNG/JPEG.
+
+See [Linux enrichment acceptance](docs/linux-message-enrichment.md) for the client
+contract, recovery coverage, and verification commands. Availability remains tied
+to each relay capability and its readiness shown in Details; installed Mac gates
+are tracked separately in the Mac enrichment acceptance record.
 
 Linux verification:
 
@@ -161,6 +188,9 @@ python3 tests/client_native_tls.py
 python3 tests/client_tls.py
 python3 tests/client_integration.py
 python3 tests/client_transport.py
+python3 tests/client_enrichment.py
+python3 tests/client_enrichment_protocol.py
+python3 tests/client_media_transport.py
 python3 tests/client_details.py
 # Requires a running Wayland desktop:
 zig build test-gui

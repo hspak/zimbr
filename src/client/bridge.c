@@ -17,15 +17,18 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <gio/gio.h>
 
 _Static_assert(CURL_ERROR_SIZE <= sizeof(((ZcError *)0)->message), "Diagnostic buffer must hold curl errors");
 
 struct Slot {
     CURL *easy; char *body; size_t len; long status; int done, stream, alert;
     int64_t last_rx; struct ZcNet *owner; ZcError error;
+    char extensions[128], mime[64];
+    int media, fd, extension_seen; size_t expected;
 };
 struct ZcNet {
-    CURLM *multi; struct curl_slist *headers; struct Slot slots[2];
+    CURLM *multi; struct curl_slist *headers; struct Slot slots[4];
     char *origin, *ca, *cert, *key; size_t ca_len, cert_len, key_len;
     X509 *root; ZcStreamFn fn; void *context;
 };
@@ -164,6 +167,16 @@ static int progress(void *context, curl_off_t a, curl_off_t b, curl_off_t c, cur
 }
 static size_t receive(char *data, size_t size, size_t count, void *context) {
     struct Slot *s=context; size_t n=size*count; s->last_rx=monotonic_ms();
+    if (s->media) {
+        long status=0; curl_easy_getinfo(s->easy,CURLINFO_RESPONSE_CODE,&status);
+        if (status==200) {
+            if (n>8*1024*1024-s->len) return 0;
+            size_t used=0;
+            while (used<n) { ssize_t wrote=write(s->fd,data+used,n-used); if (wrote<0 && errno==EINTR) continue; if (wrote<=0) return 0; used+=(size_t)wrote; }
+            s->len+=n; return n;
+        }
+        if (n>8192-s->len) return 0;
+    }
     if (s->stream) {
         long status=0; curl_easy_getinfo(s->easy,CURLINFO_RESPONSE_CODE,&status);
         if (status!=200) return n;
@@ -172,6 +185,27 @@ static size_t receive(char *data, size_t size, size_t count, void *context) {
     if (n>64*1024*1024-s->len) return 0;
     char *next=realloc(s->body,s->len+n+1); if (!next) return 0;
     s->body=next; memcpy(next+s->len,data,n); s->len+=n; next[s->len]=0; return n;
+}
+static size_t receive_header(char *data, size_t size, size_t count, void *context) {
+    struct Slot *s=context; size_t n=size*count;
+    if (n>=5 && !memcmp(data,"HTTP/",5)) { s->extensions[0]=0; s->mime[0]=0; s->extension_seen=0; }
+    if (n>=13 && !strncasecmp(data,"content-type:",13)) {
+        size_t begin=13,end=n;
+        while (begin<end && (data[begin]==' ' || data[begin]=='\t')) begin++;
+        while (end>begin && (data[end-1]=='\r' || data[end-1]=='\n' || data[end-1]==' ')) end--;
+        if (end-begin>=sizeof(s->mime)) return 0;
+        memcpy(s->mime,data+begin,end-begin); s->mime[end-begin]=0;
+    }
+    const char *name="zimbr-event-extensions:"; size_t len=strlen(name);
+    if (n>=len && !strncasecmp(data,name,len)) {
+        size_t end=n;
+        while (len<end && (data[len]==' ' || data[len]=='\t')) len++;
+        while (end>len && (data[end-1]=='\r' || data[end-1]=='\n' || data[end-1]==' ' || data[end-1]=='\t')) end--;
+        if (end-len>=sizeof(s->extensions) || s->extension_seen) return 0;
+        s->extension_seen=1;
+        memcpy(s->extensions,data+len,end-len); s->extensions[end-len]=0;
+    }
+    return n;
 }
 static void tls_message(int write, int version, int type, const void *buf, size_t len, SSL *ssl, void *context) {
     (void)version; (void)ssl;
@@ -197,7 +231,8 @@ static void clear_slot(ZcNet *n, int index) {
 }
 void zc_net_free(ZcNet *n) {
     if (!n) return;
-    clear_slot(n,0); clear_slot(n,1); curl_slist_free_all(n->headers);
+    for (int i=0;i<4;i++) clear_slot(n,i);
+    curl_slist_free_all(n->headers);
     if (n->multi) curl_multi_cleanup(n->multi);
     X509_free(n->root); free(n->origin);
     zc_private_free(n->ca,n->ca_len); zc_private_free(n->cert,n->cert_len); zc_private_free(n->key,n->key_len);
@@ -232,9 +267,9 @@ oom: failure(error,ZC_CONFIG,"Transport allocation failed.");
 fail: zc_net_free(n); return NULL;
 }
 int zc_net_start(ZcNet *n, int stream, const char *path, const char *body) {
-    if (stream<0 || stream>1 || n->slots[stream].easy || path[0]!='/' || path[1]=='/') return 0;
+    if (stream<0 || stream>3 || n->slots[stream].easy || path[0]!='/' || path[1]=='/') return 0;
     struct Slot *s=&n->slots[stream]; s->easy=curl_easy_init(); if (!s->easy) return 0;
-    s->owner=n; s->stream=stream; s->last_rx=monotonic_ms();
+    s->owner=n; s->stream=stream==1; s->media=stream>=2; s->last_rx=monotonic_ms();
     char url[8192];
     if (snprintf(url,sizeof(url),"%s%s",n->origin,path)>=(int)sizeof(url)) { clear_slot(n,stream); return 0; }
     CURLcode code;
@@ -254,10 +289,11 @@ int zc_net_start(ZcNet *n, int stream, const char *path, const char *body) {
     SET(CURLOPT_SSLCERT_BLOB,&cert); SET(CURLOPT_SSLKEY_BLOB,&key);
     SET(CURLOPT_SSL_CTX_FUNCTION,tls_context); SET(CURLOPT_SSL_CTX_DATA,s);
     SET(CURLOPT_HTTPHEADER,n->headers); SET(CURLOPT_NOSIGNAL,1L);
-    SET(CURLOPT_CONNECTTIMEOUT_MS,3000L); SET(CURLOPT_TIMEOUT_MS,stream ? 0L : 7000L);
-    if (!stream) { SET(CURLOPT_LOW_SPEED_LIMIT,1L); SET(CURLOPT_LOW_SPEED_TIME,7L); }
+    SET(CURLOPT_CONNECTTIMEOUT_MS,3000L); SET(CURLOPT_TIMEOUT_MS,s->stream ? 0L : (s->media ? 30000L : 7000L));
+    if (!s->stream) { SET(CURLOPT_LOW_SPEED_LIMIT,1L); SET(CURLOPT_LOW_SPEED_TIME,7L); }
     SET(CURLOPT_NOPROGRESS,0L); SET(CURLOPT_XFERINFOFUNCTION,progress); SET(CURLOPT_XFERINFODATA,s);
     SET(CURLOPT_WRITEFUNCTION,receive); SET(CURLOPT_WRITEDATA,s); SET(CURLOPT_PRIVATE,s);
+    SET(CURLOPT_HEADERFUNCTION,receive_header); SET(CURLOPT_HEADERDATA,s);
     if (body) { SET(CURLOPT_POST,1L); SET(CURLOPT_COPYPOSTFIELDS,body); }
     if (curl_multi_add_handle(n->multi,s->easy)!=CURLM_OK) { code=CURLE_FAILED_INIT; goto setup_error; }
     return 1;
@@ -266,6 +302,16 @@ setup_error:
     snprintf(s->error.message,sizeof(s->error.message),"libcurl TLS/request setup failed: %s. Install a supported libcurl/OpenSSL build, then Reconnect.",curl_easy_strerror(code));
     s->error.kind=ZC_CONFIG; s->done=1; return 1;
 #undef SET
+}
+int zc_net_start_file(ZcNet *n, int lane, const char *path, int fd, size_t expected) {
+    if (lane<0 || lane>1 || fd<0 || expected>8*1024*1024) return 0;
+    int slot=lane+2;
+    if (!zc_net_start(n,slot,path,NULL)) return 0;
+    n->slots[slot].fd=fd; n->slots[slot].expected=expected;
+    return 1;
+}
+const char *zc_net_media_body(ZcNet *n, int lane, size_t *length) {
+    struct Slot *s=&n->slots[lane+2]; *length=s->body ? s->len : 0; return s->body;
 }
 void zc_net_cancel_stream(ZcNet *n) { clear_slot(n,1); }
 void zc_net_cancel_request(ZcNet *n) { clear_slot(n,0); }
@@ -302,6 +348,15 @@ int zc_net_poll(ZcNet *n) {
         if (code==CURLE_OK && s->stream && s->status==200) {
             failure(&s->error,ZC_NETWORK,"Event stream closed. Reconnecting from the saved cursor.");
         }
+        if (code==CURLE_OK && s->media && s->status==200) {
+            curl_off_t length=-1;
+            curl_easy_getinfo(s->easy,CURLINFO_CONTENT_LENGTH_DOWNLOAD_T,&length);
+            if (length<1 || (uint64_t)length!=s->len || (s->expected && s->expected!=s->len) ||
+                (strcmp(s->mime,"image/png") && strcmp(s->mime,"image/jpeg"))) {
+                failure(&s->error,ZC_HTTP,"Invalid image response length or content type.");
+                s->error.curl_code=CURLE_PARTIAL_FILE;
+            }
+        }
         /* Keep the actual HTTP status even for truncated 200 responses. */
         s->done=1;
     }
@@ -314,8 +369,32 @@ long zc_net_status(ZcNet *n, int stream) {
     return status;
 }
 void zc_net_error(ZcNet *n, int stream, ZcError *error) { *error=n->slots[stream].error; }
+const char *zc_net_extensions(ZcNet *n) { return n->slots[1].extensions; }
 const char *zc_net_body(ZcNet *n, size_t *length) { *length=n->slots[0].len; return n->slots[0].body; }
 void zc_net_ack(ZcNet *n, int stream) { clear_slot(n,stream); }
+
+int zc_url_host(const char *value, char *output, size_t size) {
+    if (!value || strlen(value)>8192) return 0;
+    for (const unsigned char *p=(const unsigned char *)value; *p; p++)
+        if (*p<=32 || *p==127 || *p=='\\') return 0;
+    if (strncasecmp(value,"https://",8) && strncasecmp(value,"http://",7)) return 0;
+    const char *authority=strstr(value,"://")+3;
+    if (!*authority || *authority=='/' || *authority=='?' || *authority=='#') return 0;
+    CURLU *url=curl_url(); if (!url) return 0;
+    char *host=NULL, *user=NULL, *password=NULL;
+    int ok=curl_url_set(url,CURLUPART_URL,value,0)==CURLUE_OK &&
+        curl_url_get(url,CURLUPART_HOST,&host,0)==CURLUE_OK && host && *host && strlen(host)<size &&
+        curl_url_get(url,CURLUPART_USER,&user,0)==CURLUE_NO_USER &&
+        curl_url_get(url,CURLUPART_PASSWORD,&password,0)==CURLUE_NO_PASSWORD;
+    if (ok) snprintf(output,size,"%s",host);
+    curl_free(host); curl_free(user); curl_free(password); curl_url_cleanup(url); return ok;
+}
+int zc_url_open(const char *url) {
+    char host[512]; if (!zc_url_host(url,host,sizeof(host))) return 0;
+    /* The desktop API receives a URI argument; no command or shell expansion. */
+    g_app_info_launch_default_for_uri_async(url,NULL,NULL,NULL,NULL);
+    return 1;
+}
 
 struct ZcText { PangoLayout *layout; cairo_surface_t *surface; int width, height, subpixel; double scale; };
 static cairo_t *text_context(cairo_surface_t *surface, double scale, int top, int subpixel) {

@@ -9,8 +9,18 @@ const Notification = @import("Notification.zig");
 const Self = @This();
 const SharedSnapshot = @import("SharedSnapshot.zig");
 const a = std.heap.page_allocator;
-pub const Command = struct { kind: enum { select, draft, send, older, reconnect, check, viewed, hide, unhide }, key: []const u8 = "", text: []const u8 = "", recipient: []const u8 = "" };
+pub const Command = struct { kind: enum { select, draft, send, older, reconnect, check, viewed, hide, unhide, enrichment }, key: []const u8 = "", text: []const u8 = "", recipient: []const u8 = "" };
+pub const Readiness = struct { ready: bool = false, reason: []const u8 = "", permission: ?[]const u8 = null, stale: bool = false, last_refresh_ms: ?i64 = null };
 pub const RelayStatus = struct {
+    event_extensions: []const []const u8 = &.{},
+    enrichment_readiness: struct {
+        identity_directory_v1: Readiness = .{},
+        image_assets_v1: Readiness = .{},
+        image_attachments_v1: Readiness = .{},
+        stored_link_previews_v1: Readiness = .{},
+        reactions_v1: Readiness = .{},
+        contact_avatars_v1: Readiness = .{},
+    } = .{},
     api_version: []const u8,
     server_epoch: []const u8,
     adapter_ready: bool,
@@ -20,6 +30,12 @@ pub const RelayStatus = struct {
         read_history: bool = false,
         live_messages: bool = false,
         attachments: bool = false,
+        identity_directory_v1: bool = false,
+        image_assets_v1: bool = false,
+        image_attachments_v1: bool = false,
+        stored_link_previews_v1: bool = false,
+        reactions_v1: bool = false,
+        contact_avatars_v1: bool = false,
         group_creation: bool = false,
     },
     degraded_reasons: []const []const u8,
@@ -55,6 +71,7 @@ pub const View = struct {
     diagnostics: Diagnostics = .{},
     shared: ?*SharedSnapshot = null,
     content_generation: ?u64 = null,
+    credential_generation: u64 = 0,
     pub fn destroy(v: *View) void {
         if (v.shared) |shared| shared.release();
         v.arena.deinit();
@@ -85,10 +102,13 @@ dirty: bool = true,
 content_dirty: bool = true,
 shared: ?*SharedSnapshot = null,
 content_generation: u64 = 0,
+credential_generation: u64 = 0,
 generation: u64 = 0,
 ack: u64 = 0,
-job: enum { idle, status, sync, chats, history, preview, send, recover } = .idle,
+job: enum { idle, status, sync, chats, identities, history, preview, send, recover, enrichment } = .idle,
 job_key: []const u8 = "",
+enrichment_request: ?Command = null,
+enrichment_after: []const u8 = "",
 preview_at: i64 = 0,
 recover_row: i64 = 0,
 need_history: bool = false,
@@ -96,6 +116,9 @@ older: bool = false,
 job_older: bool = false,
 need_sync: bool = false,
 stream_active: bool = false,
+want_identities: bool = false,
+stream_verified: bool = false,
+extension_rejected: bool = false,
 retry_at: i64 = 0,
 backoff: i64 = 1000,
 status_at: i64 = 0,
@@ -204,6 +227,8 @@ fn work(s: *Self) !void {
         if (s.net) |n| c.zc_net_free(n);
         s.sse.deinit();
         a.free(s.job_key);
+        if (s.enrichment_request) |cmd| freeCommand(cmd);
+        a.free(s.enrichment_after);
         a.free(s.redirect_from);
     }
     try s.publish();
@@ -228,9 +253,18 @@ fn work(s: *Self) !void {
                     s.status = "Refreshing expired history…";
                     s.online = false;
                     s.retry_at = 0;
-                } else s.disconnected(status);
+                } else {
+                    s.disconnected(status);
+                    if (s.extension_rejected) s.status = "Relay did not accept the requested event extension · check relay version, then Reconnect";
+                }
             }
             if (!s.auth_blocked and s.stream_active and !s.online and c.zc_net_status(n, 1) == 200) {
+                s.verifyStream() catch {
+                    s.auth_blocked = true;
+                    s.disconnected(0);
+                    s.status = "Relay did not accept the requested event extension · check relay version, then Reconnect";
+                    continue;
+                };
                 s.online = true;
                 s.backoff = 1000;
                 s.transport_error = std.mem.zeroes(c.ZcError);
@@ -252,6 +286,7 @@ fn work(s: *Self) !void {
     }
 }
 fn connect(s: *Self) !void {
+    s.credential_generation +%= 1;
     s.net = c.zc_net_new(s.config.relay_url, s.config.ca_file, s.config.client_cert_file, s.config.client_key_file, receive, s, &s.transport_error, &s.identity);
     if (s.net == null) {
         s.disconnected(0);
@@ -270,7 +305,21 @@ fn receive(ctx: ?*anyopaque, bytes: [*c]const u8, len: usize) callconv(.c) c_int
     };
     return 1;
 }
+fn verifyStream(s: *Self) !void {
+    if (s.stream_verified) return;
+    const accepted = std.mem.span(c.zc_net_extensions(s.net.?));
+    if (!u.eq(accepted, if (s.want_identities) "identity-v1" else "")) {
+        s.auth_blocked = true;
+        s.extension_rejected = true;
+        return error.ExtensionNotAccepted;
+    }
+    try s.store.set("accepted_extensions", accepted);
+    s.stream_verified = true;
+}
 fn receiveBatch(s: *Self, bytes: []const u8) !void {
+    // Tests feed the parser directly; transport deliveries require negotiation
+    // before even the first event/cursor can enter the database.
+    if (s.net != null) try s.verifyStream();
     defer {
         for (s.batch_notifications.items) |n| n.destroy();
         s.batch_notifications.clearRetainingCapacity();
@@ -361,6 +410,16 @@ fn schedule(s: *Self) !void {
             s.recovery_at = u.now() + 5000;
             try s.request(.recover, try std.fmt.allocPrint(ar, "/v1/send-requests/{s}", .{s.job_key}), null);
         }
+    } else if (s.enrichment_request) |cmd| {
+        const next = try s.store.enrichmentNext(ar, cmd.key, cmd.recipient, cmd.text);
+        if (next) |after| {
+            a.free(s.enrichment_after);
+            s.enrichment_after = try a.dupe(u8, after);
+            try s.request(.enrichment, try std.fmt.allocPrint(ar, "/v1/messages/{s}/enrichment?section={s}&revision={s}&limit=200{s}{s}", .{ try encode(ar, cmd.key), try encode(ar, cmd.text), try encode(ar, cmd.recipient), if (after.len > 0) "&after=" else "", try encode(ar, after) }), null);
+        } else {
+            freeCommand(cmd);
+            s.enrichment_request = null;
+        }
     } else if (s.need_history and s.selected.len > 0 and !std.mem.startsWith(u8, s.selected, "new:")) {
         s.need_history = false;
         try s.setJobKey(s.selected);
@@ -393,8 +452,9 @@ fn schedule(s: *Self) !void {
 fn attach(s: *Self, ar: u.Allocator) !void {
     if (s.stream_active) return;
     const cursor = try s.store.get(ar, "cursor");
-    const path = try std.fmt.allocPrintSentinel(ar, "/v1/events?after={s}", .{try encode(ar, cursor)}, 0);
+    const path = try std.fmt.allocPrintSentinel(ar, "/v1/events?after={s}{s}", .{ try encode(ar, cursor), if (s.want_identities) "&extensions=identity-v1" else "" }, 0);
     if (c.zc_net_start(s.net.?, 1, path, null) == 0) return error.TransportFailure;
+    s.stream_verified = false;
     s.stream_active = true;
     s.status = "Synchronizing live messages…";
     s.dirty = true;
@@ -422,6 +482,16 @@ fn complete(s: *Self) !void {
     s.job = .idle;
     if (job != .status) s.content_dirty = true;
     if (status < 200 or status >= 300) {
+        if (job == .enrichment) {
+            if (s.enrichment_request) |cmd| freeCommand(cmd);
+            s.enrichment_request = null;
+            if (status == 409 or status == 404) {
+                s.need_history = true;
+                s.status = "Message changed · refreshing its content";
+                s.dirty = true;
+                return;
+            }
+        }
         if (job == .history and u.eq(s.job_key, s.selected)) {
             s.need_history = true;
             s.older = s.job_older;
@@ -474,10 +544,32 @@ fn handleResponse(s: *Self, ar: u.Allocator, job: @FieldType(Self, "job"), raw: 
                 s.status = "Unsupported relay API version";
                 return;
             }
+            var identities = false;
+            for (v.event_extensions) |extension| if (u.eq(extension, "identity-v1")) {
+                identities = v.capabilities.identity_directory_v1;
+            };
+            const changed_extension = identities != s.want_identities;
+            s.want_identities = identities;
+            if (!identities) try s.store.set("identity_bootstrapped", "0");
+            const contacts = v.enrichment_readiness.identity_directory_v1;
+            const blocked = !identities or (if (contacts.permission) |p| !u.eq(p, "authorized") else false);
+            const old_blocked = u.eq(try s.store.get(ar, "contacts_blocked"), "1");
+            // After denial, do not reveal older replayed names until the relay
+            // has completed a successful reconciliation. Query failures retain
+            // previously cached presentation, marked stale in Details.
+            const gate = blocked or (old_blocked and !contacts.ready);
+            try s.store.set("contacts_blocked", if (gate) "1" else "0");
+            s.content_dirty = s.content_dirty or gate != old_blocked;
+            if (changed_extension and s.stream_active) {
+                c.zc_net_cancel_stream(s.net.?);
+                s.stream_active = false;
+                s.sse.deinit();
+                s.online = false;
+            }
             s.send_direct = v.capabilities.send_direct;
             s.reply_existing = v.capabilities.reply_existing;
             s.status_at = u.now() + 15000;
-            if (!u.eq(v.server_epoch, try s.store.get(ar, "epoch")) or !u.eq(try s.store.get(ar, "bootstrapped"), "1")) {
+            if (!u.eq(v.server_epoch, try s.store.get(ar, "epoch")) or !u.eq(try s.store.get(ar, "bootstrapped"), "1") or (identities and !u.eq(try s.store.get(ar, "identity_bootstrapped"), "1"))) {
                 if (s.stream_active) {
                     c.zc_net_cancel_stream(s.net.?);
                     s.stream_active = false;
@@ -509,10 +601,20 @@ fn handleResponse(s: *Self, ar: u.Allocator, job: @FieldType(Self, "job"), raw: 
             }
             try s.store.db.exec("COMMIT");
             if (v.next) |next| try s.request(.chats, try std.fmt.allocPrint(ar, "/v1/conversations?limit=200&previews=1&before={s}", .{try encode(ar, next)}), null) else {
-                try s.store.set("bootstrapped", "1");
-                s.need_history = true;
-                try s.attach(ar);
+                if (s.want_identities) {
+                    s.status = "Downloading contact names…";
+                    try s.request(.identities, "/v1/identities?limit=200", null);
+                } else try s.finishBootstrap(ar);
             }
+        },
+        .identities => {
+            const v = try std.json.parseFromSliceLeaky(struct { identities: []const std.json.Value, next: ?[]const u8 }, ar, raw, .{ .ignore_unknown_fields = true });
+            try s.store.db.exec("BEGIN IMMEDIATE");
+            errdefer s.store.db.exec("ROLLBACK") catch {};
+            for (v.identities) |identity| _ = try s.store.upsert(ar, "identity", try u.json(ar, identity));
+            if (v.next == null) try s.store.set("identity_bootstrapped", "1");
+            try s.store.db.exec("COMMIT");
+            if (v.next) |next| try s.request(.identities, try std.fmt.allocPrint(ar, "/v1/identities?limit=200&before={s}", .{try encode(ar, next)}), null) else try s.finishBootstrap(ar);
         },
         .history, .preview => {
             const v = (try std.json.parseFromSlice(struct { messages: []const std.json.Value, next: ?[]const u8 }, ar, raw, .{ .ignore_unknown_fields = true })).value;
@@ -522,12 +624,25 @@ fn handleResponse(s: *Self, ar: u.Allocator, job: @FieldType(Self, "job"), raw: 
             if (job == .history) try s.store.page(s.job_key, v.next) else try s.store.exec("INSERT OR IGNORE INTO previews(chat) VALUES(?)", &.{.{ .text = s.job_key }});
             try s.store.db.exec("COMMIT");
         },
+        .enrichment => {
+            const cmd = s.enrichment_request orelse return;
+            defer {
+                freeCommand(cmd);
+                s.enrichment_request = null;
+            }
+            _ = try s.store.enrichmentPage(ar, raw, cmd.key, cmd.recipient, std.meta.stringToEnum(@import("Content.zig").Section, cmd.text) orelse return error.InvalidSection, s.enrichment_after);
+        },
         .send, .recover => {
             _ = try s.store.upsert(ar, "request", raw);
             s.recovery_at = u.now() + 1000;
         },
         .idle => {},
     }
+}
+fn finishBootstrap(s: *Self, ar: u.Allocator) !void {
+    try s.store.set("bootstrapped", "1");
+    s.need_history = true;
+    try s.attach(ar);
 }
 fn drain(s: *Self) !void {
     // A send can preempt an idempotent background GET. A POST is never
@@ -539,12 +654,13 @@ fn drain(s: *Self) !void {
             break;
         }
         if (s.commands.items[0].kind == .send and s.job != .idle and !s.stop.load(.acquire)) {
-            if (s.online and (s.job == .history or s.job == .preview or s.job == .status or s.job == .recover)) {
+            if (s.online and (s.job == .history or s.job == .preview or s.job == .status or s.job == .recover or s.job == .enrichment)) {
                 switch (s.job) {
                     .history => {
                         s.need_history = true;
                         s.older = s.job_older;
                     },
+                    .enrichment => {},
                     .preview => s.preview_at = 0,
                     .status => s.status_at = 0,
                     .recover => {
@@ -567,6 +683,11 @@ fn drain(s: *Self) !void {
         defer arena.deinit();
         const ar = arena.allocator();
         switch (cmd.kind) {
+            .enrichment => {
+                if (s.enrichment_request == null and std.meta.stringToEnum(@import("Content.zig").Section, cmd.text) != null) {
+                    s.enrichment_request = .{ .kind = .enrichment, .key = try a.dupe(u8, cmd.key), .text = try a.dupe(u8, cmd.text), .recipient = try a.dupe(u8, cmd.recipient) };
+                }
+            },
             .hide, .unhide => {
                 try s.store.setHidden(cmd.key, cmd.kind == .hide);
                 s.content_dirty = true;
@@ -615,6 +736,7 @@ fn drain(s: *Self) !void {
                 s.recovery_at = 0;
                 s.recover_row = 0;
                 s.auth_blocked = false;
+                s.extension_rejected = false;
                 s.retry_at = 0;
                 s.backoff = 1000;
                 s.status_at = 0;
@@ -695,7 +817,7 @@ fn publish(s: *Self) !void {
     var arena = std.heap.ArenaAllocator.init(a);
     errdefer arena.deinit();
     s.generation += 1;
-    v.* = .{ .arena = arena, .snapshot = shared.snapshot, .shared = shared, .content_generation = shared.generation, .status = try arena.allocator().dupe(u8, s.status), .online = s.online, .send_direct = s.send_direct, .reply_existing = s.reply_existing, .generation = s.generation, .ack = s.ack, .loading_history = s.need_history or s.job == .history, .redirect_from = try arena.allocator().dupe(u8, s.redirect_from) };
+    v.* = .{ .arena = arena, .snapshot = shared.snapshot, .shared = shared, .content_generation = shared.generation, .credential_generation = s.credential_generation, .status = try arena.allocator().dupe(u8, s.status), .online = s.online, .send_direct = s.send_direct, .reply_existing = s.reply_existing, .generation = s.generation, .ack = s.ack, .loading_history = s.need_history or s.job == .history, .redirect_from = try arena.allocator().dupe(u8, s.redirect_from) };
     const ar = arena.allocator();
     v.snapshot.draft = try s.store.draft(ar, s.selected);
     const server = try s.store.get(ar, "relay_status");
