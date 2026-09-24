@@ -138,6 +138,7 @@ last_http_status: i64 = 0,
 transport_error: c.ZcError = std.mem.zeroes(c.ZcError),
 identity: c.ZcIdentity = std.mem.zeroes(c.ZcIdentity),
 pub fn start(s: *Self) !void {
+    // The caller holds Config.lockCache() for the lifetime of the worker.
     if (u.c.pipe(&s.wake_pipe) != 0) return error.WorkerWakeUnavailable;
     errdefer {
         for (s.wake_pipe) |fd| _ = u.c.close(fd);
@@ -204,7 +205,7 @@ fn run(s: *Self) void {
         s.status = "Client cache unavailable. Check the data directory and restart.";
         s.online = false;
         const v = a.create(View) catch return;
-        v.* = .{ .arena = std.heap.ArenaAllocator.init(a), .snapshot = .{ .chats = &.{}, .messages = &.{}, .pending = &.{}, .selected = "", .draft = "", .epoch = "", .more = false }, .status = if (err == error.ClientAlreadyRunning) "This cache is already open in another Zimbr window." else s.status, .online = false, .send_direct = false, .reply_existing = false, .generation = s.generation + 1, .ack = s.ack };
+        v.* = .{ .arena = std.heap.ArenaAllocator.init(a), .snapshot = .{ .chats = &.{}, .messages = &.{}, .pending = &.{}, .selected = "", .draft = "", .epoch = "", .more = false }, .status = s.status, .online = false, .send_direct = false, .reply_existing = false, .generation = s.generation + 1, .ack = s.ack };
         s.mutex.lockUncancelable(s.io);
         defer s.mutex.unlock(s.io);
         if (s.view) |old| old.destroy();
@@ -214,12 +215,6 @@ fn run(s: *Self) void {
 fn work(s: *Self) !void {
     const path = try std.fmt.allocPrintSentinel(a, "{s}/client.db", .{s.config.data}, 0);
     defer a.free(path);
-    const lockpath = try std.fmt.allocPrintSentinel(a, "{s}/client.lock", .{s.config.data}, 0);
-    defer a.free(lockpath);
-    const lock = u.c.zr_lock(lockpath);
-    if (lock < 0) return error.ClientAlreadyRunning;
-    defer _ = u.c.close(lock);
-    // Own the cache before running schema migrations or opening a writer.
     s.store = try Store.open(path);
     defer s.store.close();
     s.selected = try s.store.get(a, "selected");

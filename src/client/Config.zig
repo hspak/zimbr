@@ -20,6 +20,15 @@ const Preferences = struct {
     data_dir: ?[]const u8 = null,
     enter_to_send: bool = true,
 };
+// Hold this descriptor until the client and its workers have shut down.
+pub fn lockCache(s: Self) !c_int {
+    const a = std.heap.page_allocator;
+    const path = try std.fmt.allocPrintSentinel(a, "{s}/client.lock", .{s.data}, 0);
+    defer a.free(path);
+    const lock = u.c.zr_lock(path);
+    if (lock < 0) return error.ClientAlreadyRunning;
+    return lock;
+}
 fn preferences(a: u.Allocator, raw: []const u8) !Preferences {
     const value = try std.json.parseFromSlice(std.json.Value, a, raw, .{});
     defer value.deinit();

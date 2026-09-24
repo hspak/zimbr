@@ -8,6 +8,8 @@ const Media = @import("client/Media.zig");
 const types = @import("protocol/types.zig");
 pub fn main(init: std.process.Init) !void {
     const config = try Config.parse(init);
+    const cache_lock = try config.lockCache();
+    defer _ = u.c.close(cache_lock);
     var worker = Worker{ .io = init.io, .config = config };
     try worker.start();
     defer worker.shutdown();

@@ -44,7 +44,11 @@ const WindowMetrics = struct {
 
 pub fn main(init: std.process.Init) void {
     run(init) catch |err| {
-        std.debug.print("zimbr: {s}\n", .{@errorName(err)});
+        if (err == error.ClientAlreadyRunning) {
+            std.debug.print("zimbr: another client is already using this data directory.\n", .{});
+        } else {
+            std.debug.print("zimbr: {s}\n", .{@errorName(err)});
+        }
         std.process.exit(1);
     };
 }
@@ -54,6 +58,8 @@ fn clayError(data: clay.ErrorData) callconv(.c) void {
 }
 fn run(init: std.process.Init) !void {
     const config = try Config.parse(init);
+    const cache_lock = try config.lockCache();
+    defer _ = u.c.close(cache_lock);
     rl.setTraceLogLevel(.warning);
     rl.setConfigFlags(.{ .window_resizable = true, .window_highdpi = true });
     rl.initWindow(1120, 780, "Zimbr");
@@ -620,7 +626,7 @@ const App = struct {
         const status_y = @round((footer.y + (footer.height - status_size.y) / 2) * scale) / scale;
         // Align with the visible glyphs, excluding the font's line and texture padding.
         const dot_y = status_y + s.text.lineInkCenterY(status, 11, status_width);
-        rl.drawCircleV(.{ .x = footer.x + sidebar_padding + sidebar_icon_inset + sidebar_icon_size / 2, .y = dot_y }, 3, if (online) theme.colors.success else theme.colors.danger);
+        drawStatusDot(.{ .x = footer.x + sidebar_padding + sidebar_icon_inset + sidebar_icon_size / 2, .y = dot_y }, scale, if (online) theme.colors.success else theme.colors.danger);
         s.text.drawLine(status, status_x, status_y, 11, status_width, theme.colors.muted, theme.colors.sidebar);
         const fps_width: f32 = if (client_options.fps_counter) 72 else 0;
         if (s.show_details) s.drawNotice(areas.composer, ar);
@@ -641,6 +647,26 @@ const App = struct {
             s.captured = rl.loadImageFromScreen() catch null;
         }
         if (!rl.isMouseButtonDown(.left)) s.message_selection.dragging = false;
+    }
+    fn drawStatusDot(center: rl.Vector2, scale: f32, color: rl.Color) void {
+        // Keep this six-pixel dot symmetric on the physical pixel grid, with
+        // a one-pixel antialiased edge even at fractional display scales.
+        const cx = @round(center.x * scale * 2) / 2;
+        const cy = @round(center.y * scale * 2) / 2;
+        const radius = 3 * scale;
+        var y = @floor(cy - radius - 0.5);
+        while (y < cy + radius + 0.5) : (y += 1) {
+            var x = @floor(cx - radius - 0.5);
+            while (x < cx + radius + 0.5) : (x += 1) {
+                const dx = x + 0.5 - cx;
+                const dy = y + 0.5 - cy;
+                const coverage = std.math.clamp(radius + 0.5 - @sqrt(dx * dx + dy * dy), 0, 1);
+                if (coverage == 0) continue;
+                var pixel = color;
+                pixel.a = @intFromFloat(@round(@as(f32, @floatFromInt(color.a)) * coverage));
+                rl.drawRectangleRec(.{ .x = x / scale, .y = y / scale, .width = 1 / scale, .height = 1 / scale }, pixel);
+            }
+        }
     }
     fn toggleDetails(s: *App) void {
         s.show_details = !s.show_details;
