@@ -394,40 +394,32 @@ After logout/reboot, this agent requires the user's graphical login session.
 ## Update the running relay
 
 Run this on the Mac, in Terminal or over SSH as the user who runs the relay.
-Keep that user logged into the Mac's graphical session. These commands assume
-the checkout is at `~/code/zimbr` and use the Apple Silicon Zig, OpenSSL, and
-Python installations under `.tools`; adjust those paths for another setup.
-Commit or stash local changes first. If the pull cannot fast-forward, resolve
-the checkout before retrying.
+Keep that user logged into the Mac's graphical session. From the checkout, run:
 
 ```sh
-(
-  set -eu
-  cd "$HOME/code/zimbr"
-  git switch main
-  git pull --ff-only
-
-  .tools/zig-aarch64-macos-0.16.0/zig build relay test test-macos-enrichment \
-    -Doptimize=ReleaseFast \
-    -Dopenssl-prefix="$PWD/.tools/openssl-3.5"
-
-  .tools/python/bin/python3 packaging/macos/install.py --install --start \
-    --openssl-license "$PWD/.tools/openssl-build/openssl-3.5.8/LICENSE.txt"
-
-  launchctl print "gui/$(id -u)/com.hsp.zimbr.relay"
-  "$HOME/Applications/Zimbr Relay.app/Contents/MacOS/relay" doctor
-)
+./tools/update-relay.sh --release=safe
 ```
 
-The commands stop if a step fails. The install step replaces the app used by
-LaunchAgent and restarts the service with the rebuilt executable. It reuses the
-installed credentials and persistent signing identity, preserves existing
-messages and routes, and backs up the journal under
-`~/Library/Application Support/Zimbr/backups/`.
+The script builds the current checkout, including local edits, in ReleaseSafe
+and runs the relay and native enrichment tests before installing. It uses a fresh
+build output directory and stops if a step fails. It reuses the installed
+credentials and persistent signing identity, preserves existing messages and
+routes, backs up the journal under `~/Library/Application Support/Zimbr/backups/`,
+and restarts the LaunchAgent. It then checks the build UUIDs, signed binary hashes,
+and the running process's executable path and inode, printing the verified PID
+and relay SHA-256. It does not switch branches or pull changes.
 
-Check that `launchctl print` reports `state = running`, then review the installed
-relay's `doctor` output for configuration and Messages access problems. The
-installer also checks that the restarted service opens its configured listener.
+Defaults use the Apple Silicon Zig, OpenSSL, and Python installations under
+`.tools`, with PATH fallbacks for Zig and Python. Use `ZIMBR_ZIG`, `ZIMBR_PYTHON`,
+`ZIMBR_OPENSSL_PREFIX`, and `ZIMBR_OPENSSL_LICENSE` to override those paths;
+`./tools/update-relay.sh --help` describes the options. Run without `sudo`.
+
+The installer also checks that the restarted service opens its configured
+listener. For configuration and Messages access diagnostics, run:
+
+```sh
+"$HOME/Applications/Zimbr Relay.app/Contents/MacOS/relay" doctor
+```
 
 ## Operation
 
