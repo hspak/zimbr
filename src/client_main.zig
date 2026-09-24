@@ -769,12 +769,12 @@ const App = struct {
         rl.drawLine(@intFromFloat(search.x), @intFromFloat(divider_y), @intFromFloat(search.x + search.width), @intFromFloat(divider_y), theme.colors.line);
     }
     fn drawAvatar(s: *App, r: rl.Rectangle, name: []const u8, style: theme.Participant, size: i32) void {
-        rl.drawRectangleRounded(r, 0.25, 8, style.bubble);
+        rl.drawCircleV(.{ .x = r.x + r.width / 2, .y = r.y + r.height / 2 }, @min(r.width, r.height) / 2, style.bubble);
         const safe = display.prefix(name, 128, 1);
         var ascii = [_]u8{if (safe.len > 0 and std.ascii.isAlphabetic(safe[0])) std.ascii.toUpper(safe[0]) else '+'};
         const initial: []const u8 = if (safe.len > 0 and safe[0] >= 128) safe[0..bridge.zc_text_boundary(safe.ptr, safe.len, 0, 1)] else &ascii;
         const measured = s.text.lineSize(initial, size, r.width);
-        s.text.drawLine(initial, r.x + (r.width - measured.x) / 2, r.y + (r.height - measured.y) / 2, size, r.width, style.label, style.bubble);
+        s.text.drawLine(initial, r.x + (r.width - measured.x) / 2, r.y + (r.height - measured.y) / 2, size, r.width, style.label, null);
     }
     fn detailSection(s: *App, label: []const u8, r: rl.Rectangle, y: *f32) void {
         y.* += 18;
@@ -1308,13 +1308,13 @@ const App = struct {
         };
     }
     fn drawPeerAvatar(s: *App, r: rl.Rectangle, name: []const u8, style: theme.Participant, size: i32, service: []const u8, address: []const u8) void {
+        if (address.len > 0) if (s.view) |view| if (s.media) |media| {
+            if (view.snapshot.directory.avatar(service, address)) |asset| if (s.images.get(media, asset)) |entry| if (entry.availableTexture()) |texture| {
+                ImageCache.drawAvatar(texture, r);
+                return;
+            };
+        };
         s.drawAvatar(r, name, style, size);
-        if (address.len == 0) return;
-        const view = s.view orelse return;
-        const asset = view.snapshot.directory.avatar(service, address) orelse return;
-        const media = s.media orelse return;
-        const entry = s.images.get(media, asset) orelse return;
-        if (entry.availableTexture()) |texture| ImageCache.draw(texture, r);
     }
     fn drawAsset(s: *App, asset: t.AssetRef, r: rl.Rectangle, chat: []const u8) void {
         const media = s.media orelse {

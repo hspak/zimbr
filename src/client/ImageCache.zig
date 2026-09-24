@@ -141,3 +141,41 @@ pub fn draw(texture: rl.Texture2D, bounds: rl.Rectangle) void {
     const h = @as(f32, @floatFromInt(texture.height)) * scale;
     rl.drawTexturePro(texture, .{ .x = 0, .y = 0, .width = @floatFromInt(texture.width), .height = @floatFromInt(texture.height) }, .{ .x = bounds.x + (bounds.width - w) / 2, .y = bounds.y + (bounds.height - h) / 2, .width = w, .height = h }, .{ .x = 0, .y = 0 }, 0, rl.Color.white);
 }
+
+pub fn drawAvatar(texture: rl.Texture2D, bounds: rl.Rectangle) void {
+    const radius = @min(bounds.width, bounds.height) / 2;
+    if (radius <= 0 or texture.width <= 0 or texture.height <= 0) return;
+    const center = rl.Vector2{ .x = bounds.x + bounds.width / 2, .y = bounds.y + bounds.height / 2 };
+    // Center-crop rectangular photos to fill the circle without stretching.
+    const crop: f32 = @floatFromInt(@min(texture.width, texture.height));
+    const uv = rl.Vector2{ .x = crop / @as(f32, @floatFromInt(texture.width)) / 2, .y = crop / @as(f32, @floatFromInt(texture.height)) / 2 };
+    const inner = @max(0, radius - 1 / @max(1, rl.getWindowScaleDPI().x));
+    const segments = 64;
+    rl.gl.rlSetTexture(texture.id);
+    rl.gl.rlBegin(rl.gl.rl_triangles);
+    rl.gl.rlNormal3f(0, 0, 1);
+    for (0..segments) |i| {
+        const angle = -2 * std.math.pi * @as(f32, @floatFromInt(i)) / segments;
+        const next = -2 * std.math.pi * @as(f32, @floatFromInt(i + 1)) / segments;
+        const p = rl.Vector2{ .x = @cos(angle), .y = @sin(angle) };
+        const q = rl.Vector2{ .x = @cos(next), .y = @sin(next) };
+        avatarVertex(center, .{ .x = 0, .y = 0 }, radius, uv, 0, 255);
+        avatarVertex(center, p, radius, uv, inner, 255);
+        avatarVertex(center, q, radius, uv, inner, 255);
+        // A one-pixel transparent fringe smooths the edge at every DPI.
+        avatarVertex(center, p, radius, uv, inner, 255);
+        avatarVertex(center, p, radius, uv, radius, 0);
+        avatarVertex(center, q, radius, uv, radius, 0);
+        avatarVertex(center, p, radius, uv, inner, 255);
+        avatarVertex(center, q, radius, uv, radius, 0);
+        avatarVertex(center, q, radius, uv, inner, 255);
+    }
+    rl.gl.rlEnd();
+    rl.gl.rlSetTexture(0);
+}
+
+fn avatarVertex(center: rl.Vector2, direction: rl.Vector2, radius: f32, uv: rl.Vector2, distance: f32, alpha: u8) void {
+    rl.gl.rlColor4ub(255, 255, 255, alpha);
+    rl.gl.rlTexCoord2f(0.5 + direction.x * uv.x * distance / radius, 0.5 + direction.y * uv.y * distance / radius);
+    rl.gl.rlVertex2f(center.x + direction.x * distance, center.y + direction.y * distance);
+}
