@@ -1,5 +1,5 @@
 //! Immutable message blocks. Missing/unverified placement falls back to the
-//! entire original text, then attachments and cards, without losing captions.
+//! original captions, then attachments and cards, without displaying anchors.
 const std = @import("std");
 const t = @import("../protocol/types.zig");
 const u = @import("../common.zig");
@@ -36,26 +36,35 @@ pub fn prepare(a: u.Allocator, m: t.Message) ![]const Block {
     // Incomplete or malformed ranges must not swallow the original caption.
     var text_bytes: usize = 0;
     var valid_text = mapped;
-    for (parts) |part| if (part.kind == .text) {
-        const value = partText(m, part) orelse {
-            valid_text = false;
-            continue;
-        };
-        const original = m.text orelse "";
-        if (text_bytes > original.len or value.len > original.len - text_bytes or !u.eq(original[text_bytes..][0..value.len], value)) valid_text = false;
-        text_bytes +|= value.len;
-    };
-    const original: []const u8 = m.text orelse "";
-    valid_text = valid_text and text_bytes == original.len;
+    for (parts) |part| {
+        if (part.kind == .text) {
+            const value = partText(m, part) orelse {
+                valid_text = false;
+                continue;
+            };
+            if (text_bytes > text.len or value.len > text.len - text_bytes or !u.eq(text[text_bytes..][0..value.len], value)) valid_text = false;
+            text_bytes +|= value.len;
+        } else if (part.kind == .attachment and text_bytes <= text.len and std.mem.startsWith(u8, text[text_bytes..], display.object_marker)) {
+            // Verified attachment parts consume an anchor in the source text,
+            // even though that anchor is absent from the rendered text blocks.
+            text_bytes += display.object_marker.len;
+        }
+    }
+    valid_text = valid_text and text_bytes == text.len;
     if (!valid_text) if (m.text) |value| if (value.len > 0) {
-        try blocks.append(a, .{ .source_text = value, .value = .{ .text = display.message(a, value) } });
-        text_present = true;
+        const visible = display.message(a, value);
+        if (visible.len > 0) {
+            try blocks.append(a, .{ .source_text = value, .value = .{ .text = visible } });
+            text_present = true;
+        }
     };
     if (mapped) for (parts) |part| {
         switch (part.kind) {
             .text => if (valid_text) {
                 const value = partText(m, part) orelse continue;
-                try blocks.append(a, .{ .part_id = part.id, .source_text = value, .value = .{ .text = display.message(a, value) } });
+                const visible = display.message(a, value);
+                if (visible.len == 0) continue;
+                try blocks.append(a, .{ .part_id = part.id, .source_text = value, .value = .{ .text = visible } });
                 text_present = true;
             },
             .attachment => for (m.attachments, 0..) |item, i| {
@@ -163,6 +172,73 @@ test "composite blocks keep captions, source order, part reactions and overflow"
     try std.testing.expect(!blocks[2].value.reactions[0].unresolved);
     try std.testing.expect(blocks[3].value.reactions[0].unresolved);
     try std.testing.expectEqual(Section.reactions, blocks[4].value.more);
+}
+
+test "attachment anchors preserve mapped captions and reaction positions without rendering OBJ" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const before = "Caption 👩🏽‍💻 ";
+    const after = " tail";
+    const source = before ++ display.object_marker ++ after;
+    const m = t.Message{
+        .sender = "peer",
+        .service = "imessage",
+        .direction = .incoming,
+        .timestamp = "",
+        .kind = .attachment,
+        .decoding = .attributed,
+        .observed_status = .received,
+        .text = source,
+        .attachments = &.{.{ .id = "photo", .name = "photo.png", .mime_type = "image/png", .bytes = "20" }},
+        .parts = &.{
+            .{ .id = "before", .kind = .text, .text_start = 0, .text_length = before.len },
+            .{ .id = "image", .kind = .attachment, .attachment_id = "photo" },
+            .{ .id = "after", .kind = .text, .text_start = before.len + display.object_marker.len, .text_length = after.len },
+        },
+        .enrichment = .{ .part_mapping = .resolved },
+        .reactions = &.{.{ .id = "r", .part_id = "after", .part_state = .resolved, .actor = .{ .service = "imessage", .is_self = true }, .key = "heart" }},
+    };
+    const blocks = try prepare(a, m);
+    try std.testing.expectEqual(@as(usize, 4), blocks.len);
+    try std.testing.expectEqualStrings(before, blocks[0].value.text);
+    try std.testing.expectEqualStrings("photo", blocks[1].value.attachment.id);
+    try std.testing.expectEqualStrings(after, blocks[2].value.text);
+    try std.testing.expectEqualStrings("after", blocks[2].part_id.?);
+    try std.testing.expect(!blocks[3].value.reactions[0].unresolved);
+    try std.testing.expectEqualStrings(source, m.text.?);
+}
+
+test "unmapped attachment anchors leave captions or attachment rows and keep unavailable fallbacks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const source = display.object_marker ++ "Caption 👋" ++ display.object_marker;
+    var m = t.Message{
+        .sender = "peer",
+        .service = "imessage",
+        .direction = .incoming,
+        .timestamp = "",
+        .kind = .attachment,
+        .decoding = .plain,
+        .observed_status = .received,
+        .text = source,
+        .attachments = &.{.{ .id = "photo", .name = "photo.png", .mime_type = "image/png", .bytes = "20" }},
+    };
+    const caption = try prepare(a, m);
+    try std.testing.expectEqual(@as(usize, 2), caption.len);
+    try std.testing.expectEqualStrings("Caption 👋", caption[0].value.text);
+    try std.testing.expectEqualStrings(source, caption[0].source_text.?);
+    try std.testing.expectEqualStrings("Caption 👋", display.summary(a, m));
+    m.text = display.object_marker ++ "\n" ++ display.object_marker;
+    const photo = try prepare(a, m);
+    try std.testing.expectEqual(@as(usize, 1), photo.len);
+    try std.testing.expectEqualStrings("photo", photo[0].value.attachment.id);
+    try std.testing.expectEqualStrings("Photo", display.summary(a, m));
+    m.attachments = &.{};
+    m.metadata_deferred = true;
+    try std.testing.expectEqualStrings("Attachment · preview unavailable", display.record(a, m));
+    try std.testing.expectEqualStrings("Attachment", display.summary(a, m));
 }
 
 test "many reactions group each actor once across many target parts" {

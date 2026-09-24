@@ -387,7 +387,10 @@ pub fn snapshotWithMessages(s: Self, a: u.Allocator, selected_key: []const u8, s
             const newer_position = latest == null or std.mem.order(u8, p.timestamp, latest.?.timestamp) == .gt or
                 (u.eq(p.timestamp, latest.?.timestamp) and std.mem.order(u8, p.message_id, latest.?.id) == .gt);
             const newer_revision = latest != null and u.eq(p.message_id, latest.?.id) and (try std.fmt.parseInt(i64, p.revision, 10)) > (try std.fmt.parseInt(i64, latest.?.revision, 10));
-            if (newer_position or newer_revision) preview = if (p.text.len > 0) p.text else p.kind;
+            if (newer_position or newer_revision) {
+                const text = display.withoutObjectMarkers(a, p.text);
+                preview = if (text.len > 0) text else if (u.eq(p.kind, "attachment")) "Attachment" else p.kind;
+            }
         }
         try chats.append(a, .{ .value = v, .preview = preview, .unread = q.int(1), .hidden = q.int(4) != 0 });
     }

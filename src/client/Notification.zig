@@ -69,7 +69,7 @@ test "new notifications resolve names, preserve captions and titles, and respect
     defer caption.destroy();
     try std.testing.expectEqualStrings(identity.display_name.?, caption.summary);
     try std.testing.expectEqualStrings(message.text.?, caption.body);
-    message.text = null;
+    message.text = "\u{fffc}\n\u{fffc}";
     const multiple = try create(store, message);
     defer multiple.destroy();
     try std.testing.expectEqualStrings("2 photos", multiple.body);

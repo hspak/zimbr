@@ -390,7 +390,7 @@ test "sidebar projections never replace full messages or roll back newer preview
     try std.testing.expectEqualStrings("Hello 👋", full.messages[0].text.?);
     try std.testing.expectEqualStrings("Hello 👋", full.chats[0].preview);
     preview.revision = "3";
-    preview.text = "Newer text";
+    preview.text = "\u{fffc}Newer text\u{fffc}";
     try s.savePreview(ar, try u.json(ar, preview));
     preview.revision = "1";
     preview.text = "Stale text";
@@ -398,6 +398,13 @@ test "sidebar projections never replace full messages or roll back newer preview
     const updated = try s.snapshot(ar, "c1");
     try std.testing.expectEqualStrings("Newer text", updated.chats[0].preview);
     try std.testing.expectEqualStrings("Hello 👋", updated.messages[0].text.?);
+    preview.revision = "4";
+    preview.kind = "attachment";
+    preview.text = "\u{fffc}\n\u{fffc}";
+    try s.savePreview(ar, try u.json(ar, preview));
+    const attachment = try s.snapshot(ar, "c1");
+    try std.testing.expectEqualStrings("Attachment", attachment.chats[0].preview);
+    try std.testing.expectEqualStrings("Hello 👋", attachment.messages[0].text.?);
 }
 test "composer deletes graphemes and restores Unicode selection with undo and redo" {
     var e = Editor{};

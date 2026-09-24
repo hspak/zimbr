@@ -122,9 +122,24 @@ pub fn prefix(value: []const u8, limit: usize, lines: usize) []const u8 {
     return value[0..end];
 }
 
+pub const object_marker = "\u{fffc}";
+
+/// Attachment anchors are structural text, not a user-visible caption. Keep
+/// source strings intact because part offsets and whole-message copying use them.
+pub fn withoutObjectMarkers(a: std.mem.Allocator, value: []const u8) []const u8 {
+    if (std.mem.indexOf(u8, value, object_marker) == null) return value;
+    const text = std.mem.replaceOwned(u8, a, value, object_marker, "") catch return unavailable;
+    if (std.mem.trim(u8, text, " \t\r\n").len == 0) {
+        a.free(text);
+        return "";
+    }
+    return text;
+}
+
 pub fn message(a: std.mem.Allocator, value: []const u8) []const u8 {
-    const visible = prefix(value, max_bytes, max_lines);
-    if (visible.len == value.len) return value;
+    const text = withoutObjectMarkers(a, value);
+    const visible = prefix(text, max_bytes, max_lines);
+    if (visible.len == text.len) return text;
     return std.mem.concat(a, u8, &.{ visible, shortened }) catch unavailable;
 }
 
@@ -132,6 +147,7 @@ pub fn record(a: std.mem.Allocator, m: t.Message) []const u8 {
     return message(a, content(a, m));
 }
 fn content(a: std.mem.Allocator, m: t.Message) []const u8 {
+    const text = withoutObjectMarkers(a, m.text orelse "");
     if (m.reaction_event) |event| {
         const state = switch (event.resolution) {
             .pending => "Target not available yet",
@@ -140,13 +156,13 @@ fn content(a: std.mem.Allocator, m: t.Message) []const u8 {
             .unsupported => "Unsupported reaction",
             .malformed => "Reaction target could not be decoded",
         };
-        return std.fmt.allocPrint(a, "Reaction {s} · {s}{s}{s}", .{ event.emoji orelse event.key orelse "", state, if (m.text != null) "\n" else "", m.text orelse "" }) catch state;
+        return std.fmt.allocPrint(a, "Reaction {s} · {s}{s}{s}", .{ event.emoji orelse event.key orelse "", state, if (text.len > 0) "\n" else "", text }) catch state;
     }
-    if (m.text) |text| if (text.len > 0) {
+    if (text.len > 0) {
         if (m.kind == .text or m.kind == .attachment) return text;
         if (m.kind == .reaction or m.kind == .system or m.kind == .unsupported)
             return std.fmt.allocPrint(a, "{s} · {s}", .{ if (m.kind == .reaction) "Reaction" else if (m.kind == .system) "Conversation update" else "Unsupported content", text }) catch text;
-    };
+    }
     if (m.attachments.len > 0) return std.fmt.allocPrint(a, "Attachment · {s}\n{s} · {s} bytes\nDownloads are not available yet.", .{ m.attachments[0].name, m.attachments[0].mime_type, m.attachments[0].bytes }) catch "Attachment";
     return switch (m.kind) {
         .attachment => "Attachment · preview unavailable",
@@ -169,6 +185,8 @@ test "display limits preserve UTF8 and never change full message content" {
     const a = arena.allocator();
     const normal = "Café é 👩‍💻 🇺🇸\nשלום مرحبا <b>literal text</b>";
     try std.testing.expectEqualStrings(normal, message(a, normal));
+    try std.testing.expectEqualStrings(normal, message(a, object_marker ++ normal ++ object_marker));
+    try std.testing.expectEqualStrings("", message(a, object_marker ++ "\n" ++ object_marker));
     const long = try std.mem.concat(a, u8, &.{ "x" ** (max_bytes - 1), "👩‍💻", "tail" });
     const preview = message(a, long);
     try std.testing.expect(std.unicode.utf8ValidateSlice(preview));
@@ -185,7 +203,8 @@ test "display limits preserve UTF8 and never change full message content" {
 
 /// Captions always win; image arrival never changes notification eligibility.
 pub fn summary(a: std.mem.Allocator, m: t.Message) []const u8 {
-    if (m.text) |text| if (text.len > 0) return text;
+    const text = withoutObjectMarkers(a, m.text orelse "");
+    if (text.len > 0) return text;
     var photos: usize = 0;
     for (m.attachments) |item| if (!item.preview_artwork and (item.image != null or std.mem.startsWith(u8, item.mime_type, "image/"))) {
         photos += 1;
