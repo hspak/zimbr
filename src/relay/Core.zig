@@ -2,6 +2,7 @@ const std = @import("std");
 const u = @import("../common.zig");
 const t = @import("../protocol/types.zig");
 const Journal = @import("Journal.zig");
+const Reactions = @import("Reactions.zig");
 const Adapter = if (@import("options").fake) @import("adapter/fake.zig") else @import("adapter/macos.zig");
 const fake = @import("options").fake;
 const observation_window_ms = 10000;
@@ -10,6 +11,11 @@ const Signal = @import("../Signal.zig");
 io: std.Io,
 journal: Journal,
 source_path: [:0]const u8,
+contacts_phone_region: []const u8 = "",
+contacts_status: @import("adapter/Contacts.zig").Status = .{},
+source_features: Adapter.Source.Features = .{},
+assets_service: ?@import("Assets.zig") = null,
+assets_reason: []const u8 = "starting",
 mutex: std.Io.Mutex = .init,
 read_ready: bool = false,
 automation_ready: bool = fake,
@@ -74,6 +80,7 @@ pub fn ingestLoop(self: *Self) void {
 pub fn ingest(self: *Self, a: u.Allocator) !void {
     var source = try Adapter.open(a, self.source_path);
     defer source.close();
+    self.source_features = source.features;
     try source.db.exec("BEGIN");
     defer source.db.exec("ROLLBACK") catch {};
     var batch = ImportBatch{ .source = source };
@@ -86,11 +93,25 @@ pub fn ingest(self: *Self, a: u.Allocator) !void {
     var reset = false;
     if (stored_identity) |identity| {
         const legacy_candidate = !u.eq(identity, source.identity) and live > 0 and source.legacyIdentityCandidate(identity);
-        reset = (!u.eq(identity, source.identity) and !legacy_candidate) or high < live;
+        reset = !u.eq(identity, source.identity) and !legacy_candidate;
+        const anchors = if (!reset) try Reactions.anchorsMatch(j, a, source) else 0;
+        if (!reset and anchors == 0 and try j.db.scalar("SELECT count(*) FROM ordinary_anchors") > 0) reset = true;
         if (!reset and live > 0) {
             const current = try source.guid(a, live);
             const saved = try j.progress(a, "anchor");
-            reset = current == null or saved == null or saved.?.len == 0 or !u.eq(current.?, saved.?);
+            const missing = high < live or current == null or saved == null or saved.?.len == 0 or !u.eq(current.?, saved.?);
+            if (missing) {
+                if (!legacy_candidate and anchors >= 2 and saved != null and try Reactions.deletedAnchor(j, source, live, saved.?)) {
+                    var anchor = try j.db.prepare("SELECT coalesce(max(source_row),0) FROM ordinary_anchors WHERE source_row<?");
+                    defer anchor.close();
+                    try anchor.bind(&.{.{ .int = live }});
+                    _ = try anchor.step();
+                    live = anchor.int(0);
+                    batch.rebased = true;
+                    try j.setPosition(a, "live", live);
+                    try j.setPosition(a, "rolling", 0);
+                } else reset = true;
+            }
         }
         if (reset) {
             try j.reset(a);
@@ -148,6 +169,21 @@ pub fn ingest(self: *Self, a: u.Allocator) !void {
         if (rows.len == 0) try j.execute("DELETE FROM reconcile_chats WHERE conversation_id=?", &.{.{ .text = cid }}) else try j.execute("UPDATE reconcile_chats SET after_row=? WHERE conversation_id=?", &.{ .{ .int = rows[rows.len - 1] }, .{ .text = cid } });
     }
     try self.reconcile(a, &batch, complete);
+    // Existing journals receive a distinct resumable enrichment pass. Recent
+    // and requested chats above remain prioritized while this drains.
+    const enrichment_backfill = (try j.progress(a, "enrichment_backfill_v1")) orelse "0";
+    if (!u.eq(enrichment_backfill, "complete")) {
+        const position = std.fmt.parseInt(i64, enrichment_backfill, 10) catch 0;
+        const rows = try source.rowsFor(a, .rolling, position, 0);
+        for (rows) |row| try self.importRow(a, &batch, row, "reconciliation", complete);
+        if (rows.len == 0) try j.setProgress("enrichment_backfill_v1", "complete") else try j.setPosition(a, "enrichment_backfill_v1", rows[rows.len - 1]);
+    }
+    if (source.features.reaction_target) {
+        for (try Reactions.trackedRows(j, a, source)) |row| try self.importRow(a, &batch, row, "reconciliation", complete);
+        for (try Reactions.missingTargets(j, a, source)) |row| try self.importRow(a, &batch, row, "reconciliation", complete);
+        try Reactions.project(j, a);
+    }
+    try j.backfillIdentities(a);
     try j.commit();
     self.read_ready = true;
     self.degraded = if (self.automation_ready) "" else self.automation_error;
@@ -159,6 +195,7 @@ const ImportBatch = struct {
     source: Adapter.Source,
     rows: std.AutoHashMapUnmanaged(i64, void) = .empty,
     chats: std.AutoHashMapUnmanaged(i64, ?[]const u8) = .empty,
+    rebased: bool = false,
 };
 fn importChat(self: *Self, a: u.Allocator, batch: *ImportBatch, row: i64, origin: []const u8, complete: bool) !?[]const u8 {
     const cached = try batch.chats.getOrPut(a, row);
@@ -182,14 +219,28 @@ fn importRow(self: *Self, a: u.Allocator, batch: *ImportBatch, row: i64, origin:
         // A recent/rolling scan can discover a new row before the bounded live
         // scan reaches it, including rows inserted between queries. Preserve
         // its live origin so an incoming message can still notify clients.
-        const event_origin = remembered orelse if (u.eq(origin, "reconciliation") and row > try j.position(a, "live")) "live" else origin;
+        var event_origin = remembered orelse if (u.eq(origin, "reconciliation") and row > try j.position(a, "live")) "live" else origin;
+        if (batch.rebased and remembered == null) {
+            var known = try j.db.prepare("SELECT 1 FROM messages WHERE source=?");
+            defer known.close();
+            try known.bind(&.{.{ .text = m.source }});
+            if (try known.step()) event_origin = "reconciliation";
+        }
         if (m.pending and remembered == null) try j.setProgress(origin_key, event_origin);
         if (m.pending) try j.execute("INSERT INTO pending_source(source_row,attempt_ms) VALUES(?,?) ON CONFLICT(source_row) DO UPDATE SET attempt_ms=excluded.attempt_ms", &.{ .{ .int = row }, .{ .int = u.now() } }) else try j.execute("DELETE FROM pending_source WHERE source_row=?", &.{.{ .int = row }});
         if (m.chat_row == 0 or m.source.len == 0) return;
         if (try self.importChat(a, batch, m.chat_row, event_origin, complete)) |cid| {
             var v = m.value;
             v.conversation_id = cid;
+            if (self.assets_service != null and source.features.attachment_filename) try @import("Assets.zig").attach(j, a, m.source, &v, m.attachment_sources);
+            if (self.assets_service != null) try @import("Assets.zig").previews(j, a, m.source, &v, m.link_artwork);
+            if (m.reaction) |obs| v.reaction_event = try Reactions.observe(j, a, m.source, m.row, m.date, cid, obs);
+            if (source.features.reaction_target and m.value.kind != .reaction) v.reaction_event = try Reactions.noLongerReaction(j, a, m.source);
             try j.message(a, m.source, m.row, m.date, v, event_origin);
+            if (m.value.kind != .reaction) {
+                try Reactions.anchor(j, m.source, m.row);
+                try Reactions.targetImported(j, m.source, cid);
+            }
             if (!m.pending) try j.execute("DELETE FROM ingestion_progress WHERE key=?", &.{.{ .text = origin_key }});
         }
     } else try j.execute("DELETE FROM pending_source WHERE source_row=?", &.{.{ .int = row }});

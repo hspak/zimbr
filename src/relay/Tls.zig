@@ -11,6 +11,7 @@ pub const Config = struct {
     server_key_file: []const u8,
     client_ca_file: []const u8,
     device_allowlist_file: []const u8,
+    contacts_phone_region: []const u8 = "",
 };
 pub const Device = struct { label: []const u8, sha256: []const u8, enabled: bool };
 pub const Self = @This();
@@ -35,6 +36,7 @@ pub fn load(a: u.Allocator, path: []const u8) !Self {
         if (std.mem.indexOfScalar(u8, value, 0) != null) return error.InvalidTlsConfiguration;
     }
     if (config.port == 0 or config.server_name.len == 0) return error.InvalidTlsConfiguration;
+    try @import("adapter/Contacts.zig").validateRegion(a, config.contacts_phone_region);
     // A literal IP is deliberate: never resolve a bind name to an unintended interface.
     const address = std.Io.net.IpAddress.parse(config.listen_address, config.port) catch return error.ExplicitListenAddressRequired;
     switch (address) {

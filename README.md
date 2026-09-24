@@ -148,7 +148,8 @@ to a draft for deliberate retry. Sending again after an uncertain result can
 create a duplicate. A relay epoch reset preserves drafts and outbox identities;
 orphaned drafts remain discoverable as **Recovered draft**. Local unread markers
 do not change Apple's read receipts. Attachments and unsupported content remain
-visible as placeholders; attachment downloads are not implemented.
+visible as placeholders in the current Linux client; its attachment downloads
+are outside the relay enrichment implementation.
 
 Linux verification:
 
@@ -165,6 +166,7 @@ python3 tests/client_details.py
 zig build test-gui
 python3 tests/integration.py
 python3 tests/mac_acceptance_test.py
+python3 tests/mac_enrichment_packaging.py
 zig fmt --check build.zig src
 # Read-only connection check, with aggregate-only output:
 zig-out/bin/client-probe --data-dir /path/to/client-data
@@ -215,8 +217,14 @@ uses system SQLite and has no GUI or Homebrew runtime dependency.
 
 ```sh
 zig build relay fake-relay test -Dopenssl-prefix=/absolute/openssl-3.5
+zig build test-macos-enrichment -Dopenssl-prefix=/absolute/openssl-3.5
 python3 -m pip install -r tools/requirements-tls.txt
 python3 tests/integration.py
+python3 tests/enrichment.py
+python3 tests/assets.py
+python3 tests/links.py
+python3 tests/reactions.py
+python3 tests/native_images.py
 python3 tests/relay_tls.py
 python3 tests/mac_acceptance_test.py
 ZIMBR_MKCERT=/path/to/mkcert python3 tests/cert_management.py
@@ -237,6 +245,38 @@ Tests use only synthetic Messages databases and temporary CAs, never installed i
 system trust. They cover authentication before HTTP, certificate purpose/time,
 strict configuration, connection bounds, SSE recovery, renewal/revocation,
 idempotency, interrupted dispatch, and journal persistence.
+
+The shared protocol and relay now include Contacts identities/avatars, authenticated
+image assets, stored URL metadata, stable source parts, and reaction projection.
+See the [Mac enrichment acceptance record](docs/mac-enrichment-acceptance.md) for
+verified fixtures and remaining installed/source-format gates. The native relay
+advertises image assets, image attachments, and stored link previews after installed
+Mac verification. Names, avatars, and reactions remain gated for the outstanding
+live Contacts/reaction checks; the fake relay advertises all six features.
+The native relay pins and statically compiles
+its phone-number parser during the build; fake/Linux builds have no Contacts or
+Foundation dependency. Native normalization tests do not read the address book.
+
+Contacts is optional and independent of Full Disk Access and Messages Automation.
+The bundle includes a Contacts usage description. Normal startup checks permission
+without prompting. Request access through Launch Services so the installed app
+owns the permission prompt:
+
+```sh
+open -n -a "$HOME/Applications/Zimbr Relay.app" --args doctor --request-contacts --read-only
+```
+
+Optional `contacts_phone_region` in
+`relay.json` supplies national-number context; doctor suggests the Mac's region,
+but it is never selected automatically. Names are cached in the private relay
+journal and exported only for observed addresses. Denial or successful contact
+removal publishes clearing records; transient query failure marks matches stale.
+Image attachments, embedded/local preview artwork, and lazy Contacts thumbnails
+share a private 2 GiB derivative cache and a separately signed ImageIO helper.
+Source changes retire immutable versions; missing files retry without requiring a
+new message. Photos are JPEG/PNG still previews, including HEIC conversion and
+orientation correction. No destination URL or remote artwork is fetched. Linux
+client storage, networking, and presentation changes are outside this work.
 
 ## Install and permissions
 
@@ -260,9 +300,10 @@ It installs TLS material in owner-only directories outside the app and deletes
 the obsolete token. The CA signing key is never installed. Subsequent upgrades
 may omit `--tls-config` to retain the installed credentials. Startup failures
 leave the relay stopped for repair.
-It uses ad-hoc signing by default; pass `--identity 'SIGNING IDENTITY'` to use a
-persistent signing identity. Ad-hoc rebuilds may require granting permissions
-again. The executable path and bundle identifier remain stable.
+It uses the persistent local signing identity by default; pass
+`--identity 'SIGNING IDENTITY'` to select another identity. Disposable ad-hoc
+builds (`--identity -`) may require granting permissions again. The executable
+path and bundle identifier remain stable.
 
 Complete these steps together in the Mac UI:
 
@@ -348,6 +389,9 @@ Support directory unless deliberately discarding history and idempotency records
 | GET | `/v1/sync` | Epoch and durable event cursor |
 | GET | `/v1/conversations?before=...&limit=50` | `conversations`, `next` |
 | GET | `/v1/conversations/:id/messages?before=...&limit=50` | `messages`, `next` |
+| GET | `/v1/identities?before=...&limit=50` | Observed-address `identities`, `next` |
+| GET | `/v1/assets/:id/:version/:variant` | Approved immutable JPEG/PNG bytes or availability/retry response |
+| GET | `/v1/messages/:id/enrichment?section=...&revision=...&after=...` | Bounded overflow metadata and revision-bound `next` |
 | POST | `/v1/messages` | Durable send request; 202 new, 200 retry |
 | GET | `/v1/send-requests/:id` | Current send request |
 | GET | `/v1/events?after=...` | SSE replay followed by live events |
@@ -365,6 +409,16 @@ by immutable relay ID; history pages descend by `(source timestamp, relay ID)`.
 Treat `next` and event cursors as opaque strings and URL-encode them. Fetch a sync
 cursor **before** fetching snapshots, then replay after it; merge by ID/revision.
 History queries also enqueue bounded source reconciliation.
+
+Enrichment fields are additive. Complete empty arrays clear older aggregates;
+`null` means unsupplied. Inline metadata has a combined 32 KiB budget and exposes
+totals/completion flags; overflow pages never silently drop attachments, captions,
+previews, parts, or reactions. A changed revision requires restarting those pages.
+Identity events require `extensions=identity-v1` and an echoed
+`Zimbr-Event-Extensions` response header. Legacy streams keep their existing event
+types and skip identity sequences. Bootstrap identities after capturing a sync
+cursor, then replay and merge by revision. Capability support and readiness are
+separate, so permission loss can still synchronize clearing records.
 
 SSE uses `id`, `event`, and JSON `data`, with 15-second comment heartbeats. Each
 event contains its cursor, sequence, full record, type, and origin (`live`,
@@ -387,11 +441,13 @@ network failure. Idempotency identities are never automatically pruned.
 
 On macOS, the source identity uses a persistent volume UUID, inode, and birth
 time, so reboot-time device renumbering preserves the journal. Source identity
-changes, high-water regressions, or anchor GUID mismatches rebuild normalized
+changes or unexplained high-water/anchor mismatches rebuild normalized
 source state under a new epoch. Old queued/in-flight requests become
 held `unknown` requests with `source_reset`, retaining their request IDs. Clients
 must explicitly synchronize again. Conservative invalidation may also occur for
-a benign database replacement or deletion of the anchor record.
+a benign database replacement or deletion of an ordinary anchor. A tracked
+reaction deletion preserves the epoch only with the same source identity and
+independent matching ordinary anchors; the scan rebases with GUID deduplication.
 
 Limits: 64 KiB request bodies, 16 KiB outgoing UTF-8 text, 1 MiB decoder inputs,
 64 KiB decoded incoming text, 200 records/page, 32 connections, 8 event streams,
@@ -402,12 +458,15 @@ delete normalized history or request identities.
 
 The attributed decoder recognizes the observed immutable/mutable typed-stream
 root NSString layouts and validates their length, encoding, and string terminator.
-It does not instantiate archived classes or scrape printable bytes. Unknown
-formats are visible as unsupported; it does not interpret the full attribute
-object graph. Attachments are metadata placeholders; no file paths or bytes are
-served. Reactions and system rows remain distinct content kinds. Historical
-edits/deletions, reactions as actions, group administration, read receipts, Contacts,
-and attachment transfer remain outside v1.
+It does not instantiate archived classes or scrape printable bytes. A restricted
+Foundation attribute grammar also maps verified text/image parts using source
+indices and file-transfer GUIDs; unknown layouts retain full text and attachment
+fallbacks. Stored URL payloads use a bounded primitive plist/archive reader.
+Reactions retain legacy source rows and publish complete target aggregates using
+durable source ordering/removal state. Resolved reaction rows are skipped by the
+relay sidebar projection. General message deletion, reaction/attachment sending,
+group administration, read receipts, video/audio playback, and animated stickers
+remain outside this reading extension.
 
 ## Real-account validation
 

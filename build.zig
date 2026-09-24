@@ -13,6 +13,16 @@ pub fn build(b: *std.Build) void {
         const mod = module(b, target, optimize, sdk, openssl, fake);
         const exe = b.addExecutable(.{ .name = if (fake) "fake-relay" else "relay", .root_module = mod });
         const install = b.addInstallArtifact(exe, .{});
+        if (fake or target.result.os.tag == .macos) {
+            const helper = imageHelper(b, target, optimize, sdk, fake);
+            install.step.dependOn(&b.addInstallArtifact(helper, .{}).step);
+        }
+        if (!fake and target.result.os.tag == .macos) {
+            if (b.lazyDependency("libphonenumber", .{})) |phone| {
+                const license = b.addInstallFile(phone.path("LICENSE"), "share/zimbr/licenses/libPhoneNumber-LICENSE");
+                install.step.dependOn(&license.step);
+            }
+        }
         b.step(if (fake) "fake-relay" else "relay", if (fake) "Build the fixture relay" else "Build the macOS relay").dependOn(&install.step);
         if (!fake) {
             if (target.result.os.tag == .macos) b.getInstallStep().dependOn(&install.step);
@@ -21,6 +31,10 @@ pub fn build(b: *std.Build) void {
     }
     const tests = b.addTest(.{ .root_module = module(b, target, optimize, sdk, openssl, true) });
     b.step("test", "Run relay and protocol tests").dependOn(&b.addRunArtifact(tests).step);
+    if (target.result.os.tag == .macos) {
+        const native_tests = b.addTest(.{ .root_module = module(b, target, optimize, sdk, openssl, false) });
+        b.step("test-macos-enrichment", "Test native Contacts normalization without reading the address book").dependOn(&b.addRunArtifact(native_tests).step);
+    }
     if (target.result.os.tag == .linux) client(b, target, optimize);
 }
 
@@ -101,6 +115,7 @@ fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     m.addIncludePath(b.path("src"));
     m.addCSourceFile(.{ .file = b.path("src/platform.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
     m.addCSourceFile(.{ .file = b.path("src/relay/tls.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+    m.addCSourceFile(.{ .file = b.path("src/relay/media.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
     if (openssl) |prefix| {
         m.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "include" }) });
         m.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib/libssl.a" }) });
@@ -114,6 +129,37 @@ fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     if (sdk) |s| {
         m.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ s, "usr/include" }) });
         m.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ s, "usr/lib" }) });
+        m.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ s, "System/Library/Frameworks" }) });
+    }
+    if (!fake and target.result.os.tag == .macos) {
+        const phone = b.lazyDependency("libphonenumber", .{}) orelse return m;
+        m.addIncludePath(phone.path("libPhoneNumber"));
+        m.addIncludePath(phone.path("libPhoneNumberInternal"));
+        for ([_][]const u8{ "NBMetadataHelper", "NBGeneratedPhoneNumberMetaData", "NBNumberFormat", "NBPhoneMetaData", "NBPhoneNumber", "NBPhoneNumberDefines", "NBPhoneNumberDesc", "NBPhoneNumberUtil", "NBRegExMatcher", "NBRegularExpressionCache", "NSArray+NBAdditions" }) |name| {
+            m.addCSourceFile(.{ .file = phone.path(b.fmt("libPhoneNumber/{s}.m", .{name})), .flags = &.{ "-fobjc-arc", "-fblocks" } });
+        }
+        m.addCSourceFile(.{ .file = b.path("src/relay/adapter/contacts.m"), .flags = &.{ "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror" } });
+        m.linkFramework("Foundation", .{});
+        m.linkFramework("Contacts", .{});
+        m.linkSystemLibrary("objc", .{});
+        m.linkSystemLibrary("z", .{});
     }
     return m;
+}
+
+fn imageHelper(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, sdk: ?[]const u8, fake: bool) *std.Build.Step.Compile {
+    const m = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+    m.addCSourceFile(.{ .file = b.path(if (fake) "src/relay/adapter/fake-image-helper.c" else "src/relay/adapter/image-helper.m"), .flags = if (fake) &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } else &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" } });
+    if (sdk) |s| {
+        m.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ s, "usr/include" }) });
+        m.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ s, "usr/lib" }) });
+        m.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ s, "System/Library/Frameworks" }) });
+    }
+    if (!fake) {
+        m.linkFramework("Foundation", .{});
+        m.linkFramework("ImageIO", .{});
+        m.linkFramework("CoreGraphics", .{});
+        m.linkSystemLibrary("objc", .{});
+    }
+    return b.addExecutable(.{ .name = if (fake) "fake-image-helper" else "image-helper", .root_module = m });
 }

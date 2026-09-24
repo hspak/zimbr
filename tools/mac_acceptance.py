@@ -4,6 +4,7 @@ import argparse
 import http.client
 import json
 import os
+from collections import Counter
 from pathlib import Path
 import plistlib
 import subprocess
@@ -60,12 +61,17 @@ class Client:
         try:return json.loads(response.read())
         finally:response.close();connection.close()
 
-    def events(self,after,through):
+    def events(self,after,through,identities=False):
         """Read a finite, durable SSE interval without printing private history."""
         if after==through:return []
         if after.split(':')[0]!=through.split(':')[0]:raise RuntimeError('resync_required')
         end=int(through.split(':')[1]);events=[]
-        connection,response=self.connect('/v1/events?'+urlencode({'after':after}))
+        params={'after':after}
+        if identities:params['extensions']='identity-v1'
+        connection,response=self.connect('/v1/events?'+urlencode(params))
+        if identities and response.getheader('zimbr-event-extensions')!='identity-v1':
+            response.close();connection.close()
+            raise RuntimeError('identity_extension_not_accepted')
         deadline=time.monotonic()+30
         try:
             while time.monotonic()<deadline:
@@ -82,10 +88,63 @@ class Client:
         finally:response.close();connection.close()
 
 
+def enrichment_evidence(client,conversation=None):
+    """Aggregate-only read probe; never save names, handles, IDs, paths, or URLs."""
+    status=client.request('/v1/status')
+    capabilities=status.get('capabilities',{})
+    feature_keys=('identity_directory_v1','image_assets_v1','image_attachments_v1',
+                  'stored_link_previews_v1','reactions_v1','contact_avatars_v1')
+    evidence={'capabilities':{key:capabilities.get(key,False) for key in feature_keys},
+              'readiness':status.get('enrichment_readiness',{}),
+              'identities':{},'messages':{},'identity_extension_accepted':False,
+              'installed_contacts_attribution_verified':False,
+              'complete':False}
+    if capabilities.get('identity_directory_v1') or 'identity-v1' in status.get('event_extensions',[]):
+        counts=Counter();before=None
+        while True:
+            path='/v1/identities?limit=200'
+            if before:path+='&'+urlencode({'before':before})
+            page=client.request(path)
+            for record in page['identities']:
+                counts['total']+=1
+                counts['state_'+record['match_state']]+=1
+                counts['has_name']+=record.get('display_name') is not None
+                counts['has_avatar']+=record.get('avatar') is not None
+            before=page.get('next')
+            if not before:break
+        evidence['identities']=dict(counts)
+        cursor=client.request('/v1/sync')['cursor']
+        connection,response=client.connect('/v1/events?'+urlencode({'after':cursor,'extensions':'identity-v1'}))
+        try:evidence['identity_extension_accepted']=response.getheader('zimbr-event-extensions')=='identity-v1'
+        finally:response.close();connection.close()
+    if conversation:
+        counts=Counter();before=None
+        while True:
+            path='/v1/conversations/'+conversation+'/messages?limit=200'
+            if before:path+='&'+urlencode({'before':before})
+            page=client.request(path)
+            for record in page['messages']:
+                counts['total']+=1
+                counts['kind_'+record['kind']]+=1
+                enrichment=record.get('enrichment') or {}
+                counts['attachments']+=(enrichment.get('attachments') or {}).get('total',len(record.get('attachments') or []))
+                counts['previews']+=(enrichment.get('previews') or {}).get('total',len(record.get('link_previews') or []))
+                counts['active_reactions']+=(enrichment.get('reactions') or {}).get('total',len(record.get('reactions') or []))
+                counts['parts_resolved']+=enrichment.get('part_mapping')=='resolved'
+                counts['metadata_overflow']+=any(not (enrichment.get(section) or {}).get('complete',True) for section in ('attachments','previews','reactions','parts'))
+                if record.get('reaction_event'):
+                    counts['reaction_'+record['reaction_event']['resolution']]+=1
+            before=page.get('next')
+            if not before:break
+        evidence['messages']=dict(counts)
+    return evidence
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--recipient',help='Deliberately selected iMessage email or international phone number')
     parser.add_argument('--confirm-send',action='store_true',help='Authorize two labeled test messages: direct and existing-chat reply')
+    parser.add_argument('--enrichment',action='store_true',help='Read aggregate enrichment readiness and counts without sending; optionally inspect --conversation')
     parser.add_argument('--conversation',help='Instead test one explicitly selected existing conversation, including a group')
     parser.add_argument('--restart',action='store_true',help='Restart only com.hsp.zimbr.relay after the send checks')
     parser.add_argument('--wait-for-lock',type=int,metavar='SECONDS',help='Wait for the user to lock the screen, then verify one existing-chat send while locked')
@@ -93,6 +152,17 @@ def main():
     parser.add_argument('--tls-config',type=Path,help='Administrative HTTPS credential config (default: DATA/admin.json)')
     parser.add_argument('--output',type=Path,default=Path('.local/mac-acceptance.json'))
     args=parser.parse_args()
+    if args.enrichment:
+        if args.confirm_send or args.recipient or args.restart or args.wait_for_lock:
+            parser.error('--enrichment is a read-only check; send/restart options cannot be combined')
+        if args.output.exists():parser.error('Evidence already exists; choose a new --output')
+        os.umask(0o077)
+        evidence=enrichment_evidence(Client(args.data_dir,args.tls_config),args.conversation)
+        evidence['os_build']=subprocess.check_output(['sw_vers','-buildVersion'],text=True).strip()
+        evidence['timestamp_utc']=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())
+        save_evidence(args.output,evidence)
+        print('Saved aggregate enrichment evidence; installed permission attribution and platform fixtures require separate verification.')
+        return
     if not args.confirm_send:parser.error('--confirm-send is required for a real-account test')
     if bool(args.recipient)==bool(args.conversation):parser.error('Select exactly one of --recipient or --conversation')
     if args.wait_for_lock is not None and (args.wait_for_lock<=0 or not args.conversation):parser.error('--wait-for-lock requires a positive timeout and --conversation')
@@ -100,6 +170,7 @@ def main():
     os.umask(0o077)
     client=Client(args.data_dir,args.tls_config);request=client.request
     status=request('/v1/status')
+    identity_events='identity-v1' in status.get('event_extensions',[]) or status.get('capabilities',{}).get('identity_directory_v1',False)
     if not status['capabilities']['send_direct']:raise RuntimeError('Integration not ready: '+','.join(status['degraded_reasons']))
     if args.wait_for_lock:
         print('Waiting for screen lock; one authorized test message will be sent after lock is observed.',flush=True)
@@ -142,7 +213,7 @@ def main():
             time.sleep(1)
         if result['state'] not in ('submitted','delivered'):raise RuntimeError('Send outcome: '+result['state']+'; do not blindly retry')
         # Match only this known synthetic marker; do not print real history.
-        events=client.events(baseline['cursor'],request('/v1/sync')['cursor'])
+        events=client.events(baseline['cursor'],request('/v1/sync')['cursor'],identities=identity_events)
         found=next((e['record'] for e in events if e['type']=='message.upsert' and e['record']['id']==result['message_id'] and e['record']['text']==text),None)
         if not found:raise RuntimeError('Outgoing observation absent from history API')
         if target.get('conversation_id'):assert found['conversation_id']==target['conversation_id']
@@ -161,7 +232,7 @@ def main():
         save_evidence(args.output,evidence)
         if not evidence['locked_screen_verified']:raise RuntimeError('Send observed, but screen did not stay locked throughout the check')
     before_restart=request('/v1/sync')
-    replay=client.events(baseline['cursor'],before_restart['cursor'])
+    replay=client.events(baseline['cursor'],before_restart['cursor'],identities=identity_events)
     if args.restart:
         subprocess.run(['launchctl','kickstart','-k','gui/'+str(os.getuid())+'/com.hsp.zimbr.relay'],check=True)
         deadline=time.monotonic()+45
@@ -180,7 +251,7 @@ def main():
             history=request('/v1/conversations/'+item['conversation_id']+'/messages?limit=200')['messages']
             assert sum(m['text']==payload['text'] and m['direction']=='outgoing' for m in history)==1
             assert any(m['id']==item['message_id'] for m in history)
-        assert client.events(baseline['cursor'],before_restart['cursor'])==replay
+        assert client.events(baseline['cursor'],before_restart['cursor'],identities=identity_events)==replay
         evidence['restart_verified']=True
         evidence['event_replay_survived_restart']=True
     evidence['complete']=True;save_evidence(args.output,evidence)

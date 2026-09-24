@@ -1,6 +1,7 @@
 const std = @import("std");
 const u = @import("../../common.zig");
 const t = @import("../../protocol/types.zig");
+pub const parts = @import("body_parts.zig").decode;
 // Exact root object grammars observed on macOS 27, generated independently by
 // NSArchiver fixtures. Never search arbitrary archive bytes for printable text.
 const prefixes = [_][]const u8{

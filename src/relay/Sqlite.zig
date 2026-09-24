@@ -37,7 +37,7 @@ pub fn scalar(self: Self, sql: [:0]const u8) !i64 {
     if (!try s.step()) return 0;
     return s.int(0);
 }
-pub const Value = union(enum) { text: []const u8, int: i64, null_value };
+pub const Value = union(enum) { text: []const u8, blob: []const u8, int: i64, null_value };
 pub const Statement = struct {
     handle: *c.sqlite3_stmt,
     pub fn close(s: Statement) void {
@@ -47,6 +47,7 @@ pub const Statement = struct {
         for (values, 1..) |v, i| {
             const rc = switch (v) {
                 .text => |t| c.sqlite3_bind_text(s.handle, @intCast(i), t.ptr, @intCast(t.len), null),
+                .blob => |b| c.sqlite3_bind_blob(s.handle, @intCast(i), b.ptr, @intCast(b.len), null),
                 .int => |n| c.sqlite3_bind_int64(s.handle, @intCast(i), n),
                 .null_value => c.sqlite3_bind_null(s.handle, @intCast(i)),
             };

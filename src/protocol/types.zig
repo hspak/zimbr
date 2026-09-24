@@ -6,6 +6,96 @@ pub const max_decode = 1024 * 1024;
 pub const max_page = 200;
 pub const default_page = 50;
 pub const api_version = "1";
+pub const max_enrichment = 32 * 1024;
+pub const max_metadata_page = 32 * 1024;
+pub const max_history_bytes = 8 * 1024 * 1024;
+pub const max_inline_attachments = 32;
+pub const max_inline_previews = 4;
+pub const max_inline_reactions = 128;
+pub const max_inline_parts = 128;
+
+// Null enrichment fields mean "not supplied". A complete, empty aggregate
+// explicitly clears earlier content. No existing v1 enum is extended.
+pub const EnrichmentState = enum { pending, complete, unavailable, unsupported, malformed, oversized };
+pub const AssetRef = struct {
+    id: []const u8,
+    version: []const u8,
+    variant: enum { avatar, inline_image, viewer },
+    mime_type: ?[]const u8 = null,
+    bytes: ?[]const u8 = null,
+    width: ?u32 = null,
+    height: ?u32 = null,
+    availability: enum { pending, ready, not_local, unavailable, unsupported, oversized, retired } = .pending,
+    reason: ?[]const u8 = null,
+    still_preview: bool = false,
+};
+pub const Identity = struct {
+    id: []const u8 = "",
+    revision: []const u8 = "0",
+    service: []const u8,
+    address: []const u8,
+    display_name: ?[]const u8 = null,
+    avatar: ?AssetRef = null,
+    match_state: enum { pending, matched, unmatched, ambiguous, unavailable } = .pending,
+    freshness: enum { fresh, stale } = .fresh,
+};
+pub const Aggregate = struct { total: usize = 0, complete: bool = true };
+pub const Enrichment = struct {
+    state: EnrichmentState = .pending,
+    part_mapping: enum { resolved, unresolved } = .unresolved,
+    attachments: Aggregate = .{},
+    previews: Aggregate = .{},
+    reactions: Aggregate = .{},
+    parts: Aggregate = .{},
+};
+pub const MessagePart = struct {
+    id: []const u8,
+    kind: enum { text, attachment, link_preview },
+    // Source indices are supplied only when verified from the body structure.
+    source_index: ?u32 = null,
+    text: ?[]const u8 = null,
+    // UTF-8 byte range into Message.text; avoids copying a long caption into
+    // enrichment metadata. A source parser must use codepoint boundaries.
+    text_start: ?usize = null,
+    text_length: ?usize = null,
+    attachment_id: ?[]const u8 = null,
+    preview_id: ?[]const u8 = null,
+};
+pub const LinkPreview = struct {
+    id: []const u8,
+    part_id: []const u8,
+    original_url: ?[]const u8 = null,
+    metadata_url: ?[]const u8 = null,
+    title: ?[]const u8 = null,
+    summary: ?[]const u8 = null,
+    site_name: ?[]const u8 = null,
+    image: ?AssetRef = null,
+    icon: ?AssetRef = null,
+    state: EnrichmentState = .pending,
+};
+pub const ReactionActor = struct {
+    address: ?[]const u8 = null,
+    service: []const u8,
+    is_self: bool = false,
+};
+pub const Reaction = struct {
+    id: []const u8,
+    part_id: ?[]const u8 = null,
+    part_state: enum { resolved, unresolved } = .unresolved,
+    actor: ReactionActor,
+    key: []const u8,
+    emoji: ?[]const u8 = null,
+};
+pub const ReactionEvent = struct {
+    target_message_id: ?[]const u8 = null,
+    part_id: ?[]const u8 = null,
+    part_state: enum { resolved, unresolved } = .unresolved,
+    actor: ReactionActor,
+    operation: enum { add, remove, current, retired, unknown },
+    key: ?[]const u8 = null,
+    emoji: ?[]const u8 = null,
+    resolution: enum { pending, resolved, unavailable, unsupported, malformed } = .pending,
+};
 pub const Conversation = struct {
     id: []const u8 = "",
     revision: []const u8 = "0",
@@ -16,7 +106,15 @@ pub const Conversation = struct {
     history_complete: bool = false,
     sendable: bool = false,
 };
-pub const Attachment = struct { id: []const u8, name: []const u8, mime_type: []const u8, bytes: []const u8 };
+pub const Attachment = struct {
+    id: []const u8,
+    name: []const u8,
+    mime_type: []const u8,
+    bytes: []const u8,
+    image: ?AssetRef = null,
+    viewer: ?AssetRef = null,
+    preview_artwork: bool = false,
+};
 // A sidebar projection, never a replacement for the canonical message record.
 pub const ConversationPreview = struct { conversation_id: []const u8, message_id: []const u8, revision: []const u8, timestamp: []const u8, kind: []const u8, text: []const u8 };
 pub const Message = struct {
@@ -32,6 +130,11 @@ pub const Message = struct {
     decoding: enum { plain, attributed, empty, unsupported, malformed, oversized },
     attachments: []const Attachment = &.{},
     observed_status: enum { received, sent, delivered, failed, unknown },
+    parts: ?[]const MessagePart = null,
+    enrichment: ?Enrichment = null,
+    link_previews: ?[]const LinkPreview = null,
+    reactions: ?[]const Reaction = null,
+    reaction_event: ?ReactionEvent = null,
 };
 pub const Target = struct {
     conversation_id: ?[]const u8 = null,

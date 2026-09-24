@@ -60,5 +60,37 @@ class AcceptanceTests(unittest.TestCase):
         with patch.object(acceptance.subprocess,'check_output',return_value=registry(os.getuid()+1,True)):
             with self.assertRaises(RuntimeError):acceptance.screen_locked()
 
+    def test_enrichment_probe_saves_only_counts_and_never_sends(self):
+        client=Mock()
+        client.request.side_effect=[
+            {'capabilities':{'identity_directory_v1':True}},
+            {'identities':[{'id':'private-id','address':'private@example.invalid','display_name':'Private Person','match_state':'matched','avatar':None}], 'next':None},
+            {'cursor':'epoch:5'},
+            {'messages':[{'kind':'text','text':'private message','attachments':[],'link_previews':None,'reactions':None}], 'next':None},
+        ]
+        connection,response=Mock(),Mock()
+        response.getheader.return_value='identity-v1'
+        client.connect.return_value=(connection,response)
+        result=acceptance.enrichment_evidence(client,'private-conversation')
+        self.assertEqual(result['identities']['has_name'],1)
+        self.assertEqual(result['messages']['kind_text'],1)
+        self.assertTrue(result['identity_extension_accepted'])
+        self.assertFalse(result['installed_contacts_attribution_verified'])
+        self.assertFalse(result['complete'])
+        self.assertNotIn('private',json.dumps(result).lower())
+        self.assertTrue(all(len(call.args)==1 for call in client.request.call_args_list))
+        connection.close.assert_called_once()
+        response.close.assert_called_once()
+
+    def test_identity_replay_requires_echoed_extension(self):
+        client=acceptance.Client.__new__(acceptance.Client)
+        connection,response=Mock(),Mock()
+        response.getheader.return_value=None
+        with patch.object(client,'connect',return_value=(connection,response)):
+            with self.assertRaisesRegex(RuntimeError,'identity_extension_not_accepted'):
+                client.events('epoch:0','epoch:2',identities=True)
+        connection.close.assert_called_once()
+        response.close.assert_called_once()
+
 
 if __name__=='__main__':unittest.main()

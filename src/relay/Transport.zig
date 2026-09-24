@@ -35,6 +35,7 @@ pub const Reader = struct {
 pub const Writer = struct {
     interface: std.Io.Writer,
     connection: *tls.ZrTls,
+    deadline: i64 = std.math.maxInt(i64),
     pub fn init(connection: *tls.ZrTls, buffer: []u8) Writer {
         return .{ .connection = connection, .interface = .{ .buffer = buffer, .vtable = &.{ .drain = drain } } };
     }
@@ -54,6 +55,6 @@ pub const Writer = struct {
         return n;
     }
     fn send(self: *Writer, bytes: []const u8) !void {
-        if (tls.zr_tls_write(self.connection, bytes.ptr, bytes.len) != 0) return error.WriteFailed;
+        if (tls.zr_tls_write_deadline(self.connection, bytes.ptr, bytes.len, @min(self.deadline, u.c.zr_monotonic_ms() + 10000)) != 0) return error.WriteFailed;
     }
 };

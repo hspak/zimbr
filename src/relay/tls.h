@@ -14,6 +14,7 @@ int zr_tls_valid(ZrTls *tls);
 int zr_tls_closed(ZrTls *tls);
 ptrdiff_t zr_tls_read(ZrTls *tls, void *bytes, size_t length, int64_t deadline);
 int zr_tls_write(ZrTls *tls, const void *bytes, size_t length);
+int zr_tls_write_deadline(ZrTls *tls, const void *bytes, size_t length, int64_t deadline);
 void zr_tls_free(ZrTls *tls);
 
 const char *zr_tls_version(void);

@@ -4,10 +4,16 @@ const t = @import("../protocol/types.zig");
 const Core = @import("Core.zig");
 const Transport = @import("Transport.zig");
 const Tls = @import("Tls.zig");
+const Assets = @import("Assets.zig");
 const Self = @This();
+fn readiness(supported: bool, ready: bool, reason: []const u8) struct { ready: bool, reason: []const u8 } {
+    if (!supported) return .{ .ready = false, .reason = "native_acceptance_pending" };
+    return .{ .ready = ready, .reason = if (ready) "" else reason };
+}
 core: *Core,
 tls: Tls,
 handshakes: std.atomic.Value(usize) = .init(0),
+asset_responses: std.atomic.Value(usize) = .init(0),
 pub fn run(self: *Self) !void {
     const address = try std.Io.net.IpAddress.parse(self.tls.config.listen_address, self.tls.config.port);
     var listener = try address.listen(self.core.io, .{ .reuse_address = true });
@@ -57,7 +63,7 @@ fn connection(self: *Self, stream: std.Io.net.Stream) void {
         if (request_index == 63) req.head.keep_alive = false;
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
-        self.handle(arena.allocator(), &req, peer) catch |err| {
+        self.handle(arena.allocator(), &req, peer, &writer) catch |err| {
             if (err == error.WriteFailed or err == error.ReadFailed or err == error.EndOfStream or err == error.CertificateExpired) return;
             const mapping = mapError(err);
             const body = u.json(arena.allocator(), .{ .error_info = t.SafeError{ .code = mapping.code, .message = mapping.message } }) catch return;
@@ -68,7 +74,7 @@ fn connection(self: *Self, stream: std.Io.net.Stream) void {
         if (!req.head.keep_alive or server.reader.state != .ready) return;
     }
 }
-fn handle(self: *Self, a: u.Allocator, req: *std.http.Server.Request, peer: *Tls.c.ZrTls) !void {
+fn handle(self: *Self, a: u.Allocator, req: *std.http.Server.Request, peer: *Tls.c.ZrTls, writer: *Transport.Writer) !void {
     var last: ?[]const u8 = null;
     var headers = req.iterateHeaders();
     while (headers.next()) |h| {
@@ -85,11 +91,24 @@ fn handle(self: *Self, a: u.Allocator, req: *std.http.Server.Request, peer: *Tls
     const split = std.mem.indexOfScalar(u8, target, '?') orelse target.len;
     const path = target[0..split];
     const query = if (split < target.len) target[split + 1 ..] else "";
+    if (req.head.method == .GET and std.mem.startsWith(u8, path, "/v1/assets/")) {
+        // Four media responses leave capacity for SSE and ordinary commands.
+        if (self.asset_responses.fetchAdd(1, .acq_rel) >= 4) {
+            _ = self.asset_responses.fetchSub(1, .acq_rel);
+            return error.AssetResponseLimit;
+        }
+        defer _ = self.asset_responses.fetchSub(1, .acq_rel);
+        req.head.keep_alive = false;
+        writer.deadline = u.c.zr_monotonic_ms() + 15000;
+        try self.asset(a, req, path[11..], peer);
+        return;
+    }
     if (req.head.method == .GET and u.eq(path, "/v1/events")) {
         const after = try param(a, query, "after");
         if (after != null and last != null and !u.eq(after.?, last.?)) return error.InvalidRequest;
         const cursor = after orelse last orelse return error.InvalidRequest;
-        try self.events(req, cursor, peer);
+        const identities = try identityExtension(try param(a, query, "extensions"));
+        try self.events(req, cursor, peer, identities);
         return;
     }
     var input: ?t.SendInput = null;
@@ -113,7 +132,43 @@ fn handle(self: *Self, a: u.Allocator, req: *std.http.Server.Request, peer: *Tls
             response = accepted.record;
             status = if (accepted.fresh) .accepted else .ok;
         } else if (u.eq(path, "/v1/status")) {
-            response = try u.json(a, .{ .api_version = t.api_version, .server_epoch = try j.epoch(a), .adapter_ready = self.core.read_ready, .capabilities = .{ .read_history = self.core.read_ready, .live_messages = self.core.read_ready, .send_direct = self.core.read_ready and self.core.automation_ready, .reply_existing = self.core.read_ready and self.core.automation_ready, .attachments = false, .group_creation = false }, .degraded_reasons = if (self.core.degraded.len == 0) @as([]const []const u8, &.{}) else &.{self.core.degraded} });
+            var contacts = self.core.contacts_status;
+            // Native rollout waits for installed permission-attribution checks.
+            // Protocol negotiation stays available for read-only acceptance.
+            if (!@import("options").fake) {
+                contacts.ready = false;
+                if (contacts.reason.len == 0) contacts.reason = "native_acceptance_pending";
+            }
+            response = try u.json(a, .{
+                .api_version = t.api_version,
+                .event_extensions = [_][]const u8{"identity-v1"},
+                .server_epoch = try j.epoch(a),
+                .adapter_ready = self.core.read_ready,
+                .source_features = self.core.source_features,
+                .capabilities = .{
+                    .read_history = self.core.read_ready,
+                    .live_messages = self.core.read_ready,
+                    .send_direct = self.core.read_ready and self.core.automation_ready,
+                    .reply_existing = self.core.read_ready and self.core.automation_ready,
+                    .attachments = true,
+                    .group_creation = false,
+                    .identity_directory_v1 = @import("options").fake,
+                    .image_assets_v1 = true,
+                    .image_attachments_v1 = true,
+                    .stored_link_previews_v1 = true,
+                    .reactions_v1 = @import("options").fake,
+                    .contact_avatars_v1 = @import("options").fake,
+                },
+                .enrichment_readiness = .{
+                    .identity_directory_v1 = contacts,
+                    .image_assets_v1 = readiness(true, self.core.assets_service != null, self.core.assets_reason),
+                    .image_attachments_v1 = readiness(true, self.core.assets_service != null and self.core.read_ready and self.core.source_features.attachment_filename, if (self.core.assets_service == null) self.core.assets_reason else if (!self.core.read_ready) self.core.degraded else "source_columns_unavailable"),
+                    .stored_link_previews_v1 = readiness(true, self.core.read_ready and self.core.source_features.link_payload, if (!self.core.read_ready) self.core.degraded else "source_columns_unavailable"),
+                    .reactions_v1 = readiness(@import("options").fake, self.core.read_ready and self.core.source_features.reaction_target, "source_columns_unavailable"),
+                    .contact_avatars_v1 = readiness(@import("options").fake, contacts.ready and self.core.assets_service != null, if (self.core.assets_service == null) self.core.assets_reason else contacts.reason),
+                },
+                .degraded_reasons = if (self.core.degraded.len == 0) @as([]const []const u8, &.{}) else &.{self.core.degraded},
+            });
         } else if (u.eq(path, "/v1/sync")) {
             const epoch = try j.epoch(a);
             response = try u.json(a, .{ .server_epoch = epoch, .cursor = try t.cursor(a, epoch, try j.sequence()) });
@@ -123,11 +178,23 @@ fn handle(self: *Self, a: u.Allocator, req: *std.http.Server.Request, peer: *Tls
             const p = try j.page(a, null, before, limit);
             const previews = if (u.eq((try param(a, query, "previews")) orelse "", "1")) try j.previews(a, before, limit) else null;
             response = try u.json(a, .{ .conversations = p.records, .next = p.next, .previews = previews });
+        } else if (u.eq(path, "/v1/identities")) {
+            const p = try j.identityPage(a, try param(a, query, "before"), try pageLimit(a, query));
+            response = try u.json(a, .{ .identities = p.records, .next = p.next });
+        } else if (std.mem.startsWith(u8, path, "/v1/messages/") and std.mem.endsWith(u8, path, "/enrichment")) {
+            const id = path[13 .. path.len - 11];
+            if (!t.uuid(id)) return error.InvalidRequest;
+            const name = (try param(a, query, "section")) orelse return error.InvalidRequest;
+            const section = std.meta.stringToEnum(@import("Enrichment.zig").Section, name) orelse return error.InvalidRequest;
+            const revision = (try param(a, query, "revision")) orelse return error.InvalidRequest;
+            response = try u.json(a, try @import("Enrichment.zig").page(j, a, id, section, revision, try param(a, query, "after"), try pageLimit(a, query)));
         } else if (std.mem.startsWith(u8, path, "/v1/conversations/") and std.mem.endsWith(u8, path, "/messages")) {
             const id = path[18 .. path.len - 9];
             if (!t.uuid(id)) return error.InvalidRequest;
             if (try j.getRecord(a, .conversation, id) == null) return error.NotFound;
             try j.execute("INSERT OR IGNORE INTO reconcile_chats(conversation_id) VALUES(?)", &.{.{ .text = id }});
+            if (self.core.assets_service != null) try Assets.prioritizeConversation(j, id);
+            try @import("Reactions.zig").prioritize(j, id);
             const p = try j.page(a, id, try param(a, query, "before"), try pageLimit(a, query));
             response = try u.json(a, .{ .messages = p.records, .next = p.next });
         } else if (std.mem.startsWith(u8, path, "/v1/send-requests/")) {
@@ -138,7 +205,81 @@ fn handle(self: *Self, a: u.Allocator, req: *std.http.Server.Request, peer: *Tls
     }
     try respond(req, response, status);
 }
-fn events(self: *Self, req: *std.http.Server.Request, start: []const u8, peer: *Tls.c.ZrTls) !void {
+fn asset(self: *Self, a: u.Allocator, req: *std.http.Server.Request, path: []const u8, peer: *Tls.c.ZrTls) !void {
+    const service = self.core.assets_service orelse return error.AssetServiceUnavailable;
+    var components = std.mem.splitScalar(u8, path, '/');
+    const id = components.next() orelse return error.InvalidRequest;
+    const version = components.next() orelse return error.InvalidRequest;
+    const variant_name = components.next() orelse return error.InvalidRequest;
+    if (!t.uuid(id) or !t.uuid(version) or components.next() != null) return error.InvalidRequest;
+    const variant = std.meta.stringToEnum(Assets.Variant, variant_name) orelse return error.InvalidRequest;
+    var if_none_match: ?[]const u8 = null;
+    var headers = req.iterateHeaders();
+    while (headers.next()) |header| if (std.ascii.eqlIgnoreCase(header.name, "if-none-match")) {
+        if (if_none_match != null) return error.InvalidRequest;
+        if_none_match = header.value;
+    };
+    const value = blk: {
+        self.core.lock();
+        defer self.core.unlock();
+        const j = self.core.journal;
+        if (variant == .avatar and !@import("adapter/Contacts.zig").canPresent(self.core.contacts_status)) return error.ContactsUnavailable;
+        try j.begin();
+        errdefer j.rollback();
+        const found = try Assets.lookup(j, a, id, version, variant);
+        try j.commit();
+        break :blk found;
+    };
+    if (value.ref.availability != .ready or value.file_name == null or value.etag == null) return assetPending(a, req, value.ref);
+    const size = std.fmt.parseInt(usize, value.ref.bytes orelse "", 10) catch return error.InvalidAsset;
+    if (size > Assets.max_derivative) return error.InvalidAsset;
+    const fd = Assets.c.zr_media_cached(service.cache_fd, try a.dupeZ(u8, value.file_name.?), size);
+    defer if (fd >= 0) {
+        _ = u.c.close(fd);
+    };
+    const bytes = if (fd >= 0) Assets.readBytes(a, fd, size) catch null else null;
+    if (bytes == null or !try Assets.verifyBytes(a, bytes.?, value.etag.?)) {
+        {
+            self.core.lock();
+            defer self.core.unlock();
+            const j = self.core.journal;
+            try j.begin();
+            errdefer j.rollback();
+            // Recheck the immutable version after file I/O, including epoch reset.
+            if (variant == .avatar and !@import("adapter/Contacts.zig").canPresent(self.core.contacts_status)) return error.ContactsUnavailable;
+            _ = try Assets.lookup(j, a, id, version, variant);
+            try Assets.evicted(j, a, value);
+            try j.commit();
+        }
+        var ref = value.ref;
+        ref.availability = .pending;
+        ref.reason = "cache_evicted";
+        return assetPending(a, req, ref);
+    }
+    {
+        self.core.lock();
+        defer self.core.unlock();
+        if (variant == .avatar and !@import("adapter/Contacts.zig").canPresent(self.core.contacts_status)) return error.ContactsUnavailable;
+        _ = try Assets.lookup(self.core.journal, a, id, version, variant);
+    }
+    if (Tls.c.zr_tls_valid(peer) == 0) return error.CertificateExpired;
+    const etag = try std.fmt.allocPrint(a, "\"{s}\"", .{value.etag.?});
+    const extra = [_]std.http.Header{
+        .{ .name = "content-type", .value = value.ref.mime_type orelse return error.InvalidAsset },
+        .{ .name = "etag", .value = etag },
+        .{ .name = "cache-control", .value = "private, max-age=31536000, immutable" },
+        .{ .name = "x-content-type-options", .value = "nosniff" },
+    };
+    const unchanged = if (if_none_match) |tag| u.eq(tag, etag) or u.eq(tag, "*") else false;
+    try req.respond(if (unchanged) "" else bytes.?, .{ .status = if (unchanged) .not_modified else .ok, .keep_alive = false, .extra_headers = &extra });
+}
+fn assetPending(a: u.Allocator, req: *std.http.Server.Request, ref: t.AssetRef) !void {
+    const can_retry = Assets.retryable(ref);
+    const body = try u.json(a, .{ .error_info = t.SafeError{ .code = ref.reason orelse "asset_unavailable", .message = "The image representation is not currently available." }, .asset = ref, .retryable = can_retry, .retry_after = if (can_retry) @as(?u32, 2) else null });
+    const headers = [_]std.http.Header{ .{ .name = "content-type", .value = "application/json" }, .{ .name = "cache-control", .value = "no-store" }, .{ .name = "retry-after", .value = "2" } };
+    try req.respond(body, .{ .status = .conflict, .keep_alive = false, .extra_headers = headers[0..if (can_retry) @as(usize, 3) else 2] });
+}
+fn events(self: *Self, req: *std.http.Server.Request, start: []const u8, peer: *Tls.c.ZrTls, identities: bool) !void {
     if (self.core.streams.fetchAdd(1, .acq_rel) >= 8) {
         _ = self.core.streams.fetchSub(1, .acq_rel);
         return error.TooManyStreams;
@@ -153,7 +294,7 @@ fn events(self: *Self, req: *std.http.Server.Request, start: []const u8, peer: *
         seq = try self.core.journal.checkCursor(arena.allocator(), start);
     }
     var buffer: [8192]u8 = undefined;
-    var stream = try req.respondStreaming(&buffer, .{ .respond_options = .{ .keep_alive = false, .transfer_encoding = .none, .extra_headers = &.{ .{ .name = "content-type", .value = "text/event-stream" }, .{ .name = "cache-control", .value = "no-cache" }, .{ .name = "x-accel-buffering", .value = "no" } } } });
+    var stream = try req.respondStreaming(&buffer, .{ .respond_options = .{ .keep_alive = false, .transfer_encoding = .none, .extra_headers = &.{ .{ .name = "content-type", .value = "text/event-stream" }, .{ .name = "cache-control", .value = "no-cache" }, .{ .name = "x-accel-buffering", .value = "no" }, .{ .name = "zimbr-event-extensions", .value = if (identities) "identity-v1" else "" } } } });
     // Once headers are sent, close on errors; do not write a second HTTP response.
     stream.writer.writeAll(": connected\n\n") catch return;
     stream.writer.flush() catch return;
@@ -173,7 +314,7 @@ fn events(self: *Self, req: *std.http.Server.Request, start: []const u8, peer: *
             if (!std.mem.startsWith(u8, start, epoch)) return;
             const current = t.cursor(a, epoch, seq) catch return;
             _ = j.checkCursor(a, current) catch return;
-            break :blk j.events(a, seq) catch return;
+            break :blk j.eventsWithIdentities(a, seq, identities) catch return;
         };
         for (frames) |frame| {
             stream.writer.writeAll(frame.frame) catch return;
@@ -192,8 +333,15 @@ fn events(self: *Self, req: *std.http.Server.Request, start: []const u8, peer: *
         if (frames.len == 0) self.core.changed.wait(self.core.io, observed, 1000);
     }
 }
+fn identityExtension(value: ?[]const u8) !bool {
+    const raw = value orelse return false;
+    if (raw.len == 0) return false;
+    if (u.eq(raw, "identity-v1")) return true;
+    return error.UnsupportedExtension;
+}
 fn respond(req: *std.http.Server.Request, body: []const u8, status: std.http.Status) !void {
-    try req.respond(body, .{ .status = status, .keep_alive = req.head.keep_alive, .extra_headers = &.{ .{ .name = "content-type", .value = "application/json" }, .{ .name = "cache-control", .value = "no-store" } } });
+    const headers = [_]std.http.Header{ .{ .name = "content-type", .value = "application/json" }, .{ .name = "cache-control", .value = "no-store" }, .{ .name = "retry-after", .value = "2" } };
+    try req.respond(body, .{ .status = status, .keep_alive = req.head.keep_alive, .extra_headers = headers[0..if (status == .service_unavailable) @as(usize, 3) else 2] });
 }
 fn pageLimit(a: u.Allocator, query: []const u8) !usize {
     const value = (try param(a, query, "limit")) orelse return t.default_page;
@@ -228,6 +376,12 @@ const ErrorMapping = struct { status: std.http.Status, code: []const u8, message
 fn mapError(err: anyerror) ErrorMapping {
     return switch (err) {
         error.InvalidRequest => .{ .status = .bad_request, .code = "invalid_request", .message = "The request is invalid." },
+        error.UnsupportedExtension => .{ .status = .bad_request, .code = "unsupported_extension", .message = "The requested event extension is not supported." },
+        error.EnrichmentRestartRequired => .{ .status = .conflict, .code = "enrichment_restart_required", .message = "Message enrichment changed; refresh the message and restart paging." },
+        error.AssetRetired => .{ .status = .gone, .code = "asset_retired", .message = "Refresh owner metadata for the current asset version." },
+        error.ContactsUnavailable => .{ .status = .conflict, .code = "contacts_unavailable", .message = "Contact presentation is currently unavailable." },
+        error.AssetQueueFull, error.AssetResponseLimit => .{ .status = .service_unavailable, .code = "asset_busy", .message = "The media service is busy; retry shortly." },
+        error.AssetServiceUnavailable => .{ .status = .service_unavailable, .code = "asset_service_unavailable", .message = "The image service is unavailable." },
         error.UnsupportedTarget => .{ .status = .bad_request, .code = "unsupported_target", .message = "Only explicit iMessage targets are supported." },
         error.RequestConflict => .{ .status = .conflict, .code = "request_conflict", .message = "This request ID already has a different payload." },
         error.ResyncRequired => .{ .status = .conflict, .code = "resync_required", .message = "Obtain a new snapshot and cursor before continuing." },

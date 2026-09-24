@@ -72,10 +72,13 @@ def main():
     p.add_argument('--identity', help='Explicit codesign identity override; use - only for disposable ad-hoc builds')
     p.add_argument('--signing-directory', type=Path, default=default_directory(), help='Persistent local signing state (created by signing.py setup)')
     p.add_argument('--binary', type=Path, default=ROOT/'zig-out/bin/relay')
+    p.add_argument('--image-helper', type=Path, help='Bounded ImageIO helper (default: image-helper beside the relay binary)')
     p.add_argument('--tls-config', type=Path, help='Validated relay configuration/material to install (default: existing installed config)')
     p.add_argument('--admin-config', type=Path, help='Optional separately enrolled Mac administrative identity to install')
     p.add_argument('--openssl-license', type=Path, default=ROOT/'.tools/openssl-build/openssl-3.5.8/LICENSE.txt')
+    p.add_argument('--phone-license', type=Path, default=ROOT/'zig-out/share/zimbr/licenses/libPhoneNumber-LICENSE')
     args = p.parse_args()
+    args.image_helper = args.image_helper or args.binary.parent/'image-helper'
     if args.start and not args.install: p.error('--start requires --install')
     os.umask(0o077)
     home = Path.home(); data = home/'Library/Application Support/Zimbr'
@@ -99,17 +102,23 @@ def main():
     links = subprocess.check_output(['otool', '-L', str(args.binary)], text=True)
     if any('libssl' in line or 'libcrypto' in line or '/opt/homebrew/' in line for line in links.splitlines()[1:]):
         raise RuntimeError('Relay must statically link OpenSSL; Homebrew runtime paths are forbidden')
+    helper_links = subprocess.check_output(['otool', '-L', str(args.image_helper)], text=True)
+    if any('libssl' in line or 'libcrypto' in line or '/opt/homebrew/' in line for line in helper_links.splitlines()[1:]):
+        raise RuntimeError('Image helper must have no TLS or Homebrew runtime dependency')
     staging = ROOT/'zig-out/macos'; staging.mkdir(parents=True, exist_ok=True)
     bundle = staging/'Zimbr Relay.app'
     if bundle.exists(): shutil.rmtree(bundle)
     contents = bundle/'Contents'; macos = contents/'MacOS'; macos.mkdir(parents=True)
     shutil.copy2(args.binary, macos/'relay'); (macos/'relay').chmod(0o755)
+    shutil.copy2(args.image_helper, macos/'image-helper'); (macos/'image-helper').chmod(0o755)
     resources = contents/'Resources'; resources.mkdir()
     shutil.copy2(args.openssl_license, resources/'OpenSSL-LICENSE.txt')
-    info = {'CFBundleIdentifier': LABEL, 'CFBundleName': 'Zimbr Relay', 'CFBundleDisplayName': 'Zimbr Relay', 'CFBundleExecutable': 'relay', 'CFBundlePackageType': 'APPL', 'CFBundleVersion': '2', 'CFBundleShortVersionString': '0.2.0', 'LSUIElement': True, 'LSMinimumSystemVersion': '27.0', 'NSAppleEventsUsageDescription': 'Zimbr sends text through your Messages account when you submit a message to your authenticated relay.'}
+    shutil.copy2(args.phone_license, resources/'libPhoneNumber-LICENSE.txt')
+    info = {'CFBundleIdentifier': LABEL, 'CFBundleName': 'Zimbr Relay', 'CFBundleDisplayName': 'Zimbr Relay', 'CFBundleExecutable': 'relay', 'CFBundlePackageType': 'APPL', 'CFBundleVersion': '2', 'CFBundleShortVersionString': '0.2.0', 'LSUIElement': True, 'LSMinimumSystemVersion': '27.0', 'NSAppleEventsUsageDescription': 'Zimbr sends text through your Messages account when you submit a message to your authenticated relay.', 'NSContactsUsageDescription': 'Zimbr uses contact names and photos to identify conversations on your enrolled clients.'}
     with (contents/'Info.plist').open('wb') as f: plistlib.dump(info, f)
     entitlements = staging/'entitlements.plist'
     with entitlements.open('wb') as f: plistlib.dump({'com.apple.security.automation.apple-events': True}, f)
+    sign(macos/'image-helper', identity=args.identity, directory=args.signing_directory)
     sign(bundle, entitlements, identity=args.identity, directory=args.signing_directory)
     config = {'Label': LABEL, 'ProgramArguments': [str(destination/'Contents/MacOS/relay'), 'serve', '--config', str(data/'relay.json')], 'RunAtLoad': True, 'KeepAlive': True, 'ThrottleInterval': 30, 'ProcessType': 'Background', 'LimitLoadToSessionType': 'Aqua', 'WorkingDirectory': str(data), 'StandardOutPath': str(data/'relay.log'), 'StandardErrorPath': str(data/'relay.log'), 'Umask': 0o077, 'EnvironmentVariables': {'HOME': str(home)}}
     plist = staging/(LABEL+'.plist')

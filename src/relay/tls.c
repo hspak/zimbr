@@ -241,10 +241,12 @@ ptrdiff_t zr_tls_read(ZrTls *tls, void *bytes, size_t length, int64_t deadline) 
     }
 }
 int zr_tls_write(ZrTls *tls, const void *bytes, size_t length) {
-    int64_t deadline = zr_monotonic_ms() + 10000;
+    return zr_tls_write_deadline(tls, bytes, length, zr_monotonic_ms() + 10000);
+}
+int zr_tls_write_deadline(ZrTls *tls, const void *bytes, size_t length, int64_t deadline) {
     size_t offset = 0;
     while (offset < length) {
-        if (zr_monotonic_ms() >= deadline) return -1;
+        if (zr_monotonic_ms() >= deadline || !zr_tls_valid(tls)) return -1;
         size_t n = 0; ERR_clear_error(); int rc = SSL_write_ex(tls->ssl, (const char *)bytes + offset, length - offset, &n);
         if (rc == 1) { offset += n; continue; }
         if (wait_for(tls, SSL_get_error(tls->ssl, rc), deadline)) return -1;

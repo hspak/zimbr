@@ -2,6 +2,7 @@ const std = @import("std");
 const u = @import("../common.zig");
 const t = @import("../protocol/types.zig");
 const Db = @import("Sqlite.zig");
+pub const Enrichment = @import("Enrichment.zig");
 const Self = @This();
 db: Db,
 changed: ?struct { signal: *@import("../Signal.zig"), io: std.Io } = null,
@@ -9,6 +10,8 @@ pub fn open(path: [:0]const u8) !Self {
     const db = try Db.open(path, false);
     errdefer db.close();
     try db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;");
+    try db.exec("BEGIN IMMEDIATE");
+    errdefer db.exec("ROLLBACK") catch {};
     try db.exec(@embedFile("schema.sql"));
     if (try db.scalar("SELECT count(*) FROM relay_meta") == 0) {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -18,7 +21,10 @@ pub fn open(path: [:0]const u8) !Self {
         try s.bind(&.{.{ .text = try u.id(arena.allocator()) }});
         _ = try s.step();
     }
-    if (try db.scalar("SELECT version FROM relay_meta") != 1) return error.SchemaUnsupported;
+    const version = try db.scalar("SELECT version FROM relay_meta");
+    if (version < 1 or version > 6) return error.SchemaUnsupported;
+    if (version < 6) try db.exec("UPDATE relay_meta SET version=6");
+    try db.exec("COMMIT");
     return .{ .db = db };
 }
 pub fn close(self: Self) void {
@@ -73,6 +79,7 @@ pub fn event(self: Self, seq: i64, kind: []const u8, record: []const u8, origin:
 }
 pub fn conversation(self: Self, a: u.Allocator, source: []const u8, row: i64, route: []const u8, value: t.Conversation, origin: []const u8) ![]const u8 {
     var v = value;
+    for (v.participants) |address| _ = try self.observeIdentity(a, v.service, address);
     var find = try self.db.prepare("SELECT id,content,source_row,route,service FROM conversations WHERE source=?");
     defer find.close();
     try find.bind(&.{.{ .text = source }});
@@ -96,14 +103,21 @@ pub fn conversation(self: Self, a: u.Allocator, source: []const u8, row: i64, ro
 }
 pub fn message(self: Self, a: u.Allocator, source: []const u8, row: i64, date: i64, value: t.Message, origin: []const u8) !void {
     var v = value;
-    var find = try self.db.prepare("SELECT id,content,source_row FROM messages WHERE source=?");
+    if (v.direction == .incoming) _ = try self.observeIdentity(a, v.service, v.sender);
+    if (v.reaction_event) |ev| if (!ev.actor.is_self) {
+        if (ev.actor.address) |address| _ = try self.observeIdentity(a, ev.actor.service, address);
+    };
+    var find = try self.db.prepare("SELECT id,content,source_row,record FROM messages WHERE source=?");
     defer find.close();
     try find.bind(&.{.{ .text = source }});
     const exists = try find.step();
     v.id = if (exists) try find.text(a, 0) else try u.id(a);
     v.revision = "0";
+    const previous = if (exists) (try std.json.parseFromSlice(t.Message, a, find.bytes(3), .{ .allocate = .alloc_always, .ignore_unknown_fields = true })).value else null;
+    const enrichment = try Enrichment.prepare(self, a, v, previous);
+    v = enrichment.value;
     const content = try u.json(a, v);
-    if (exists and u.eq(find.bytes(1), content)) {
+    if (exists and !enrichment.changed and u.eq(find.bytes(1), content)) {
         if (find.int(2) != row) try self.execute("UPDATE messages SET source_row=? WHERE id=?", &.{ .{ .int = row }, .{ .text = v.id } });
         return;
     }
@@ -111,6 +125,7 @@ pub fn message(self: Self, a: u.Allocator, source: []const u8, row: i64, date: i
     v.revision = try u.decimal(a, seq);
     const record = try u.json(a, v);
     try self.execute("INSERT INTO messages(id,source,source_row,conversation_id,date_ns,direction,text,status,content,record) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source) DO UPDATE SET source_row=excluded.source_row,conversation_id=excluded.conversation_id,date_ns=excluded.date_ns,direction=excluded.direction,text=excluded.text,status=excluded.status,content=excluded.content,record=excluded.record", &.{ .{ .text = v.id }, .{ .text = source }, .{ .int = row }, .{ .text = v.conversation_id }, .{ .int = date }, .{ .text = @tagName(v.direction) }, .{ .text = v.text orelse "" }, .{ .text = @tagName(v.observed_status) }, .{ .text = content }, .{ .text = record } });
+    try Enrichment.persist(self, v.id, enrichment);
     try self.event(seq, "message.upsert", record, origin);
 }
 pub fn getRecord(self: Self, a: u.Allocator, kind: enum { conversation, request }, id: []const u8) !?[]const u8 {
@@ -182,7 +197,7 @@ pub fn reset(self: Self, a: u.Allocator) !void {
     var items: std.ArrayList(t.SendRequest) = .empty;
     while (try s.step()) try items.append(a, (try std.json.parseFromSlice(t.SendRequest, a, s.bytes(0), .{ .allocate = .alloc_always })).value);
     try self.execute("UPDATE relay_meta SET epoch=?,sequence=0,pruned_through=0", &.{.{ .text = try u.id(a) }});
-    try self.db.exec("DELETE FROM events; DELETE FROM participants; DELETE FROM messages; DELETE FROM conversations; DELETE FROM ingestion_progress; DELETE FROM pending_source; DELETE FROM reconcile_chats;");
+    try self.db.exec("DELETE FROM events; DELETE FROM reaction_work; DELETE FROM reaction_sources; DELETE FROM ordinary_anchors; DELETE FROM asset_work; DELETE FROM asset_owners; DELETE FROM asset_representations; DELETE FROM asset_blobs; DELETE FROM asset_sources; DELETE FROM contact_mappings; DELETE FROM identity_work; DELETE FROM identities; DELETE FROM enrichment_items; DELETE FROM enrichment_sections; DELETE FROM participants; DELETE FROM messages; DELETE FROM conversations; DELETE FROM ingestion_progress; DELETE FROM pending_source; DELETE FROM reconcile_chats;");
     for (items.items) |item| {
         var v = item;
         v.state = .unknown;
@@ -231,12 +246,14 @@ pub fn page(self: Self, a: u.Allocator, conversation_id: ?[]const u8, before: ?[
     var items: std.ArrayList(std.json.Value) = .empty;
     var next_key: ?[]const u8 = null;
     var last: ?[]const u8 = null;
+    var byte_count: usize = 0;
     while (try s.step()) {
-        if (items.items.len == limit) {
+        if (items.items.len == limit or (items.items.len > 0 and byte_count + s.bytes(0).len > t.max_history_bytes)) {
             next_key = last;
             break;
         }
         try items.append(a, (try std.json.parseFromSlice(std.json.Value, a, s.bytes(0), .{ .allocate = .alloc_always })).value);
+        byte_count += s.bytes(0).len + 1;
         last = if (conversation_id != null) try std.fmt.allocPrint(a, "{d}:{s}", .{ s.int(1), s.bytes(2) }) else try s.text(a, 2);
     }
     return .{ .records = try items.toOwnedSlice(a), .next = next_key };
@@ -245,30 +262,130 @@ pub const Frame = struct { sequence: i64, frame: []const u8 };
 pub fn previews(self: Self, a: u.Allocator, before: ?[]const u8, limit: usize) ![]t.ConversationPreview {
     // The same conversation page, with one indexed latest-message lookup per
     // chat. Keep payloads small without ever truncating canonical messages.
-    var q = try self.db.prepare("SELECT m.conversation_id,m.id,json_extract(m.record,'$.revision'),json_extract(m.record,'$.timestamp'),json_extract(m.record,'$.kind'),substr(m.text,1,256) FROM conversations c LEFT JOIN messages m ON m.id=(SELECT id FROM messages WHERE conversation_id=c.id ORDER BY date_ns DESC,id DESC LIMIT 1) WHERE c.id<? ORDER BY c.id DESC LIMIT ?");
+    var q = try self.db.prepare("SELECT m.conversation_id,m.id,json_extract(m.record,'$.revision'),json_extract(m.record,'$.timestamp'),json_extract(m.record,'$.kind'),substr(m.text,1,256) FROM conversations c LEFT JOIN messages m ON m.id=(SELECT id FROM messages WHERE conversation_id=c.id AND coalesce(json_extract(record,'$.reaction_event.resolution'),'')<>'resolved' ORDER BY date_ns DESC,id DESC LIMIT 1) WHERE c.id<? ORDER BY c.id DESC LIMIT ?");
     defer q.close();
     try q.bind(&.{ .{ .text = before orelse "~" }, .{ .int = @intCast(limit) } });
     var result: std.ArrayList(t.ConversationPreview) = .empty;
     while (try q.step()) {
         if (q.bytes(1).len == 0) continue;
-        try result.append(a, .{ .conversation_id = try q.text(a, 0), .message_id = try q.text(a, 1), .revision = try q.text(a, 2), .timestamp = try q.text(a, 3), .kind = try q.text(a, 4), .text = try q.text(a, 5) });
+        var text = try q.text(a, 5);
+        if (text.len == 0 and u.eq(q.bytes(4), "attachment")) {
+            var images = try self.db.prepare("SELECT count(*) FROM enrichment_items WHERE message_id=? AND section='attachments' AND (json_extract(record,'$.mime_type') LIKE 'image/%' OR json_extract(record,'$.image.availability')='ready')");
+            defer images.close();
+            try images.bind(&.{.{ .text = q.bytes(1) }});
+            _ = try images.step();
+            if (images.int(0) > 0) text = if (images.int(0) == 1) "Photo" else try std.fmt.allocPrint(a, "{d} photos", .{images.int(0)});
+        }
+        try result.append(a, .{ .conversation_id = try q.text(a, 0), .message_id = try q.text(a, 1), .revision = try q.text(a, 2), .timestamp = try q.text(a, 3), .kind = try q.text(a, 4), .text = text });
     }
     return result.toOwnedSlice(a);
 }
 pub fn events(self: Self, a: u.Allocator, after: i64) ![]const Frame {
+    return self.eventsWithIdentities(a, after, false);
+}
+pub fn eventsWithIdentities(self: Self, a: u.Allocator, after: i64, identities: bool) ![]const Frame {
     var s = try self.db.prepare("SELECT sequence,type,record,origin FROM events WHERE sequence>? ORDER BY sequence LIMIT 100");
     defer s.close();
     try s.bind(&.{.{ .int = after }});
     var items: std.ArrayList(Frame) = .empty;
     const e = try self.epoch(a);
+    var byte_count: usize = 0;
     while (try s.step()) {
         const seq = s.int(0);
+        // Advance the private stream scan even if this extension was not
+        // negotiated. Global sequence gaps are part of the v1 cursor contract.
+        if (!identities and u.eq(s.bytes(1), "identity.upsert")) {
+            try items.append(a, .{ .sequence = seq, .frame = "" });
+            continue;
+        }
+        if (byte_count + s.bytes(2).len > 512 * 1024 and items.items.len > 0) break;
+        byte_count += s.bytes(2).len;
         const cur = try t.cursor(a, e, seq);
         const record_value = (try std.json.parseFromSlice(std.json.Value, a, s.bytes(2), .{ .allocate = .alloc_always })).value;
         const data = try u.json(a, .{ .cursor = cur, .sequence = try u.decimal(a, seq), .type = s.bytes(1), .record = record_value, .origin = s.bytes(3) });
         try items.append(a, .{ .sequence = seq, .frame = try std.fmt.allocPrint(a, "id: {s}\nevent: {s}\ndata: {s}\n\n", .{ cur, s.bytes(1), data }) });
     }
     return items.toOwnedSlice(a);
+}
+
+pub fn observeIdentity(self: Self, a: u.Allocator, service: []const u8, address: []const u8) !?[]const u8 {
+    if (address.len == 0) return null;
+    var s = try self.db.prepare("SELECT id FROM identities WHERE service=? AND address=?");
+    defer s.close();
+    try s.bind(&.{ .{ .text = service }, .{ .text = address } });
+    if (try s.step()) return try s.text(a, 0);
+    const id = try u.id(a);
+    var v: t.Identity = .{ .id = id, .service = service, .address = address };
+    const content = try u.json(a, v);
+    const seq = try self.next();
+    v.revision = try u.decimal(a, seq);
+    const record = try u.json(a, v);
+    try self.execute("INSERT INTO identities VALUES(?,?,?,?,?)", &.{ .{ .text = id }, .{ .text = service }, .{ .text = address }, .{ .text = content }, .{ .text = record } });
+    try self.execute("INSERT INTO identity_work(identity_id) VALUES(?)", &.{.{ .text = id }});
+    try self.event(seq, "identity.upsert", record, "reconciliation");
+    return id;
+}
+
+// Only observed identities can be updated. Contacts identifiers are kept in a
+// separate private table and never serialized into directory records/events.
+pub fn updateIdentity(self: Self, a: u.Allocator, value: t.Identity) !void {
+    var s = try self.db.prepare("SELECT service,address,content FROM identities WHERE id=?");
+    defer s.close();
+    try s.bind(&.{.{ .text = value.id }});
+    if (!try s.step()) return error.NotFound;
+    if (!u.eq(value.service, s.bytes(0)) or !u.eq(value.address, s.bytes(1))) return error.InvalidRequest;
+    var v = value;
+    v.revision = "0";
+    if (v.match_state != .matched) {
+        v.display_name = null;
+        v.avatar = null;
+    }
+    const content = try u.json(a, v);
+    if (u.eq(content, s.bytes(2))) return;
+    const seq = try self.next();
+    v.revision = try u.decimal(a, seq);
+    const record = try u.json(a, v);
+    try self.execute("UPDATE identities SET content=?,record=? WHERE id=?", &.{ .{ .text = content }, .{ .text = record }, .{ .text = v.id } });
+    try self.event(seq, "identity.upsert", record, "reconciliation");
+}
+
+pub fn identityPage(self: Self, a: u.Allocator, before: ?[]const u8, limit: usize) !Page {
+    if (before) |b| if (!t.uuid(b)) return error.InvalidRequest;
+    var s = try self.db.prepare("SELECT id,record FROM identities WHERE id<? ORDER BY id DESC LIMIT ?");
+    defer s.close();
+    try s.bind(&.{ .{ .text = before orelse "~" }, .{ .int = @intCast(limit + 1) } });
+    var records: std.ArrayList(std.json.Value) = .empty;
+    var last: ?[]const u8 = null;
+    var next_key: ?[]const u8 = null;
+    var bytes: usize = 0;
+    while (try s.step()) {
+        if (records.items.len == limit or (records.items.len > 0 and bytes + s.bytes(1).len > t.max_metadata_page)) {
+            next_key = last;
+            break;
+        }
+        bytes += s.bytes(1).len + 1;
+        try records.append(a, (try std.json.parseFromSlice(std.json.Value, a, s.bytes(1), .{ .allocate = .alloc_always })).value);
+        last = try s.text(a, 0);
+    }
+    return .{ .records = try records.toOwnedSlice(a), .next = next_key };
+}
+
+// Independent, versioned backfill also covers old senders no longer present in
+// chat participants. Checkpoint and new identities share the writer transaction.
+pub fn backfillIdentities(self: Self, a: u.Allocator) !void {
+    const key = "identity_backfill_v1";
+    const after = (try self.progress(a, key)) orelse "";
+    if (u.eq(after, "complete")) return;
+    var s = try self.db.prepare("SELECT id,record FROM messages WHERE id>? ORDER BY id LIMIT 100");
+    defer s.close();
+    try s.bind(&.{.{ .text = after }});
+    var last: ?[]const u8 = null;
+    while (try s.step()) {
+        const v = (try std.json.parseFromSlice(t.Message, a, s.bytes(1), .{ .ignore_unknown_fields = true, .allocate = .alloc_always })).value;
+        if (v.direction == .incoming) _ = try self.observeIdentity(a, v.service, v.sender);
+        last = try s.text(a, 0);
+    }
+    try self.setProgress(key, last orelse "complete");
 }
 
 test "subscribers are notified only after a successful durable commit" {
@@ -364,4 +481,43 @@ test "failed journal acceptance never leaves a queued send" {
     try std.testing.expectError(error.DatabaseFailure, j.accept(a, input, true));
     try std.testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM send_requests"));
     try std.testing.expectEqual(@as(i64, 0), try j.sequence());
+}
+
+test "directory tombstones preserve identity and legacy streams skip extension events" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const j = try Self.open(":memory:");
+    defer j.close();
+    try j.begin();
+    const id = (try j.observeIdentity(a, "imessage", "Alias@Example.invalid")).?;
+    try std.testing.expectEqualStrings(id, (try j.observeIdentity(a, "imessage", "Alias@Example.invalid")).?);
+    const other = (try j.observeIdentity(a, "sms", "Alias@Example.invalid")).?;
+    try std.testing.expect(!u.eq(id, other));
+    var v: t.Identity = .{ .id = id, .service = "imessage", .address = "Alias@Example.invalid", .display_name = "Synthetic Élodie", .match_state = .matched };
+    try j.updateIdentity(a, v);
+    const named_revision = try j.sequence();
+    try j.updateIdentity(a, v);
+    try std.testing.expectEqual(named_revision, try j.sequence());
+    v.match_state = .unavailable;
+    try j.updateIdentity(a, v);
+    const cleared = try j.identityPage(a, null, 10);
+    for (cleared.records) |value| if (u.eq(value.object.get("id").?.string, id)) {
+        try std.testing.expect(value.object.get("display_name").? == .null);
+        try std.testing.expect(value.object.get("avatar").? == .null);
+        try std.testing.expectEqualStrings("unavailable", value.object.get("match_state").?.string);
+    };
+    const legacy = try j.events(a, 0);
+    const rich = try j.eventsWithIdentities(a, 0, true);
+    try std.testing.expectEqual(rich.len, legacy.len);
+    for (legacy, rich) |old, new| {
+        try std.testing.expectEqual(old.sequence, new.sequence);
+        try std.testing.expectEqualStrings("", old.frame);
+        try std.testing.expect(std.mem.indexOf(u8, new.frame, "identity.upsert") != null);
+    }
+    // Rollback covers the directory, its jobs, and all associated revisions.
+    j.rollback();
+    try std.testing.expectEqual(@as(i64, 0), try j.sequence());
+    try std.testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM identities"));
+    try std.testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM identity_work"));
 }

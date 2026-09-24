@@ -3,11 +3,24 @@ const u = @import("../../common.zig");
 const t = @import("../../protocol/types.zig");
 const Db = @import("../Sqlite.zig");
 const decoder = @import("decoder.zig");
+const links = @import("link_preview.zig");
+const reactions = @import("reactions.zig");
 const Self = @This();
 db: Db,
 identity: []const u8,
+features: Features,
+pub const Features = struct {
+    attachment_filename: bool = false,
+    attachment_uti: bool = false,
+    attachment_transfer_state: bool = false,
+    link_payload: bool = false,
+    reaction_target: bool = false,
+    reaction_emoji: bool = false,
+    reaction_range: bool = false,
+};
 pub const SourceConversation = struct { source: []const u8, row: i64, route: []const u8, value: t.Conversation };
-pub const SourceMessage = struct { source: []const u8, row: i64, date: i64, chat_row: i64, value: t.Message, pending: bool };
+pub const AttachmentSource = struct { id: []const u8, filename: []const u8, uti: []const u8, transfer_state: i64 };
+pub const SourceMessage = struct { source: []const u8, row: i64, date: i64, chat_row: i64, value: t.Message, pending: bool, attachment_sources: []const AttachmentSource = &.{}, link_artwork: []const links.Artwork = &.{}, reaction: ?reactions.Observation = null };
 pub fn open(a: u.Allocator, path: [:0]const u8) !Self {
     const db = try Db.open(path, true);
     errdefer db.close();
@@ -21,7 +34,21 @@ pub fn open(a: u.Allocator, path: [:0]const u8) !Self {
     chats.close();
     var attachments = try db.prepare("SELECT a.guid,a.transfer_name,a.mime_type,a.total_bytes FROM attachment a JOIN message_attachment_join j ON j.attachment_id=a.ROWID LIMIT 0");
     attachments.close();
-    return .{ .db = db, .identity = try a.dupe(u8, buf[0..@intCast(n)]) };
+    return .{ .db = db, .identity = try a.dupe(u8, buf[0..@intCast(n)]), .features = .{
+        .attachment_filename = probe(db, "SELECT filename FROM attachment LIMIT 0"),
+        .attachment_uti = probe(db, "SELECT uti FROM attachment LIMIT 0"),
+        .attachment_transfer_state = probe(db, "SELECT transfer_state FROM attachment LIMIT 0"),
+        .link_payload = probe(db, "SELECT payload_data FROM message LIMIT 0"),
+        .reaction_target = probe(db, "SELECT associated_message_guid FROM message LIMIT 0"),
+        .reaction_emoji = probe(db, "SELECT associated_message_emoji FROM message LIMIT 0"),
+        .reaction_range = probe(db, "SELECT associated_message_range_location,associated_message_range_length FROM message LIMIT 0"),
+    } };
+}
+fn probe(db: Db, query: [:0]const u8) bool {
+    // Optional enrichment columns never enter the required history query.
+    var s = db.prepare(query) catch return false;
+    s.close();
+    return true;
 }
 pub fn close(self: Self) void {
     self.db.close();
@@ -113,7 +140,13 @@ pub fn message(self: Self, a: u.Allocator, row: i64) !?SourceMessage {
         if (text != null) decoding = .attributed;
     }
     var attachments: std.ArrayList(t.Attachment) = .empty;
-    var att = try self.db.prepare("SELECT a.guid,substr(coalesce(a.transfer_name,'Attachment'),1,255),substr(coalesce(a.mime_type,''),1,128),a.total_bytes FROM attachment a JOIN message_attachment_join j ON j.attachment_id=a.ROWID WHERE j.message_id=? ORDER BY a.ROWID LIMIT 32");
+    var attachment_sources: std.ArrayList(AttachmentSource) = .empty;
+    const attachment_query = try std.fmt.allocPrintSentinel(a, "SELECT a.guid,substr(coalesce(a.transfer_name,'Attachment'),1,255),substr(coalesce(a.mime_type,''),1,128),a.total_bytes,{s},{s},{s} FROM attachment a JOIN message_attachment_join j ON j.attachment_id=a.ROWID WHERE j.message_id=? ORDER BY a.ROWID", .{
+        if (self.features.attachment_filename) "substr(coalesce(a.filename,''),1,4097)" else "''",
+        if (self.features.attachment_uti) "substr(coalesce(a.uti,''),1,128)" else "''",
+        if (self.features.attachment_transfer_state) "coalesce(a.transfer_state,0)" else "0",
+    }, 0);
+    var att = try self.db.prepare(attachment_query);
     defer att.close();
     try att.bind(&.{.{ .int = row }});
     while (try att.step()) {
@@ -122,13 +155,44 @@ pub fn message(self: Self, a: u.Allocator, row: i64) !?SourceMessage {
         std.crypto.hash.sha2.Sha256.hash(att.bytes(0), &digest, .{});
         const hex = std.fmt.bytesToHex(digest, .lower);
         try attachments.append(a, .{ .id = try a.dupe(u8, &hex), .name = try att.text(a, 1), .mime_type = try att.text(a, 2), .bytes = try u.decimal(a, att.int(3)) });
+        if (self.features.attachment_filename) try attachment_sources.append(a, .{ .id = attachments.items[attachments.items.len - 1].id, .filename = try att.text(a, 4), .uti = try att.text(a, 5), .transfer_state = att.int(6) });
     }
-    const reaction = s.int(13) >= 2000 and s.int(13) < 4000;
+    const reaction = reactions.candidate(s.int(13));
     const system = s.int(14) != 0 or s.int(15) != 0;
     const special = s.bytes(16).len != 0 or (s.int(13) != 0 and !reaction);
     const kind: @FieldType(t.Message, "kind") = if (reaction) .reaction else if (system) .system else if (special) .unsupported else if (attachments.items.len > 0) .attachment else if (text != null and text.?.len > 0) .text else if (decoding == .empty) .empty else .unsupported;
     const outgoing = s.int(3) != 0;
-    return .{ .source = try s.text(a, 0), .row = row, .date = s.int(1), .chat_row = s.int(17), .pending = s.bytes(0).len == 0 or s.int(17) == 0 or (decoding == .empty and (s.int(12) == 0 or kind == .empty)), .value = .{
+    var reaction_result: ?reactions.Observation = null;
+    if (reaction and self.features.reaction_target) {
+        const sql = try std.fmt.allocPrintSentinel(a, "SELECT substr(coalesce(associated_message_guid,''),1,1100),{s},{s},{s} FROM message WHERE ROWID=?", .{
+            if (self.features.reaction_emoji) "substr(coalesce(associated_message_emoji,''),1,257)" else "''",
+            if (self.features.reaction_range) "associated_message_range_location" else "NULL",
+            if (self.features.reaction_range) "associated_message_range_length" else "NULL",
+        }, 0);
+        var associated = try self.db.prepare(sql);
+        defer associated.close();
+        try associated.bind(&.{.{ .int = row }});
+        if (try associated.step()) {
+            reaction_result = try reactions.decode(a, s.int(13), associated.bytes(0), associated.bytes(1), .{ .service = normalizeService(s.bytes(4)), .is_self = outgoing, .address = if (outgoing) null else try s.text(a, 2) });
+            if (reaction_result) |*result| if (self.features.reaction_range) {
+                result.range_location = associated.int(2);
+                result.range_length = associated.int(3);
+            };
+        }
+    }
+    var link_result: ?links.Result = null;
+    if (self.features.link_payload) {
+        link_result = .{ .state = .complete };
+        if (u.eq(s.bytes(16), links.provider)) {
+            var payload = try self.db.prepare("SELECT CASE WHEN length(payload_data)<=1048576 THEN payload_data END,length(payload_data) FROM message WHERE ROWID=?");
+            defer payload.close();
+            try payload.bind(&.{.{ .int = row }});
+            if (try payload.step()) link_result = if (payload.int(1) > t.max_decode) .{ .state = .oversized } else try links.decode(a, payload.bytes(0));
+        }
+    }
+    if (link_result) |*result| result.artwork = try links.bindLocalArtwork(a, s.bytes(0), attachments.items, result.artwork);
+    const parts = if (body.len > 0 and text != null and (link_result == null or link_result.?.previews.len == 0)) decoder.parts(a, body, text.?, attachments.items) catch null else null;
+    return .{ .source = try s.text(a, 0), .row = row, .date = s.int(1), .chat_row = s.int(17), .reaction = reaction_result, .attachment_sources = try attachment_sources.toOwnedSlice(a), .link_artwork = if (link_result) |result| result.artwork else &.{}, .pending = s.bytes(0).len == 0 or s.int(17) == 0 or (decoding == .empty and (s.int(12) == 0 or kind == .empty)), .value = .{
         .sender = try s.text(a, 2),
         .direction = if (outgoing) .outgoing else .incoming,
         .service = normalizeService(s.bytes(4)),
@@ -137,6 +201,9 @@ pub fn message(self: Self, a: u.Allocator, row: i64) !?SourceMessage {
         .text = text,
         .decoding = decoding,
         .attachments = try attachments.toOwnedSlice(a),
+        .link_previews = if (link_result) |result| result.previews else null,
+        .parts = parts,
+        .enrichment = if (link_result != null or parts != null) .{ .state = if (link_result) |result| result.state else .complete, .part_mapping = if (parts != null) .resolved else .unresolved } else null,
         .observed_status = if (s.int(10) != 0) .failed else if (!outgoing) .received else if (s.int(8) != 0 or s.int(9) > 0) .delivered else if (s.int(11) != 0) .sent else .unknown,
     } };
 }
