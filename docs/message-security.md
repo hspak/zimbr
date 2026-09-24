@@ -31,8 +31,9 @@ compromised relay. This follows the [OWASP input validation guidance](https://ch
   a GUID over 1,024 bytes. That attachment set is omitted with enrichment state
   `oversized`, preserving the caption. This is a source safety limit, separate
   from normal inline metadata and overflow pagination limits.
-- Import scratch allocations are released after each message, so a batch of
-  expensive messages cannot retain every parser's scratch memory until commit.
+- Import scratch allocations are reset after each message, retaining at most
+  256 KiB of reusable capacity. A batch of expensive messages cannot retain
+  every parser's scratch memory until commit; the arena is freed at batch end.
 
 ## Client
 
@@ -69,6 +70,7 @@ python3 tests/links.py
 python3 tests/assets.py
 python3 tests/integration.py
 python3 tests/client_enrichment.py
+python3 tests/client_pixel_safety.py
 ```
 
 The fixtures are synthetic. They exercise malformed text, byte boundaries,
@@ -76,3 +78,7 @@ attachment floods, aliased plist offsets, shared artwork expansion, deep/wide
 JSON, rejected sends, valid Unicode/idempotency, client transaction rollback,
 duplicate/invalid metadata pagination, and large reaction groups. Native macOS
 Messages and ImageIO acceptance still require validation on a Mac.
+
+The [performance hardening audit](performance-hardening.md) compares both
+September 24 performance commits with the security-pass baseline and records
+additional boundary, statement-lifetime, and sanitized pixel regressions.

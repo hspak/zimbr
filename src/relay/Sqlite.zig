@@ -176,3 +176,27 @@ test "cache survives schema changes and failed writes and stays bounded" {
     while (stmt != null) : (stmt = c.sqlite3_next_stmt(db.handle, stmt)) count += 1;
     try std.testing.expect(count <= db.cache.slots.len);
 }
+
+test "failed partial bindings cannot leak into a later cached query or connection" {
+    const db = try open(":memory:", false);
+    defer db.close();
+    const other = try open(":memory:", false);
+    defer other.close();
+    const query = "SELECT ?";
+    const secret = try std.testing.allocator.dupe(u8, "private\x00blob");
+    var statement = try db.prepare(query);
+    // The first parameter binds borrowed memory before the second fails.
+    try std.testing.expectError(error.DatabaseFailure, statement.bind(&.{ .{ .blob = secret }, .{ .int = 2 } }));
+    statement.close();
+    std.testing.allocator.free(secret);
+    statement = try db.prepare(query);
+    defer statement.close();
+    try std.testing.expect(try statement.step());
+    try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(statement.handle, 0));
+    var independent = try other.prepare(query);
+    defer independent.close();
+    try independent.bind(&.{.{ .text = "other connection" }});
+    try std.testing.expect(try independent.step());
+    try std.testing.expectEqualStrings("other connection", independent.bytes(0));
+    try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(statement.handle, 0));
+}

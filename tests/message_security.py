@@ -80,6 +80,11 @@ def main():
                     encoded[:-1] + b',"text":"duplicate"}',
                     json.dumps(dict(send, text='visible\0hidden')).encode(),
                 ]
+                # SIMD may skip ordinary string bytes, but typed parsing must
+                # still reject controls and invalid escapes in unknown fields.
+                for padding in range(32):
+                    prefix = encoded[:-1] + b',"unknown":"' + b'a' * (64 + padding)
+                    rejected.extend([prefix + b'\x00"}', prefix + b'\\q"}'])
                 for body in rejected:
                     assert request('/v1/messages', body)[0] == 400
                 assert request('/v1/messages', encoded, 'application/json-bogus')[0] == 400

@@ -99,3 +99,23 @@ test "vector string scanning matches scalar bounds across escapes and tails" {
         }
     }
 }
+
+test "long quoted prefixes cannot hide depth token or byte limits" {
+    const a = std.testing.allocator;
+    for (0..32) |padding| {
+        const prefix = try std.fmt.allocPrint(a, "{{\"padding\":\"{s}\\\"\\\\\",\"unknown\":", .{("a" ** 96)[0 .. 64 + padding]});
+        defer a.free(prefix);
+        const deep = try std.mem.concat(a, u8, &.{ prefix, "[" ** 31 ++ "0" ++ "]" ** 31 ++ "}" });
+        defer a.free(deep);
+        try check(deep, deep.len, 8192);
+        const too_deep = try std.mem.concat(a, u8, &.{ prefix, "[" ** 32 ++ "0" ++ "]" ** 32 ++ "}" });
+        defer a.free(too_deep);
+        try std.testing.expectError(error.JsonTooDeep, check(too_deep, too_deep.len, 8192));
+        // Object, two keys, string value, array, and 8,187 number tokens.
+        const wide = try std.mem.concat(a, u8, &.{ prefix, "[" ++ "0," ** 8186 ++ "0]}" });
+        defer a.free(wide);
+        try check(wide, wide.len, 8192);
+        try std.testing.expectError(error.JsonTooComplex, check(wide, wide.len, 8191));
+        try std.testing.expectError(error.JsonTooLarge, check(wide, wide.len - 1, 8192));
+    }
+}
