@@ -81,15 +81,16 @@ pub fn prepare(a: u.Allocator, m: t.Message) ![]const Block {
     if (blocks.items.len == 0 and !text_present) try blocks.append(a, .{ .value = .{ .text = display.record(a, m) } });
     // Place chips immediately below the referenced block; unresolved or absent
     // parts get one message-level group with an explicit explanation in detail.
+    const grouped = try ReactionGroups.init(a, m.reactions orelse &.{}, blocks.items);
     var result: std.ArrayList(Block) = .empty;
     for (blocks.items) |block| {
         try result.append(a, block);
         if (block.part_id) |id| {
-            const chips = try group(a, m.reactions orelse &.{}, id, blocks.items);
+            const chips = grouped.groups[grouped.by_part.get(id).?];
             if (chips.len > 0) try result.append(a, .{ .part_id = id, .value = .{ .reactions = chips } });
         }
     }
-    const chips = try group(a, m.reactions orelse &.{}, null, blocks.items);
+    const chips = grouped.groups[0];
     if (chips.len > 0) try result.append(a, .{ .value = .{ .reactions = chips } });
     if (m.enrichment) |e| inline for (comptime std.meta.tags(Section)) |section| {
         if (!@field(e, @tagName(section)).complete) try result.append(a, .{ .value = .{ .more = section } });
@@ -105,41 +106,44 @@ pub fn partText(m: t.Message, part: t.MessagePart) ?[]const u8 {
     const value = text[start..][0..len];
     return if (std.unicode.utf8ValidateSlice(value)) value else null;
 }
-fn group(a: u.Allocator, reactions: []const t.Reaction, part: ?[]const u8, blocks: []const Block) ![]const Chip {
-    var chips: std.ArrayList(Chip) = .empty;
-    for (reactions) |reaction| {
-        var found = false;
-        if (reaction.part_state == .resolved) if (reaction.part_id) |id| {
-            for (blocks) |block| if (block.part_id) |bid| {
-                if (u.eq(id, bid)) {
-                    found = true;
-                    break;
-                }
-            };
+// Resolve targets and build actor lists once. Re-scanning every block for
+// every reaction at every part made hostile metadata cubic in its item count.
+const ReactionGroups = struct {
+    groups: []const []const Chip,
+    by_part: std.StringHashMapUnmanaged(usize),
+    fn init(a: u.Allocator, reactions: []const t.Reaction, blocks: []const Block) !ReactionGroups {
+        const PendingChip = struct { label: []const u8, actors: std.ArrayList(t.ReactionActor) = .empty };
+        const PendingGroup = struct { labels: std.StringHashMapUnmanaged(usize) = .empty, chips: std.ArrayList(PendingChip) = .empty };
+        var by_part: std.StringHashMapUnmanaged(usize) = .empty;
+        var pending: std.ArrayList(PendingGroup) = .empty;
+        try pending.append(a, .{}); // Unresolved/message-level reactions.
+        for (blocks) |block| if (block.part_id) |id| {
+            const entry = try by_part.getOrPut(a, id);
+            if (!entry.found_existing) {
+                entry.value_ptr.* = pending.items.len;
+                try pending.append(a, .{});
+            }
         };
-        if (part) |id| {
-            if (!found or !u.eq(reaction.part_id.?, id)) continue;
-        } else if (found) continue;
-        const label = reaction.emoji orelse reactionLabel(reaction.key);
-        var index: ?usize = null;
-        for (chips.items, 0..) |chip, i| if (u.eq(chip.label, label)) {
-            index = i;
-            break;
-        };
-        if (index) |i| {
-            const old = chips.items[i].actors;
-            const actors = try a.alloc(t.ReactionActor, old.len + 1);
-            @memcpy(actors[0..old.len], old);
-            actors[old.len] = reaction.actor;
-            chips.items[i].actors = actors;
-        } else {
-            const actors = try a.alloc(t.ReactionActor, 1);
-            actors[0] = reaction.actor;
-            try chips.append(a, .{ .label = label, .actors = actors, .unresolved = !found });
+        for (reactions) |reaction| {
+            const index = if (reaction.part_state == .resolved and reaction.part_id != null) by_part.get(reaction.part_id.?) orelse 0 else 0;
+            const group = &pending.items[index];
+            const label = reaction.emoji orelse reactionLabel(reaction.key);
+            const entry = try group.labels.getOrPut(a, label);
+            if (!entry.found_existing) {
+                entry.value_ptr.* = group.chips.items.len;
+                try group.chips.append(a, .{ .label = label });
+            }
+            try group.chips.items[entry.value_ptr.*].actors.append(a, reaction.actor);
         }
+        const groups = try a.alloc([]const Chip, pending.items.len);
+        for (pending.items, groups, 0..) |group, *chips, index| {
+            const values = try a.alloc(Chip, group.chips.items.len);
+            for (group.chips.items, values) |chip, *value| value.* = .{ .label = chip.label, .actors = chip.actors.items, .unresolved = index == 0 };
+            chips.* = values;
+        }
+        return .{ .groups = groups, .by_part = by_part };
     }
-    return chips.items;
-}
+};
 fn reactionLabel(key: []const u8) []const u8 {
     const keys = [_][]const u8{ "heart", "like", "dislike", "laugh", "emphasize", "question" };
     const labels = [_][]const u8{ "❤️", "👍", "👎", "😂", "‼️", "❓" };
@@ -159,4 +163,30 @@ test "composite blocks keep captions, source order, part reactions and overflow"
     try std.testing.expect(!blocks[2].value.reactions[0].unresolved);
     try std.testing.expect(blocks[3].value.reactions[0].unresolved);
     try std.testing.expectEqual(Section.reactions, blocks[4].value.more);
+}
+
+test "many reactions group each actor once across many target parts" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const count = 4096;
+    const blocks = try a.alloc(Block, count);
+    const reactions = try a.alloc(t.Reaction, count);
+    for (blocks, reactions, 0..) |*block, *reaction, i| {
+        const id = try std.fmt.allocPrint(a, "part:{d}", .{i});
+        block.* = .{ .part_id = id, .value = .{ .text = "text" } };
+        reaction.* = .{ .id = id, .part_id = id, .part_state = .resolved, .actor = .{ .address = "peer", .service = "imessage" }, .key = "like" };
+    }
+    const grouped = try ReactionGroups.init(a, reactions, blocks);
+    try std.testing.expectEqual(@as(usize, count + 1), grouped.groups.len);
+    try std.testing.expectEqual(@as(usize, 0), grouped.groups[0].len);
+    for (grouped.groups[1..]) |chips| {
+        try std.testing.expectEqual(@as(usize, 1), chips.len);
+        try std.testing.expectEqual(@as(usize, 1), chips[0].actors.len);
+        try std.testing.expect(!chips[0].unresolved);
+    }
+    for (reactions) |*reaction| reaction.part_id = "missing";
+    const unresolved = try ReactionGroups.init(a, reactions, blocks);
+    try std.testing.expectEqual(@as(usize, count), unresolved.groups[0][0].actors.len);
+    try std.testing.expect(unresolved.groups[0][0].unresolved);
 }

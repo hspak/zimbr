@@ -210,8 +210,13 @@ fn importChat(self: *Self, a: u.Allocator, batch: *ImportBatch, row: i64, origin
     try batch.chats.put(a, row, result);
     return result;
 }
-fn importRow(self: *Self, a: u.Allocator, batch: *ImportBatch, row: i64, origin: []const u8, complete: bool) !void {
-    if ((try batch.rows.getOrPut(a, row)).found_existing) return;
+fn importRow(self: *Self, batch_a: u.Allocator, batch: *ImportBatch, row: i64, origin: []const u8, complete: bool) !void {
+    if ((try batch.rows.getOrPut(batch_a, row)).found_existing) return;
+    // Decoder scratch must not accumulate across an entire import batch.
+    // Conversation IDs/maps alone need to live for the batch's duration.
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
     const source = batch.source;
     const j = self.journal;
     if (try source.message(a, row)) |m| {
@@ -230,7 +235,7 @@ fn importRow(self: *Self, a: u.Allocator, batch: *ImportBatch, row: i64, origin:
         if (m.pending and remembered == null) try j.setProgress(origin_key, event_origin);
         if (m.pending) try j.execute("INSERT INTO pending_source(source_row,attempt_ms) VALUES(?,?) ON CONFLICT(source_row) DO UPDATE SET attempt_ms=excluded.attempt_ms", &.{ .{ .int = row }, .{ .int = u.now() } }) else try j.execute("DELETE FROM pending_source WHERE source_row=?", &.{.{ .int = row }});
         if (m.chat_row == 0 or m.source.len == 0) return;
-        if (try self.importChat(a, batch, m.chat_row, event_origin, complete)) |cid| {
+        if (try self.importChat(batch_a, batch, m.chat_row, event_origin, complete)) |cid| {
             var v = m.value;
             v.conversation_id = cid;
             if (self.assets_service != null and source.features.attachment_filename) try @import("Assets.zig").attach(j, a, m.source, &v, m.attachment_sources);

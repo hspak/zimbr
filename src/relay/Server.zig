@@ -113,10 +113,13 @@ fn handle(self: *Self, a: u.Allocator, req: *std.http.Server.Request, peer: *Tls
     }
     var input: ?t.SendInput = null;
     if (req.head.method == .POST and u.eq(path, "/v1/messages")) {
-        if (req.head.content_type == null or !std.mem.startsWith(u8, req.head.content_type.?, "application/json")) return error.InvalidRequest;
+        const content_type = req.head.content_type orelse return error.InvalidRequest;
+        var media_type = std.mem.splitScalar(u8, content_type, ';');
+        if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, media_type.first(), " \t"), "application/json")) return error.InvalidRequest;
         var body_buf: [8192]u8 = undefined;
         const body_reader = try req.readerExpectContinue(&body_buf);
         const body = body_reader.allocRemaining(a, .limited(t.max_body)) catch |err| return if (err == error.StreamTooLong) error.BodyTooLarge else error.InvalidRequest;
+        @import("../protocol/Json.zig").check(body, t.max_body, 8192) catch return error.InvalidRequest;
         input = (std.json.parseFromSlice(t.SendInput, a, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return error.InvalidRequest).value;
     } else if (req.head.method != .GET) return error.NotFound;
     if (Tls.c.zr_tls_valid(peer) == 0) return error.CertificateExpired;

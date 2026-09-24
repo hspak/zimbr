@@ -46,6 +46,13 @@ const Binary = struct {
     ref_width: usize,
     table: usize,
     allocated: usize = 0,
+    // Offsets may alias. Input size alone does not bound repeated decoding or
+    // hashing of the same large string under many different object indices.
+    work: usize = 0,
+    fn charge(self: *Binary, bytes: usize) Failure!void {
+        if (bytes > max_bytes * 8 - self.work) return error.Oversized;
+        self.work += bytes;
+    }
     fn parse(a: u.Allocator, bytes: []const u8) Failure!Value {
         if (bytes.len < 40) return error.Malformed;
         const trailer = bytes[bytes.len - 32 ..];
@@ -67,6 +74,7 @@ const Binary = struct {
     }
     fn take(self: *Binary, position: *usize, length: usize) Failure![]const u8 {
         if (position.* > self.table or length > self.table - position.*) return error.Malformed;
+        try self.charge(length);
         const bytes = self.bytes[position.*..][0..length];
         position.* += length;
         return bytes;
@@ -136,6 +144,7 @@ const Binary = struct {
                     var keys: std.StringHashMapUnmanaged(void) = .empty;
                     for (entries, 0..) |*entry, i| {
                         const key = (try self.reference(refs[i * self.ref_width ..][0..self.ref_width], depth + 1)).text() orelse return error.Malformed;
+                        try self.charge(key.len);
                         if ((try keys.getOrPut(self.a, key)).found_existing) return error.Malformed;
                         entry.* = .{ .key = key, .value = try self.reference(refs[(i + length) * self.ref_width ..][0..self.ref_width], depth + 1) };
                     }

@@ -554,6 +554,11 @@ retained status output. Over-limit content becomes a classified placeholder.
 Events are pruned every minute to seven days and at most 100,000 records by default. Pruning does not
 delete normalized history or request identities.
 
+Message handling also bounds JSON nesting/complexity, shared plist expansion,
+attachment enumeration, and client metadata accumulation. Malformed text and
+oversized source metadata use classified fallbacks. See the
+[message security boundaries and regression tests](docs/message-security.md).
+
 The attributed decoder recognizes the observed immutable/mutable typed-stream
 root NSString layouts and validates their length, encoding, and string terminator.
 It does not instantiate archived classes or scrape printable bytes. A restricted

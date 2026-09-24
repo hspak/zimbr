@@ -108,6 +108,17 @@ def main():
             add('cyclic', {'$archiver': 'NSKeyedArchiver', '$objects': ['$null', plistlib.UID(1)], '$top': {'root': plistlib.UID(1)}}, state='malformed')
             add('unknown-class', {'$archiver': 'NSKeyedArchiver', '$objects': ['$null', {'$class': plistlib.UID(2), 'metadata': meta}, {'$classname': 'UnexpectedExecutableClass'}], '$top': {'root': plistlib.UID(1)}}, state='unsupported')
             add('oversized', raw=b'x' * (1024 * 1024 + 1), state='oversized')
+            add('nul-text-payload', raw='\0' + 'x' * (1024 * 1024), state='oversized')
+            # Aliased offsets revalidate the same large string under distinct
+            # object indices. Wire size and object count alone do not bound work.
+            array = b'\xaf\x10\x20' + bytes(range(1, 33))
+            scalar = b'\x5f\x12' + (512 * 1024).to_bytes(4, 'big') + b'x' * (512 * 1024)
+            objects = b'bplist00' + array + scalar
+            offsets = [8] + [8 + len(array)] * 32
+            trailer = b'\0' * 6 + bytes([4, 1]) + (33).to_bytes(8, 'big') + b'\0' * 8 + len(objects).to_bytes(8, 'big')
+            add('aliased-offsets', raw=objects + b''.join(i.to_bytes(4, 'big') for i in offsets) + trailer, state='oversized')
+            shared = {'metadata': {'URL': 'https://shared.example.invalid/', 'image': b'x' * (256 * 1024)}}
+            add('shared-artwork-expansion', [shared] * 32, state='oversized')
             deep = {'originalURL': 'https://example.invalid/'}
             for _ in range(40): deep = {'metadata': deep}
             add('deep', deep, state='oversized')

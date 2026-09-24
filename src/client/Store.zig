@@ -191,6 +191,7 @@ pub fn beginSync(s: Self, epoch: []const u8, cursor: []const u8) !void {
     try s.db.exec("COMMIT");
 }
 pub fn upsert(s: Self, a: u.Allocator, kind: []const u8, raw: []const u8) !bool {
+    try @import("../protocol/Json.zig").check(raw, @import("Validation.zig").max_record_bytes, 32768);
     if (u.eq(kind, "identity")) {
         const v = try std.json.parseFromSliceLeaky(t.Identity, a, raw, .{ .ignore_unknown_fields = true });
         const revision = try std.fmt.parseInt(i64, v.revision, 10);
@@ -211,6 +212,7 @@ pub fn upsert(s: Self, a: u.Allocator, kind: []const u8, raw: []const u8) !bool 
         chat = if (v.is_self and v.thread_id != null and t.uuid(v.thread_id.?)) v.thread_id.? else v.id;
     } else if (u.eq(kind, "message")) {
         const v = (try std.json.parseFromSlice(t.Message, a, raw, .{ .ignore_unknown_fields = true })).value;
+        try @import("Validation.zig").message(v);
         id = v.id;
         rev = v.revision;
         chat = v.conversation_id;
@@ -265,6 +267,7 @@ pub fn event(s: Self, a: u.Allocator, raw: []const u8, frame_id: []const u8, fra
 // The returned message is only eligible for delivery AFTER the caller's batch
 // transaction commits. Its strings belong to a, just like parsed event records.
 pub fn eventNotification(s: Self, a: u.Allocator, raw: []const u8, frame_id: []const u8, frame_type: []const u8, viewed: []const u8) !?t.Message {
+    try @import("../protocol/Json.zig").check(raw, 1024 * 1024, 65536);
     const e = (try std.json.parseFromSlice(Event, a, raw, .{ .ignore_unknown_fields = true })).value;
     const epoch = try s.get(a, "epoch");
     const seq = try t.parseCursor(e.cursor, epoch);
@@ -280,6 +283,7 @@ pub fn eventNotification(s: Self, a: u.Allocator, raw: []const u8, frame_id: []c
     var notification: ?t.Message = null;
     if (u.eq(kind, "message")) {
         const m = (try std.json.parseFromSlice(t.Message, a, record, .{ .ignore_unknown_fields = true })).value;
+        try @import("Validation.zig").message(m);
         if (u.eq(e.origin, "live") or try s.cacheBackgroundMessage(m)) _ = try s.upsert(a, kind, record);
         if (!display.resolvedReaction(m)) try s.savePreview(a, try u.json(a, t.ConversationPreview{
             .conversation_id = m.conversation_id,
@@ -468,8 +472,11 @@ pub fn enrichmentNext(s: Self, a: u.Allocator, id: []const u8, revision: []const
     return if (q.bytes(0).len == 0) null else try q.text(a, 0);
 }
 pub fn enrichmentPage(s: Self, a: u.Allocator, raw: []const u8, id: []const u8, revision: []const u8, section: @import("Content.zig").Section, after: []const u8) !bool {
+    const limits = @import("Validation.zig");
+    try @import("../protocol/Json.zig").check(raw, t.max_metadata_page, 8192);
     const Page = struct { message_id: []const u8, revision: []const u8, section: @import("Content.zig").Section, items: []const std.json.Value, total: usize, next: ?[]const u8 };
     const page_value = try std.json.parseFromSliceLeaky(Page, a, raw, .{ .ignore_unknown_fields = true });
+    if (page_value.items.len > t.max_page or page_value.total > limits.max_section_items) return error.InvalidEnrichmentPage;
     if (!u.eq(page_value.message_id, id) or !u.eq(page_value.revision, revision) or page_value.section != section or (page_value.next != null and (u.eq(page_value.next.?, after) or page_value.items.len == 0))) return error.InvalidEnrichmentPage;
     try s.db.exec("BEGIN IMMEDIATE");
     errdefer s.db.exec("ROLLBACK") catch {};
@@ -500,6 +507,8 @@ pub fn enrichmentPage(s: Self, a: u.Allocator, raw: []const u8, id: []const u8, 
     if (m.enrichment == null) return error.InvalidEnrichmentPage;
     switch (section) {
         inline else => |selected| {
+            const aggregate = @field(m.enrichment.?, @tagName(selected));
+            if (page_value.total != aggregate.total or (page_value.next != null and items.items.len >= page_value.total)) return error.InvalidEnrichmentPage;
             const field = comptime if (selected == .previews) "link_previews" else @tagName(selected);
             const T = comptime switch (selected) {
                 .attachments => t.Attachment,
@@ -508,13 +517,20 @@ pub fn enrichmentPage(s: Self, a: u.Allocator, raw: []const u8, id: []const u8, 
                 .parts => t.MessagePart,
             };
             const values = try std.json.parseFromSliceLeaky([]const T, a, encoded, .{ .ignore_unknown_fields = true });
+            var ids: std.StringHashMapUnmanaged(void) = .empty;
+            for (values) |value| {
+                if (value.id.len == 0 or (try ids.getOrPut(a, value.id)).found_existing) return error.InvalidEnrichmentPage;
+            }
             const current: []const T = if (selected == .attachments) m.attachments else @field(m, field) orelse &.{};
             if (values.len >= current.len or page_value.next == null) @field(m, field) = values;
             @field(m.enrichment.?, @tagName(selected)) = .{ .total = page_value.total, .complete = page_value.next == null };
         },
     }
+    try limits.message(m);
+    const record = try u.json(a, m);
+    if (record.len > limits.max_expanded_bytes) return error.InvalidEnrichmentPage;
     try s.exec("INSERT INTO enrichment_pages VALUES(?,?,?,?,?) ON CONFLICT(message_id,section) DO UPDATE SET revision=excluded.revision,items=excluded.items,next=excluded.next", &.{ .{ .text = id }, .{ .text = @tagName(section) }, .{ .text = revision }, .{ .text = encoded }, if (page_value.next) |next| .{ .text = next } else .null_value });
-    try s.exec("INSERT INTO enrichment_cache VALUES(?,?,?,1) ON CONFLICT(message_id) DO UPDATE SET revision=excluded.revision,record=excluded.record,serial=enrichment_cache.serial+1", &.{ .{ .text = id }, .{ .int = try std.fmt.parseInt(i64, revision, 10) }, .{ .text = try u.json(a, m) } });
+    try s.exec("INSERT INTO enrichment_cache VALUES(?,?,?,1) ON CONFLICT(message_id) DO UPDATE SET revision=excluded.revision,record=excluded.record,serial=enrichment_cache.serial+1", &.{ .{ .text = id }, .{ .int = try std.fmt.parseInt(i64, revision, 10) }, .{ .text = record } });
     try s.db.exec("COMMIT");
     return true;
 }

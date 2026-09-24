@@ -27,9 +27,13 @@ pub fn decode(a: u.Allocator, body: []const u8) ![]const u8 {
                 a.free(decoded);
                 return error.Oversized;
             }
+            if (std.mem.indexOfScalar(u8, decoded, 0) != null) {
+                a.free(decoded);
+                return error.Malformed;
+            }
             return decoded;
         }
-        if (!std.unicode.utf8ValidateSlice(text)) return error.Malformed;
+        if (!std.unicode.utf8ValidateSlice(text) or std.mem.indexOfScalar(u8, text, 0) != null) return error.Malformed;
         return a.dupe(u8, text);
     }
     return error.Unsupported;
@@ -70,6 +74,8 @@ test "typed string bounds and UTF16" {
     try std.testing.expectEqualStrings("😀", decoded);
     try std.testing.expectError(error.Oversized, decode(a, prefixes[0] ++ "\x82\xff\xff\xff\xff"));
     try std.testing.expectError(error.Malformed, decode(a, prefixes[0] ++ "\x81\xff"));
+    try std.testing.expectError(error.Malformed, decode(a, prefixes[0] ++ "\x03a\x00b\x86"));
+    try std.testing.expectError(error.Malformed, decode(a, prefixes[0] ++ "\x04\xff\xfe\x00\x00\x86"));
 }
 
 test "independent Foundation archive fixtures" {

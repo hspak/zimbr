@@ -86,23 +86,8 @@ fn urlField(value: V, key: []const u8) Failure!?[]const u8 {
     if (url.len > 4096) return error.Oversized;
     return if (safeUrl(url)) url else null;
 }
-pub fn safeUrl(url: []const u8) bool {
-    if (url.len == 0 or url.len > 4096 or !std.unicode.utf8ValidateSlice(url)) return false;
-    for (url) |byte| if (byte <= 32 or byte == 127 or byte == '\\') return false;
-    const parsed = std.Uri.parse(url) catch return false;
-    if (!std.ascii.eqlIgnoreCase(parsed.scheme, "https") and !std.ascii.eqlIgnoreCase(parsed.scheme, "http")) return false;
-    if (parsed.user != null or parsed.password != null or parsed.host == null) return false;
-    const host = parsed.host.?.percent_encoded;
-    if (host.len == 0 or std.mem.indexOfScalar(u8, host, '%') != null) return false;
-    if (host[0] == '[') {
-        if (host.len < 3 or host[host.len - 1] != ']') return false;
-        _ = std.Io.net.Ip6Address.parse(host[1 .. host.len - 1], 0) catch return false;
-    } else {
-        for (host) |byte| if (byte < 128 and !std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '.') return false;
-        if (host[0] == '.' or std.mem.indexOf(u8, host, "..") != null) return false;
-    }
-    return true;
-}
+pub const safeUrl = @import("../../protocol/Url.zig").safe;
+
 fn knownKey(key: []const u8) bool {
     for ([_][]const u8{ "richLinkMetadata", "metadata", "title", "summary", "siteName", "URL", "originalURL", "richLinkIsPlaceholder", "image", "icon", "data", "attachmentGUID", "richLinkImageAttachmentSubstituteIndex", "images", "icons", "musicMetadata", "collaborationMetadata", "appStoreMetadata", "mapMetadata", "specialization" }) |known| if (u.eq(key, known)) return true;
     return false;
@@ -112,9 +97,24 @@ const Archive = struct {
     objects: []const V = &.{},
     active: []bool = &.{},
     visits: usize = 0,
+    expanded_bytes: usize = 0,
+    fn charge(self: *Archive, bytes: usize) Failure!void {
+        const maximum = 4 * t.max_decode;
+        if (bytes > maximum - self.expanded_bytes) return error.Oversized;
+        self.expanded_bytes += bytes;
+    }
     fn resolve(self: *Archive, value: V, depth: usize) Failure!V {
         self.visits += 1;
         if (depth >= plist.max_depth or self.visits > plist.max_objects) return error.Oversized;
+        // A small shared graph can expand into many copies of artwork or
+        // metadata. Charge both borrowed scalars and containers before use.
+        try self.charge(switch (value) {
+            .string => value.string.len,
+            .data => value.data.len,
+            .array => value.array.len * @sizeOf(V),
+            .dict => value.dict.len * @sizeOf(plist.Entry),
+            else => 0,
+        });
         if (value == .uid) {
             if (value.uid >= self.objects.len or self.active[value.uid]) return error.Malformed;
             if (value.uid == 0 and self.objects[0] == .string and u.eq(self.objects[0].string, "$null")) return .none;

@@ -15,6 +15,55 @@ comptime {
 const u = @import("common.zig");
 const epoch = "12345678-1234-1234-1234-123456789012";
 const message = "{\"id\":\"m1\",\"revision\":\"2\",\"conversation_id\":\"c1\",\"sender\":\"test@example.invalid\",\"direction\":\"incoming\",\"service\":\"imessage\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"kind\":\"text\",\"text\":\"Hello 👋\",\"decoding\":\"plain\",\"observed_status\":\"received\"}";
+test "hostile messages cannot change records or advance the event cursor" {
+    const t = @import("protocol/types.zig");
+    const s = try Store.open(":memory:");
+    defer s.close();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try s.beginSync(epoch, epoch ++ ":0");
+    const deep = "{\"unknown\":" ++ "[" ** 32 ++ "0" ++ "]" ** 32 ++ "}";
+    try std.testing.expectError(error.JsonTooDeep, s.upsert(a, "message", deep));
+    var m = try std.json.parseFromSliceLeaky(t.Message, a, message, .{});
+    for ([_][]const u8{ "hidden\x00suffix", "x" ** (t.max_body + 1) }) |text| {
+        m.text = text;
+        const event = try u.json(a, .{ .cursor = epoch ++ ":1", .sequence = "1", .type = "message.upsert", .origin = "live", .record = m });
+        try std.testing.expectError(error.InvalidRecord, s.event(a, event, epoch ++ ":1", "message.upsert", ""));
+    }
+    try std.testing.expectEqualStrings(epoch ++ ":0", try s.get(a, "cursor"));
+    try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM records"));
+    try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM unread"));
+    m.text = "Valid 👩‍💻\nMultiline";
+    const good = try u.json(a, .{ .cursor = epoch ++ ":1", .sequence = "1", .type = "message.upsert", .origin = "live", .record = m });
+    try s.event(a, good, epoch ++ ":1", "message.upsert", "");
+    try std.testing.expectEqualStrings(epoch ++ ":1", try s.get(a, "cursor"));
+}
+
+test "enrichment rejects unbounded and changing totals without committing pages" {
+    const t = @import("protocol/types.zig");
+    const s = try Store.open(":memory:");
+    defer s.close();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var m = try std.json.parseFromSliceLeaky(t.Message, a, message, .{});
+    m.enrichment = .{ .state = .complete, .attachments = .{ .total = 2, .complete = false } };
+    _ = try s.upsert(a, "message", try u.json(a, m));
+    const item = t.Attachment{ .id = "a", .name = "photo", .mime_type = "image/png", .bytes = "10" };
+    for ([_]usize{ 1, 3, 4097 }) |total| {
+        const page = try u.json(a, .{ .message_id = m.id, .revision = m.revision, .section = "attachments", .items = &.{item}, .total = total, .next = "more" });
+        try std.testing.expectError(error.InvalidEnrichmentPage, s.enrichmentPage(a, page, m.id, m.revision, .attachments, ""));
+    }
+    try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM enrichment_pages"));
+    try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM enrichment_cache"));
+    const good = try u.json(a, .{ .message_id = m.id, .revision = m.revision, .section = "attachments", .items = &.{item}, .total = 2, .next = "more" });
+    try std.testing.expect(try s.enrichmentPage(a, good, m.id, m.revision, .attachments, ""));
+    const duplicate = try u.json(a, .{ .message_id = m.id, .revision = m.revision, .section = "attachments", .items = &.{item}, .total = 2, .next = @as(?[]const u8, null) });
+    try std.testing.expectError(error.InvalidEnrichmentPage, s.enrichmentPage(a, duplicate, m.id, m.revision, .attachments, "more"));
+    try std.testing.expectEqualStrings("more", (try s.enrichmentNext(a, m.id, m.revision, "attachments")).?);
+}
+
 test "self thread upgrade preserves both histories drafts unread and immutable sends" {
     const t = @import("protocol/types.zig");
     const Shared = @import("client/SharedSnapshot.zig");

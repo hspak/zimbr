@@ -172,7 +172,7 @@ def main():
             (attachments / 'outside-link').symlink_to(root / 'outside')
             (root / 'outside').write_bytes(b'ZIMBR-IMAGE outside root')
             os.mkfifo(attachments / 'pipe')
-            for index, unsafe in ((2, str(attachments / '../outside')), (3, str(attachments / 'outside-link')), (4, str(attachments / 'pipe'))):
+            for index, unsafe in ((2, str(attachments / '../outside')), (3, str(attachments / 'outside-link')), (4, str(attachments / 'pipe')), (9, str(attachments / 'image-9') + '\0hidden')):
                 with database(source) as db:
                     db.execute('UPDATE attachment SET filename=? WHERE ROWID=?', (unsafe, index + 10))
                 wait_for(lambda index=index: canonical()['attachments'][index]['image'].get('reason') == 'unsafe_source')

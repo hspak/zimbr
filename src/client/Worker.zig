@@ -594,6 +594,7 @@ fn complete(s: *Self) !void {
     s.dirty = true;
 }
 fn handleResponse(s: *Self, ar: u.Allocator, job: @FieldType(Self, "job"), raw: []const u8) !void {
+    try @import("../protocol/Json.zig").check(raw, t.max_history_bytes, 512 * 1024);
     switch (job) {
         .status => {
             const v = (try std.json.parseFromSlice(RelayStatus, ar, raw, .{ .ignore_unknown_fields = true })).value;
@@ -657,6 +658,7 @@ fn handleResponse(s: *Self, ar: u.Allocator, job: @FieldType(Self, "job"), raw: 
         },
         .chats => {
             const v = (try std.json.parseFromSlice(struct { conversations: []const std.json.Value, next: ?[]const u8, previews: ?[]const std.json.Value = null }, ar, raw, .{ .ignore_unknown_fields = true })).value;
+            if (v.conversations.len > t.max_page or (if (v.previews) |items| items.len else 0) > t.max_page) return error.InvalidRecord;
             try s.store.db.exec("BEGIN IMMEDIATE");
             errdefer s.store.db.exec("ROLLBACK") catch {};
             for (v.conversations) |chat| _ = try s.store.upsert(ar, "conversation", try u.json(ar, chat));
@@ -664,7 +666,10 @@ fn handleResponse(s: *Self, ar: u.Allocator, job: @FieldType(Self, "job"), raw: 
                 for (previews) |preview| try s.store.savePreview(ar, try u.json(ar, preview));
                 // An empty chat was also covered by this page. Older relays
                 // omit projections and keep the existing preview fallback.
-                for (v.conversations) |chat| try s.store.exec("INSERT OR IGNORE INTO previews(chat) VALUES(?)", &.{.{ .text = chat.object.get("id").?.string }});
+                for (v.conversations) |chat| {
+                    const parsed = try std.json.parseFromValue(t.Conversation, ar, chat, .{ .ignore_unknown_fields = true });
+                    try s.store.exec("INSERT OR IGNORE INTO previews(chat) VALUES(?)", &.{.{ .text = parsed.value.id }});
+                }
             }
             try s.store.db.exec("COMMIT");
             if (v.next) |next| try s.request(.chats, try std.fmt.allocPrint(ar, "/v1/conversations?limit=200&previews=1&before={s}", .{try encode(ar, next)}), null) else {
@@ -677,6 +682,7 @@ fn handleResponse(s: *Self, ar: u.Allocator, job: @FieldType(Self, "job"), raw: 
         },
         .identities => {
             const v = try std.json.parseFromSliceLeaky(struct { identities: []const std.json.Value, next: ?[]const u8 }, ar, raw, .{ .ignore_unknown_fields = true });
+            if (v.identities.len > t.max_page) return error.InvalidRecord;
             try s.store.db.exec("BEGIN IMMEDIATE");
             errdefer s.store.db.exec("ROLLBACK") catch {};
             for (v.identities) |identity| _ = try s.store.upsert(ar, "identity", try u.json(ar, identity));
@@ -688,6 +694,7 @@ fn handleResponse(s: *Self, ar: u.Allocator, job: @FieldType(Self, "job"), raw: 
         },
         .history, .preview => {
             const v = (try std.json.parseFromSlice(struct { messages: []const std.json.Value, next: ?[]const u8 }, ar, raw, .{ .ignore_unknown_fields = true })).value;
+            if (v.messages.len > t.max_page) return error.InvalidRecord;
             try s.store.db.exec("BEGIN IMMEDIATE");
             errdefer s.store.db.exec("ROLLBACK") catch {};
             for (v.messages) |message| _ = try s.store.upsert(ar, "message", try u.json(ar, message));
