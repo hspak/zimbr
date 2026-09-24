@@ -3,7 +3,8 @@
 Status: design specification, with relay and Linux client implementations available.
 Current macOS TLS evidence is tracked in [docs/macos-tls.md](docs/macos-tls.md);
 the earlier Messages acceptance record is [docs/mac-validation.md](docs/mac-validation.md).
-Linux build, verification, and text-backend limitations are documented in [README.md](README.md).
+Linux build, verification, and text-backend limitations are documented in the
+[Linux client guide](docs/linux-client.md).
 The proposed [message enrichment design](docs/message-enrichment.md) covers
 Contacts names/photos, attached images, existing URL previews, and reactions,
 including shared infrastructure, delivery order, and acceptance criteria.

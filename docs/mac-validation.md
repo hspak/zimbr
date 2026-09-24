@@ -35,6 +35,31 @@ possibly completed sends. Do not repeat an uncertain send with a new request ID.
 Record observed results separately from unverified cases; synthetic tests alone
 do not establish installed-app acceptance.
 
+## Real-account validation
+
+Run the helper from the repository root.
+
+After permissions are granted, use only a deliberately selected recipient:
+
+```sh
+python3 tools/mac_acceptance.py --recipient 'YOUR_TEST_ADDRESS' --confirm-send --restart
+```
+
+This sends two clearly labeled Unicode/multiline messages, reuses their request
+IDs to check idempotency, observes the resulting history and SSE records, replies
+to the identified existing conversation, and optionally verifies IDs and event
+replay after restarting the LaunchAgent. Use `--conversation OPAQUE_ID` instead
+of `--recipient` to test one explicitly selected existing conversation or group.
+Add `--wait-for-lock 300` with `--conversation` to wait up to five minutes for the
+user to lock the screen before sending that one message.
+
+The helper saves test IDs/statuses under ignored `.local/` before submitting each
+message, preserving them on failure. It refuses to overwrite an existing evidence
+file; inspect that run's request IDs before authorizing another run with a new
+`--output` path. Recipient-side delivery and receipt initiated from another Apple
+device require separate confirmation. Locked operation is recorded only when the
+helper observes the current user's locked console session throughout its send check.
+
 ## Regression coverage
 
 Reconciliation must classify rows beyond live progress as live even if another
