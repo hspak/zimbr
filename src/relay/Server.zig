@@ -132,13 +132,7 @@ fn handle(self: *Self, a: u.Allocator, req: *std.http.Server.Request, peer: *Tls
             response = accepted.record;
             status = if (accepted.fresh) .accepted else .ok;
         } else if (u.eq(path, "/v1/status")) {
-            var contacts = self.core.contacts_status;
-            // Native rollout waits for installed permission-attribution checks.
-            // Protocol negotiation stays available for read-only acceptance.
-            if (!@import("options").fake) {
-                contacts.ready = false;
-                if (contacts.reason.len == 0) contacts.reason = "native_acceptance_pending";
-            }
+            const contacts = @import("adapter/Contacts.zig").currentStatus(self.core.contacts_status);
             response = try u.json(a, .{
                 .api_version = t.api_version,
                 .event_extensions = [_][]const u8{"identity-v1"},
@@ -152,20 +146,20 @@ fn handle(self: *Self, a: u.Allocator, req: *std.http.Server.Request, peer: *Tls
                     .reply_existing = self.core.read_ready and self.core.automation_ready,
                     .attachments = true,
                     .group_creation = false,
-                    .identity_directory_v1 = @import("options").fake,
+                    .identity_directory_v1 = true,
                     .image_assets_v1 = true,
                     .image_attachments_v1 = true,
                     .stored_link_previews_v1 = true,
-                    .reactions_v1 = @import("options").fake,
-                    .contact_avatars_v1 = @import("options").fake,
+                    .reactions_v1 = true,
+                    .contact_avatars_v1 = true,
                 },
                 .enrichment_readiness = .{
                     .identity_directory_v1 = contacts,
                     .image_assets_v1 = readiness(true, self.core.assets_service != null, self.core.assets_reason),
                     .image_attachments_v1 = readiness(true, self.core.assets_service != null and self.core.read_ready and self.core.source_features.attachment_filename, if (self.core.assets_service == null) self.core.assets_reason else if (!self.core.read_ready) self.core.degraded else "source_columns_unavailable"),
                     .stored_link_previews_v1 = readiness(true, self.core.read_ready and self.core.source_features.link_payload, if (!self.core.read_ready) self.core.degraded else "source_columns_unavailable"),
-                    .reactions_v1 = readiness(@import("options").fake, self.core.read_ready and self.core.source_features.reaction_target, "source_columns_unavailable"),
-                    .contact_avatars_v1 = readiness(@import("options").fake, contacts.ready and self.core.assets_service != null, if (self.core.assets_service == null) self.core.assets_reason else contacts.reason),
+                    .reactions_v1 = readiness(true, self.core.read_ready and self.core.source_features.reaction_target, "source_columns_unavailable"),
+                    .contact_avatars_v1 = readiness(true, contacts.ready and self.core.assets_service != null, if (self.core.assets_service == null) self.core.assets_reason else contacts.reason),
                 },
                 .degraded_reasons = if (self.core.degraded.len == 0) @as([]const []const u8, &.{}) else &.{self.core.degraded},
             });

@@ -6,6 +6,7 @@ const u = @import("../common.zig");
 const t = @import("../protocol/types.zig");
 const Journal = @import("Journal.zig");
 pub const Section = enum { attachments, previews, reactions, parts };
+const max_inline_items = @max(t.max_inline_attachments, t.max_inline_previews, t.max_inline_reactions, t.max_inline_parts);
 pub const Prepared = struct {
     value: t.Message,
     sections: [4]?[]const []const u8,
@@ -79,6 +80,7 @@ pub fn prepare(j: Journal, a: u.Allocator, value: t.Message, previous: ?t.Messag
         v.enrichment = metadata;
     }
     var result = Prepared{ .value = v, .sections = @splat(null), .hashes = @splat(null), .changed = false };
+    var inline_sizes: [4][max_inline_items]usize = undefined;
     inline for (comptime std.meta.tags(Section), 0..) |section, index| {
         const list: ?[]const itemType(section) = switch (section) {
             .attachments => v.attachments,
@@ -89,11 +91,12 @@ pub fn prepare(j: Journal, a: u.Allocator, value: t.Message, previous: ?t.Messag
         if (list) |items| {
             var encoded: std.ArrayList([]const u8) = .empty;
             var hash = std.crypto.hash.sha2.Sha256.init(.{});
-            for (items) |item| {
+            for (items, 0..) |item, position| {
                 const json = try u.json(a, item);
                 // Each item must fit an overflow page on its own. Adapters bound
                 // their strings; callers cannot create an unpageable record.
                 if (json.len > t.max_metadata_page - 1024) return error.MetadataItemTooLarge;
+                if (position < max_inline_items) inline_sizes[index][position] = json.len;
                 hash.update(json);
                 hash.update("\n");
                 try encoded.append(a, json);
@@ -109,7 +112,7 @@ pub fn prepare(j: Journal, a: u.Allocator, value: t.Message, previous: ?t.Messag
             }
         }
     }
-    result.value = try inlineMessage(a, v);
+    result.value = try inlineMessage(v, &inline_sizes);
     return result;
 }
 
@@ -117,7 +120,7 @@ fn length(items: anytype) usize {
     return if (items) |values| values.len else 0;
 }
 
-fn inlineMessage(a: u.Allocator, value: t.Message) !t.Message {
+fn inlineMessage(value: t.Message, sizes: *const [4][max_inline_items]usize) !t.Message {
     var v = value;
     var metadata = v.enrichment orelse t.Enrichment{ .state = .complete };
     metadata.attachments.total = v.attachments.len;
@@ -128,28 +131,47 @@ fn inlineMessage(a: u.Allocator, value: t.Message) !t.Message {
     if (v.link_previews) |items| v.link_previews = items[0..@min(items.len, t.max_inline_previews)];
     if (v.reactions) |items| v.reactions = items[0..@min(items.len, t.max_inline_reactions)];
     if (v.parts) |items| v.parts = items[0..@min(items.len, t.max_inline_parts)];
-    while (true) {
-        metadata.attachments.complete = metadata.attachments.total == v.attachments.len;
-        metadata.previews.complete = metadata.previews.total == length(v.link_previews);
-        metadata.reactions.complete = metadata.reactions.total == length(v.reactions);
-        metadata.parts.complete = metadata.parts.total == length(v.parts);
-        v.enrichment = metadata;
-        const bytes = try u.json(a, .{ .attachments = v.attachments, .parts = v.parts, .link_previews = v.link_previews, .reactions = v.reactions, .reaction_event = v.reaction_event, .enrichment = metadata });
-        if (bytes.len <= t.max_enrichment) return v;
-        // Keep every section's prefix and expose all omitted items through the
-        // revision-bound endpoint. Trimming never touches original Message.text.
-        if (length(v.parts) > 1) {
-            v.parts = v.parts.?[0 .. v.parts.?.len - 1];
-        } else if (length(v.reactions) > 0) {
-            v.reactions = v.reactions.?[0 .. v.reactions.?.len - 1];
-        } else if (length(v.link_previews) > 0) {
-            v.link_previews = v.link_previews.?[0 .. v.link_previews.?.len - 1];
-        } else if (v.attachments.len > 0) {
-            v.attachments = v.attachments[0 .. v.attachments.len - 1];
-        } else if (length(v.parts) > 0) {
-            v.parts = &.{};
-        } else return error.MetadataItemTooLarge;
+    // Measure the empty envelope once and reuse the canonical item encodings'
+    // lengths. Re-encoding every shrinking prefix would allocate quadratic
+    // temporary data in the ingestion arena while holding the journal lock.
+    // false is one byte longer than true, giving at most four bytes of slack.
+    metadata.attachments.complete = false;
+    metadata.previews.complete = false;
+    metadata.reactions.complete = false;
+    metadata.parts.complete = false;
+    var buffer: [256]u8 = undefined;
+    var counter = std.Io.Writer.Discarding.init(&buffer);
+    try std.json.Stringify.value(.{
+        .attachments = @as([]const t.Attachment, &.{}),
+        .parts = @as(?[]const t.MessagePart, if (v.parts != null) &.{} else null),
+        .link_previews = @as(?[]const t.LinkPreview, if (v.link_previews != null) &.{} else null),
+        .reactions = @as(?[]const t.Reaction, if (v.reactions != null) &.{} else null),
+        .reaction_event = v.reaction_event,
+        .enrichment = metadata,
+    }, .{}, &counter.writer);
+    var bytes: usize = @intCast(counter.fullCount());
+    var counts = [_]usize{ v.attachments.len, length(v.link_previews), length(v.reactions), length(v.parts) };
+    for (counts, 0..) |count, index| {
+        for (sizes[index][0..count]) |size| bytes += size;
+        if (count > 0) bytes += count - 1;
     }
+    while (bytes > t.max_enrichment) {
+        // Preserve prefixes and the original caption. Canonical overflow
+        // records retain every item omitted from this transport representation.
+        const index: usize = if (counts[3] > 1) 3 else if (counts[2] > 0) 2 else if (counts[1] > 0) 1 else if (counts[0] > 0) 0 else if (counts[3] > 0) 3 else return error.MetadataItemTooLarge;
+        bytes -= sizes[index][counts[index] - 1] + @as(usize, @intFromBool(counts[index] > 1));
+        counts[index] -= 1;
+    }
+    v.attachments = v.attachments[0..counts[0]];
+    if (v.link_previews) |items| v.link_previews = items[0..counts[1]];
+    if (v.reactions) |items| v.reactions = items[0..counts[2]];
+    if (v.parts) |items| v.parts = items[0..counts[3]];
+    metadata.attachments.complete = metadata.attachments.total == counts[0];
+    metadata.previews.complete = metadata.previews.total == counts[1];
+    metadata.reactions.complete = metadata.reactions.total == counts[2];
+    metadata.parts.complete = metadata.parts.total == counts[3];
+    v.enrichment = metadata;
+    return v;
 }
 
 pub fn persist(j: Journal, id: []const u8, prepared: Prepared) !void {
@@ -253,4 +275,35 @@ test "overflow is lossless, revision-bound, and preserves captions and independe
     try j.message(a, "message", 1, 10, v, "reconciliation");
     try std.testing.expectError(error.EnrichmentRestartRequired, page(j, a, first.id, .attachments, first.revision, p.next, 2));
     try std.testing.expectEqual(@as(usize, 0), (try load(j, a, .reactions, first.id)).?.len);
+}
+
+test "large escaped metadata stays within a bounded preparation arena" {
+    const j = try Journal.open(":memory:");
+    defer j.close();
+    const storage = try std.testing.allocator.alloc(u8, 8 * 1024 * 1024);
+    defer std.testing.allocator.free(storage);
+    var bounded = std.heap.FixedBufferAllocator.init(storage);
+    var arena = std.heap.ArenaAllocator.init(bounded.allocator());
+    defer arena.deinit();
+    const a = arena.allocator();
+    const escaped = [_]u8{1} ** 2048;
+    var attachments: [32]t.Attachment = undefined;
+    var reactions: [128]t.Reaction = undefined;
+    var parts: [128]t.MessagePart = undefined;
+    var previews: [4]t.LinkPreview = undefined;
+    for (&attachments, 0..) |*item, i| item.* = .{ .id = try u.decimal(a, @intCast(i)), .name = escaped[0..255], .mime_type = "image/jpeg", .bytes = "100" };
+    for (&reactions, 0..) |*item, i| item.* = .{ .id = try u.decimal(a, @intCast(i)), .actor = .{ .service = "imessage", .address = "a" ** 240 ++ "@example.test" }, .key = "like", .emoji = "👍" };
+    for (&parts, 0..) |*item, i| item.* = .{ .id = try u.decimal(a, @intCast(i)), .kind = .text, .text_start = 0, .text_length = 7 };
+    for (&previews, 0..) |*item, i| item.* = .{ .id = try u.decimal(a, @intCast(i)), .part_id = "card", .original_url = "https://example.invalid", .title = escaped[0..1024], .summary = &escaped, .state = .complete };
+    const value: t.Message = .{ .id = "fixture", .sender = "", .direction = .outgoing, .service = "imessage", .timestamp = "2026-01-01T00:00:00Z", .kind = .attachment, .text = "caption", .decoding = .plain, .observed_status = .sent, .attachments = &attachments, .reactions = &reactions, .parts = &parts, .link_previews = &previews };
+    const prepared = try prepare(j, a, value, null);
+    try std.testing.expectEqualStrings("caption", prepared.value.text.?);
+    try std.testing.expectEqual(@as(usize, 32), prepared.value.enrichment.?.attachments.total);
+    try std.testing.expectEqual(@as(usize, 128), prepared.value.enrichment.?.reactions.total);
+    try std.testing.expectEqual(@as(usize, 4), prepared.value.enrichment.?.previews.total);
+    try std.testing.expectEqual(@as(usize, 128), prepared.value.enrichment.?.parts.total);
+    for (prepared.sections, [_]usize{ 32, 4, 128, 128 }) |items, count| try std.testing.expectEqual(count, items.?.len);
+    const v = prepared.value;
+    const encoded = try u.json(a, .{ .attachments = v.attachments, .parts = v.parts, .link_previews = v.link_previews, .reactions = v.reactions, .reaction_event = v.reaction_event, .enrichment = v.enrichment });
+    try std.testing.expect(encoded.len <= t.max_enrichment);
 }

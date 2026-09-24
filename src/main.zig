@@ -21,6 +21,8 @@ fn run(init: std.process.Init) !void {
     // Private bounded child mode: no HOME, TLS config, Contacts enumeration or
     // permission request. Its exit status carries only the public OS decision.
     if (args.len == 2 and u.eq(args[1], "contacts-permission-status")) Contacts.permissionProbeExit();
+    // Contact reads use bounded private pipes and the same installed identity.
+    if (args.len == 2 and u.eq(args[1], "contacts-reader")) Contacts.readerProbeExit();
     const home = init.environ_map.get("HOME") orelse return error.HomeRequired;
     var data: []const u8 = try std.fmt.allocPrint(a, "{s}/Library/Application Support/Zimbr", .{home});
     var source: []const u8 = try std.fmt.allocPrint(a, "{s}/Library/Messages/chat.db", .{home});
@@ -190,6 +192,7 @@ fn printJson(a: u.Allocator, value: anytype) !void {
 }
 test {
     _ = @import("protocol/types.zig");
+    _ = @import("protocol/legacy_v1_test.zig");
     _ = @import("relay/adapter/decoder.zig");
     _ = @import("relay/adapter/body_parts.zig");
     _ = @import("relay/adapter/link_preview.zig");

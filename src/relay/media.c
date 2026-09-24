@@ -152,6 +152,11 @@ int zr_media_convert(const char *helper, int source, int output, const char *var
     if (source_status) return source_status;
     int pipefd[2];
     if (pipe(pipefd)) return -1;
+    // A decoder may exit while a descendant still owns its metadata writer.
+    // Once the direct child exits, accept only metadata already available.
+    if (fcntl(pipefd[0], F_SETFL, O_NONBLOCK) || fcntl(pipefd[0], F_SETFD, FD_CLOEXEC)) {
+        close(pipefd[0]); close(pipefd[1]); return -1;
+    }
     // High duplicates avoid collisions with the fixed helper descriptors.
     int input = fcntl(source, F_DUPFD_CLOEXEC, 10), result = fcntl(output, F_DUPFD_CLOEXEC, 10);
     int meta = fcntl(pipefd[1], F_DUPFD_CLOEXEC, 10);
@@ -161,7 +166,13 @@ int zr_media_convert(const char *helper, int source, int output, const char *var
     }
     posix_spawn_file_actions_t actions;
     posix_spawnattr_t attrs;
-    posix_spawn_file_actions_init(&actions); posix_spawnattr_init(&attrs);
+    if (posix_spawn_file_actions_init(&actions)) {
+        close(input); close(result); close(meta); close(pipefd[0]); return -1;
+    }
+    if (posix_spawnattr_init(&attrs)) {
+        posix_spawn_file_actions_destroy(&actions);
+        close(input); close(result); close(meta); close(pipefd[0]); return -1;
+    }
     int rc = posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0);
     rc |= posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0);
     rc |= posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0);
@@ -189,7 +200,10 @@ int zr_media_convert(const char *helper, int source, int output, const char *var
     for (;;) {
         pid_t waited = waitpid(pid, &status, WNOHANG);
         if (waited == pid) break;
-        if (waited < 0 && errno != EINTR) { timeout = 1; break; }
+        if (waited < 0 && errno != EINTR) {
+            // In particular, ECHILD means this PID is no longer ours to kill.
+            close(pipefd[0]); return -5;
+        }
 #ifdef __APPLE__
         struct proc_taskinfo task;
         if (proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &task, sizeof(task)) == sizeof(task) && task.pti_resident_size > 512ULL * 1024 * 1024) {
@@ -203,7 +217,7 @@ int zr_media_convert(const char *helper, int source, int output, const char *var
     if (!WIFEXITED(status) || WEXITSTATUS(status)) {
         close(pipefd[0]); return WIFEXITED(status) && WEXITSTATUS(status) == 4 ? -4 : -5;
     }
-    // Child is gone, so metadata reads cannot hang on an inherited writer.
+    // Nonblocking even if another process retained a metadata writer.
     ssize_t n = read(pipefd[0], info, sizeof(*info)); close(pipefd[0]);
     unsigned edge = !strcmp(variant, "avatar") ? 128 : !strcmp(variant, "inline_image") ? 1024 : !strcmp(variant, "viewer") ? 2560 : 0;
     if (n != sizeof(*info) || !info->width || !info->height || info->width > edge || info->height > edge ||

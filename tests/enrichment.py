@@ -218,10 +218,20 @@ def main():
             assert not status['enrichment_readiness']['identity_directory_v1']['ready']
             # Native permission transitions need not emit a store generation.
             # Restore names immediately, without waiting for the periodic scan.
-            contacts([alice], changed=False)
-            wait_for(lambda: identity().get('display_name') == alice['name'])
-            contacts(permission='denied', changed=False)
-            wait_for(lambda: identity().get('match_state') == 'unavailable')
+            for permission in ('restricted', 'unavailable', 'denied'):
+                contacts([alice], changed=False)
+                wait_for(lambda: identity().get('display_name') == alice['name'])
+                current_avatar = identity()['avatar']
+                avatar(current_avatar)
+                wait_for(lambda: avatar(current_avatar)[0] == 200)
+                contacts(permission=permission, changed=False)
+                wait_for(lambda: all(r['match_state'] == 'unavailable' for r in directory_page().values()))
+                assert identity()['display_name'] is None and identity()['avatar'] is None
+                assert avatar(current_avatar)[0] in (404, 409, 410)
+                status = request('/v1/status')[1]
+                assert status['enrichment_readiness']['identity_directory_v1']['permission'] == permission
+                assert status['capabilities']['identity_directory_v1'] and status['capabilities']['contact_avatars_v1']
+                assert status['capabilities']['read_history']
             epoch = sync()['server_epoch']
             process.terminate(); process.wait(timeout=5)
             process = start()

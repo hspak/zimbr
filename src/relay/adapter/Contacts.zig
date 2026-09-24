@@ -9,6 +9,7 @@ const native = !@import("options").fake and @import("builtin").os.tag == .macos;
 pub const normalization_version = 1;
 extern fn zr_contacts_status() c_int;
 extern fn zr_contacts_raw_status() c_int;
+extern fn zr_contacts_reader() c_int;
 extern fn zr_contacts_monitor_status() void;
 extern fn zr_contacts_refresh_status() void;
 extern fn zr_contacts_generation() u64;
@@ -133,6 +134,9 @@ pub fn pumpMain() void {
 pub fn permissionProbeExit() noreturn {
     std.process.exit(if (native) @intCast(100 + zr_contacts_raw_status()) else 104);
 }
+pub fn readerProbeExit() noreturn {
+    std.process.exit(if (native) @intCast(zr_contacts_reader()) else 105);
+}
 pub fn startAuthorizationChecks() void {
     if (native) zr_contacts_monitor_status();
 }
@@ -144,6 +148,21 @@ pub fn authorizationLoop(core: *@import("../Core.zig")) void {
 }
 pub fn canPresent(status: Status) bool {
     return status.permission == .authorized and (!native or permission() == .authorized);
+}
+pub fn currentStatus(status: Status) Status {
+    return if (native) withPermission(status, permission()) else status;
+}
+fn withPermission(status: Status, observed: Permission) Status {
+    var result = status;
+    // A read/conversion can outlast the permission monitor. Report its fresh
+    // decision immediately; a grant still waits for directory reconciliation.
+    if (observed != status.permission) {
+        result.permission = observed;
+        result.ready = false;
+        result.stale = false;
+        result.reason = if (observed == .authorized) "reconciling" else @tagName(observed);
+    }
+    return result;
 }
 pub fn requestPermission() !Permission {
     if (!native) return error.UnsupportedPlatform;
@@ -344,6 +363,25 @@ pub fn complete(j: Journal, a: u.Allocator, epoch: []const u8, generation: i64, 
     }
     try j.execute("DELETE FROM identity_work WHERE identity_id=?", &.{.{ .text = value.id }});
     try j.commit();
+}
+
+test "fresh permission gates status while the contacts worker is busy" {
+    const ready = Status{ .permission = .authorized, .ready = true, .reason = "", .last_refresh_ms = 123 };
+    for ([_]Permission{ .denied, .restricted, .unavailable }) |observed| {
+        const revoked = withPermission(ready, observed);
+        try std.testing.expectEqual(observed, revoked.permission);
+        try std.testing.expect(!revoked.ready);
+        try std.testing.expectEqualStrings(@tagName(observed), revoked.reason);
+        try std.testing.expectEqual(ready.last_refresh_ms, revoked.last_refresh_ms);
+        const granted = withPermission(revoked, .authorized);
+        try std.testing.expect(!granted.ready);
+        try std.testing.expectEqualStrings("reconciling", granted.reason);
+    }
+    const failed = Status{ .permission = .authorized, .stale = true, .reason = "contacts_query_failed" };
+    const unchanged = withPermission(failed, .authorized);
+    try std.testing.expect(unchanged.stale and !unchanged.ready);
+    try std.testing.expectEqualStrings("contacts_query_failed", unchanged.reason);
+    try std.testing.expect(withPermission(ready, .authorized).ready);
 }
 
 test "contact matching prefers exact email local part, preserves aliases, and rejects ambiguous contacts" {

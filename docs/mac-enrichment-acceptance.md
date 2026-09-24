@@ -1,30 +1,35 @@
 # Mac enrichment implementation and acceptance
 
-Implementation is in progress against [message-enrichment.md](message-enrichment.md).
+The relay/shared-protocol implementation of
+[message-enrichment.md](message-enrichment.md) is complete, with the verification
+limits recorded below. Native reaction verification covers
+heart-to-thumbs-up replacement; extended cases remain unverified.
 This record keeps the entire relay/shared-protocol scope visible. Linux client
 storage, networking, rendering, notification changes, and Linux UI acceptance are
 excluded from this task. Native compilation and synthetic tests do not establish
 installed-app permission attribution or the semantics of a real Messages payload.
 
-## Current evidence (2026-09-23)
+## Current evidence (2026-09-24)
 
 | Work item | Implemented | Remaining evidence/work |
 | --- | --- | --- |
-| 1. Fixtures and contract | Additive types; independent optional-column probes; pinned phone parser; generated Contacts, image, plist and Foundation fixtures; aggregate probes; installed Contacts attribution and observed URL archive layouts | Observed Mac reaction operation precedence and deletion semantics |
-| 2. Identity directory | Observed addresses only; native Contacts bridge; background matching; durable jobs; rename/removal/denial/stale handling; keyset/negotiated streams; migration/backfill; installed grant, relaunch, signed upgrade and locked-session reads | Runtime contact edits/removal and independent Contacts/FDA permission changes |
+| 1. Fixtures and contract | Additive types; independent optional-column probes; pinned phone parser; generated Contacts, image, plist and Foundation fixtures; aggregate probes; installed Contacts attribution, URL archive layouts and reaction add/replacement | Extended native reaction cases deferred |
+| 2. Identity directory | Observed addresses only; native Contacts bridge; background matching; durable jobs; rename/removal/denial/stale handling; keyset/negotiated streams; migration/backfill; installed grant, relaunch, signed upgrade, locked-session reads, live rename/removal, permission recovery and independent Contacts/FDA changes | Verified for the documented installed cases |
 | 3. Image pipeline | Protected source opens; bounded ImageIO helper; immutable versions/ETags; mTLS delivery; arrival/change retries; eviction/regeneration; GC; bounded overflow; slow-reader capacity; epoch invalidation; installed JPEG/PNG/HEIC and locked-session delivery | Verified for the documented formats and bounds |
-| 4. Contact avatars | Lazy thumbnail jobs; shared per-contact assets; photo-only invalidation; requested-photo refresh; denial/removal clearing; actual installed thumbnail conversion/delivery | Native photo change/removal and permission revocation acceptance |
+| 4. Contact avatars | Lazy thumbnail jobs; shared per-contact assets; photo-only invalidation; requested-photo refresh; denial/removal clearing; installed thumbnail conversion/delivery, photo addition, photo-only replacement, photo removal, live revocation and recovery from denied startup | Verified for the documented installed cases |
 | 5. Stored link cards | Bounded binary/XML/keyed reader; standard/partial cards; delayed payloads; embedded/local artwork; observed RichLink wrappers; exact joined attachment GUID mapping; installed metadata and image delivery | Unknown archive classes or attachment naming layouts retain fallback |
-| 6. Reactions | Standard/custom/removal mappings; Foundation range/transfer-GUID parts; durable source ledger and target work; deletion tombstones; ordinary continuity anchors; target upserts and sidebar selection | Confirm source operation precedence and custom/removal behavior on the recorded Mac |
-| 7. Integration/rollout | Journal/mTLS fixture suites; migration/backfill; legacy/negotiated events; signed helper; aggregate tooling; native images/attachments/stored-card capabilities enabled independently | Remaining Contacts/avatar/reaction acceptance before enabling those capabilities |
+| 6. Reactions | Standard/custom/removal mappings; Foundation range/transfer-GUID parts; durable source ledger and target work; deletion tombstones; ordinary continuity anchors; target upserts and sidebar selection; installed heart add, thumbs-up replacement and persistence across upgrade/restart | Remaining standard values, custom/removal/deletion and removal across restart have synthetic coverage; extended native checks deferred |
+| 7. Integration/rollout | Journal/mTLS fixture suites; migration/backfill; legacy/negotiated events; signed helper; aggregate tooling; all six native capabilities enabled | Native verification limits below |
 
-Native `image_assets_v1`, `image_attachments_v1`, `stored_link_previews_v1` and
-legacy `attachments` are enabled following installed verification. The other
-three native capabilities remain disabled for their outstanding acceptance cases;
-they do not hold back the verified features. The fake relay advertises all six.
+Native `identity_directory_v1`, `contact_avatars_v1`, `image_assets_v1`,
+`image_attachments_v1`, `stored_link_previews_v1`, `reactions_v1` and legacy
+`attachments` are enabled. Contacts and images passed the installed cases below;
+reaction rollout uses the installed add/replacement checks and automated coverage,
+with the native verification limits recorded below. The fake relay also
+advertises all six.
 Permission or missing source columns affect readiness, not protocol-support
 flags. `event_extensions: ["identity-v1"]` advertises negotiation on both binaries,
-including read-only native acceptance while Contacts rollout remains pending.
+including read-only native acceptance.
 
 ## Directory and transport contract
 
@@ -64,6 +69,13 @@ The native main thread services the macOS run loop while the HTTPS listener runs
 on a worker. The installed rename check initially exposed missing notification
 delivery when the main thread blocked in network accept; after this fix a second
 rename arrived live, advancing the identity revision and preserving its ID.
+Adding a photo and then changing only that photo produced valid JPEG avatars with
+new versions and different ETags while preserving the identity and name.
+Removing only the photo after recovery from denied startup cleared the avatar
+live and made the previously cached image return HTTP 404. The name, identity,
+relay epoch and history availability were preserved, and the revision advanced.
+Deleting the contact then cleared its name live, advanced the identity revision,
+and preserved its identity, relay epoch and history availability.
 Startup/change notification/permission grant/15-minute refreshes replace the index;
 new handles use that index. Failed queries mark existing matches stale and retry
 after 30 seconds; a new source generation permits earlier recovery. Successful
@@ -75,6 +87,38 @@ calls the request API. `relay doctor --request-contacts` is the explicit interac
 action and refuses an executable without the installed bundle identifier.
 `CNAuthorizationStatusLimited` is annotated for iOS in the inspected Mac SDK;
 unknown status values are reported as unsupported until verified on macOS.
+
+Installed revocation testing found that the long-running process retained an old
+authorization result. A permission monitor now invokes the same signed executable
+in a private status-only mode once per second. The child uses the public Contacts
+authorization API, an empty environment, null standard streams and no inherited
+descriptors. Each probe has a two-second deadline; failure or an observation older
+than five seconds makes contact presentation unavailable. This runs outside the
+Core mutex. Installed live revocation cleared names/photos and rejected the exact
+avatar fetched successfully just before revocation with HTTP 409, without a relay
+restart; history remained ready. Startup with access denied also clears names and
+photos. Status responses use the monitor's latest decision even while the directory
+worker is busy; a restored grant stays unready until reconciliation finishes.
+
+Recovery testing found a second process-level cache: a new `CNContactStore` object
+in a relay started while denied still failed enumeration after regrant. Enumeration
+and thumbnail reads now run in fresh instances of the same signed executable,
+using dedicated request/response pipes, empty environments and no inherited relay
+descriptors. Reads have a 15-second deadline and 512 MiB resident-memory bound;
+responses are capped at 32 MiB for the index and 8 MiB for a thumbnail. The parent
+checks permission around each result and generation around each thumbnail. Normal
+invocation without the dedicated pipe handles is refused. Installed authorized
+startup, thumbnail delivery and live revocation pass with this reader. A relay
+started while denied then restored the fixture name and avatar after regrant,
+without another restart. The recovered avatar returned HTTP 200 with valid JPEG
+markers, and the identity and history availability were preserved.
+Independent permission checks also pass: installed doctor can read Messages while
+Contacts is denied, and reports `DatabaseUnavailable` with Contacts still
+authorized when Full Disk Access is disabled. After Full Disk Access was restored,
+installed doctor again reported readable Messages and authorized Contacts. The
+subsequently installed signed build advertises the directory and avatar
+capabilities and reports both ready through mTLS; its app/helper signatures pass
+strict verification.
 
 ## Phone normalization dependency
 
@@ -114,7 +158,7 @@ ordinary history. Doctor and status expose only the following booleans:
 
 These prove query availability only. The parsers accept the explicitly bounded
 layouts below; fixture acceptance does not establish that a particular Messages version
-uses those layouts. Native rollout stays gated accordingly.
+uses those layouts. Source-format evidence and its limits are recorded below.
 
 ## Image and overflow contract
 
@@ -155,6 +199,10 @@ completion flags expose overflow. `GET /v1/messages/:id/enrichment` accepts
 and a changed revision returns 409 `enrichment_restart_required`. Pages have a
 32 KiB byte bound. Captions remain in the original `text`; parts use UTF-8 ranges
 instead of duplicating long text. History assembly also observes its 8 MiB bound.
+Inline budgeting reuses canonical item lengths and measures the envelope once;
+it does not repeatedly allocate encodings of shrinking prefixes. A regression
+with large escaped strings, 32 attachments, four cards, 128 reactions and 128
+parts preserves every canonical item within an 8 MiB preparation arena.
 
 ## Accepted source-format candidates
 
@@ -208,7 +256,26 @@ Native samples confirm standard/custom codes and `p:`/`bp:` target forms, but
 do not establish removal/deletion precedence or every standard value.
 These are candidates derived from the
 [reference mapping](https://github.com/ReagentX/imessage-exporter/blob/develop/imessage-database/src/tables/messages/message.rs),
-with native source acceptance still pending.
+with the controlled native evidence and deferred cases described below.
+
+A controlled heart Tapback in a self-conversation exposed an explicit fallback
+case: the native source marks both reaction and target incoming and joins them to
+two different chats, with one chat link each and no shared link. The relay retains
+the unresolved reaction placeholder rather than projecting across conversations.
+This self-conversation case does not establish ordinary add/change/remove
+acceptance and does not justify merging routes or inferring account ownership.
+
+Native verification in a regular conversation covered a standard heart followed
+by a standard thumbs-up. Both resolved to the selected target and the source marked
+the actor as self. Authenticated enrichment reads published one current value,
+and each target change emitted a reconciliation upsert. The target timestamp,
+delivery status and relay epoch stayed unchanged. Messages retained both source
+add operations; the later thumbs-up replaced the earlier heart in the aggregate.
+Other standard values, complete custom sequences, matching/mismatched removal, deleted-source
+reconciliation, cursor continuity and removal across restart retain their automated
+coverage; this run does not claim installed acceptance for those cases. The
+verified thumbs-up aggregate also survived the final signed upgrade and relay
+restart with the same epoch, target timestamp and delivery status.
 
 The private ledger folds by target/source-part/actor in `(source timestamp, source
 row, source GUID)` order. Adds replace that actor's value; removes clear only the
@@ -245,6 +312,8 @@ python3 tests/integration.py
 python3 tests/mac_acceptance_test.py
 python3 tests/mac_enrichment_packaging.py
 python3 tests/enrichment_probe.py
+python3 tests/contacts_permission.py
+python3 tests/media_boundary.py
 zig fmt --check build.zig build.zig.zon src
 ```
 
@@ -257,8 +326,11 @@ rename, stale query failure, ambiguity, denial, permission-only regrant without 
 generation notification, removal, restart, observed-only
 export, a historical sender, migration/backfill, and legacy/negotiated streams.
 The pre-existing protocol/send recovery suite still passes with the Contacts worker.
-The native build completed all 21 build steps: 20 fake-relay unit tests
-passed with the native-only case skipped, and all 21 native unit tests passed.
+The full native/fake build completed all 21 build steps. The latest unit targets
+passed 23 fake-relay tests with the native-only case skipped, and all 24 native
+tests. A frozen pre-enrichment v1 message schema verifies every existing closed
+enum value and ignores the new fields using the old client's parsing policy;
+old messages also decode with absent enrichment under the new schema.
 Five acceptance-helper tests pass. A disposable staged app passes strict signature
 verification and contains both permission descriptions and both dependency licenses;
 this stages under `zig-out/` and does not replace or run the installed app.
@@ -280,6 +352,10 @@ verifies actual JPEG/PNG/HEIC decoding, EXIF orientation, alpha, animation first
 frame, metadata stripping, output variants, corrupt/hostile dimensions, source
 mutation and helper timeout. ImageIO HEIC fixture encoding needs macOS codec service
 access outside the development sandbox.
+The process-boundary harness also checks inherited-descriptor and environment
+isolation, failed launch, malformed metadata, helper crash, and a descendant that
+retains the metadata pipe after the helper exits. Metadata reads are nonblocking,
+and an already-reaped child PID is never killed on a wait error.
 
 Reaction tests cover source-order folding, whole custom emoji, self/multiple actors,
 replacement/mismatched and matching removals, old tracked deletion, highest/cursor
@@ -299,11 +375,24 @@ payloads and 100 reaction rows through the read-only adapter. It reports parser
 outcomes, known archive vocabulary, exact local artwork join counts and reaction
 type/target-shape counts. It never emits source strings, identifiers or bytes;
 `tests/enrichment_probe.py` checks those disclosure and sample bounds.
+It also compares source/target chat links, reporting only fixed state labels and
+counts, plus the newest sample's direction flags. Fixtures distinguish a shared
+selected chat, shared links with different selected chats, disjoint chats and a
+malformed target, without exposing GUIDs or participant values.
+Its independent diagnostic tree walk has an 8,192-visit budget; shared binary
+plist references cannot expand into an unbounded traversal. Truncated diagnostic
+counts are marked by `shape_limit_reached`. The shared-reference regression timed
+out before this bound and now completes with the expected limit indication.
+`tests/contacts_permission.py` runs the permission-only child with an empty
+environment and verifies its bounded exit-status contract and absence of output;
+it neither requests access nor reads contacts. It also verifies that the private
+reader refuses ordinary invocation without its dedicated pipe handles.
+The synthetic Contacts transport suite now exercises restricted, unavailable and
+denied states against an avatar fetched successfully immediately before each
+change. Every state clears live presentation, refuses that cached version, keeps
+history and protocol support available, and recovers on a same-generation grant.
 
-Remaining installed acceptance covers live contact rename/photo/removal,
-independent Contacts/FDA permission changes, and controlled reaction
-add/change/remove/deleted-source behavior. These require deliberate Mac UI or
-account mutations, which have not been performed. Use generated/synthetic contacts
-and a deliberately selected test conversation. Names, avatars and reactions remain
-gated until those cases are established. Keep private evidence outside the public repository and publish only sanitized
-functional results.
+Native verification covers heart addition and thumbs-up replacement. Remaining
+standard values, custom reactions, removal/deletion and removal across restart
+remain unverified natively, despite passing synthetic coverage. Keep private
+acceptance records outside the public repository.

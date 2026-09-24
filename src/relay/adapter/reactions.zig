@@ -1,6 +1,6 @@
-//! Source format candidates are fixture-tested independently of rollout. Native
-//! capability remains gated until the recorded Mac's operation/deletion cases
-//! have been observed. Unknown types never acquire an invented reaction value.
+//! Bounded source mappings have fixture coverage and installed add/replacement
+//! checks. The acceptance record distinguishes observed and deferred Mac cases.
+//! Unknown types never acquire an invented reaction value.
 const std = @import("std");
 const u = @import("../../common.zig");
 const t = @import("../../protocol/types.zig");

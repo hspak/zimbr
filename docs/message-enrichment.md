@@ -1,12 +1,13 @@
 # Contacts, images, link previews, reactions, and contact photos
 
-Status: implementation in progress for the shared protocol and Mac relay; Linux
+Status: implemented for the shared protocol and Mac relay; Linux
 client changes are outside the current implementation task. This extends
 [DESIGN.md](../DESIGN.md). The original repository observations below describe
 the starting point on 2026-09-23. See the
 [Mac enrichment acceptance record](mac-enrichment-acceptance.md) for current
-implementation and verification evidence. Limits and platform checks below remain
-acceptance criteria, not claims that every feature already works.
+implementation and verification evidence, including the native reaction checks
+that remain deferred. The platform checks below describe the intended
+acceptance coverage; the evidence record distinguishes completed and deferred cases.
 
 Build two shared facilities: an address-to-contact presentation directory and an
 authenticated image pipeline. Use both from the message UI. Normalize existing
