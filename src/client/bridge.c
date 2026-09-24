@@ -598,6 +598,17 @@ size_t zc_text_boundary(const char *text, size_t length, size_t position, int di
     g_free(attrs); return result;
 }
 
+int zc_timestamp_ms(const char *timestamp, size_t length, int64_t *output) {
+    char value[64];
+    if (!length || length >= sizeof(value) || memchr(timestamp, '\0', length)) return 0;
+    memcpy(value, timestamp, length); value[length] = '\0';
+    GDateTime *date = g_date_time_new_from_iso8601(value, NULL);
+    if (!date) return 0;
+    *output = g_date_time_to_unix(date) * 1000 + g_date_time_get_microsecond(date) / 1000;
+    g_date_time_unref(date);
+    return 1;
+}
+
 int zc_local_time(const char *timestamp, char *output, size_t size, int compact) {
     struct tm tm = {0};
     if (sscanf(timestamp, "%d-%d-%dT%d:%d:%d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday, &tm.tm_hour, &tm.tm_min, &tm.tm_sec) != 6) return 0;

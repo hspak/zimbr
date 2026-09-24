@@ -1,10 +1,96 @@
 //! Bound presentation work without modifying stored messages or copied text.
 const std = @import("std");
 const t = @import("../protocol/types.zig");
+const bridge = @import("c.zig").api;
 pub const max_bytes = 4096;
 pub const max_lines = 64;
 pub const shortened = "\n… Preview shortened · select and Ctrl+C to copy full text";
 pub const unavailable = "Text preview unavailable · select and Ctrl+C to copy";
+
+pub const unknown_grace_ms = 30_000;
+pub const MessageStatus = union(enum) { none, label: []const u8, checks: bool };
+
+// Use the original send time so snapshots, echo matching, navigation, and
+// restarts cannot restart the grace period. Missing dates must not hide a
+// potentially stuck send indefinitely.
+fn deferUnknown(timestamp: []const u8, now_ms: i64) bool {
+    var sent_ms: i64 = undefined;
+    if (bridge.zc_timestamp_ms(timestamp.ptr, timestamp.len, &sent_ms) == 0) return false;
+    return now_ms < sent_ms + unknown_grace_ms;
+}
+
+pub fn messageStatus(m: t.Message, now_ms: i64) MessageStatus {
+    if (m.direction != .outgoing) return .none;
+    return switch (m.observed_status) {
+        .sent => .{ .checks = false },
+        .delivered => .{ .checks = true },
+        .unknown => if (deferUnknown(m.timestamp, now_ms)) .none else .{ .label = "unknown" },
+        else => .{ .label = @tagName(m.observed_status) },
+    };
+}
+
+pub fn pendingStatus(a: std.mem.Allocator, state: []const u8, detail: []const u8, sent_at: []const u8, now_ms: i64) []const u8 {
+    const uncertain = std.mem.eql(u8, state, "unknown") or std.mem.eql(u8, state, "unconfirmed");
+    // Details can also describe uncertainty; defer the entire warning.
+    if (uncertain and deferUnknown(sent_at, now_ms)) return "Sending…";
+    const status = if (uncertain) "Uncertain · not automatically resent" else if (std.mem.eql(u8, state, "failed")) "Failed" else if (std.mem.eql(u8, state, "sending")) "Saving / submitting…" else state;
+    return if (detail.len > 0) std.fmt.allocPrint(a, "{s} · {s}", .{ status, label(a, detail) }) catch status else status;
+}
+
+test "unknown delivery status waits thirty seconds while confirmed outcomes appear immediately" {
+    const sent_ms: i64 = 1767225600123;
+    var m = t.Message{
+        .sender = "",
+        .service = "imessage",
+        .direction = .outgoing,
+        .timestamp = "2026-01-01T00:00:00.123000000Z",
+        .kind = .text,
+        .text = "Hello",
+        .decoding = .plain,
+        .observed_status = .unknown,
+    };
+    try std.testing.expect(messageStatus(m, sent_ms) == .none);
+    try std.testing.expect(messageStatus(m, sent_ms + 29_999) == .none);
+    // No record update is needed for a stalled message to become visible.
+    try std.testing.expectEqualStrings("unknown", messageStatus(m, sent_ms + 30_000).label);
+    try std.testing.expectEqualStrings("unknown", messageStatus(m, sent_ms + 60_000).label);
+    try std.testing.expectEqual(.unknown, m.observed_status);
+    m.observed_status = .sent;
+    try std.testing.expect(!messageStatus(m, sent_ms + 1).checks);
+    try std.testing.expect(!messageStatus(m, sent_ms + 30_000).checks);
+    m.observed_status = .delivered;
+    try std.testing.expect(messageStatus(m, sent_ms + 1).checks);
+    try std.testing.expect(messageStatus(m, sent_ms + 30_000).checks);
+    m.observed_status = .failed;
+    try std.testing.expectEqualStrings("failed", messageStatus(m, sent_ms + 1).label);
+    m.observed_status = .unknown;
+    m.direction = .incoming;
+    try std.testing.expect(messageStatus(m, sent_ms + 30_000) == .none);
+    m.direction = .outgoing;
+    for ([_][]const u8{ "2025-12-31T23:59:00Z", "", "invalid" }) |stamp| {
+        m.timestamp = stamp;
+        try std.testing.expectEqualStrings("unknown", messageStatus(m, sent_ms).label);
+    }
+}
+
+test "pending uncertainty and its details share a grace period based on the original send time" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const sent_ms: i64 = 1767225600000;
+    // Both supported timestamp precisions and timezone offsets describe the
+    // same send, so importing an echo must not change the deadline.
+    for ([_][]const u8{ "2026-01-01T00:00:00Z", "2026-01-01T00:00:00.000000000Z", "2025-12-31T16:00:00-08:00" }) |stamp| {
+        for ([_][]const u8{ "unknown", "unconfirmed" }) |state| {
+            try std.testing.expectEqualStrings("Sending…", pendingStatus(a, state, "Outcome uncertain", stamp, sent_ms + 29_999));
+            try std.testing.expectEqualStrings("Uncertain · not automatically resent · Outcome uncertain", pendingStatus(a, state, "Outcome uncertain", stamp, sent_ms + 30_000));
+        }
+        try std.testing.expectEqualStrings("Failed · Rejected", pendingStatus(a, "failed", "Rejected", stamp, sent_ms));
+        try std.testing.expectEqualStrings("Saving / submitting…", pendingStatus(a, "sending", "", stamp, sent_ms));
+        try std.testing.expectEqualStrings("queued", pendingStatus(a, "queued", "", stamp, sent_ms));
+    }
+    try std.testing.expectEqualStrings("Uncertain · not automatically resent", pendingStatus(a, "unknown", "", "", sent_ms));
+}
 
 pub fn prefix(value: []const u8, limit: usize, lines: usize) []const u8 {
     var end: usize = 0;

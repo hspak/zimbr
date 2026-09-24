@@ -63,6 +63,7 @@ unsigned char *zc_text_pixels(ZcText *text, unsigned color, int start, int end, 
 unsigned char *zc_text_pixels_on(ZcText *text, unsigned color, int start, int end, int top, int height, unsigned background);
 void zc_text_clear_pixels(ZcText *text);
 int zc_local_time(const char *timestamp, char *output, size_t size, int compact);
+int zc_timestamp_ms(const char *timestamp, size_t length, int64_t *output);
 void zc_text_caret(ZcText *text, int index, int *x, int *y, int *height);
 int zc_text_hit(ZcText *text, int x, int y);
 size_t zc_text_boundary(const char *text, size_t length, size_t position, int direction);

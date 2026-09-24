@@ -64,6 +64,9 @@ Group and direct conversations appear together, ordered by their latest message,
 newest first, beside a charcoal conversation pane. Incoming and outgoing messages
 share a left-aligned feed with square avatars, sender labels, timestamps, and
 outgoing delivery checkmarks: one for sent, two for delivered.
+Unknown delivery states and uncertain-send warnings appear only after 30 seconds
+from the send time; pending sends show “Sending…” during this grace period.
+Confirmed failures appear immediately.
 Pending and uncertain sends stay in the timeline at their original send time;
 older cached sends use an estimated position from nearby history.
 The compact composer grows from one to three text lines, then scrolls for longer

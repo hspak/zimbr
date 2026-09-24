@@ -1250,6 +1250,8 @@ const App = struct {
             } else |_| {}
             s.hydration_at = u.now() + 250;
         }
+        // Reevaluate on idle redraws too, even when the snapshot is unchanged.
+        const status_now = u.now();
         for (rows[visible.start..visible.end]) |row| {
             if (row.pending) continue;
             const m = v.snapshot.messages[row.source_index];
@@ -1270,11 +1272,7 @@ const App = struct {
                 const name = display.label(ar, if (outgoing) "You" else v.snapshot.directory.name(m.service, m.sender));
                 const name_width = @min(inner * 0.55, s.text.lineSize(name, 14, inner * 0.55).x);
                 s.text.drawLine(name, x, y, 14, name_width, if (outgoing) theme.colors.ink else style.label, bg);
-                const status: MessageStatus = if (!outgoing) .none else switch (m.observed_status) {
-                    .sent => .{ .checks = false },
-                    .delivered => .{ .checks = true },
-                    else => .{ .label = @tagName(m.observed_status) },
-                };
+                const status = display.messageStatus(m, status_now);
                 const stamp_x = x + name_width + 10;
                 s.drawMessageMeta(localTime(ar, m.timestamp, false), status, .{ .x = stamp_x, .y = y + 2, .width = @max(1, inner - name_width - 10), .height = 18 }, bg);
                 if (row.blocks.len == 0) {
@@ -1292,8 +1290,7 @@ const App = struct {
                 s.drawAvatar(.{ .x = r.x + 20, .y = y, .width = 34, .height = 34 }, "You", .{ .bubble = theme.colors.incoming, .label = theme.colors.muted }, 17);
                 const name_width = s.text.lineSize("You", 14, inner).x;
                 s.text.drawLine("You", x, y, 14, name_width, theme.colors.muted, theme.colors.paper);
-                const label = if (u.eq(p.state, "unknown") or u.eq(p.state, "unconfirmed")) "Uncertain · not automatically resent" else if (u.eq(p.state, "failed")) "Failed" else if (u.eq(p.state, "sending")) "Saving / submitting…" else p.state;
-                const status = if (p.detail.len > 0) std.fmt.allocPrint(ar, "{s} · {s}", .{ label, display.label(ar, p.detail) }) catch label else label;
+                const status = display.pendingStatus(ar, p.state, p.detail, p.sent_at, status_now);
                 s.drawMessageMeta(localTime(ar, p.sent_at, false), .{ .label = status }, .{ .x = x + name_width + 10, .y = y + 2, .width = @max(1, inner - name_width - 10), .height = 18 }, theme.colors.paper);
                 s.drawMessageText(row, p.input.text, .{ .x = x, .y = y + 22, .width = inner, .height = h }, theme.colors.muted, theme.colors.paper);
                 if (s.button(.{ .x = x + inner - 118, .y = y + h + 24, .width = 118, .height = 27 }, "Copy to draft", false)) {
@@ -1648,8 +1645,7 @@ const App = struct {
         s.text.draw(body, viewport.x, viewport.y - s.content_detail_scroll, 16, viewport.width, theme.colors.ink, theme.colors.paper);
         endClip();
     }
-    const MessageStatus = union(enum) { none, label: []const u8, checks: bool };
-    fn drawMessageMeta(s: *App, stamp: []const u8, status: MessageStatus, r: rl.Rectangle, background: rl.Color) void {
+    fn drawMessageMeta(s: *App, stamp: []const u8, status: display.MessageStatus, r: rl.Rectangle, background: rl.Color) void {
         const reserved: f32 = switch (status) {
             .none => 0,
             .checks => 28,
