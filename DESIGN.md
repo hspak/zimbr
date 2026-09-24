@@ -4,6 +4,9 @@ Status: design specification, with relay and Linux client implementations availa
 Current macOS TLS evidence is tracked in [docs/macos-tls.md](docs/macos-tls.md);
 the earlier Messages acceptance record is [docs/mac-validation.md](docs/mac-validation.md).
 Linux build, verification, and text-backend limitations are documented in [README.md](README.md).
+The proposed [message enrichment design](docs/message-enrichment.md) covers
+Contacts names/photos, attached images, existing URL previews, and reactions,
+including shared infrastructure, delivery order, and acceptance criteria.
 
 Build a small, self-hosted system that uses an always-on Mac mini, signed into
 Messages, to send and receive iMessages from a graphical Linux application.
