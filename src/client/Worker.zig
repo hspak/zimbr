@@ -86,6 +86,7 @@ commands: std.ArrayList(Command) = .empty,
 notifications: std.ArrayList(*Notification) = .empty,
 batch_notifications: std.ArrayList(*Notification) = .empty,
 view: ?*View = null,
+on_ready: ?*const fn () callconv(.c) void = null,
 stop: std.atomic.Value(bool) = .init(false),
 thread: ?std.Thread = null,
 wake_pipe: [2]c_int = .{ -1, -1 },
@@ -996,6 +997,7 @@ fn publish(s: *Self) !void {
     s.view = v;
     s.dirty = false;
     s.last_published = u.now();
+    if (s.on_ready) |ready| ready();
 }
 pub fn encode(ar: u.Allocator, raw: []const u8) ![]const u8 {
     var result: std.ArrayList(u8) = .empty;

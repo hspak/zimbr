@@ -9,6 +9,8 @@ void zc_notifications_show(ZcNotifications *, const char *chat, const char *summ
 void zc_notifications_dismiss(ZcNotifications *, const char *chat);
 void zc_notifications_free(ZcNotifications *);
 void zc_activation_init(void);
+void zc_activation_wake(void);
+int zc_activation_wait(int timeout_ms);
 int zc_activation_activate(void *surface, const char *token);
 void zc_activation_free(void);
 typedef struct ZcNet ZcNet;

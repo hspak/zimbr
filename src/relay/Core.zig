@@ -39,6 +39,7 @@ pub fn sleep(self: *Self, ms: i64) void {
     std.Io.sleep(self.io, .fromMilliseconds(ms), .awake) catch {};
 }
 pub fn ingestLoop(self: *Self) void {
+    u.c.zr_thread_qos(0);
     var tick: usize = 0;
     const watch = u.c.zr_watch_open(self.source_path);
     defer u.c.zr_watch_close(watch);
@@ -84,6 +85,7 @@ pub fn ingest(self: *Self, a: u.Allocator) !void {
     try source.db.exec("BEGIN");
     defer source.db.exec("ROLLBACK") catch {};
     var batch = ImportBatch{ .source = source };
+    defer batch.scratch.deinit();
     const high = try source.high();
     const j = self.journal;
     try j.begin();
@@ -193,6 +195,7 @@ pub fn ingest(self: *Self, a: u.Allocator) !void {
 }
 const ImportBatch = struct {
     source: Adapter.Source,
+    scratch: std.heap.ArenaAllocator = .init(std.heap.page_allocator),
     rows: std.AutoHashMapUnmanaged(i64, void) = .empty,
     chats: std.AutoHashMapUnmanaged(i64, ?[]const u8) = .empty,
     rebased: bool = false,
@@ -214,9 +217,10 @@ fn importRow(self: *Self, batch_a: u.Allocator, batch: *ImportBatch, row: i64, o
     if ((try batch.rows.getOrPut(batch_a, row)).found_existing) return;
     // Decoder scratch must not accumulate across an entire import batch.
     // Conversation IDs/maps alone need to live for the batch's duration.
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+    // Reuse pages across rows, but do not retain an unusually large decoded
+    // attachment/archive for the rest of the batch.
+    defer _ = batch.scratch.reset(.{ .retain_with_limit = 256 * 1024 });
+    const a = batch.scratch.allocator();
     const source = batch.source;
     const j = self.journal;
     if (try source.message(a, row)) |m| {
@@ -252,6 +256,7 @@ fn importRow(self: *Self, batch_a: u.Allocator, batch: *ImportBatch, row: i64, o
     } else try j.execute("DELETE FROM pending_source WHERE source_row=?", &.{.{ .int = row }});
 }
 pub fn senderLoop(self: *Self) void {
+    u.c.zr_thread_qos(1);
     var last_check: i64 = 0;
     var recovery_needed = false;
     while (!self.stop.load(.acquire)) {

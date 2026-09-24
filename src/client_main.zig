@@ -66,10 +66,10 @@ fn run(init: std.process.Init) !void {
     rl.setExitKey(.null);
     rl.setTargetFPS(120);
     _ = clay.initialize(.init(try init.arena.allocator().alloc(u8, clay.minMemorySize())), .{ .w = 1120, .h = 780 }, .{ .error_handler_function = clayError });
-    var worker = Worker{ .io = init.io, .config = config };
+    var worker = Worker{ .io = init.io, .config = config, .on_ready = bridge.zc_activation_wake };
     try worker.start();
     defer worker.shutdown();
-    var media = Media{ .io = init.io, .config = config };
+    var media = Media{ .io = init.io, .config = config, .on_ready = bridge.zc_activation_wake };
     const media_ready = if (media.start()) true else |_| false;
     defer if (media_ready) media.shutdown();
     var app = App{ .worker = &worker, .enter_to_send = config.enter_to_send, .show_details = config.details };
@@ -84,6 +84,7 @@ fn run(init: std.process.Init) !void {
     var last_revision: u64 = 0;
     var last_mouse = rl.getMousePosition();
     var last_window = WindowMetrics{};
+    var background_ready = false;
     while (!rl.windowShouldClose()) {
         bridge.zc_notifications_poll();
         try app.update();
@@ -101,9 +102,10 @@ fn run(init: std.process.Init) !void {
         // Keep rendering between input events so scrolling and key repeat do
         // not fall back to the idle polling cadence during an interaction.
         if (input or window_changed or revision != last_revision) active_until = now + 0.5;
-        if (frames < 4 or config.frames > 0 or app.layout_pending or now < active_until or generation != last_generation or u.now() - last_draw >= 500) {
+        if (frames < 4 or config.frames > 0 or background_ready or app.layout_pending or now < active_until or generation != last_generation or u.now() - last_draw >= 500) {
             app.capture_frame = config.screenshot != null and config.frames > 0 and frames + 1 >= config.frames;
             app.draw(window.scale);
+            background_ready = false;
             last_draw = u.now();
             last_generation = generation;
             last_revision = revision;
@@ -111,7 +113,7 @@ fn run(init: std.process.Init) !void {
             last_window = window;
             frames += 1;
         } else {
-            rl.waitTime(0.025);
+            background_ready = bridge.zc_activation_wait(25) != 0;
             rl.pollInputEvents();
         }
         if (config.frames > 0 and frames >= config.frames) {
@@ -149,6 +151,9 @@ const App = struct {
     history_arena: std.heap.ArenaAllocator = .init(a),
     history_rows: []HistoryRow = &.{},
     history_generation: ?u64 = null,
+    history_needs_position: bool = true,
+    history_needs_measurement: bool = true,
+    frame_arena: std.heap.ArenaAllocator = .init(a),
     hydration_at: i64 = 0,
     layout_pending: bool = false,
     height_budget: usize = 0,
@@ -206,6 +211,7 @@ const App = struct {
         s.text.deinit();
         s.heights.deinit(a);
         s.history_arena.deinit();
+        s.frame_arena.deinit();
         s.composer.deinit();
         s.recipient.deinit();
         s.search.deinit();
@@ -566,9 +572,8 @@ const App = struct {
         s.following = true;
     }
     fn draw(s: *App, scale: f32) void {
-        var arena = std.heap.ArenaAllocator.init(a);
-        defer arena.deinit();
-        const ar = arena.allocator();
+        defer _ = s.frame_arena.reset(.{ .retain_with_limit = 1024 * 1024 });
+        const ar = s.frame_arena.allocator();
         s.text.nextFrame(scale);
         if (s.media) |media| s.images.nextFrame(media);
         s.rich_count = 0;
@@ -977,6 +982,8 @@ const App = struct {
         if (snapshot.pending.len > 0) std.mem.sort(HistoryRow, active_rows, snapshot, HistoryRow.before);
         s.history_rows = active_rows;
         s.history_generation = generation;
+        s.history_needs_position = true;
+        s.history_needs_measurement = true;
         if (s.message_selection.id.len > 0) {
             var valid = false;
             for (active_rows) |row| {
@@ -1029,6 +1036,7 @@ const App = struct {
         }
         s.content_height = total;
         s.scroll = if (s.following) s.historyLimit(viewport) else s.clampHistoryScroll(s.scroll, viewport);
+        s.history_needs_position = false;
     }
     const max_height_work = 256;
     fn hasHeightBudget(s: *App) bool {
@@ -1093,11 +1101,15 @@ const App = struct {
             s.content_height += row.height();
             s.layout_pending = s.layout_pending or row.measured == null;
         }
+        s.history_needs_measurement = s.layout_pending;
         s.scroll = if (s.following) s.historyLimit(viewport) else s.clampHistoryScroll(s.scroll, viewport);
     }
     fn rememberHistoryAnchor(s: *App, rows: []const HistoryRow) void {
-        var top: f64 = 54;
-        for (rows) |row| {
+        // Positions are already sorted. Scrolling near the end of a large
+        // archive must not walk every earlier message on every frame.
+        const start = s.historyStart(rows);
+        for (rows[start..]) |row| {
+            const top = row.top;
             if (top + row.height() > s.scroll) {
                 if (row.pending != s.anchor_pending or !u.eq(row.id, s.history_anchor)) {
                     const id = a.dupe(u8, row.id) catch return;
@@ -1125,7 +1137,6 @@ const App = struct {
                 }
                 return;
             }
-            top += row.height();
         }
     }
     fn blockId(block: Content.Block) []const u8 {
@@ -1139,15 +1150,19 @@ const App = struct {
         };
     }
     const HistoryRange = struct { start: usize, end: usize, loading: bool = false };
-    fn visibleHistory(s: *App, rows: []const HistoryRow, viewport: f32) HistoryRange {
+    fn historyStart(s: *App, rows: []const HistoryRow) usize {
         var low: usize = 0;
         var high = rows.len;
         while (low < high) {
             const middle = low + (high - low) / 2;
             if (rows[middle].top + rows[middle].height() <= s.scroll) low = middle + 1 else high = middle;
         }
-        const start = low;
-        high = rows.len;
+        return low;
+    }
+    fn visibleHistory(s: *App, rows: []const HistoryRow, viewport: f32) HistoryRange {
+        const start = s.historyStart(rows);
+        var low = start;
+        var high = rows.len;
         while (low < high) {
             const middle = low + (high - low) / 2;
             if (rows[middle].top < s.scroll + viewport) low = middle + 1 else high = middle;
@@ -1179,7 +1194,7 @@ const App = struct {
         if (!u.eq(s.key, v.snapshot.selected)) return;
         const inner = historyTextWidth(r);
         const rows = s.prepareHistory(inner) catch return;
-        s.positionHistory(rows, r.height);
+        if (s.history_needs_position) s.positionHistory(rows, r.height) else s.scroll = if (s.following) s.historyLimit(r.height) else s.clampHistoryScroll(s.scroll, r.height);
         var scrolled = false;
         if (hover(r)) {
             const wheel = rl.getMouseWheelMove();
@@ -1193,7 +1208,7 @@ const App = struct {
             s.following = s.scroll >= s.historyLimit(r.height) - 1;
             scrolled = true;
         }
-        s.measureHistory(rows, inner, r.height);
+        if (s.history_needs_measurement) s.measureHistory(rows, inner, r.height);
         // Deferred measurements may change the range during a drag. Keep the
         // thumb under the pointer, then save this position as the reading anchor.
         if (s.history_bar.dragging) {
@@ -1978,6 +1993,13 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     rl.setConfigFlags(.{ .window_highdpi = true });
     rl.initWindow(1120, 780, "Zimbr UI checks");
     defer rl.closeWindow();
+    bridge.zc_activation_init();
+    defer bridge.zc_activation_free();
+    // Coalesced worker signals wake an idle UI without dispatching or clearing
+    // input callbacks. Draining must leave the next wait idle.
+    for (0..10000) |_| bridge.zc_activation_wake();
+    try std.testing.expectEqual(@as(c_int, 1), bridge.zc_activation_wait(0));
+    try std.testing.expectEqual(@as(c_int, 0), bridge.zc_activation_wait(0));
     rl.pollInputEvents();
     rl.setTargetFPS(60);
     var arena = std.heap.ArenaAllocator.init(a);
@@ -2255,6 +2277,21 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     while (app.layout_pending and frames < 200) : (frames += 1) app.draw(WindowMetrics.current().scale);
     try std.testing.expect(!app.layout_pending);
     try std.testing.expectEqual(messages.len, app.heights.count());
+    // A settled frame retains geometry while viewport changes still keep the
+    // latest message at the bottom. New content invalidates that geometry.
+    try std.testing.expect(!app.history_needs_position and !app.history_needs_measurement);
+    const settled_rows = app.history_rows.ptr;
+    app.draw(WindowMetrics.current().scale);
+    try std.testing.expectEqual(settled_rows, app.history_rows.ptr);
+    try app.composer.set("A taller\nthree-line\ncomposer");
+    app.draw(WindowMetrics.current().scale);
+    const history = layout.frame(@floatFromInt(rl.getScreenWidth()), @floatFromInt(rl.getScreenHeight()), app.composerHeight()).history;
+    try std.testing.expectApproxEqAbs(app.historyLimit(history.height), app.scroll, 0.000001);
+    const settled_height = app.content_height;
+    messages[messages.len - 1].text = "Changed\nMore\nLines\nTo\nMeasure";
+    view.generation += 1;
+    app.draw(WindowMetrics.current().scale);
+    try std.testing.expect(app.content_height != settled_height);
     try std.testing.expect(app.text.texture_bytes <= 32 * 1024 * 1024);
     try std.testing.expectEqual(@as(usize, 0), clip_depth);
 }

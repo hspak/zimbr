@@ -120,7 +120,9 @@ def main():
     with entitlements.open('wb') as f: plistlib.dump({'com.apple.security.automation.apple-events': True}, f)
     sign(macos/'image-helper', identity=args.identity, directory=args.signing_directory)
     sign(bundle, entitlements, identity=args.identity, directory=args.signing_directory)
-    config = {'Label': LABEL, 'ProgramArguments': [str(destination/'Contents/MacOS/relay'), 'serve', '--config', str(data/'relay.json')], 'RunAtLoad': True, 'KeepAlive': True, 'ThrottleInterval': 30, 'ProcessType': 'Background', 'LimitLoadToSessionType': 'Aqua', 'WorkingDirectory': str(data), 'StandardOutPath': str(data/'relay.log'), 'StandardErrorPath': str(data/'relay.log'), 'Umask': 0o077, 'EnvironmentVariables': {'HOME': str(home)}}
+    # HTTPS requests cannot obtain Adaptive's XPC boosts. Use Standard and let
+    # per-thread QoS distinguish user requests from ingestion/enrichment work.
+    config = {'Label': LABEL, 'ProgramArguments': [str(destination/'Contents/MacOS/relay'), 'serve', '--config', str(data/'relay.json')], 'RunAtLoad': True, 'KeepAlive': True, 'ThrottleInterval': 30, 'ProcessType': 'Standard', 'LimitLoadToSessionType': 'Aqua', 'WorkingDirectory': str(data), 'StandardOutPath': str(data/'relay.log'), 'StandardErrorPath': str(data/'relay.log'), 'Umask': 0o077, 'EnvironmentVariables': {'HOME': str(home)}}
     plist = staging/(LABEL+'.plist')
     with plist.open('wb') as f: plistlib.dump(config, f)
     subprocess.run(['plutil', '-lint', str(plist)], check=True)

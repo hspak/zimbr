@@ -23,9 +23,9 @@ Wayland, and xkbcommon. Clay and raylib are pinned in
 sans-serif font and an emoji font for the scripts you use.
 
 ```sh
-zig build client
+zig build client -Doptimize=ReleaseFast
 # After provisioning and configuration below:
-zig build run
+zig build run -Doptimize=ReleaseFast
 # Optional user-local executable, icon, and application launcher:
 packaging/linux/install.sh
 ```
@@ -34,6 +34,9 @@ Linux uses Wayland exclusively. The GUI was rendered at 125% desktop scaling
 and uses `zimbr` as its application ID. Movement, scrolling, and navigation target
 120 FPS, returning to idle rendering after half a second without activity. The
 background worker continues to receive messages while rendering sleeps.
+Idle input and worker results wake rendering immediately. Settled histories reuse
+their geometry when scrolling or typing; offscreen history does not need a full
+layout pass each frame. See [performance measurements](docs/performance.md).
 
 Incoming live messages show desktop notifications while Zimbr is running, including
 when its window is unfocused or minimized. Notifications use the
@@ -259,6 +262,20 @@ Install Zig **0.16.0**, Apple's Command Line Tools, and a target build of
 **OpenSSL 3.5 LTS** with static archives. This migration packages 3.5.8; use current
 3.5 security patches and rebuild/re-sign the app when updating OpenSSL. The relay
 uses system SQLite and has no GUI or Homebrew runtime dependency.
+
+For the M1 Mac mini, build the deployed relay with optimization and an explicit
+M1 CPU target (including NEON and ARM SHA-256 instructions):
+
+```sh
+zig build relay -Doptimize=ReleaseFast -Dtarget=aarch64-macos -Dcpu=apple_m1 \
+  -Dopenssl-prefix=/absolute/openssl-3.5
+```
+
+Use matching arm64 OpenSSL archives. Rebuild and run the existing signing/install
+procedure to apply the new launch agent's scheduling settings. The relay gives
+user requests and send dispatch higher QoS than ingestion and enrichment; macOS
+chooses the cores. [Performance notes](docs/performance.md) distinguish Linux
+measurements from native M1 validation. Omit `-Doptimize` for a Debug build.
 
 ```sh
 zig build relay fake-relay test -Dopenssl-prefix=/absolute/openssl-3.5

@@ -14,11 +14,25 @@
 #include <sys/attr.h>
 #include <sys/event.h>
 #include <uuid/uuid.h>
+#include <pthread/qos.h>
 #elif defined(__linux__)
 #include <sys/inotify.h>
 #endif
 extern char **environ;
+void zr_thread_qos(int user_initiated) {
+#ifdef __APPLE__
+    // Let macOS choose performance/efficiency cores; never pin core numbers.
+    (void)pthread_set_qos_class_self_np(user_initiated ? QOS_CLASS_USER_INITIATED : QOS_CLASS_UTILITY, 0);
+#else
+    (void)user_initiated;
+#endif
+}
 int zr_random(void *bytes, size_t length) {
+#ifdef __APPLE__
+    // Native CSPRNG avoids opening/closing /dev/urandom for every journal UUID.
+    arc4random_buf(bytes, length);
+    return 0;
+#else
     int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
     if (fd < 0) return -1;
     size_t pos = 0;
@@ -29,6 +43,7 @@ int zr_random(void *bytes, size_t length) {
         pos += (size_t)n;
     }
     close(fd); return 0;
+#endif
 }
 int64_t zr_now_ms(void) {
     struct timespec t;

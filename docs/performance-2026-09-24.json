@@ -1,0 +1,578 @@
+{
+  "date": "2026-09-24",
+  "baseline_commit": "1aa4f0b621091726db1ba35e02df0fff0db0d669",
+  "candidate": "working tree performance pass",
+  "build": "Zig 0.16.0 ReleaseFast, native CPU",
+  "host": {
+    "os": "Linux",
+    "arch": "x86_64",
+    "cpu": "AMD Ryzen AI Max+ 395"
+  },
+  "method": {
+    "paired_runs": 3,
+    "order": [
+      [
+        "before",
+        "after"
+      ],
+      [
+        "after",
+        "before"
+      ],
+      [
+        "before",
+        "after"
+      ]
+    ],
+    "concurrent_builds_or_tests": false,
+    "comparison": "median of the corresponding statistic from the three runs; p95 values are not pooled",
+    "transport": "synthetic native mTLS over localhost",
+    "probe_sampling_ms": 20,
+    "end_to_end_samples_per_run": {
+      "incoming": 8,
+      "sends": 4
+    },
+    "cpu_batches_per_run": 15
+  },
+  "limitations": [
+    "No M1 runtime measurements or full macOS build; only JSON and SHA-256 M1 code generation checked.",
+    "End-to-end timing excludes GPU presentation; text raster timing excludes GPU upload/drawing.",
+    "Send timings are near the 20 ms probe interval; warm snapshot publication was essentially unchanged and cold publication was about 9 ms slower in this three-run sample."
+  ],
+  "validation": {
+    "ReleaseFast": {
+      "passed": 79,
+      "skipped": 1
+    },
+    "ReleaseSafe": {
+      "passed": 79,
+      "skipped": 1
+    },
+    "skip_reason": "native macOS Contacts normalization unavailable on Linux",
+    "Wayland_GUI": {
+      "passed": 38
+    },
+    "integration_suites_passed": [
+      "integration",
+      "client_integration",
+      "client_transport",
+      "client_lazy_history",
+      "client_enrichment",
+      "conversations",
+      "enrichment",
+      "assets",
+      "links",
+      "reactions",
+      "relay_tls",
+      "message_security"
+    ],
+    "m1_codegen": [
+      "NEON cmeq.16b in JSON string scan",
+      "sha256h.4s and sha256su instructions in existing SHA-256"
+    ]
+  },
+  "comparison": {
+    "initial_ingest_ms": {
+      "before": 5228.94,
+      "after": 3717.6
+    },
+    "incoming_p50_ms": {
+      "before": 55.04,
+      "after": 41.46
+    },
+    "incoming_p95_ms": {
+      "before": 85.04,
+      "after": 61.67
+    },
+    "send_ack_p50_ms": {
+      "before": 35.02,
+      "after": 39.87
+    },
+    "send_dispatch_p50_ms": {
+      "before": 38.57,
+      "after": 42.58
+    },
+    "send_echo_p50_ms": {
+      "before": 72.23,
+      "after": 55.15
+    },
+    "burst_ms": {
+      "before": 200.35,
+      "after": 118.16
+    },
+    "sql_lookup_p50_us": {
+      "before": 0.891,
+      "after": 0.162
+    },
+    "json_check_p50_us": {
+      "before": 23.075,
+      "after": 2.311
+    },
+    "opaque_text_raster_p50_us": {
+      "before": 202.824,
+      "after": 53.785
+    },
+    "snapshot_cold_ms": {
+      "before": 132.483,
+      "after": 141.893
+    },
+    "snapshot_unchanged_p50_ms": {
+      "before": 13.926,
+      "after": 13.86
+    },
+    "snapshot_edit_p50_ms": {
+      "before": 15.445,
+      "after": 15.687
+    },
+    "snapshot_append_p50_ms": {
+      "before": 15.704,
+      "after": 15.468
+    }
+  },
+  "runs": [
+    {
+      "before": {
+        "end_to_end": {
+          "fixture_messages": 10004,
+          "conversations": 4,
+          "incoming": {
+            "samples": 8,
+            "p50_ms": 78.6,
+            "p95_ms": 114.02,
+            "max_ms": 114.02
+          },
+          "send_ack": {
+            "samples": 4,
+            "p50_ms": 35.02,
+            "p95_ms": 39.88,
+            "max_ms": 39.88
+          },
+          "send_dispatch": {
+            "samples": 4,
+            "p50_ms": 38.57,
+            "p95_ms": 50.65,
+            "max_ms": 50.65
+          },
+          "send_echo": {
+            "samples": 4,
+            "p50_ms": 72.23,
+            "p95_ms": 100.22,
+            "max_ms": 100.22
+          },
+          "initial_ingest_ms": 5228.94,
+          "indexed_source_joins": true,
+          "connect_ms": 26.27,
+          "sidebar_ready_ms": 26.74,
+          "open_history_ms": 39.66,
+          "burst": {
+            "messages": 500,
+            "elapsed_ms": 180.43
+          }
+        },
+        "client-bench": {
+          "messages": 25000,
+          "text_bytes": 1024,
+          "samples": 15,
+          "cold_ms": 128.4476730003953,
+          "unchanged": {
+            "p50_ms": 13.92561899870634,
+            "p95_ms": 15.334118999540806
+          },
+          "edit": {
+            "p50_ms": 15.445258997380733,
+            "p95_ms": 17.369289003312588
+          },
+          "append": {
+            "p50_ms": 15.594729997217655,
+            "p95_ms": 17.224556997418404
+          }
+        },
+        "hotpath-bench": {
+          "samples": 15,
+          "json_bytes": 65536,
+          "sql_lookup": {
+            "p50_us": 0.8478807006835938,
+            "p95_us": 0.9885705001831054
+          },
+          "json_check": {
+            "p50_us": 21.467804000854493,
+            "p95_us": 25.11522799682617
+          },
+          "opaque_text_raster": {
+            "p50_us": 201.29664001464843,
+            "p95_us": 217.47770004272462
+          }
+        }
+      },
+      "after": {
+        "end_to_end": {
+          "fixture_messages": 10004,
+          "conversations": 4,
+          "incoming": {
+            "samples": 8,
+            "p50_ms": 41.89,
+            "p95_ms": 45.35,
+            "max_ms": 45.35
+          },
+          "send_ack": {
+            "samples": 4,
+            "p50_ms": 39.84,
+            "p95_ms": 40.22,
+            "max_ms": 40.22
+          },
+          "send_dispatch": {
+            "samples": 4,
+            "p50_ms": 42.55,
+            "p95_ms": 42.67,
+            "max_ms": 42.67
+          },
+          "send_echo": {
+            "samples": 4,
+            "p50_ms": 55.15,
+            "p95_ms": 60.3,
+            "max_ms": 60.3
+          },
+          "initial_ingest_ms": 3640.58,
+          "indexed_source_joins": true,
+          "connect_ms": 26.15,
+          "sidebar_ready_ms": 26.65,
+          "open_history_ms": 39.68,
+          "burst": {
+            "messages": 500,
+            "elapsed_ms": 118.16
+          }
+        },
+        "client-bench": {
+          "messages": 25000,
+          "text_bytes": 1024,
+          "samples": 15,
+          "cold_ms": 133.96401499956846,
+          "unchanged": {
+            "p50_ms": 13.52836100012064,
+            "p95_ms": 14.700988002121449
+          },
+          "edit": {
+            "p50_ms": 14.869865000247955,
+            "p95_ms": 16.353969000279903
+          },
+          "append": {
+            "p50_ms": 14.92094200104475,
+            "p95_ms": 17.30900600552559
+          }
+        },
+        "hotpath-bench": {
+          "samples": 15,
+          "json_bytes": 65536,
+          "sql_lookup": {
+            "p50_us": 0.1595311996459961,
+            "p95_us": 0.165678800201416
+          },
+          "json_check": {
+            "p50_us": 2.1696839904785157,
+            "p95_us": 2.2384940032958984
+          },
+          "opaque_text_raster": {
+            "p50_us": 53.21034004211426,
+            "p95_us": 57.40484001159668
+          }
+        }
+      }
+    },
+    {
+      "after": {
+        "end_to_end": {
+          "fixture_messages": 10004,
+          "conversations": 4,
+          "incoming": {
+            "samples": 8,
+            "p50_ms": 41.46,
+            "p95_ms": 62.14,
+            "max_ms": 62.14
+          },
+          "send_ack": {
+            "samples": 4,
+            "p50_ms": 40.0,
+            "p95_ms": 40.14,
+            "max_ms": 40.14
+          },
+          "send_dispatch": {
+            "samples": 4,
+            "p50_ms": 42.62,
+            "p95_ms": 43.52,
+            "max_ms": 43.52
+          },
+          "send_echo": {
+            "samples": 4,
+            "p50_ms": 55.04,
+            "p95_ms": 60.21,
+            "max_ms": 60.21
+          },
+          "initial_ingest_ms": 3717.6,
+          "indexed_source_joins": true,
+          "connect_ms": 26.4,
+          "sidebar_ready_ms": 26.75,
+          "open_history_ms": 39.79,
+          "burst": {
+            "messages": 500,
+            "elapsed_ms": 140.13
+          }
+        },
+        "client-bench": {
+          "messages": 25000,
+          "text_bytes": 1024,
+          "samples": 15,
+          "cold_ms": 152.8229779973626,
+          "unchanged": {
+            "p50_ms": 14.085960000753403,
+            "p95_ms": 18.265896998345852
+          },
+          "edit": {
+            "p50_ms": 16.15572600066662,
+            "p95_ms": 18.316982999444008
+          },
+          "append": {
+            "p50_ms": 15.966559998691082,
+            "p95_ms": 18.069417998194695
+          }
+        },
+        "hotpath-bench": {
+          "samples": 15,
+          "json_bytes": 65536,
+          "sql_lookup": {
+            "p50_us": 0.17044679946899413,
+            "p95_us": 0.1752097999572754
+          },
+          "json_check": {
+            "p50_us": 2.3111299896240234,
+            "p95_us": 2.458365997314453
+          },
+          "opaque_text_raster": {
+            "p50_us": 57.28170997619629,
+            "p95_us": 59.03360000610351
+          }
+        }
+      },
+      "before": {
+        "end_to_end": {
+          "fixture_messages": 10004,
+          "conversations": 4,
+          "incoming": {
+            "samples": 8,
+            "p50_ms": 53.73,
+            "p95_ms": 78.61,
+            "max_ms": 78.61
+          },
+          "send_ack": {
+            "samples": 4,
+            "p50_ms": 35.0,
+            "p95_ms": 39.93,
+            "max_ms": 39.93
+          },
+          "send_dispatch": {
+            "samples": 4,
+            "p50_ms": 37.74,
+            "p95_ms": 42.66,
+            "max_ms": 42.66
+          },
+          "send_echo": {
+            "samples": 4,
+            "p50_ms": 60.03,
+            "p95_ms": 68.31,
+            "max_ms": 68.31
+          },
+          "initial_ingest_ms": 5212.43,
+          "indexed_source_joins": true,
+          "connect_ms": 26.93,
+          "sidebar_ready_ms": 27.56,
+          "open_history_ms": 39.36,
+          "burst": {
+            "messages": 500,
+            "elapsed_ms": 220.55
+          }
+        },
+        "client-bench": {
+          "messages": 25000,
+          "text_bytes": 1024,
+          "samples": 15,
+          "cold_ms": 132.4831279963255,
+          "unchanged": {
+            "p50_ms": 14.872982002794743,
+            "p95_ms": 15.620358005166054
+          },
+          "edit": {
+            "p50_ms": 16.607716999948025,
+            "p95_ms": 19.037569001317024
+          },
+          "append": {
+            "p50_ms": 16.18196500092745,
+            "p95_ms": 19.15106300264597
+          }
+        },
+        "hotpath-bench": {
+          "samples": 15,
+          "json_bytes": 65536,
+          "sql_lookup": {
+            "p50_us": 0.8962356994628906,
+            "p95_us": 0.9464802993774414
+          },
+          "json_check": {
+            "p50_us": 23.48488000488281,
+            "p95_us": 25.69968798828125
+          },
+          "opaque_text_raster": {
+            "p50_us": 211.38062995910644,
+            "p95_us": 220.3174500274658
+          }
+        }
+      }
+    },
+    {
+      "before": {
+        "end_to_end": {
+          "fixture_messages": 10004,
+          "conversations": 4,
+          "incoming": {
+            "samples": 8,
+            "p50_ms": 55.04,
+            "p95_ms": 85.04,
+            "max_ms": 85.04
+          },
+          "send_ack": {
+            "samples": 4,
+            "p50_ms": 39.98,
+            "p95_ms": 40.21,
+            "max_ms": 40.21
+          },
+          "send_dispatch": {
+            "samples": 4,
+            "p50_ms": 42.74,
+            "p95_ms": 43.09,
+            "max_ms": 43.09
+          },
+          "send_echo": {
+            "samples": 4,
+            "p50_ms": 75.35,
+            "p95_ms": 80.38,
+            "max_ms": 80.38
+          },
+          "initial_ingest_ms": 5229.08,
+          "indexed_source_joins": true,
+          "connect_ms": 27.09,
+          "sidebar_ready_ms": 27.57,
+          "open_history_ms": 59.71,
+          "burst": {
+            "messages": 500,
+            "elapsed_ms": 200.35
+          }
+        },
+        "client-bench": {
+          "messages": 25000,
+          "text_bytes": 1024,
+          "samples": 15,
+          "cold_ms": 134.59764800220728,
+          "unchanged": {
+            "p50_ms": 13.645842000842094,
+            "p95_ms": 16.809055000543594
+          },
+          "edit": {
+            "p50_ms": 14.819260001182556,
+            "p95_ms": 17.791914999485016
+          },
+          "append": {
+            "p50_ms": 15.704245999455452,
+            "p95_ms": 17.14768200367689
+          }
+        },
+        "hotpath-bench": {
+          "samples": 15,
+          "json_bytes": 65536,
+          "sql_lookup": {
+            "p50_us": 0.8906622001647949,
+            "p95_us": 0.9230431999206543
+          },
+          "json_check": {
+            "p50_us": 23.075108001708983,
+            "p95_us": 27.07293199157715
+          },
+          "opaque_text_raster": {
+            "p50_us": 202.82381996154785,
+            "p95_us": 205.95371002197265
+          }
+        }
+      },
+      "after": {
+        "end_to_end": {
+          "fixture_messages": 10004,
+          "conversations": 4,
+          "incoming": {
+            "samples": 8,
+            "p50_ms": 38.25,
+            "p95_ms": 61.67,
+            "max_ms": 61.67
+          },
+          "send_ack": {
+            "samples": 4,
+            "p50_ms": 39.87,
+            "p95_ms": 40.23,
+            "max_ms": 40.23
+          },
+          "send_dispatch": {
+            "samples": 4,
+            "p50_ms": 42.58,
+            "p95_ms": 42.67,
+            "max_ms": 42.67
+          },
+          "send_echo": {
+            "samples": 4,
+            "p50_ms": 59.95,
+            "p95_ms": 60.31,
+            "max_ms": 60.31
+          },
+          "initial_ingest_ms": 3742.67,
+          "indexed_source_joins": true,
+          "connect_ms": 27.54,
+          "sidebar_ready_ms": 28.0,
+          "open_history_ms": 39.66,
+          "burst": {
+            "messages": 500,
+            "elapsed_ms": 117.63
+          }
+        },
+        "client-bench": {
+          "messages": 25000,
+          "text_bytes": 1024,
+          "samples": 15,
+          "cold_ms": 141.89309799671173,
+          "unchanged": {
+            "p50_ms": 13.859774000942707,
+            "p95_ms": 14.902217000722885
+          },
+          "edit": {
+            "p50_ms": 15.687313996255398,
+            "p95_ms": 16.472260996699333
+          },
+          "append": {
+            "p50_ms": 15.467550002038479,
+            "p95_ms": 16.563232995569706
+          }
+        },
+        "hotpath-bench": {
+          "samples": 15,
+          "json_bytes": 65536,
+          "sql_lookup": {
+            "p50_us": 0.16187969970703125,
+            "p95_us": 0.16443150024414063
+          },
+          "json_check": {
+            "p50_us": 2.3276800079345703,
+            "p95_us": 2.363509994506836
+          },
+          "opaque_text_raster": {
+            "p50_us": 53.785330047607424,
+            "p95_us": 57.60982002258301
+          }
+        }
+      }
+    }
+  ]
+}

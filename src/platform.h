@@ -17,6 +17,8 @@ int zr_file_identity(const char *path, char *out, size_t capacity);
 int zr_secure_file(const char *path, const void *data, size_t length, int replace);
 int zr_read_secret(const char *path, char *out, size_t capacity);
 void zr_socket_timeout(int fd);
+// 1: a user is waiting on this thread; 0: ongoing ingestion/enrichment.
+void zr_thread_qos(int user_initiated);
 
 int zr_lock(const char *path);
 

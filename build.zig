@@ -57,6 +57,8 @@ fn client(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     b.step("client-probe", "Build headless client integration driver").dependOn(&b.addInstallArtifact(probe, .{}).step);
     const bench = b.addExecutable(.{ .name = "client-bench", .root_module = clientModule(b, target, optimize, "src/client_bench.zig") });
     b.step("client-bench", "Build synthetic cached-history benchmark").dependOn(&b.addInstallArtifact(bench, .{}).step);
+    const hotpaths = b.addExecutable(.{ .name = "hotpath-bench", .root_module = clientModule(b, target, optimize, "src/hotpath_bench.zig") });
+    b.step("hotpath-bench", "Build SQL, JSON and text rasterization microbenchmarks").dependOn(&b.addInstallArtifact(hotpaths, .{}).step);
     const step = b.step("client", "Build the Linux desktop client");
     const clay = b.lazyDependency("zclay", .{ .target = target, .optimize = optimize }) orelse return;
     const ray = b.lazyDependency("raylib_zig", .{ .target = target, .optimize = optimize, .raudio = false, .rmodels = false, .linux_display_backend = .Wayland }) orelse return;

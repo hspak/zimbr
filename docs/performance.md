@@ -1,7 +1,7 @@
 # Messaging performance
 
-The measurements below describe the pre-mTLS release. The Linux performance harness now connects
-directly to the native mTLS fake relay with temporary enrolled credentials;
+The September 24 pass below uses the current native mTLS fake relay with temporary
+enrolled credentials. The older September 22 tables describe the pre-mTLS release;
 the old plaintext adapter has been removed. Current Mac
 transport/deployment checks are in [macOS TLS operation](macos-tls.md).
 
@@ -9,6 +9,126 @@ The critical path is the whole system: observing Apple's database, committing
 the relay journal, transporting changes, committing the client cache, publishing
 the view, and drawing it. Both endpoints and the wire protocol are ours to change.
 Apple's service and automation behavior remain external boundaries.
+
+## September 24 performance pass
+
+The client now waits for Wayland socket readiness and a nonblocking worker wake
+pipe in place of its fixed 25 ms idle sleep. Background views and decoded media
+wake rendering, including when the view generation has not changed. Input
+callbacks still run through raylib's normal input reset/dispatch sequence. The
+25 ms timeout remains for notification/timer maintenance, and active rendering
+still targets 120 FPS.
+
+Settled histories reuse row positions and heights; finding the reading anchor is
+a binary search. Content, width, and display-scale changes invalidate geometry,
+while changing the composer height still clamps the viewport and preserves
+follow mode. The frame scratch arena retains at most 1 MiB between frames.
+Opaque Pango/Cairo surfaces need only a channel swap before upload; skipping
+unpremultiplication removes three integer divisions per pixel. Transparent text
+keeps its existing conversion and antialiasing behavior.
+
+Both owned databases and the read-only Messages reader reuse compiled SQL in a
+connection-owned cache of at most 256 idle statements. Checked-out statements are
+exclusive, nested identical queries get independent cursors, and close resets
+the statement and clears borrowed bindings. Failed statements are finalized;
+schema changes retain SQLite's automatic reprepare behavior. DDL and PRAGMAs are
+not cached. Ingestion also reuses decoder scratch pages across rows, retaining
+at most 256 KiB after each row instead of repeatedly mapping/freeing pages.
+WAL, `synchronous=FULL`, source read-only access, and commit-before-publication
+remain intact. See SQLite's [persistent preparation hint](https://www.sqlite.org/c3ref/c_prepare_dont_log.html),
+[reset behavior](https://www.sqlite.org/c3ref/reset.html), and
+[binding lifetime](https://www.sqlite.org/c3ref/clear_bindings.html).
+
+JSON bounds checking skips ordinary quoted content in 128-bit blocks, retaining
+the scalar escape/delimiter state machine and separate UTF-8 validation. Tests
+compare it with the scalar path over generated inputs, vector alignments, escapes,
+UTF-8 truncations, and structural/token limits.
+
+### M1 and macOS
+
+Build with `-Doptimize=ReleaseFast -Dtarget=aarch64-macos -Dcpu=apple_m1` and matching
+arm64 OpenSSL archives. M1-targeted assembly was checked for NEON byte comparisons
+in the JSON scanner and `sha256h`/`sha256su` instructions in Zig's existing SHA-256
+implementation, used for asset hashing. TLS continues to use OpenSSL's existing
+crypto implementation.
+
+The launch agent now uses `ProcessType=Standard`. HTTPS requests do not receive
+the XPC boosts that make Adaptive suitable for XPC services. Connection handling
+and send dispatch request user-initiated QoS; ingestion, Contacts, and asset work
+request utility QoS. This follows Apple's guidance to describe the urgency of
+work and let macOS place it on performance/efficiency cores. No core affinity or
+realtime priority is imposed. Reinstall the launch agent to apply its ProcessType
+change. See [Apple's launchd definitions](https://github.com/apple-oss-distributions/launchd/blob/main/man/launchd.plist.5),
+[QoS guidance](https://developer.apple.com/library/archive/documentation/Performance/Conceptual/EnergyGuide-iOS/PrioritizeWorkWithQoS.html),
+and [Apple silicon tuning](https://developer.apple.com/documentation/apple-silicon/tuning-your-code-s-performance-for-apple-silicon).
+
+macOS UUID generation uses `arc4random_buf`, avoiding a `/dev/urandom` open/read/close
+sequence for every UUID. This is also the native primitive used by Apple's
+[system random generator](https://developer.apple.com/documentation/swift/systemrandomnumbergenerator).
+
+These changes have Linux runtime coverage and M1 code-generation checks. The
+macOS C boundary and complete app still need a native build and runtime profiling;
+the numbers below are **not M1 measurements**. Profile real ingestion, foreground
+requests during backfill, media conversion, and idle wakeups on the Mac before
+drawing conclusions about its throughput or power use.
+
+### Measurements and reproduction
+
+Use the same Zig 0.16.0 release configuration for both revisions and run them
+sequentially without concurrent builds or tests. The synthetic Linux host is an
+AMD Ryzen AI Max+ 395. The end-to-end fixture has 10,004 messages with 1,024-byte
+historical text; the client probe samples every 20 ms and excludes GPU presentation.
+The CPU microbenchmark uses in-memory SQL, a 65,536-byte JSON string, and an opaque
+Unicode text layout at 125% scale. Raster timings exclude GPU upload and drawing.
+
+Three before/after pairs ran sequentially, alternating which version ran first.
+Each row below is the median of that statistic across the three runs; each
+end-to-end run contains eight incoming samples and four sends.
+
+| Measurement | Before | After |
+| --- | ---: | ---: |
+| Initial ingestion, 10,004 messages | 5.23 s | 3.72 s |
+| Incoming visibility, median | 55.0 ms | 41.5 ms |
+| Incoming visibility, per-run p95 | 85.0 ms | 61.7 ms |
+| Local outbox acknowledgement, median | 35.0 ms | 39.9 ms |
+| Send dispatch, median | 38.6 ms | 42.6 ms |
+| Outgoing echo visibility, median | 72.2 ms | 55.2 ms |
+| 500-message live burst | 200 ms | 118 ms |
+| SQL prepare/bind/read/close, median | 0.891 µs | 0.162 µs |
+| 64 KiB JSON bounds check, median | 23.1 µs | 2.31 µs |
+| Opaque text rasterization, median | 203 µs | 53.8 µs |
+| Cold publication of 25,000 messages | 132 ms | 142 ms |
+| Publish 25,000 unchanged messages, median | 13.9 ms | 13.9 ms |
+| Publish one edit in 25,000 messages, median | 15.4 ms | 15.7 ms |
+| Publish one append to 25,000 messages, median | 15.7 ms | 15.5 ms |
+
+Ingestion time fell 29%, burst visibility time fell 41%, and the isolated opaque
+text raster path was 3.8× faster. Warm snapshot publication was essentially unchanged;
+cold publication was about 9 ms slower in this three-run sample.
+The acknowledgement/dispatch samples were slightly slower; their small sample
+count and the probe's 20 ms cadence do not establish a send-latency improvement.
+Microbenchmark speedups describe these specific hot paths, not whole-app speed.
+
+Validation passed in ReleaseFast and ReleaseSafe (79 tests, one native Contacts
+test skipped on Linux), the isolated Wayland suite (38 tests), and 12 integration
+suites covering persistence, replay, send priority, lazy history, enrichment,
+assets, links, reactions, TLS, and hostile-message bounds. New regressions cover
+statement reuse and binding lifetime, SIMD boundary behavior, coalesced UI wakeups,
+and history geometry after content and composer changes.
+
+```sh
+zig build fake-relay client-probe client-bench hotpath-bench -Doptimize=ReleaseFast \
+  -Dopenssl-prefix=/absolute/openssl-3.5
+python3 tests/performance.py --history 10000 --text-bytes 1024 --samples 8 --burst 500
+zig-out/bin/client-bench 25000 1024
+zig-out/bin/hotpath-bench
+```
+
+`hotpath-bench` discards a warmup batch and reports 15 batches of each hot path,
+with timer overhead amortized over repeated operations. It opens no network,
+display, account, or persistent cache. Use `--bin-dir` with `tests/performance.py`
+for saved before/after binaries. Raw results and comparison tables are recorded
+in [the September 24 measurements](performance-2026-09-24.json).
 
 ## Implemented architecture
 
@@ -218,9 +338,9 @@ before choosing the next change.
 4. **Resume/bootstrap protocol:** combined status, cursor, first conversation page,
    and selected history can remove additional RTTs on cold starts. Stream replay
    and snapshot revisions must still close every synchronization race.
-5. **Native UI wakeup:** replace the remaining GUI input polling with a display
-   event wait that the worker can wake. Keep cursor blinking, resizing, scrolling,
-   and deferred layout responsive without raising idle CPU use.
+5. **Idle maintenance:** Wayland and worker results now wake the GUI directly.
+   Integrating the remaining notification/timer polling with that wait could
+   further reduce idle wakeups while preserving cursor blinking and retries.
 
 Design references: [SQLite WAL durability](https://www.sqlite.org/wal.html),
 [SQLite synchronous modes](https://www.sqlite.org/pragma.html#pragma_synchronous),

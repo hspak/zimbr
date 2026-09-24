@@ -541,6 +541,7 @@ pub fn contactWork(core: *Core, a: u.Allocator) !void {
     }
 }
 pub fn loop(core: *Core) void {
+    u.c.zr_thread_qos(0);
     const self = if (core.assets_service) |*value| value else return;
     var maintenance: i64 = 0;
     while (!core.stop.load(.acquire)) {

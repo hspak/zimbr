@@ -228,6 +228,7 @@ fn work(j: Journal, a: u.Allocator) ![]Work {
 }
 
 pub fn loop(core: *@import("../Core.zig")) void {
+    u.c.zr_thread_qos(0);
     var cache = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer cache.deinit();
     var index: ?Index = null;

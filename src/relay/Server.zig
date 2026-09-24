@@ -42,6 +42,7 @@ pub fn run(self: *Self) !void {
     }
 }
 fn connection(self: *Self, stream: std.Io.net.Stream) void {
+    u.c.zr_thread_qos(1);
     defer _ = self.core.connections.fetchSub(1, .acq_rel);
     defer stream.close(self.core.io);
     const connection_tls = Tls.c.zr_tls_accept(self.tls.context, stream.socket.handle);

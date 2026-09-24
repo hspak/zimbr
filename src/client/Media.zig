@@ -45,6 +45,7 @@ wake_pipe: [2]c_int = .{ -1, -1 },
 queue: std.ArrayList(*Request) = .empty,
 active: [2]?*Request = .{ null, null },
 result: ?*Result = null,
+on_ready: ?*const fn () callconv(.c) void = null,
 delivering: bool = false,
 generation: u64 = 0,
 epoch: []const u8 = "",
@@ -192,7 +193,10 @@ fn deliver(s: *Self, request_value: *Request, result: *Result, lane: usize) void
     s.mutex.lockUncancelable(s.io);
     defer s.mutex.unlock(s.io);
     s.active[lane] = null;
-    if (result.generation == s.generation and s.result == null) s.result = result else result.destroy();
+    if (result.generation == s.generation and s.result == null) {
+        s.result = result;
+        if (s.on_ready) |ready| ready();
+    } else result.destroy();
     request_value.destroy(s.dir);
 }
 fn resultFor(r: *Request, message: []const u8) !*Result {

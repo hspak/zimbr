@@ -543,10 +543,20 @@ unsigned char *zc_text_pixels_on(ZcText *t, unsigned color, int start, int end, 
     if (status != CAIRO_STATUS_SUCCESS) { zc_text_clear_pixels(t); return NULL; }
     unsigned char *pixels = cairo_image_surface_get_data(t->surface) + (top - raster_top)*cairo_image_surface_get_stride(t->surface);
     // Cairo is premultiplied native ARGB; raylib expects straight RGBA.
-    for (int y=0; y<height; ++y) for (int x=0; x<t->width; ++x) {
-        unsigned char *p = pixels+y*cairo_image_surface_get_stride(t->surface)+x*4;
-        unsigned b=p[0], g=p[1], r=p[2], a=p[3];
-        p[0]=a ? (unsigned char)(r*255/a) : 0; p[1]=a ? (unsigned char)(g*255/a) : 0; p[2]=a ? (unsigned char)(b*255/a) : 0;
+    const int stride = cairo_image_surface_get_stride(t->surface);
+    if ((background & 255) == 255) {
+        // Opaque text is already straight alpha. This simple channel swap can
+        // auto-vectorize; avoid three integer divisions per pixel on UI text.
+        for (int y=0; y<height; ++y) for (int x=0; x<t->width; ++x) {
+            unsigned char *p = pixels+y*stride+x*4;
+            unsigned char b=p[0]; p[0]=p[2]; p[2]=b;
+        }
+    } else {
+        for (int y=0; y<height; ++y) for (int x=0; x<t->width; ++x) {
+            unsigned char *p = pixels+y*stride+x*4;
+            unsigned b=p[0], g=p[1], r=p[2], a=p[3];
+            p[0]=a ? (unsigned char)(r*255/a) : 0; p[1]=a ? (unsigned char)(g*255/a) : 0; p[2]=a ? (unsigned char)(b*255/a) : 0;
+        }
     }
     return pixels;
 }
