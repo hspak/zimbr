@@ -924,7 +924,10 @@ pub fn enrichmentPage(
 }
 
 pub fn directory(s: Store, a: u.Allocator) RecordError!Directory {
-    var result = Directory{ .available = !u.eq(try s.get(a, "contacts_blocked"), "1") };
+    var result = Directory{
+        .available = !u.eq(try s.get(a, "contacts_blocked"), "1"),
+        .cache_generation = std.hash.Wyhash.hash(0, try s.get(a, "contacts_refresh")),
+    };
     const q = try s.db.prepare("SELECT record FROM identities");
     defer q.close();
     while (try q.step()) try result.put(

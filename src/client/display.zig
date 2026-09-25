@@ -55,6 +55,10 @@ pub fn pendingStatus(
     return if (detail.len > 0) std.fmt.allocPrint(a, "{s} · {s}", .{ status, label(a, detail) }) catch status else status;
 }
 
+pub fn canCopyPending(state: []const u8, sent_at: []const u8, now_ms: i64) bool {
+    return std.mem.eql(u8, state, "failed") or !deferUnknown(sent_at, now_ms);
+}
+
 test "unknown delivery status waits thirty seconds while confirmed outcomes appear immediately" {
     const sent_ms: i64 = 1767225600123;
     var m = t.Message{
@@ -131,6 +135,32 @@ test "pending uncertainty and its details share a grace period based on the orig
         "Uncertain · not automatically resent",
         pendingStatus(a, "unknown", "", "", sent_ms),
     );
+}
+
+test "copy to draft waits thirty seconds for pending sends but confirmed failures remain actionable" {
+    const sent_ms: i64 = 1767225600000;
+    for ([_][]const u8{
+        "sending",
+        "queued",
+        "dispatching",
+        "submitted",
+        "unknown",
+        "unconfirmed",
+    }) |state| {
+        for ([_][]const u8{
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00.000000000Z",
+            "2025-12-31T16:00:00-08:00",
+        }) |stamp| {
+            try std.testing.expect(!canCopyPending(state, stamp, sent_ms));
+            try std.testing.expect(!canCopyPending(state, stamp, sent_ms + 29_999));
+            try std.testing.expect(canCopyPending(state, stamp, sent_ms + 30_000));
+            try std.testing.expect(canCopyPending(state, stamp, sent_ms + 60_000));
+        }
+        try std.testing.expect(canCopyPending(state, "", sent_ms));
+        try std.testing.expect(canCopyPending(state, "invalid", sent_ms));
+    }
+    try std.testing.expect(canCopyPending("failed", "2026-01-01T00:00:00Z", sent_ms));
 }
 
 pub fn prefix(value: []const u8, limit: usize, lines: usize) []const u8 {

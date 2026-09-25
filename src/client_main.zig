@@ -376,6 +376,10 @@ const App = struct {
     }
     fn update(s: *App) !void {
         if (s.worker.take()) |v| {
+            const refresh = v.diagnostics.contacts_refresh;
+            const refresh_changed = if (s.view) |old| refresh != old.diagnostics.contacts_refresh or
+                v.diagnostics.contacts_refresh_attempt != old.diagnostics.contacts_refresh_attempt else true;
+            if (refresh != .idle and refresh_changed) s.info(refresh.message());
             // Metadata-only views retain the same immutable records, so their
             // history previews and measurements remain valid across updates.
             const same_history = if (s.view) |old| old.shared != null and v.shared != null and old.shared.?.history == v.shared.?.history and old.snapshot.pending.len == 0 and v.snapshot.pending.len == 0 and old.snapshot.directory.fingerprint() == v.snapshot.directory.fingerprint() else false;
@@ -1173,6 +1177,50 @@ const App = struct {
         );
         y.* += height + 10;
     }
+    fn drawContactFreshness(
+        s: *App,
+        clip: rl.Rectangle,
+        right: f32,
+        y: *f32,
+        freshness: []const u8,
+        refresh: Worker.ContactRefresh,
+    ) void {
+        const label = switch (refresh) {
+            .idle, .unsupported, .offline => "Refresh contacts",
+            .queued, .waiting, .downloading => "Refreshing…",
+            .complete => "Refresh again",
+            .failed => "Retry refresh",
+        };
+        const size = s.buttonSize(label);
+        const refresh_button = rl.Rectangle{
+            .x = right - size.x,
+            .y = y.*,
+            .width = size.x,
+            .height = 30,
+        };
+        var freshness_bounds = clip;
+        freshness_bounds.width = refresh_button.x - 12 - clip.x;
+        y.* += 5;
+        s.detailRow("Contacts freshness", freshness, freshness_bounds, y);
+        if (s.button(refresh_button, label, refresh.active()) and hover(clip) and !refresh.active()) {
+            if (s.worker.push(.{ .kind = .refresh_contacts })) |_| {
+                s.info("Contact refresh requested…");
+            } else |_| {
+                s.info("Could not request a contact refresh. Try again.");
+            }
+        }
+        y.* = @max(y.*, refresh_button.y + refresh_button.height + 10);
+        const status_x = clip.x + 122;
+        const status_width = @max(1, clip.x + clip.width - status_x);
+        const color = switch (refresh) {
+            .idle => theme.colors.muted,
+            .queued, .waiting, .downloading => theme.colors.focus,
+            .complete => theme.colors.success,
+            .failed, .unsupported, .offline => theme.colors.danger,
+        };
+        s.text.draw(refresh.message(), status_x, y.*, 13, status_width, color, theme.colors.paper);
+        y.* += @max(20, s.text.height(refresh.message(), 13, status_width)) + 10;
+    }
     fn drawDetails(s: *App, r: rl.Rectangle, ar: u.Allocator) void {
         const back_size = s.buttonSize("Back");
         const reconnect_size = s.buttonSize("Reconnect");
@@ -1342,11 +1390,12 @@ const App = struct {
                     clip,
                     &y,
                 );
-                s.detailRow(
-                    "Contacts freshness",
-                    if (contacts.stale) "Cached matches are stale" else if (contacts.last_refresh_ms) |ms| elapsed(ar, ms) else "Not reported",
+                s.drawContactFreshness(
                     clip,
+                    reconnect.x + reconnect.width,
                     &y,
+                    if (contacts.stale) "Cached matches are stale" else if (contacts.last_refresh_ms) |ms| elapsed(ar, ms) else "Not reported",
+                    d.contacts_refresh,
                 );
             }
             s.detailSection("Participants", clip, &y);
@@ -2021,7 +2070,7 @@ const App = struct {
                     .width = inner,
                     .height = h,
                 }, theme.colors.muted, theme.colors.paper);
-                if (s.button(.{
+                if (display.canCopyPending(p.state, p.sent_at, status_now) and s.button(.{
                     .x = x + inner - 118,
                     .y = y + h + 24,
                     .width = 118,
@@ -3552,7 +3601,7 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
 
     // An uncertain send stays before a newer reply and retains its recovery action.
     group_messages[group_messages.len - 1].timestamp = "2026-01-01T00:02:00Z";
-    const pending = [_]Store.Pending{.{
+    var pending = [_]Store.Pending{.{
         .input = .{
             .request_id = "pending-fixture",
             .server_epoch = "",
@@ -3581,6 +3630,47 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     );
     try std.testing.expectEqualStrings(pending[0].input.text, app.composer.text.items);
     try std.testing.expect(app.duplicate_risk);
+
+    // Successful sends can pass through each of these states before their echo
+    // arrives. The recovery action must neither render nor accept clicks yet.
+    try app.composer.set("");
+    pending[0].sent_at = try u.timestamp(arena.allocator(), (u.now() - 978307200000) * 1000000);
+    for ([_][]const u8{
+        "sending",
+        "queued",
+        "dispatching",
+        "submitted",
+        "unknown",
+        "unconfirmed",
+    }) |state| {
+        pending[0].state = state;
+        view.generation += 1;
+        app.draw(scale);
+        const recent_row = app.history_rows[app.history_rows.len - 1];
+        try std.testing.expect(recent_row.pending);
+        const copy_x = areas.history.x + 66 + App.historyTextWidth(areas.history) - 59;
+        const copy_y = areas.history.y + @as(f32, @floatCast(recent_row.top - app.scroll)) + recent_row.measured.? + 37;
+        const recent = try captureTestFrame(&app, scale);
+        defer rl.unloadImage(recent);
+        try std.testing.expectEqual(theme.colors.paper, rl.getImageColor(
+            recent,
+            @intFromFloat(copy_x * scale),
+            @intFromFloat(copy_y * scale),
+        ));
+        clickTestFrame(&app, copy_x, copy_y);
+        try std.testing.expectEqualStrings("", app.composer.text.items);
+    }
+    pending[0].state = "failed";
+    view.generation += 1;
+    app.draw(scale);
+    const failed_row = app.history_rows[app.history_rows.len - 1];
+    clickTestFrame(
+        &app,
+        areas.history.x + 66 + App.historyTextWidth(areas.history) - 59,
+        areas.history.y + @as(f32, @floatCast(failed_row.top - app.scroll)) + failed_row.measured.? + 37,
+    );
+    try std.testing.expectEqualStrings(pending[0].input.text, app.composer.text.items);
+    try std.testing.expect(!app.duplicate_risk);
     view.snapshot.pending = &.{};
     view.generation += 1;
 
@@ -3785,6 +3875,135 @@ fn expectScrollbarPixel(shot: rl.Image, viewport: rl.Rectangle, content: f64, of
         pixel,
         theme.colors.accent,
     ));
+}
+
+test "contact refresh acknowledges clicks and announces progress and results" {
+    rl.setTraceLogLevel(.none);
+    rl.setConfigFlags(.{ .window_highdpi = true });
+    rl.initWindow(780, 560, "Zimbr contact refresh checks");
+    defer rl.closeWindow();
+    rl.pollInputEvents();
+    for (0..4) |_| {
+        rl.beginDrawing();
+        rl.clearBackground(theme.colors.paper);
+        rl.endDrawing();
+    }
+    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
+    defer worker.shutdown();
+    var app = App{ .worker = &worker, .show_details = true, .focus = .none };
+    defer app.deinit();
+    const clip = rl.Rectangle{
+        .x = 24,
+        .y = 78,
+        .width = 448,
+        .height = 300,
+    };
+    const right: f32 = 408;
+    const scale = WindowMetrics.current().scale;
+    for ([_]Worker.ContactRefresh{ .idle, .waiting }) |refresh| {
+        rl.playAutomationEvent(.{
+            .frame = 0,
+            .type = 7,
+            .params = .{
+                @intFromFloat(right - 10),
+                115,
+                0,
+                0,
+            },
+        });
+        rl.playAutomationEvent(.{
+            .frame = 0,
+            .type = 6,
+            .params = .{
+                0,
+                0,
+                0,
+                0,
+            },
+        });
+        app.text.nextFrame(scale);
+        rl.beginDrawing();
+        rl.clearBackground(theme.colors.paper);
+        const reconnect_size = app.buttonSize("Reconnect");
+        _ = app.button(.{
+            .x = right - reconnect_size.x,
+            .y = 20,
+            .width = reconnect_size.x,
+            .height = 30,
+        }, "Reconnect", false);
+        var y: f32 = 100;
+        beginClip(clip);
+        app.drawContactFreshness(clip, right, &y, "Just now", refresh);
+        endClip();
+        rl.gl.rlDrawRenderBatchActive();
+        const shot = try rl.loadImageFromScreen();
+        defer rl.unloadImage(shot);
+        rl.endDrawing();
+        for ([_]f32{ 35, 115 }) |center_y| {
+            try std.testing.expect(!std.meta.eql(theme.colors.paper, rl.getImageColor(
+                shot,
+                @intFromFloat((right - 3) * scale),
+                @intFromFloat(center_y * scale),
+            )));
+            try std.testing.expectEqual(theme.colors.paper, rl.getImageColor(
+                shot,
+                @intFromFloat((right + 1) * scale),
+                @intFromFloat(center_y * scale),
+            ));
+        }
+        try std.testing.expectEqual(@as(usize, 1), worker.commands.items.len);
+        try std.testing.expectEqual(.refresh_contacts, worker.commands.items[0].kind);
+        try std.testing.expectEqualStrings("Contact refresh requested…", app.notice);
+        try std.testing.expect(app.notice_until > u.now());
+        rl.playAutomationEvent(.{
+            .frame = 0,
+            .type = 5,
+            .params = .{
+                0,
+                0,
+                0,
+                0,
+            },
+        });
+        rl.beginDrawing();
+        rl.endDrawing();
+    }
+    for ([_]Worker.ContactRefresh{
+        .queued,
+        .waiting,
+        .downloading,
+        .complete,
+        .complete,
+        .failed,
+        .unsupported,
+        .offline,
+    }, 1..) |refresh, id| {
+        app.notice = "";
+        const view = try a.create(Worker.View);
+        view.* = .{
+            .arena = .init(a),
+            .snapshot = .{
+                .chats = &.{},
+                .messages = &.{},
+                .pending = &.{},
+                .selected = "",
+                .draft = "",
+                .epoch = "",
+                .more = false,
+            },
+            .status = "Connected",
+            .online = true,
+            .send_direct = false,
+            .reply_existing = false,
+            .generation = id,
+            .ack = 0,
+            .diagnostics = .{ .contacts_refresh = refresh, .contacts_refresh_attempt = id },
+        };
+        worker.view = view;
+        try app.update();
+        try std.testing.expectEqualStrings(refresh.message(), app.notice);
+        try std.testing.expect(app.notice_until > u.now());
+    }
 }
 
 test "shared message presentations survive replaced views and refresh edited text" {

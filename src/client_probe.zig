@@ -111,6 +111,9 @@ fn control(init: std.process.Init, worker: *Worker) !void {
         }
         if (worker.take()) |v| {
             defer v.destroy();
+            const selected_title = for (v.snapshot.chats) |chat| {
+                if (u.eq(chat.value.id, v.snapshot.selected)) break v.snapshot.directory.conversation(a, chat.value);
+            } else "";
             const raw = try u.json(a, .{
                 .online = v.online,
                 .status = v.status,
@@ -118,6 +121,8 @@ fn control(init: std.process.Init, worker: *Worker) !void {
                 .messages = v.snapshot.messages.len,
                 .pending = v.snapshot.pending.len,
                 .selected = v.snapshot.selected,
+                .selected_title = selected_title,
+                .directory_revision = v.snapshot.directory.fingerprint(),
                 .ack = v.ack,
                 .diagnostics = v.diagnostics,
             });

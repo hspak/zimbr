@@ -46,6 +46,7 @@ job: enum {
     sync,
     chats,
     identities,
+    refresh_contacts,
     history,
     preview,
     send,
@@ -60,6 +61,10 @@ hydration_request: ?Command = null,
 hydration_at: i64 = 0,
 text_first_history: bool = false,
 identities_before: ?[]const u8 = null,
+contacts_refresh: ContactRefresh = .idle,
+contacts_refresh_id: u64 = 0,
+contacts_refresh_attempt: u64 = 0,
+can_refresh_contacts: bool = false,
 preview_at: i64 = 0,
 recover_row: i64 = 0,
 need_history: bool = false,
@@ -91,6 +96,7 @@ pub const Command = struct {
         send,
         older,
         reconnect,
+        refresh_contacts,
         check,
         viewed,
         hide,
@@ -108,6 +114,38 @@ pub const Readiness = struct {
     permission: ?[]const u8 = null,
     stale: bool = false,
     last_refresh_ms: ?i64 = null,
+    refresh_requested: u64 = 0,
+    refresh_completed: u64 = 0,
+};
+pub const ContactRefresh = enum {
+    idle,
+    queued,
+    waiting,
+    downloading,
+    complete,
+    failed,
+    unsupported,
+    offline,
+
+    pub fn active(refresh: ContactRefresh) bool {
+        return switch (refresh) {
+            .queued, .waiting, .downloading => true,
+            .idle, .complete, .failed, .unsupported, .offline => false,
+        };
+    }
+
+    pub fn message(refresh: ContactRefresh) []const u8 {
+        return switch (refresh) {
+            .idle => "Reload contact names and photos from the relay",
+            .queued => "Contact refresh requested…",
+            .waiting => "Refreshing Contacts on the relay…",
+            .downloading => "Updating contact names and photos…",
+            .complete => "Contacts refreshed",
+            .failed => "Refresh failed · check Contacts readiness and try again",
+            .unsupported => "Update the relay to refresh contacts",
+            .offline => "Connect to the relay to refresh contacts",
+        };
+    }
 };
 pub const RelayStatus = struct {
     event_extensions: []const []const u8 = &.{},
@@ -129,6 +167,7 @@ pub const RelayStatus = struct {
         live_messages: bool = false,
         attachments: bool = false,
         identity_directory_v1: bool = false,
+        refresh_contacts_v1: bool = false,
         image_assets_v1: bool = false,
         image_attachments_v1: bool = false,
         stored_link_previews_v1: bool = false,
@@ -155,6 +194,8 @@ pub const Diagnostics = struct {
     cached_messages: i64 = 0,
     saved_drafts: i64 = 0,
     pending_sends: i64 = 0,
+    contacts_refresh: ContactRefresh = .idle,
+    contacts_refresh_attempt: u64 = 0,
 };
 pub const View = struct {
     arena: std.heap.ArenaAllocator,
@@ -520,6 +561,10 @@ fn schedule(s: *Worker) !void {
                 null,
             );
         }
+    } else if (s.contacts_refresh == .queued) {
+        try s.request(.refresh_contacts, "/v1/contacts/refresh", "");
+    } else if (s.contacts_refresh == .waiting and u.now() >= s.status_at) {
+        try s.request(.status, "/v1/status", null);
     } else if (u.now() >= s.hydration_at and try s.hydrateSend(ar)) {
         // A linked echo can arrive through reconciliation before its request.
         // Fetch that one message even when its conversation is not cached.
@@ -658,6 +703,13 @@ fn complete(s: *Worker) !void {
     s.job = .idle;
     if (job != .status) s.content_dirty = true;
     if (status < 200 or status >= 300) {
+        if (job == .refresh_contacts) {
+            s.contacts_refresh = if (status == 404) .unsupported else .failed;
+            if (status != 0 and status != 401 and status != 403 and !(status >= 300 and status < 400)) {
+                s.dirty = true;
+                return;
+            }
+        }
         if (job == .hydrate and status != 401 and status != 403 and (status != 0 or request_error.kind == c.ZC_NETWORK)) {
             // Optional metadata failures leave text and the live stream usable.
             s.hydration_at = u.now() + 5000;
@@ -709,6 +761,7 @@ fn complete(s: *Worker) !void {
     if (s.auth_blocked and job != .send and job != .recover) return;
     s.handleResponse(ar, job, raw) catch |err| {
         log.warn("client response: {s}", .{@errorName(err)});
+        if (job == .refresh_contacts) s.contacts_refresh = .failed;
         if (job == .hydrate) {
             s.hydration_at = u.now() + 5000;
             s.dirty = true;
@@ -731,6 +784,18 @@ fn complete(s: *Worker) !void {
 fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), raw: []const u8) !void {
     try json_bounds.check(raw, t.max_history_bytes, 512 * 1024);
     switch (job) {
+        .refresh_contacts => {
+            const accepted = try std.json.parseFromSliceLeaky(
+                struct { refresh_id: u64 },
+                ar,
+                raw,
+                .{ .ignore_unknown_fields = true },
+            );
+            if (accepted.refresh_id == 0) return error.InvalidRecord;
+            s.contacts_refresh_id = accepted.refresh_id;
+            s.contacts_refresh = .waiting;
+            s.status_at = 0;
+        },
         .status => {
             const v = (try std.json.parseFromSlice(
                 RelayStatus,
@@ -758,6 +823,7 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
             };
             const changed_extension = identities != s.want_identities;
             s.want_identities = identities;
+            s.can_refresh_contacts = identities and v.capabilities.refresh_contacts_v1;
             s.text_first_history = v.capabilities.text_first_history_v1;
             if (!identities) try s.store.set("identity_bootstrapped", "0");
             const contacts = v.enrichment_readiness.identity_directory_v1;
@@ -778,10 +844,24 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
             s.send_direct = v.capabilities.send_direct;
             s.reply_existing = v.capabilities.reply_existing;
             s.status_at = u.now() + 15000;
+            if (s.contacts_refresh == .waiting) {
+                if (!s.can_refresh_contacts) {
+                    s.contacts_refresh = .unsupported;
+                } else if (contacts.refresh_requested < s.contacts_refresh_id) {
+                    // A restarted relay has lost its in-memory refresh request.
+                    s.contacts_refresh = .queued;
+                } else if (contacts.refresh_completed >= contacts.refresh_requested) {
+                    if (contacts.ready and !contacts.stale and !blocked) {
+                        try s.beginContactDownload();
+                    } else if (contacts.stale or blocked) {
+                        s.contacts_refresh = .failed;
+                    } else s.status_at = u.now() + 1000;
+                } else s.status_at = u.now() + 1000;
+            }
             if (!u.eq(v.server_epoch, try s.store.get(ar, "epoch")) or !u.eq(
                 try s.store.get(ar, "bootstrapped"),
                 "1",
-            ) or (identities and !u.eq(
+            ) or (identities and s.contacts_refresh != .downloading and !u.eq(
                 try s.store.get(ar, "identity_bootstrapped"),
                 "1",
             ))) {
@@ -798,6 +878,7 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
             }
         },
         .sync => {
+            if (s.contacts_refresh == .downloading) s.contacts_refresh = .queued;
             if (s.identities_before) |before| a.free(before);
             s.identities_before = null;
             const v = (try std.json.parseFromSlice(
@@ -878,7 +959,12 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
             try s.store.db.exec("COMMIT");
             if (s.identities_before) |before| a.free(before);
             s.identities_before = null;
-            if (v.next) |next| s.identities_before = try a.dupe(u8, next) else try s.finishBootstrap(ar);
+            if (v.next) |next| {
+                s.identities_before = try a.dupe(u8, next);
+            } else if (s.contacts_refresh == .downloading) {
+                s.contacts_refresh = .complete;
+                try s.attach(ar);
+            } else try s.finishBootstrap(ar);
         },
         .history, .preview => {
             const v = (try std.json.parseFromSlice(
@@ -935,6 +1021,25 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
         },
         .idle => {},
     }
+}
+fn beginContactDownload(s: *Worker) !void {
+    const before = try a.dupe(u8, "");
+    errdefer a.free(before);
+    var generation_buf: [20]u8 = undefined;
+    const generation = try std.fmt.bufPrint(&generation_buf, "{d}", .{s.contacts_refresh_id});
+    // Keep the live cursor and all message state. Events received after this
+    // transaction merge with directory pages by revision.
+    try s.store.db.exec("BEGIN IMMEDIATE");
+    errdefer s.store.db.exec("ROLLBACK") catch {};
+    try s.store.db.exec("DELETE FROM identities");
+    try s.store.set("identity_bootstrapped", "0");
+    // Presentation caches must also miss when relay revisions are unchanged.
+    try s.store.set("contacts_refresh", generation);
+    try s.store.db.exec("COMMIT");
+    if (s.identities_before) |previous| a.free(previous);
+    s.identities_before = before;
+    s.contacts_refresh = .downloading;
+    s.content_dirty = true;
 }
 fn finishBootstrap(s: *Worker, ar: u.Allocator) !void {
     try s.store.set("bootstrapped", "1");
@@ -1064,6 +1169,7 @@ fn drain(s: *Worker) !void {
                 s.need_history = true;
             },
             .reconnect => {
+                if (s.contacts_refresh == .downloading) s.contacts_refresh = .queued;
                 if (s.identities_before) |before| a.free(before);
                 s.identities_before = null;
                 if (s.job == .send) {
@@ -1096,6 +1202,17 @@ fn drain(s: *Worker) !void {
             },
             .check => {
                 s.recovery_at = 0;
+            },
+            .refresh_contacts => {
+                if (!s.contacts_refresh.active()) {
+                    s.contacts_refresh_attempt +%= 1;
+                    s.contacts_refresh = if (!s.online)
+                        .offline
+                    else if (!s.can_refresh_contacts)
+                        .unsupported
+                    else
+                        .queued;
+                }
             },
             .send => {
                 s.content_dirty = true;
@@ -1264,6 +1381,8 @@ fn publish(s: *Worker) !void {
         .cached_messages = shared.cached_messages,
         .saved_drafts = try s.store.db.scalar("SELECT count(*) FROM drafts WHERE length(text)>0"),
         .pending_sends = shared.pending_sends,
+        .contacts_refresh = s.contacts_refresh,
+        .contacts_refresh_attempt = s.contacts_refresh_attempt,
     };
     // Arena state changes during snapshot construction: retain the final state.
     v.arena = arena;
@@ -1346,6 +1465,56 @@ test "lazy metadata upgrades a text snapshot without changing its revision or lo
     defer edited.release();
     try std.testing.expectEqualStrings("Edited caption", edited.messages[0].text.?);
     try std.testing.expect(edited.messages[0].metadata_deferred);
+}
+
+test "contact refresh waits for reconciliation after its scan completes" {
+    const epoch = "12345678-1234-1234-1234-123456789012";
+    var worker = Worker{
+        .io = std.testing.io,
+        .config = .{ .data = "/tmp/unused" },
+        .online = true,
+        .stream_active = true,
+        .want_identities = true,
+        .contacts_refresh = .waiting,
+        .contacts_refresh_id = 123,
+    };
+    worker.store = try Store.open(":memory:");
+    defer worker.store.close();
+    defer worker.shutdown();
+    defer if (worker.identities_before) |before| a.free(before);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    try worker.store.beginSync(epoch, epoch ++ ":0");
+    try worker.store.set("bootstrapped", "1");
+    try worker.store.set("identity_bootstrapped", "1");
+    var status = RelayStatus{
+        .api_version = "1",
+        .server_epoch = epoch,
+        .adapter_ready = true,
+        .event_extensions = &.{"identity-v1"},
+        .capabilities = .{
+            .send_direct = false,
+            .reply_existing = false,
+            .identity_directory_v1 = true,
+            .refresh_contacts_v1 = true,
+        },
+        .degraded_reasons = &.{},
+    };
+    status.enrichment_readiness.identity_directory_v1 = .{
+        .permission = "authorized",
+        .reason = "reconciling",
+        .refresh_requested = 123,
+        .refresh_completed = 123,
+    };
+    try worker.handleResponse(ar, .status, try u.json(ar, status));
+    try std.testing.expectEqual(ContactRefresh.waiting, worker.contacts_refresh);
+    try std.testing.expectEqualStrings("1", try worker.store.get(ar, "identity_bootstrapped"));
+    status.enrichment_readiness.identity_directory_v1.ready = true;
+    status.enrichment_readiness.identity_directory_v1.reason = "";
+    try worker.handleResponse(ar, .status, try u.json(ar, status));
+    try std.testing.expectEqual(ContactRefresh.downloading, worker.contacts_refresh);
+    try std.testing.expectEqualStrings("0", try worker.store.get(ar, "identity_bootstrapped"));
 }
 
 test "metadata views share immutable history while edited records replace it" {

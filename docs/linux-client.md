@@ -141,7 +141,9 @@ Offline drafts are saved but new sends are not queued offline. Each outgoing
 request is persisted before its first POST; recovery checks the original UUID
 without automatically sending again. While the original submission is unresolved,
 new sends stay as drafts. An uncertain or failed message can be copied
-to a draft for deliberate retry. Sending again after an uncertain result can
+to a draft for deliberate retry. Uncertain status and **Copy to draft** wait
+30 seconds from the original send time; confirmed failures remain actionable
+immediately. Sending again after an uncertain result can
 create a duplicate. A relay epoch reset preserves drafts and outbox identities;
 orphaned drafts remain discoverable as **Recovered draft**. Local unread markers
 do not change Apple's read receipts.
@@ -153,6 +155,15 @@ senders, reaction details, search, and new notifications. Explicit chat titles s
 intact; Details keeps participant addresses available. Names and photos remain
 cached offline. A permission revocation learned from the relay clears contact
 presentation; its other messaging features continue independently.
+
+To force a name or photo update, open **Details** and click **Refresh contacts**
+beside **Contacts freshness**. The button shows **Refreshing…** while working;
+the status below it and an in-app notice report progress, completion, or failure.
+The relay rereads Contacts immediately, then the client clears and downloads its
+contact directory again, refreshing displayed
+names and photo references. Messages, drafts, and unread counts are preserved.
+The refresh status reports completion or failure; Contacts permission must be
+enabled on the relay. This requires a relay advertising manual contact refresh.
 
 Messages retain captions alongside multiple images, stored URL cards, and reaction
 chips. Click an image for a larger view; Left/Right navigate that message's photos,
@@ -251,6 +262,7 @@ python3 tests/conversations.py
 python3 tests/client_transport.py
 python3 tests/client_lazy_history.py
 python3 tests/client_enrichment.py
+python3 tests/contact_refresh.py
 python3 tests/client_enrichment_protocol.py
 python3 tests/client_media_transport.py
 python3 tests/client_details.py
