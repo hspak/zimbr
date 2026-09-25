@@ -1,22 +1,22 @@
 const std = @import("std");
-const Store = @import("client/Store.zig");
-const Editor = @import("client/Editor.zig");
-const Sse = @import("client/Sse.zig");
-comptime {
-    _ = @import("client/Config.zig");
-    _ = @import("client/Content.zig");
-    _ = @import("client/Media.zig");
-    _ = @import("client/Links.zig");
-    _ = @import("client/IdentityDirectory.zig");
-    _ = @import("client/Worker.zig");
-    _ = @import("client/display.zig");
-    _ = @import("client/MessageSelection.zig");
-}
+const Store = @import("client.zig").Store;
+const Editor = @import("client.zig").Editor;
+const Sse = @import("client.zig").Sse;
 const u = @import("common.zig");
+test {
+    _ = @import("client.zig").Config;
+    _ = @import("client.zig").content;
+    _ = @import("client.zig").Media;
+    _ = @import("client.zig").links;
+    _ = @import("client.zig").IdentityDirectory;
+    _ = @import("client.zig").Worker;
+    _ = @import("client.zig").display;
+    _ = @import("client.zig").MessageSelection;
+}
 const epoch = "12345678-1234-1234-1234-123456789012";
 const message = "{\"id\":\"m1\",\"revision\":\"2\",\"conversation_id\":\"c1\",\"sender\":\"test@example.invalid\",\"direction\":\"incoming\",\"service\":\"imessage\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"kind\":\"text\",\"text\":\"Hello 👋\",\"decoding\":\"plain\",\"observed_status\":\"received\"}";
 test "hostile messages cannot change records or advance the event cursor" {
-    const t = @import("protocol/types.zig");
+    const t = @import("protocol.zig").types;
     const s = try Store.open(":memory:");
     defer s.close();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -28,20 +28,35 @@ test "hostile messages cannot change records or advance the event cursor" {
     var m = try std.json.parseFromSliceLeaky(t.Message, a, message, .{});
     for ([_][]const u8{ "hidden\x00suffix", "x" ** (t.max_body + 1) }) |text| {
         m.text = text;
-        const event = try u.json(a, .{ .cursor = epoch ++ ":1", .sequence = "1", .type = "message.upsert", .origin = "live", .record = m });
-        try std.testing.expectError(error.InvalidRecord, s.event(a, event, epoch ++ ":1", "message.upsert", ""));
+        const event = try u.json(a, .{
+            .cursor = epoch ++ ":1",
+            .sequence = "1",
+            .type = "message.upsert",
+            .origin = "live",
+            .record = m,
+        });
+        try std.testing.expectError(
+            error.InvalidRecord,
+            s.event(a, event, epoch ++ ":1", "message.upsert", ""),
+        );
     }
     try std.testing.expectEqualStrings(epoch ++ ":0", try s.get(a, "cursor"));
     try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM records"));
     try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM unread"));
     m.text = "Valid 👩‍💻\nMultiline";
-    const good = try u.json(a, .{ .cursor = epoch ++ ":1", .sequence = "1", .type = "message.upsert", .origin = "live", .record = m });
+    const good = try u.json(a, .{
+        .cursor = epoch ++ ":1",
+        .sequence = "1",
+        .type = "message.upsert",
+        .origin = "live",
+        .record = m,
+    });
     try s.event(a, good, epoch ++ ":1", "message.upsert", "");
     try std.testing.expectEqualStrings(epoch ++ ":1", try s.get(a, "cursor"));
 }
 
 test "enrichment rejects unbounded and changing totals without committing pages" {
-    const t = @import("protocol/types.zig");
+    const t = @import("protocol.zig").types;
     const s = try Store.open(":memory:");
     defer s.close();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -50,23 +65,68 @@ test "enrichment rejects unbounded and changing totals without committing pages"
     var m = try std.json.parseFromSliceLeaky(t.Message, a, message, .{});
     m.enrichment = .{ .state = .complete, .attachments = .{ .total = 2, .complete = false } };
     _ = try s.upsert(a, "message", try u.json(a, m));
-    const item = t.Attachment{ .id = "a", .name = "photo", .mime_type = "image/png", .bytes = "10" };
-    for ([_]usize{ 1, 3, 4097 }) |total| {
-        const page = try u.json(a, .{ .message_id = m.id, .revision = m.revision, .section = "attachments", .items = &.{item}, .total = total, .next = "more" });
-        try std.testing.expectError(error.InvalidEnrichmentPage, s.enrichmentPage(a, page, m.id, m.revision, .attachments, ""));
+    const item = t.Attachment{
+        .id = "a",
+        .name = "photo",
+        .mime_type = "image/png",
+        .bytes = "10",
+    };
+    for ([_]usize{
+        1,
+        3,
+        4097,
+    }) |total| {
+        const page = try u.json(a, .{
+            .message_id = m.id,
+            .revision = m.revision,
+            .section = "attachments",
+            .items = &.{item},
+            .total = total,
+            .next = "more",
+        });
+        try std.testing.expectError(
+            error.InvalidEnrichmentPage,
+            s.enrichmentPage(a, page, m.id, m.revision, .attachments, ""),
+        );
     }
-    try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM enrichment_pages"));
-    try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM enrichment_cache"));
-    const good = try u.json(a, .{ .message_id = m.id, .revision = m.revision, .section = "attachments", .items = &.{item}, .total = 2, .next = "more" });
+    try std.testing.expectEqual(
+        @as(i64, 0),
+        try s.db.scalar("SELECT count(*) FROM enrichment_pages"),
+    );
+    try std.testing.expectEqual(
+        @as(i64, 0),
+        try s.db.scalar("SELECT count(*) FROM enrichment_cache"),
+    );
+    const good = try u.json(a, .{
+        .message_id = m.id,
+        .revision = m.revision,
+        .section = "attachments",
+        .items = &.{item},
+        .total = 2,
+        .next = "more",
+    });
     try std.testing.expect(try s.enrichmentPage(a, good, m.id, m.revision, .attachments, ""));
-    const duplicate = try u.json(a, .{ .message_id = m.id, .revision = m.revision, .section = "attachments", .items = &.{item}, .total = 2, .next = @as(?[]const u8, null) });
-    try std.testing.expectError(error.InvalidEnrichmentPage, s.enrichmentPage(a, duplicate, m.id, m.revision, .attachments, "more"));
-    try std.testing.expectEqualStrings("more", (try s.enrichmentNext(a, m.id, m.revision, "attachments")).?);
+    const duplicate = try u.json(a, .{
+        .message_id = m.id,
+        .revision = m.revision,
+        .section = "attachments",
+        .items = &.{item},
+        .total = 2,
+        .next = @as(?[]const u8, null),
+    });
+    try std.testing.expectError(
+        error.InvalidEnrichmentPage,
+        s.enrichmentPage(a, duplicate, m.id, m.revision, .attachments, "more"),
+    );
+    try std.testing.expectEqualStrings(
+        "more",
+        (try s.enrichmentNext(a, m.id, m.revision, "attachments")).?,
+    );
 }
 
 test "self thread upgrade preserves both histories drafts unread and immutable sends" {
-    const t = @import("protocol/types.zig");
-    const Shared = @import("client/SharedSnapshot.zig");
+    const t = @import("protocol.zig").types;
+    const Shared = @import("client.zig").SharedSnapshot;
     const s = try Store.open(":memory:");
     defer s.close();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -75,14 +135,29 @@ test "self thread upgrade preserves both histories drafts unread and immutable s
     const root = epoch;
     const alias = "22345678-1234-1234-1234-123456789012";
     try s.beginSync(epoch, epoch ++ ":0");
-    for ([_][]const u8{ root, alias, "unrelated" }) |id| {
-        _ = try s.upsert(a, "conversation", try u.json(a, t.Conversation{ .id = id, .service = "imessage", .title = "Same contact name", .participants = &.{id}, .sendable = true }));
+    for ([_][]const u8{
+        root,
+        alias,
+        "unrelated",
+    }) |id| {
+        _ = try s.upsert(a, "conversation", try u.json(a, t.Conversation{
+            .id = id,
+            .service = "imessage",
+            .title = "Same contact name",
+            .participants = &.{id},
+            .sendable = true,
+        }));
         var m = try std.json.parseFromSliceLeaky(t.Message, a, message, .{});
         m.id = id;
         m.conversation_id = id;
         _ = try s.upsert(a, "message", try u.json(a, m));
     }
-    const input = t.SendInput{ .request_id = epoch, .server_epoch = epoch, .target = .{ .conversation_id = alias }, .text = "Unresolved send" };
+    const input = t.SendInput{
+        .request_id = epoch,
+        .server_epoch = epoch,
+        .target = .{ .conversation_id = alias },
+        .text = "Unresolved send",
+    };
     try s.persistSend(a, alias, input);
     try s.saveDraft(root, "Phone draft");
     try s.saveDraft(alias, "Email draft 👋");
@@ -93,20 +168,34 @@ test "self thread upgrade preserves both histories drafts unread and immutable s
     defer previous.release();
     try std.testing.expectEqual(@as(usize, 3), previous.snapshot.chats.len);
     // Alias first models reversed bootstrap pages and upgrades with cached data.
-    for ([_][]const u8{ alias, root }) |id| _ = try s.upsert(a, "conversation", try u.json(a, t.Conversation{ .id = id, .revision = "3", .service = "imessage", .participants = &.{id}, .sendable = true, .is_self = true, .thread_id = root }));
+    for ([_][]const u8{ alias, root }) |id| _ = try s.upsert(a, "conversation", try u.json(a, t.Conversation{
+        .id = id,
+        .revision = "3",
+        .service = "imessage",
+        .participants = &.{id},
+        .sendable = true,
+        .is_self = true,
+        .thread_id = root,
+    }));
     const next = try Shared.create(s, root, 2, previous);
     defer next.release();
     try std.testing.expectEqual(@as(usize, 2), next.snapshot.chats.len);
     try std.testing.expectEqual(@as(usize, 2), next.snapshot.messages.len);
     try std.testing.expectEqual(@as(usize, 1), next.snapshot.pending.len);
-    try std.testing.expectEqualStrings(alias, next.snapshot.pending[0].input.target.conversation_id.?);
+    try std.testing.expectEqualStrings(
+        alias,
+        next.snapshot.pending[0].input.target.conversation_id.?,
+    );
     try std.testing.expectEqualStrings("Phone draft\n\nEmail draft 👋", next.snapshot.draft);
     try std.testing.expectEqualStrings("", (try s.nextPage(a, root)).?);
     try std.testing.expectEqualStrings(root, (try s.snapshot(a, alias)).selected);
     for (next.snapshot.chats) |chat| if (u.eq(chat.value.id, root)) {
         try std.testing.expectEqual(@as(i64, 5), chat.unread);
         try std.testing.expectEqual(@as(usize, 2), chat.value.participants.len);
-        try std.testing.expectEqualStrings("You", next.snapshot.directory.conversation(a, chat.value));
+        try std.testing.expectEqualStrings(
+            "You",
+            next.snapshot.directory.conversation(a, chat.value),
+        );
         try std.testing.expect(next.snapshot.directory.matches(chat.value, alias));
     };
     try s.setHidden(alias, true);
@@ -117,11 +206,17 @@ test "self thread upgrade preserves both histories drafts unread and immutable s
     var incoming = try std.json.parseFromSliceLeaky(t.Message, a, message, .{});
     incoming.id = "new-self-message";
     incoming.conversation_id = alias;
-    const notification = try @import("client/Notification.zig").create(s, incoming);
+    const notification = try @import("client.zig").Notification.create(s, incoming);
     defer notification.destroy();
     try std.testing.expectEqualStrings(root, notification.chat);
     try std.testing.expectEqualStrings("You", notification.summary);
-    const ev = try u.json(a, .{ .cursor = epoch ++ ":4", .sequence = "4", .type = "message.upsert", .origin = "live", .record = incoming });
+    const ev = try u.json(a, .{
+        .cursor = epoch ++ ":4",
+        .sequence = "4",
+        .type = "message.upsert",
+        .origin = "live",
+        .record = incoming,
+    });
     try std.testing.expect((try s.eventNotification(a, ev, epoch ++ ":4", "message.upsert", root)) == null);
     try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM unread"));
     try s.saveDraft(root, "Edited combined draft");
@@ -129,7 +224,7 @@ test "self thread upgrade preserves both histories drafts unread and immutable s
 }
 
 test "You sends to a verified self address while other conversations keep their routes" {
-    const t = @import("protocol/types.zig");
+    const t = @import("protocol.zig").types;
     const s = try Store.open(":memory:");
     defer s.close();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -138,9 +233,29 @@ test "You sends to a verified self address while other conversations keep their 
     const root = epoch;
     const alias = "22345678-1234-1234-1234-123456789012";
     try s.beginSync(epoch, epoch ++ ":0");
-    const older = t.Conversation{ .id = root, .service = "imessage", .participants = &.{"self@example.invalid"}, .is_self = true, .thread_id = root, .last_activity = "2026-01-01T00:00:00Z", .sendable = false };
-    const recent = t.Conversation{ .id = alias, .service = "imessage", .participants = &.{"+14155550124"}, .is_self = true, .thread_id = root, .last_activity = "2026-01-02T00:00:00Z", .sendable = true };
-    for ([_]t.Conversation{ older, recent }) |chat| _ = try s.upsert(ar, "conversation", try u.json(ar, chat));
+    const older = t.Conversation{
+        .id = root,
+        .service = "imessage",
+        .participants = &.{"self@example.invalid"},
+        .is_self = true,
+        .thread_id = root,
+        .last_activity = "2026-01-01T00:00:00Z",
+        .sendable = false,
+    };
+    const recent = t.Conversation{
+        .id = alias,
+        .service = "imessage",
+        .participants = &.{"+14155550124"},
+        .is_self = true,
+        .thread_id = root,
+        .last_activity = "2026-01-02T00:00:00Z",
+        .sendable = true,
+    };
+    for ([_]t.Conversation{ older, recent }) |chat| _ = try s.upsert(
+        ar,
+        "conversation",
+        try u.json(ar, chat),
+    );
     for ([_][]const u8{ root, alias }) |key| {
         const target = try s.sendTarget(ar, key);
         try std.testing.expect(target.conversation_id == null);
@@ -153,7 +268,13 @@ test "You sends to a verified self address while other conversations keep their 
     try std.testing.expect(Store.selfRecipient(snapshot.chats[0].value) != null);
 
     // A matching display name, SMS chat, or invalid address is not an exception.
-    var other = t.Conversation{ .id = "other", .service = "imessage", .title = "You", .participants = &.{"peer@example.invalid"}, .sendable = false };
+    var other = t.Conversation{
+        .id = "other",
+        .service = "imessage",
+        .title = "You",
+        .participants = &.{"peer@example.invalid"},
+        .sendable = false,
+    };
     _ = try s.upsert(ar, "conversation", try u.json(ar, other));
     try std.testing.expect(Store.selfRecipient(other) == null);
     try std.testing.expectEqualStrings("other", (try s.sendTarget(ar, "other")).conversation_id.?);
@@ -177,7 +298,12 @@ test "hidden conversations survive restart and live updates without losing histo
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const ar = arena.allocator();
-    const path = try std.fmt.allocPrintSentinel(ar, ".zig-cache/tmp/{s}/client.db", .{tmp.sub_path}, 0);
+    const path = try std.fmt.allocPrintSentinel(
+        ar,
+        ".zig-cache/tmp/{s}/client.db",
+        .{tmp.sub_path},
+        0,
+    );
     const conversation = "{\"id\":\"c1\",\"service\":\"imessage\"}";
     {
         const store = try Store.open(path);
@@ -193,7 +319,11 @@ test "hidden conversations survive restart and live updates without losing histo
     try std.testing.expect((try store.snapshot(ar, "c1")).chats[0].hidden);
     const ev = "{\"cursor\":\"" ++ epoch ++ ":1\",\"sequence\":\"1\",\"type\":\"message.upsert\",\"origin\":\"live\",\"record\":" ++ message ++ "}";
     try store.event(ar, ev, epoch ++ ":1", "message.upsert", "");
-    _ = try store.upsert(ar, "conversation", "{\"id\":\"c1\",\"revision\":\"1\",\"service\":\"imessage\",\"title\":\"New activity\"}");
+    _ = try store.upsert(
+        ar,
+        "conversation",
+        "{\"id\":\"c1\",\"revision\":\"1\",\"service\":\"imessage\",\"title\":\"New activity\"}",
+    );
     const hidden = try store.snapshot(ar, "c1");
     try std.testing.expect(hidden.chats[0].hidden);
     try std.testing.expectEqualStrings("Hello 👋", hidden.messages[0].text.?);
@@ -230,7 +360,10 @@ test "events commit records and cursor together, deduplicate replay and ignore s
     try s.db.exec("CREATE TRIGGER reject_cursor BEFORE UPDATE ON meta WHEN NEW.key='cursor' BEGIN SELECT RAISE(ABORT,'failure'); END");
     const next = try std.mem.replaceOwned(u8, a, ev, ":2\"", ":3\"");
     const next2 = try std.mem.replaceOwned(u8, a, next, "\"sequence\":\"2\"", "\"sequence\":\"3\"");
-    try std.testing.expectError(error.DatabaseFailure, s.event(a, next2, epoch ++ ":3", "message.upsert", ""));
+    try std.testing.expectError(
+        error.DatabaseFailure,
+        s.event(a, next2, epoch ++ ":3", "message.upsert", ""),
+    );
     try std.testing.expectEqualStrings(epoch ++ ":2", try s.get(a, "cursor"));
 }
 test "historical imports do not create unread markers; epoch reset preserves drafts and holds old sends" {
@@ -244,15 +377,23 @@ test "historical imports do not create unread markers; epoch reset preserves dra
     const ev = "{\"cursor\":\"" ++ epoch ++ ":2\",\"sequence\":\"2\",\"type\":\"message.upsert\",\"origin\":\"historical_import\",\"record\":" ++ message ++ "}";
     try s.event(a, ev, epoch ++ ":2", "message.upsert", "");
     try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM unread"));
-    try s.persistSend(a, "new:test", .{ .request_id = epoch, .server_epoch = epoch, .target = .{ .recipient = .{ .address = "test@example.invalid", .service = "imessage" } }, .text = "Hello" });
+    try s.persistSend(a, "new:test", .{
+        .request_id = epoch,
+        .server_epoch = epoch,
+        .target = .{ .recipient = .{ .address = "test@example.invalid", .service = "imessage" } },
+        .text = "Hello",
+    });
     const changed = "22345678-1234-1234-1234-123456789012";
     try s.beginSync(changed, changed ++ ":0");
     try std.testing.expectEqualStrings("Draft 👩‍💻\nCafé", try s.draft(a, "c1"));
-    try std.testing.expectEqual(@as(i64, 1), try s.db.scalar("SELECT count(*) FROM outbox WHERE state='unknown'"));
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        try s.db.scalar("SELECT count(*) FROM outbox WHERE state='unknown'"),
+    );
 }
 
 test "background history advances sync and previews without filling the message cache" {
-    const t = @import("protocol/types.zig");
+    const t = @import("protocol.zig").types;
     const s = try Store.open(":memory:");
     defer s.close();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -266,13 +407,22 @@ test "background history advances sync and previews without filling the message 
         m.revision = try u.decimal(ar, @intCast(i + 1));
         m.timestamp = if (i == 0) "2020-01-01T00:00:00Z" else "2010-01-01T00:00:00Z";
         const cursor = try t.cursor(ar, epoch, @intCast(i + 1));
-        const raw = try u.json(ar, .{ .cursor = cursor, .sequence = m.revision, .type = "message.upsert", .origin = if (i % 2 == 0) "historical_import" else "reconciliation", .record = m });
+        const raw = try u.json(ar, .{
+            .cursor = cursor,
+            .sequence = m.revision,
+            .type = "message.upsert",
+            .origin = if (i % 2 == 0) "historical_import" else "reconciliation",
+            .record = m,
+        });
         try std.testing.expect(try s.eventNotification(ar, raw, cursor, "message.upsert", "") == null);
     }
-    try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM records WHERE kind='message'"));
+    try std.testing.expectEqual(
+        @as(i64, 0),
+        try s.db.scalar("SELECT count(*) FROM records WHERE kind='message'"),
+    );
     try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM unread"));
     try std.testing.expectEqualStrings(epoch ++ ":200", try s.get(ar, "cursor"));
-    var preview = try s.db.prepare("SELECT json_extract(record,'$.message_id') FROM previews WHERE chat='c1'");
+    const preview = try s.db.prepare("SELECT json_extract(record,'$.message_id') FROM previews WHERE chat='c1'");
     defer preview.close();
     _ = try preview.step();
     try std.testing.expectEqualStrings("archive-0", preview.bytes(0));
@@ -281,36 +431,72 @@ test "background history advances sync and previews without filling the message 
     _ = try s.upsert(ar, "message", try u.json(ar, m));
     m.revision = "201";
     m.text = "Edited requested history";
-    const edited = try u.json(ar, .{ .cursor = epoch ++ ":201", .sequence = "201", .type = "message.upsert", .origin = "reconciliation", .record = m });
+    const edited = try u.json(ar, .{
+        .cursor = epoch ++ ":201",
+        .sequence = "201",
+        .type = "message.upsert",
+        .origin = "reconciliation",
+        .record = m,
+    });
     try s.event(ar, edited, epoch ++ ":201", "message.upsert", "");
-    try std.testing.expectEqualStrings("Edited requested history", (try s.snapshot(ar, "c1")).messages[0].text.?);
+    try std.testing.expectEqualStrings(
+        "Edited requested history",
+        (try s.snapshot(ar, "c1")).messages[0].text.?,
+    );
     m.id = "live";
     m.revision = "202";
     m.timestamp = "2026-01-01T00:00:00Z";
-    const live = try u.json(ar, .{ .cursor = epoch ++ ":202", .sequence = "202", .type = "message.upsert", .origin = "live", .record = m });
+    const live = try u.json(ar, .{
+        .cursor = epoch ++ ":202",
+        .sequence = "202",
+        .type = "message.upsert",
+        .origin = "live",
+        .record = m,
+    });
     try std.testing.expect((try s.eventNotification(ar, live, epoch ++ ":202", "message.upsert", "")) != null);
     try std.testing.expect((try s.eventNotification(ar, live, epoch ++ ":202", "message.upsert", "")) == null);
-    try std.testing.expectEqual(@as(i64, 2), try s.db.scalar("SELECT count(*) FROM records WHERE kind='message'"));
-    try std.testing.expectEqual(@as(i64, 1), try s.db.scalar("SELECT count FROM unread WHERE chat='c1'"));
+    try std.testing.expectEqual(
+        @as(i64, 2),
+        try s.db.scalar("SELECT count(*) FROM records WHERE kind='message'"),
+    );
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        try s.db.scalar("SELECT count FROM unread WHERE chat='c1'"),
+    );
 }
 
 test "legacy history cache trims once per thread while preserving drafts sends and requested pages" {
-    const t = @import("protocol/types.zig");
+    const t = @import("protocol.zig").types;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const ar = arena.allocator();
-    const path = try std.fmt.allocPrintSentinel(ar, ".zig-cache/tmp/{s}/client.db", .{tmp.sub_path}, 0);
+    const path = try std.fmt.allocPrintSentinel(
+        ar,
+        ".zig-cache/tmp/{s}/client.db",
+        .{tmp.sub_path},
+        0,
+    );
     const root = epoch;
     const alias = "22345678-1234-1234-1234-123456789012";
-    const input = t.SendInput{ .request_id = epoch, .server_epoch = epoch, .target = .{ .conversation_id = alias }, .text = "Saved send" };
+    const input = t.SendInput{
+        .request_id = epoch,
+        .server_epoch = epoch,
+        .target = .{ .conversation_id = alias },
+        .text = "Saved send",
+    };
     var saved_payload: []const u8 = undefined;
     {
         const s = try Store.open(path);
         defer s.close();
         try s.beginSync(epoch, epoch ++ ":200");
-        for ([_][]const u8{ root, alias }) |id| _ = try s.upsert(ar, "conversation", try u.json(ar, t.Conversation{ .id = id, .is_self = true, .thread_id = root, .service = "imessage" }));
+        for ([_][]const u8{ root, alias }) |id| _ = try s.upsert(ar, "conversation", try u.json(ar, t.Conversation{
+            .id = id,
+            .is_self = true,
+            .thread_id = root,
+            .service = "imessage",
+        }));
         var m = try std.json.parseFromSliceLeaky(t.Message, ar, message, .{});
         for (0..150) |i| {
             m.id = try std.fmt.allocPrint(ar, "m-{d:0>3}", .{i});
@@ -319,8 +505,15 @@ test "legacy history cache trims once per thread while preserving drafts sends a
         }
         try s.persistSend(ar, root, input);
         try s.saveDraft(root, "Keep draft 👋");
-        _ = try s.upsert(ar, "request", try u.json(ar, t.SendRequest{ .request_id = input.request_id, .server_epoch = epoch, .target = input.target, .text = input.text, .state = .unknown, .candidate_message_id = "m-000" }));
-        var payload = try s.db.prepare("SELECT payload FROM outbox");
+        _ = try s.upsert(ar, "request", try u.json(ar, t.SendRequest{
+            .request_id = input.request_id,
+            .server_epoch = epoch,
+            .target = input.target,
+            .text = input.text,
+            .state = .unknown,
+            .candidate_message_id = "m-000",
+        }));
+        const payload = try s.db.prepare("SELECT payload FROM outbox");
         defer payload.close();
         _ = try payload.step();
         saved_payload = try payload.text(ar, 0);
@@ -332,15 +525,27 @@ test "legacy history cache trims once per thread while preserving drafts sends a
     {
         const s = try Store.open(path);
         defer s.close();
-        try std.testing.expectEqual(@as(i64, 101), try s.db.scalar("SELECT count(*) FROM records WHERE kind='message'"));
-        try std.testing.expectEqual(@as(i64, 1), try s.db.scalar("SELECT count(*) FROM records WHERE kind='message' AND id='m-000'"));
-        try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM enrichment_cache"));
-        try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM enrichment_pages"));
+        try std.testing.expectEqual(
+            @as(i64, 101),
+            try s.db.scalar("SELECT count(*) FROM records WHERE kind='message'"),
+        );
+        try std.testing.expectEqual(
+            @as(i64, 1),
+            try s.db.scalar("SELECT count(*) FROM records WHERE kind='message' AND id='m-000'"),
+        );
+        try std.testing.expectEqual(
+            @as(i64, 0),
+            try s.db.scalar("SELECT count(*) FROM enrichment_cache"),
+        );
+        try std.testing.expectEqual(
+            @as(i64, 0),
+            try s.db.scalar("SELECT count(*) FROM enrichment_pages"),
+        );
         try std.testing.expectEqualStrings("", (try s.nextPage(ar, root)).?);
         try std.testing.expectEqualStrings("Keep draft 👋", try s.draft(ar, root));
         try std.testing.expectEqualStrings(epoch ++ ":200", try s.get(ar, "cursor"));
         try std.testing.expectEqual(@as(i64, 3), try s.db.scalar("SELECT count FROM unread"));
-        var payload = try s.db.prepare("SELECT payload FROM outbox");
+        const payload = try s.db.prepare("SELECT payload FROM outbox");
         defer payload.close();
         _ = try payload.step();
         try std.testing.expectEqualStrings(saved_payload, payload.bytes(0));
@@ -349,15 +554,33 @@ test "legacy history cache trims once per thread while preserving drafts sends a
         background.id = "m-010";
         background.conversation_id = alias;
         background.revision = "201";
-        const old_event = try u.json(ar, .{ .cursor = epoch ++ ":201", .sequence = "201", .type = "message.upsert", .origin = "reconciliation", .record = background });
+        const old_event = try u.json(ar, .{
+            .cursor = epoch ++ ":201",
+            .sequence = "201",
+            .type = "message.upsert",
+            .origin = "reconciliation",
+            .record = background,
+        });
         try s.event(ar, old_event, epoch ++ ":201", "message.upsert", root);
-        try std.testing.expectEqual(@as(i64, 101), try s.db.scalar("SELECT count(*) FROM records WHERE kind='message'"));
+        try std.testing.expectEqual(
+            @as(i64, 101),
+            try s.db.scalar("SELECT count(*) FROM records WHERE kind='message'"),
+        );
         // A newly discovered message inside the recent window is still useful.
         background.id = "m-999";
         background.revision = "202";
-        const recent_event = try u.json(ar, .{ .cursor = epoch ++ ":202", .sequence = "202", .type = "message.upsert", .origin = "reconciliation", .record = background });
+        const recent_event = try u.json(ar, .{
+            .cursor = epoch ++ ":202",
+            .sequence = "202",
+            .type = "message.upsert",
+            .origin = "reconciliation",
+            .record = background,
+        });
         try s.event(ar, recent_event, epoch ++ ":202", "message.upsert", root);
-        try std.testing.expectEqual(@as(i64, 102), try s.db.scalar("SELECT count(*) FROM records WHERE kind='message'"));
+        try std.testing.expectEqual(
+            @as(i64, 102),
+            try s.db.scalar("SELECT count(*) FROM records WHERE kind='message'"),
+        );
         // History explicitly requested after the migration survives reopening.
         var older = try std.json.parseFromSliceLeaky(t.Message, ar, message, .{});
         older.id = "requested-old";
@@ -368,19 +591,29 @@ test "legacy history cache trims once per thread while preserving drafts sends a
     }
     const reopened = try Store.open(path);
     defer reopened.close();
-    try std.testing.expectEqual(@as(i64, 103), try reopened.db.scalar("SELECT count(*) FROM records WHERE kind='message'"));
+    try std.testing.expectEqual(
+        @as(i64, 103),
+        try reopened.db.scalar("SELECT count(*) FROM records WHERE kind='message'"),
+    );
     try std.testing.expectEqualStrings("requested-page", (try reopened.nextPage(ar, root)).?);
 }
 
 test "sidebar projections never replace full messages or roll back newer previews" {
-    const t = @import("protocol/types.zig");
+    const t = @import("protocol.zig").types;
     const s = try Store.open(":memory:");
     defer s.close();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const ar = arena.allocator();
     _ = try s.upsert(ar, "conversation", "{\"id\":\"c1\",\"service\":\"imessage\"}");
-    var preview = t.ConversationPreview{ .conversation_id = "c1", .message_id = "m1", .revision = "2", .timestamp = "2026-01-01T00:00:00Z", .kind = "text", .text = "Truncated preview" };
+    var preview = t.ConversationPreview{
+        .conversation_id = "c1",
+        .message_id = "m1",
+        .revision = "2",
+        .timestamp = "2026-01-01T00:00:00Z",
+        .kind = "text",
+        .text = "Truncated preview",
+    };
     try s.savePreview(ar, try u.json(ar, preview));
     const projected = try s.snapshot(ar, "c1");
     try std.testing.expectEqualStrings("Truncated preview", projected.chats[0].preview);
@@ -431,7 +664,7 @@ test "composer deletes graphemes and restores Unicode selection with undo and re
 }
 const Frames = struct {
     count: usize = 0,
-    fn accept(s: *@This(), _: u.Allocator, data: []const u8, id: []const u8, event: []const u8) !void {
+    fn accept(s: *Frames, _: u.Allocator, data: []const u8, id: []const u8, event: []const u8) !void {
         try std.testing.expectEqualStrings("one\ntwo", data);
         try std.testing.expectEqualStrings("42", id);
         try std.testing.expectEqualStrings("update", event);
@@ -443,11 +676,11 @@ test "SSE accepts fragmented multiline frames and ignores heartbeats and truncat
     defer parser.deinit();
     var frames = Frames{};
     const wire = ": heartbeat\r\n\r\nid: 42\r\nevent: update\r\ndata: one\r\ndata: two\r\n\r\nid: truncated\ndata: no";
-    for (wire) |byte| try parser.feed(&.{byte}, &frames, Frames.accept);
+    for (wire) |byte| try parser.feed(Frames.accept, &frames, &.{byte});
     try std.testing.expectEqual(@as(usize, 1), frames.count);
 }
 test {
-    _ = @import("client/Worker.zig");
+    _ = @import("client.zig").Worker;
 }
 
 test "live replay after a snapshot still records unread exactly once" {
@@ -470,24 +703,52 @@ test "an unchanged authoritative request resolves local uncertainty without anot
     defer arena.deinit();
     const a = arena.allocator();
     try s.beginSync(epoch, epoch ++ ":1");
-    const input = @import("protocol/types.zig").SendInput{ .request_id = epoch, .server_epoch = epoch, .target = .{ .recipient = .{ .address = "test@example.invalid", .service = "imessage" } }, .text = "hello" };
+    const input = @import("protocol.zig").types.SendInput{
+        .request_id = epoch,
+        .server_epoch = epoch,
+        .target = .{ .recipient = .{ .address = "test@example.invalid", .service = "imessage" } },
+        .text = "hello",
+    };
     try s.persistSend(a, "new:test", input);
-    const raw = try u.json(a, @import("protocol/types.zig").SendRequest{ .request_id = epoch, .server_epoch = epoch, .target = input.target, .text = input.text, .revision = "2", .state = .delivered });
+    const raw = try u.json(a, @import("protocol.zig").types.SendRequest{
+        .request_id = epoch,
+        .server_epoch = epoch,
+        .target = input.target,
+        .text = input.text,
+        .revision = "2",
+        .state = .delivered,
+    });
     _ = try s.upsert(a, "request", raw);
     try s.outcome(epoch, "unknown", "Lost HTTP response");
-    try std.testing.expectEqual(@as(i64, 1), try s.db.scalar("SELECT count(*) FROM outbox WHERE state='delivered' AND detail=''"));
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        try s.db.scalar("SELECT count(*) FROM outbox WHERE state='delivered' AND detail=''"),
+    );
     _ = try s.upsert(a, "request", raw);
-    try std.testing.expectEqual(@as(i64, 1), try s.db.scalar("SELECT count(*) FROM outbox WHERE state='delivered'"));
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        try s.db.scalar("SELECT count(*) FROM outbox WHERE state='delivered'"),
+    );
 }
 test "outbox send times survive status updates, restart, and epoch reset" {
-    const t = @import("protocol/types.zig");
+    const t = @import("protocol.zig").types;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const ar = arena.allocator();
-    const path = try std.fmt.allocPrintSentinel(ar, ".zig-cache/tmp/{s}/client.db", .{tmp.sub_path}, 0);
-    const input = t.SendInput{ .request_id = epoch, .server_epoch = epoch, .target = .{ .recipient = .{ .address = "test@example.invalid", .service = "imessage" } }, .text = "Keep my place" };
+    const path = try std.fmt.allocPrintSentinel(
+        ar,
+        ".zig-cache/tmp/{s}/client.db",
+        .{tmp.sub_path},
+        0,
+    );
+    const input = t.SendInput{
+        .request_id = epoch,
+        .server_epoch = epoch,
+        .target = .{ .recipient = .{ .address = "test@example.invalid", .service = "imessage" } },
+        .text = "Keep my place",
+    };
     var sent_at: []const u8 = undefined;
     {
         const store = try Store.open(path);
@@ -500,25 +761,54 @@ test "outbox send times survive status updates, restart, and epoch reset" {
         try std.testing.expect(std.mem.order(u8, sent_at, before) != .lt);
         try std.testing.expect(std.mem.order(u8, sent_at, after) != .gt);
         try store.outcome(epoch, "unknown", "Connection interrupted");
-        _ = try store.upsert(ar, "request", try u.json(ar, t.SendRequest{ .request_id = epoch, .server_epoch = epoch, .target = input.target, .text = input.text, .revision = "2", .state = .unknown }));
-        try std.testing.expectEqualStrings(sent_at, (try store.snapshot(ar, "c1")).pending[0].sent_at);
+        _ = try store.upsert(ar, "request", try u.json(ar, t.SendRequest{
+            .request_id = epoch,
+            .server_epoch = epoch,
+            .target = input.target,
+            .text = input.text,
+            .revision = "2",
+            .state = .unknown,
+        }));
+        try std.testing.expectEqualStrings(
+            sent_at,
+            (try store.snapshot(ar, "c1")).pending[0].sent_at,
+        );
     }
     const reopened = try Store.open(path);
     defer reopened.close();
-    try std.testing.expectEqualStrings(sent_at, (try reopened.snapshot(ar, "c1")).pending[0].sent_at);
-    try reopened.beginSync("22345678-1234-1234-1234-123456789012", "22345678-1234-1234-1234-123456789012:0");
-    try std.testing.expectEqualStrings(sent_at, (try reopened.snapshot(ar, "c1")).pending[0].sent_at);
+    try std.testing.expectEqualStrings(
+        sent_at,
+        (try reopened.snapshot(ar, "c1")).pending[0].sent_at,
+    );
+    try reopened.beginSync(
+        "22345678-1234-1234-1234-123456789012",
+        "22345678-1234-1234-1234-123456789012:0",
+    );
+    try std.testing.expectEqualStrings(
+        sent_at,
+        (try reopened.snapshot(ar, "c1")).pending[0].sent_at,
+    );
 }
 
 test "legacy outbox positions are estimated from nearby history only once" {
-    const t = @import("protocol/types.zig");
+    const t = @import("protocol.zig").types;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const ar = arena.allocator();
-    const path = try std.fmt.allocPrintSentinel(ar, ".zig-cache/tmp/{s}/client.db", .{tmp.sub_path}, 0);
-    const input = t.SendInput{ .request_id = epoch, .server_epoch = epoch, .target = .{ .recipient = .{ .address = "test@example.invalid", .service = "imessage" } }, .text = "Older uncertain send" };
+    const path = try std.fmt.allocPrintSentinel(
+        ar,
+        ".zig-cache/tmp/{s}/client.db",
+        .{tmp.sub_path},
+        0,
+    );
+    const input = t.SendInput{
+        .request_id = epoch,
+        .server_epoch = epoch,
+        .target = .{ .recipient = .{ .address = "test@example.invalid", .service = "imessage" } },
+        .text = "Older uncertain send",
+    };
     {
         const store = try Store.open(path);
         defer store.close();
@@ -531,32 +821,69 @@ test "legacy outbox positions are estimated from nearby history only once" {
         m.timestamp = "2026-01-01T00:02:00Z";
         _ = try store.upsert(ar, "message", try u.json(ar, m));
         try store.persistSend(ar, "c1", input);
-        _ = try store.upsert(ar, "request", try u.json(ar, t.SendRequest{ .request_id = epoch, .server_epoch = epoch, .target = input.target, .text = input.text, .revision = "20", .state = .unknown }));
+        _ = try store.upsert(ar, "request", try u.json(ar, t.SendRequest{
+            .request_id = epoch,
+            .server_epoch = epoch,
+            .target = input.target,
+            .text = input.text,
+            .revision = "20",
+            .state = .unknown,
+        }));
         // Recreate the schema used before send times were persisted.
         try store.db.exec("ALTER TABLE outbox DROP COLUMN sent_at");
     }
     {
         const migrated = try Store.open(path);
         defer migrated.close();
-        try std.testing.expectEqualStrings("2026-01-01T00:00:00Z", (try migrated.snapshot(ar, "c1")).pending[0].sent_at);
-        _ = try migrated.upsert(ar, "request", try u.json(ar, t.SendRequest{ .request_id = epoch, .server_epoch = epoch, .target = input.target, .text = input.text, .revision = "40", .state = .unknown }));
+        try std.testing.expectEqualStrings(
+            "2026-01-01T00:00:00Z",
+            (try migrated.snapshot(ar, "c1")).pending[0].sent_at,
+        );
+        _ = try migrated.upsert(ar, "request", try u.json(ar, t.SendRequest{
+            .request_id = epoch,
+            .server_epoch = epoch,
+            .target = input.target,
+            .text = input.text,
+            .revision = "40",
+            .state = .unknown,
+        }));
     }
     const reopened = try Store.open(path);
     defer reopened.close();
-    try std.testing.expectEqualStrings("2026-01-01T00:00:00Z", (try reopened.snapshot(ar, "c1")).pending[0].sent_at);
+    try std.testing.expectEqualStrings(
+        "2026-01-01T00:00:00Z",
+        (try reopened.snapshot(ar, "c1")).pending[0].sent_at,
+    );
 }
 
 test "provisional outgoing echoes replace uncertainty without confirming or discarding the request" {
-    const t = @import("protocol/types.zig");
-    const SharedSnapshot = @import("client/SharedSnapshot.zig");
+    const t = @import("protocol.zig").types;
+    const SharedSnapshot = @import("client.zig").SharedSnapshot;
     const s = try Store.open(":memory:");
     defer s.close();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const ar = arena.allocator();
     try s.beginSync(epoch, epoch ++ ":0");
-    const input = t.SendInput{ .request_id = epoch, .server_epoch = epoch, .target = .{ .recipient = .{ .address = "test@example.invalid", .service = "imessage" } }, .text = "Awww" };
-    var request = t.SendRequest{ .request_id = epoch, .server_epoch = epoch, .target = input.target, .text = input.text, .revision = "3", .state = .unknown, .error_info = .{ .code = "awaiting_observation", .message = "Awaiting an unambiguous outgoing Messages record.", .outcome = .uncertain } };
+    const input = t.SendInput{
+        .request_id = epoch,
+        .server_epoch = epoch,
+        .target = .{ .recipient = .{ .address = "test@example.invalid", .service = "imessage" } },
+        .text = "Awww",
+    };
+    var request = t.SendRequest{
+        .request_id = epoch,
+        .server_epoch = epoch,
+        .target = input.target,
+        .text = input.text,
+        .revision = "3",
+        .state = .unknown,
+        .error_info = .{
+            .code = "awaiting_observation",
+            .message = "Awaiting an unambiguous outgoing Messages record.",
+            .outcome = .uncertain,
+        },
+    };
     var echo = (try std.json.parseFromSlice(t.Message, ar, message, .{})).value;
     echo.direction = .outgoing;
     echo.observed_status = .delivered;
@@ -585,7 +912,10 @@ test "provisional outgoing echoes replace uncertainty without confirming or disc
         try std.testing.expectEqual(.delivered, merged.snapshot.messages[0].observed_status);
         try std.testing.expectEqual(@as(usize, 0), merged.snapshot.pending.len);
         try std.testing.expectEqual(@as(usize, 0), (try s.snapshot(ar, key)).pending.len);
-        try std.testing.expectEqual(@as(i64, 1), try s.db.scalar("SELECT count(*) FROM outbox WHERE state='unknown' AND json_extract(record,'$.message_id') IS NULL"));
+        try std.testing.expectEqual(
+            @as(i64, 1),
+            try s.db.scalar("SELECT count(*) FROM outbox WHERE state='unknown' AND json_extract(record,'$.message_id') IS NULL"),
+        );
         // Another plausible echo withdraws the hint. The saved request and its
         // uncertainty return, and new-conversation history drops the old hint.
         request.revision = "5";
@@ -595,13 +925,19 @@ test "provisional outgoing echoes replace uncertainty without confirming or disc
         defer ambiguous.release();
         try std.testing.expectEqual(@as(usize, 1), ambiguous.snapshot.pending.len);
         try std.testing.expectEqualStrings("unknown", ambiguous.snapshot.pending[0].state);
-        try std.testing.expectEqual(@as(usize, if (u.eq(key, "c1")) 1 else 0), ambiguous.snapshot.messages.len);
+        try std.testing.expectEqual(
+            @as(usize, if (u.eq(key, "c1")) 1 else 0),
+            ambiguous.snapshot.messages.len,
+        );
     }
     // Old-epoch hints are never used after a reset, even if an ID is cached again.
     request.revision = "6";
     request.candidate_message_id = echo.id;
     _ = try s.upsert(ar, "request", try u.json(ar, request));
-    try s.beginSync("22345678-1234-1234-1234-123456789012", "22345678-1234-1234-1234-123456789012:0");
+    try s.beginSync(
+        "22345678-1234-1234-1234-123456789012",
+        "22345678-1234-1234-1234-123456789012:0",
+    );
     _ = try s.upsert(ar, "message", try u.json(ar, echo));
     const reset = try s.snapshot(ar, "new:test@example.invalid");
     try std.testing.expectEqual(@as(usize, 1), reset.pending.len);
@@ -616,13 +952,16 @@ test "failed cursor commit rolls back a new message and unread marker" {
     try s.beginSync(epoch, epoch ++ ":1");
     try s.db.exec("CREATE TRIGGER reject_cursor BEFORE UPDATE ON meta WHEN NEW.key='cursor' BEGIN SELECT RAISE(ABORT,'failure'); END");
     const ev = "{\"cursor\":\"" ++ epoch ++ ":2\",\"sequence\":\"2\",\"type\":\"message.upsert\",\"origin\":\"live\",\"record\":" ++ message ++ "}";
-    try std.testing.expectError(error.DatabaseFailure, s.event(a, ev, epoch ++ ":2", "message.upsert", ""));
+    try std.testing.expectError(
+        error.DatabaseFailure,
+        s.event(a, ev, epoch ++ ":2", "message.upsert", ""),
+    );
     try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM records"));
     try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM unread"));
     try std.testing.expectEqualStrings(epoch ++ ":1", try s.get(a, "cursor"));
 }
 test "indexed history keeps linked echoes ordered and deduplicated across conversations" {
-    const t = @import("protocol/types.zig");
+    const t = @import("protocol.zig").types;
     const s = try Store.open(":memory:");
     defer s.close();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -632,32 +971,64 @@ test "indexed history keeps linked echoes ordered and deduplicated across conver
     const base = (try std.json.parseFromSlice(t.Message, ar, message, .{})).value;
     // m0 is an echo in the eventual direct conversation. m1 is both local
     // history and a linked echo; it must appear once. m2 shares its timestamp.
-    for ([_][]const u8{ "m2", "m1", "m0", "unrelated" }) |id| {
+    for ([_][]const u8{
+        "m2",
+        "m1",
+        "m0",
+        "unrelated",
+    }) |id| {
         var m = base;
         m.id = id;
         m.conversation_id = if (u.eq(id, "m1") or u.eq(id, "m2")) "c1" else "c2";
         if (u.eq(id, "m0")) m.timestamp = "2025-12-31T23:59:59Z";
         _ = try s.upsert(ar, "message", try u.json(ar, m));
     }
-    for ([_][]const u8{ epoch, "22345678-1234-1234-1234-123456789012", "32345678-1234-1234-1234-123456789012" }, [_][]const u8{ "m0", "m1", "m0" }) |id, echo| {
-        const input = t.SendInput{ .request_id = id, .server_epoch = epoch, .target = .{ .recipient = .{ .address = "test@example.invalid", .service = "imessage" } }, .text = "Fixture" };
+    for ([_][]const u8{
+        epoch,
+        "22345678-1234-1234-1234-123456789012",
+        "32345678-1234-1234-1234-123456789012",
+    }, [_][]const u8{
+        "m0",
+        "m1",
+        "m0",
+    }) |id, echo| {
+        const input = t.SendInput{
+            .request_id = id,
+            .server_epoch = epoch,
+            .target = .{ .recipient = .{ .address = "test@example.invalid", .service = "imessage" } },
+            .text = "Fixture",
+        };
         try s.persistSend(ar, "c1", input);
-        _ = try s.upsert(ar, "request", try u.json(ar, t.SendRequest{ .request_id = id, .server_epoch = epoch, .target = input.target, .text = input.text, .state = .delivered, .message_id = echo }));
+        _ = try s.upsert(ar, "request", try u.json(ar, t.SendRequest{
+            .request_id = id,
+            .server_epoch = epoch,
+            .target = input.target,
+            .text = input.text,
+            .state = .delivered,
+            .message_id = echo,
+        }));
     }
     const snapshot = try s.snapshot(ar, "c1");
     try std.testing.expectEqual(@as(usize, 3), snapshot.messages.len);
     try std.testing.expectEqual(@as(usize, 0), snapshot.pending.len);
-    for (snapshot.messages, [_][]const u8{ "m0", "m1", "m2" }) |m, id| try std.testing.expectEqualStrings(id, m.id);
-    const SharedSnapshot = @import("client/SharedSnapshot.zig");
+    for (snapshot.messages, [_][]const u8{
+        "m0",
+        "m1",
+        "m2",
+    }) |m, id| try std.testing.expectEqualStrings(id, m.id);
+    const SharedSnapshot = @import("client.zig").SharedSnapshot;
     const shared = try SharedSnapshot.create(s, "c1", 1, null);
     defer shared.release();
     try std.testing.expectEqual(@as(usize, 0), shared.snapshot.pending.len);
-    for (shared.snapshot.messages, snapshot.messages) |actual, expected| try std.testing.expectEqualStrings(expected.id, actual.id);
+    for (shared.snapshot.messages, snapshot.messages) |actual, expected| try std.testing.expectEqualStrings(
+        expected.id,
+        actual.id,
+    );
 }
 
 test "incremental snapshots preserve versions through prepends, reordering, failure and epoch replacement" {
-    const t = @import("protocol/types.zig");
-    const SharedSnapshot = @import("client/SharedSnapshot.zig");
+    const t = @import("protocol.zig").types;
+    const SharedSnapshot = @import("client.zig").SharedSnapshot;
     const store = try Store.open(":memory:");
     defer store.close();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -687,7 +1058,10 @@ test "incremental snapshots preserve versions through prepends, reordering, fail
     defer edited.release();
     try std.testing.expectEqual(@as(usize, 3), edited.snapshot.messages.len);
     try std.testing.expectEqualStrings("older", edited.snapshot.messages[0].id);
-    try std.testing.expectEqual(first.snapshot.messages[0].text.?.ptr, edited.snapshot.messages[1].text.?.ptr);
+    try std.testing.expectEqual(
+        first.snapshot.messages[0].text.?.ptr,
+        edited.snapshot.messages[1].text.?.ptr,
+    );
     try std.testing.expectEqualStrings("Edited 👩‍💻", edited.snapshot.messages[2].text.?);
     try std.testing.expectEqualStrings("Second", first.snapshot.messages[1].text.?);
     // Moving an existing record earlier must change ordering without stale text.
@@ -722,7 +1096,7 @@ test "incremental snapshots preserve versions through prepends, reordering, fail
 }
 
 test "long Unicode text measures, wraps, and renders a bounded tile" {
-    const c = @import("client/c.zig").api;
+    const c = @import("client.zig").c.api;
     const text = try std.testing.allocator.alloc(u8, 16384);
     defer std.testing.allocator.free(text);
     @memset(text, 'W');
@@ -740,7 +1114,7 @@ test "long Unicode text measures, wraps, and renders a bounded tile" {
 }
 
 test "unbroken messages and URLs have bounded raster dimensions" {
-    const c = @import("client/c.zig").api;
+    const c = @import("client.zig").c.api;
     const text = try std.testing.allocator.alloc(u8, 65536);
     defer std.testing.allocator.free(text);
     @memset(text, 'W');
@@ -757,8 +1131,12 @@ test "unbroken messages and URLs have bounded raster dimensions" {
 }
 
 test "unsafe text and invalid geometry fail before shaping or allocation" {
-    const c = @import("client/c.zig").api;
-    for ([_][]const u8{ "bad\xff", "nul\x00text", "a" ++ "́" ** 1000, "\u{202e}" ** 1000, "\n" ** 65536 }) |text| {
+    const c = @import("client.zig").c.api;
+    for ([_][]const u8{
+        "bad\xff",          "nul\x00text",
+        "a" ++ "́" ** 1000,
+        "\u{202e}" ** 1000, "\n" ** 65536,
+    }) |text| {
         try std.testing.expect(c.zc_text_new(text.ptr, @intCast(text.len), 16, 300, 1) == null);
     }
     try std.testing.expect(c.zc_text_new("a", -1, 16, 300, 1) == null);
@@ -768,7 +1146,7 @@ test "unsafe text and invalid geometry fail before shaping or allocation" {
 }
 
 test "RGB glyph edges use opaque backgrounds and transparent text stays grayscale" {
-    const c = @import("client/c.zig").api;
+    const c = @import("client.zig").c.api;
     const text = "RGB hinting: Hello world";
     const rgb = c.zc_text_new_with_options(text.ptr, text.len, 16, 300, 1, 0, 1) orelse return error.NoLayout;
     defer c.zc_text_free(rgb);
@@ -777,7 +1155,11 @@ test "RGB glyph edges use opaque backgrounds and transparent text stays grayscal
     // Independent RGB coverages cannot be stored in one transparent alpha.
     try std.testing.expect(c.zc_text_pixels(rgb, 0xffffffff, 0, 0, 0, height) == null);
     var chromatic: usize = 0;
-    for ([_]u32{ 0x000000ff, 0xffffffff, 0x123456ff }) |background| {
+    for ([_]u32{
+        0x000000ff,
+        0xffffffff,
+        0x123456ff,
+    }) |background| {
         const foreground = (background ^ 0xffffff00);
         const pixels = c.zc_text_pixels_on(rgb, foreground, 0, 0, 0, height, background);
         try std.testing.expect(pixels != null);
@@ -810,17 +1192,33 @@ test "RGB glyph edges use opaque backgrounds and transparent text stays grayscal
 }
 
 test "fractional scale tiles match full text rendering including selection and bidi" {
-    const c = @import("client/c.zig").api;
+    const c = @import("client.zig").c.api;
     const text = "Café é 👩‍💻 שלום مرحبا\n" ** 12;
-    for ([_]f64{ 1, 1.25, 1.5, 2 }) |scale| for ([_]bool{ false, true }) |subpixel| {
-        const layout = c.zc_text_new_with_options(text.ptr, text.len, 16, 300, scale, 0, @intFromBool(subpixel)) orelse return error.NoLayout;
+    for ([_]f64{
+        1,
+        1.25,
+        1.5,
+        2,
+    }) |scale| for ([_]bool{ false, true }) |subpixel| {
+        const layout = c.zc_text_new_with_options(
+            text.ptr,
+            text.len,
+            16,
+            300,
+            scale,
+            0,
+            @intFromBool(subpixel),
+        ) orelse return error.NoLayout;
         defer c.zc_text_free(layout);
         const width: usize = @intCast(c.zc_text_width(layout));
         const height = c.zc_text_height(layout);
         const background: u32 = if (subpixel) 0xf0e8d8ff else 0;
         const ptr = c.zc_text_pixels_on(layout, 0x112233ff, 0, 80, 0, height, background);
         try std.testing.expect(ptr != null);
-        const full = try std.testing.allocator.dupe(u8, ptr[0 .. width * @as(usize, @intCast(height)) * 4]);
+        const full = try std.testing.allocator.dupe(
+            u8,
+            ptr[0 .. width * @as(usize, @intCast(height)) * 4],
+        );
         defer std.testing.allocator.free(full);
         // It must contain glyphs rather than an empty successful surface.
         var ink = false;
@@ -829,10 +1227,27 @@ test "fractional scale tiles match full text rendering including selection and b
             ink = ink or if (subpixel) full[i] != background >> 24 else full[i + 3] != 0;
         }
         try std.testing.expect(ink);
-        for ([_]usize{ 1, 17, 64, 128 }) |top| {
-            const tile = c.zc_text_pixels_on(layout, 0x112233ff, 0, 80, @intCast(top), 128, background);
+        for ([_]usize{
+            1,
+            17,
+            64,
+            128,
+        }) |top| {
+            const tile = c.zc_text_pixels_on(
+                layout,
+                0x112233ff,
+                0,
+                80,
+                @intCast(top),
+                128,
+                background,
+            );
             try std.testing.expect(tile != null);
-            try std.testing.expectEqualSlices(u8, full[width * top * 4 ..][0 .. width * 128 * 4], tile[0 .. width * 128 * 4]);
+            try std.testing.expectEqualSlices(
+                u8,
+                full[width * top * 4 ..][0 .. width * 128 * 4],
+                tile[0 .. width * 128 * 4],
+            );
         }
     };
 }
@@ -846,22 +1261,40 @@ test "identity events are negotiated, revision merged, atomic and cleared on res
     try s.beginSync(epoch, epoch ++ ":0");
     const identity = "{\"id\":\"person\",\"revision\":\"7\",\"service\":\"imessage\",\"address\":\"test@example.invalid\",\"display_name\":\"Renamed 👋\",\"match_state\":\"matched\"}";
     const ev = "{\"cursor\":\"" ++ epoch ++ ":7\",\"sequence\":\"7\",\"type\":\"identity.upsert\",\"origin\":\"reconciliation\",\"record\":" ++ identity ++ "}";
-    try std.testing.expectError(error.UnknownEvent, s.event(ar, ev, epoch ++ ":7", "identity.upsert", ""));
+    try std.testing.expectError(
+        error.UnknownEvent,
+        s.event(ar, ev, epoch ++ ":7", "identity.upsert", ""),
+    );
     try s.set("accepted_extensions", "identity-v1");
     try s.event(ar, ev, epoch ++ ":7", "identity.upsert", "");
     const stale = try std.mem.replaceOwned(u8, ar, identity, "\"7\"", "\"1\"");
     _ = try s.upsert(ar, "identity", stale);
-    try std.testing.expectEqualStrings("Renamed 👋", (try s.directory(ar)).name("imessage", "test@example.invalid"));
+    try std.testing.expectEqualStrings(
+        "Renamed 👋",
+        (try s.directory(ar)).name("imessage", "test@example.invalid"),
+    );
     try std.testing.expectEqual(@as(i64, 7), try s.db.scalar("SELECT revision FROM identities"));
     try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM unread"));
     try s.db.exec("CREATE TRIGGER reject_identity_cursor BEFORE UPDATE ON meta WHEN NEW.key='cursor' BEGIN SELECT RAISE(ABORT,'failure'); END");
     const cleared = "{\"id\":\"person\",\"revision\":\"8\",\"service\":\"imessage\",\"address\":\"test@example.invalid\",\"match_state\":\"unavailable\"}";
-    const next = try u.json(ar, .{ .cursor = epoch ++ ":8", .sequence = "8", .type = "identity.upsert", .origin = "reconciliation", .record = try std.json.parseFromSliceLeaky(std.json.Value, ar, cleared, .{}) });
-    try std.testing.expectError(error.DatabaseFailure, s.event(ar, next, epoch ++ ":8", "identity.upsert", ""));
+    const next = try u.json(ar, .{
+        .cursor = epoch ++ ":8",
+        .sequence = "8",
+        .type = "identity.upsert",
+        .origin = "reconciliation",
+        .record = try std.json.parseFromSliceLeaky(std.json.Value, ar, cleared, .{}),
+    });
+    try std.testing.expectError(
+        error.DatabaseFailure,
+        s.event(ar, next, epoch ++ ":8", "identity.upsert", ""),
+    );
     try std.testing.expectEqual(@as(i64, 7), try s.db.scalar("SELECT revision FROM identities"));
     try s.db.exec("DROP TRIGGER reject_identity_cursor");
     try s.event(ar, next, epoch ++ ":8", "identity.upsert", "");
-    try std.testing.expectEqualStrings("test@example.invalid", (try s.directory(ar)).name("imessage", "test@example.invalid"));
+    try std.testing.expectEqualStrings(
+        "test@example.invalid",
+        (try s.directory(ar)).name("imessage", "test@example.invalid"),
+    );
     try s.saveDraft("c1", "Keep draft");
     try s.beginSync(epoch, epoch ++ ":8");
     try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM identities"));
@@ -876,15 +1309,25 @@ test "reaction rows and enrichment changes do not alert or create unread" {
     defer arena.deinit();
     const ar = arena.allocator();
     try s.beginSync(epoch, epoch ++ ":0");
-    const reaction = try std.mem.replaceOwned(u8, ar, message, "\"kind\":\"text\"", "\"kind\":\"reaction\"");
-    const ev = try std.fmt.allocPrint(ar, "{{\"cursor\":\"{s}:1\",\"sequence\":\"1\",\"type\":\"message.upsert\",\"origin\":\"live\",\"record\":{s}}}", .{ epoch, reaction });
+    const reaction = try std.mem.replaceOwned(
+        u8,
+        ar,
+        message,
+        "\"kind\":\"text\"",
+        "\"kind\":\"reaction\"",
+    );
+    const ev = try std.fmt.allocPrint(
+        ar,
+        "{{\"cursor\":\"{s}:1\",\"sequence\":\"1\",\"type\":\"message.upsert\",\"origin\":\"live\",\"record\":{s}}}",
+        .{ epoch, reaction },
+    );
     try std.testing.expect(try s.eventNotification(ar, ev, epoch ++ ":1", "message.upsert", "") == null);
     try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM unread"));
 }
 
 test "overflow pages extend immutable presentations and stale pages cannot restore cleared enrichment" {
-    const t = @import("protocol/types.zig");
-    const Shared = @import("client/SharedSnapshot.zig");
+    const t = @import("protocol.zig").types;
+    const Shared = @import("client.zig").SharedSnapshot;
     const s = try Store.open(":memory:");
     defer s.close();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -893,17 +1336,43 @@ test "overflow pages extend immutable presentations and stale pages cannot resto
     try s.beginSync(epoch, epoch ++ ":0");
     var m = try std.json.parseFromSliceLeaky(t.Message, ar, message, .{});
     m.enrichment = .{ .state = .complete, .attachments = .{ .total = 2, .complete = false } };
-    const item = t.Attachment{ .id = "a", .name = "a.png", .mime_type = "image/png", .bytes = "10" };
+    const item = t.Attachment{
+        .id = "a",
+        .name = "a.png",
+        .mime_type = "image/png",
+        .bytes = "10",
+    };
     m.attachments = &.{item};
     _ = try s.upsert(ar, "message", try u.json(ar, m));
     const first = try Shared.create(s, "c1", 1, null);
     defer first.release();
-    const page = try u.json(ar, .{ .message_id = m.id, .revision = m.revision, .section = "attachments", .items = &.{item}, .total = 2, .next = "next" });
+    const page = try u.json(ar, .{
+        .message_id = m.id,
+        .revision = m.revision,
+        .section = "attachments",
+        .items = &.{item},
+        .total = 2,
+        .next = "next",
+    });
     try std.testing.expect(try s.enrichmentPage(ar, page, m.id, m.revision, .attachments, ""));
     var second_item = item;
     second_item.id = "b";
-    const final_page = try u.json(ar, .{ .message_id = m.id, .revision = m.revision, .section = "attachments", .items = &.{second_item}, .total = 2, .next = @as(?[]const u8, null) });
-    try std.testing.expect(try s.enrichmentPage(ar, final_page, m.id, m.revision, .attachments, "next"));
+    const final_page = try u.json(ar, .{
+        .message_id = m.id,
+        .revision = m.revision,
+        .section = "attachments",
+        .items = &.{second_item},
+        .total = 2,
+        .next = @as(?[]const u8, null),
+    });
+    try std.testing.expect(try s.enrichmentPage(
+        ar,
+        final_page,
+        m.id,
+        m.revision,
+        .attachments,
+        "next",
+    ));
     const expanded = try Shared.create(s, "c1", 2, first);
     defer expanded.release();
     try std.testing.expectEqual(@as(usize, 2), expanded.snapshot.messages[0].attachments.len);
@@ -921,5 +1390,8 @@ test "overflow pages extend immutable presentations and stale pages cannot resto
     defer cleared.release();
     try std.testing.expectEqual(@as(usize, 0), cleared.snapshot.messages[0].attachments.len);
     try std.testing.expectEqual(@as(usize, 0), cleared.snapshot.messages[0].reactions.?.len);
-    try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM enrichment_cache"));
+    try std.testing.expectEqual(
+        @as(i64, 0),
+        try s.db.scalar("SELECT count(*) FROM enrichment_cache"),
+    );
 }

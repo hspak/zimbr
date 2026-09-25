@@ -2,30 +2,35 @@
 //! external entities, or network/file resolution. Callers own an arena.
 const std = @import("std");
 const u = @import("../../common.zig");
-const max_bytes = @import("../../protocol/types.zig").max_decode;
+const max_bytes = @import("../../protocol.zig").types.max_decode;
 pub const max_objects = 8192;
 pub const max_depth = 32;
-pub const Value = union(enum) {
+pub const Node = union(enum) {
     none,
     boolean: bool,
     integer: u64,
     string: []const u8,
     data: []const u8,
     uid: usize,
-    array: []Value,
+    array: []Node,
     dict: []Entry,
-    pub fn get(self: Value, key: []const u8) ?Value {
+    pub fn get(self: Node, key: []const u8) ?Node {
         if (self != .dict) return null;
         for (self.dict) |entry| if (u.eq(entry.key, key)) return entry.value;
         return null;
     }
-    pub fn text(self: Value) ?[]const u8 {
+    pub fn text(self: Node) ?[]const u8 {
         return if (self == .string) self.string else null;
     }
 };
-pub const Entry = struct { key: []const u8, value: Value };
-const Failure = error{ Malformed, Unsupported, Oversized, OutOfMemory };
-pub fn parse(a: u.Allocator, bytes: []const u8) Failure!Value {
+pub const Entry = struct { key: []const u8, value: Node };
+const Failure = error{
+    Malformed,
+    Unsupported,
+    Oversized,
+    OutOfMemory,
+};
+pub fn parse(a: u.Allocator, bytes: []const u8) Failure!Node {
     if (bytes.len > max_bytes) return error.Oversized;
     if (std.mem.startsWith(u8, bytes, "bplist00")) return Binary.parse(a, bytes);
     var xml = Xml{ .a = a, .bytes = bytes };
@@ -41,7 +46,7 @@ const Binary = struct {
     a: u.Allocator,
     bytes: []const u8,
     offsets: []usize,
-    values: []Value,
+    values: []Node,
     marks: []u8,
     ref_width: usize,
     table: usize,
@@ -53,7 +58,7 @@ const Binary = struct {
         if (bytes > max_bytes * 8 - self.work) return error.Oversized;
         self.work += bytes;
     }
-    fn parse(a: u.Allocator, bytes: []const u8) Failure!Value {
+    fn parse(a: u.Allocator, bytes: []const u8) Failure!Node {
         if (bytes.len < 40) return error.Malformed;
         const trailer = bytes[bytes.len - 32 ..];
         const count = try unsigned(trailer[8..16]);
@@ -63,7 +68,15 @@ const Binary = struct {
         const refs: usize = trailer[7];
         if (count == 0 or count > max_objects) return error.Oversized;
         if (root >= count or width == 0 or width > 8 or refs == 0 or refs > 8 or table < 8 or table > bytes.len - 32 or count * width > bytes.len - 32 - table) return error.Malformed;
-        var self = Binary{ .a = a, .bytes = bytes, .offsets = try a.alloc(usize, @intCast(count)), .values = try a.alloc(Value, @intCast(count)), .marks = try a.alloc(u8, @intCast(count)), .ref_width = refs, .table = @intCast(table) };
+        var self = Binary{
+            .a = a,
+            .bytes = bytes,
+            .offsets = try a.alloc(usize, @intCast(count)),
+            .values = try a.alloc(Node, @intCast(count)),
+            .marks = try a.alloc(u8, @intCast(count)),
+            .ref_width = refs,
+            .table = @intCast(table),
+        };
         @memset(self.marks, 0);
         for (self.offsets, 0..) |*offset, i| {
             const value = try unsigned(bytes[@as(usize, @intCast(table)) + i * width ..][0..width]);
@@ -87,12 +100,12 @@ const Binary = struct {
         if (n > max_bytes) return error.Oversized;
         return @intCast(n);
     }
-    fn reference(self: *Binary, bytes: []const u8, depth: usize) Failure!Value {
+    fn reference(self: *Binary, bytes: []const u8, depth: usize) Failure!Node {
         const index = try unsigned(bytes);
         if (index >= self.offsets.len) return error.Malformed;
         return self.object(@intCast(index), depth);
     }
-    fn object(self: *Binary, index: usize, depth: usize) Failure!Value {
+    fn object(self: *Binary, index: usize, depth: usize) Failure!Node {
         if (depth >= max_depth) return error.Oversized;
         if (self.marks[index] == 1) return error.Malformed;
         if (self.marks[index] == 2) return self.values[index];
@@ -100,59 +113,84 @@ const Binary = struct {
         var position = self.offsets[index];
         const tag = (try self.take(&position, 1))[0];
         const small = tag & 15;
-        const value: Value = switch (tag >> 4) {
+        const value: Node = switch (tag >> 4) {
             0 => switch (small) {
                 0 => .none,
                 8 => .{ .boolean = false },
                 9 => .{ .boolean = true },
                 else => return error.Unsupported,
             },
-            1 => if (small <= 3) .{ .integer = try unsigned(try self.take(&position, @as(usize, 1) << @intCast(small))) } else return error.Unsupported,
-            2, 3 => blk: { // irrelevant real/date values still have strict bounds
+            1 => if (small <= 3) .{ .integer = try unsigned(try self.take(
+                &position,
+                @as(usize, 1) << @intCast(small),
+            )) } else return error.Unsupported,
+            2, 3 => object: { // irrelevant real/date values still have strict bounds
                 if (small > 3) return error.Unsupported;
                 _ = try self.take(&position, @as(usize, 1) << @intCast(small));
-                break :blk .none;
+                break :object .none;
             },
-            4, 5, 6 => blk: {
+            4, 5, 6 => object: {
                 const length = try self.size(&position, small);
-                const bytes = try self.take(&position, length * (if (tag >> 4 == 6) @as(usize, 2) else 1));
-                if (tag >> 4 == 4) break :blk .{ .data = bytes };
+                const bytes = try self.take(
+                    &position,
+                    length * (if (tag >> 4 == 6) @as(usize, 2) else 1),
+                );
+                if (tag >> 4 == 4) break :object .{ .data = bytes };
                 if (tag >> 4 == 5) {
                     if (!std.unicode.utf8ValidateSlice(bytes)) return error.Malformed;
-                    break :blk .{ .string = bytes };
+                    break :object .{ .string = bytes };
                 }
                 self.allocated += length * 3;
                 if (self.allocated > max_bytes * 2) return error.Oversized;
                 const units = try self.a.alloc(u16, length);
-                for (units, 0..) |*unit, i| unit.* = std.mem.readInt(u16, bytes[i * 2 ..][0..2], .big);
-                break :blk .{ .string = std.unicode.utf16LeToUtf8Alloc(self.a, units) catch return error.Malformed };
+                for (units, 0..) |*unit, i| unit.* = std.mem.readInt(
+                    u16,
+                    bytes[i * 2 ..][0..2],
+                    .big,
+                );
+                break :object .{ .string = std.unicode.utf16LeToUtf8Alloc(self.a, units) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.DanglingSurrogateHalf, error.ExpectedSecondSurrogateHalf, error.UnexpectedSecondSurrogateHalf => return error.Malformed,
+                } };
             },
-            8 => blk: {
+            8 => object: {
                 const value = try unsigned(try self.take(&position, @as(usize, small) + 1));
                 if (value > max_objects) return error.Malformed;
-                break :blk .{ .uid = @intCast(value) };
+                break :object .{ .uid = @intCast(value) };
             },
-            10, 13 => blk: {
+            10, 13 => object: {
                 const length = try self.size(&position, small);
                 if (length > max_objects) return error.Oversized;
                 self.allocated += length * @sizeOf(Entry);
                 if (self.allocated > max_bytes * 2) return error.Oversized;
                 const dict = tag >> 4 == 13;
-                const refs = try self.take(&position, length * self.ref_width * (if (dict) @as(usize, 2) else 1));
+                const refs = try self.take(
+                    &position,
+                    length * self.ref_width * (if (dict) @as(usize, 2) else 1),
+                );
                 if (dict) {
                     const entries = try self.a.alloc(Entry, length);
                     var keys: std.StringHashMapUnmanaged(void) = .empty;
                     for (entries, 0..) |*entry, i| {
-                        const key = (try self.reference(refs[i * self.ref_width ..][0..self.ref_width], depth + 1)).text() orelse return error.Malformed;
+                        const key = (try self.reference(
+                            refs[i * self.ref_width ..][0..self.ref_width],
+                            depth + 1,
+                        )).text() orelse return error.Malformed;
                         try self.charge(key.len);
                         if ((try keys.getOrPut(self.a, key)).found_existing) return error.Malformed;
-                        entry.* = .{ .key = key, .value = try self.reference(refs[(i + length) * self.ref_width ..][0..self.ref_width], depth + 1) };
+                        entry.* = .{ .key = key, .value = try self.reference(
+                            refs[(i + length) * self.ref_width ..][0..self.ref_width],
+                            depth + 1,
+                        ) };
                     }
-                    break :blk .{ .dict = entries };
+                    break :object .{ .dict = entries };
                 }
-                const array = try self.a.alloc(Value, length);
-                for (array, 0..) |*item, i| item.* = try self.reference(refs[i * self.ref_width ..][0..self.ref_width], depth + 1);
-                break :blk .{ .array = array };
+                const array = try self.a.alloc(Node, length);
+                for (array, 0..) |*item, i| item.* = try self.reference(
+                    refs[i * self.ref_width ..][0..self.ref_width],
+                    depth + 1,
+                );
+                break :object .{ .array = array };
             },
             else => return error.Unsupported,
         };
@@ -189,7 +227,7 @@ const Xml = struct {
             break;
         }
     }
-    fn parse(self: *Xml) Failure!Value {
+    fn parse(self: *Xml) Failure!Node {
         try self.whitespace();
         if (self.consume("<?xml ")) {
             const end = std.mem.indexOf(u8, self.bytes[self.pos..], "?>") orelse return error.Malformed;
@@ -226,7 +264,32 @@ const Xml = struct {
             }
             const semi = std.mem.indexOfScalarPos(u8, raw, i, ';') orelse return error.Malformed;
             const entity = raw[i + 1 .. semi];
-            const character: u21 = if (u.eq(entity, "amp")) '&' else if (u.eq(entity, "lt")) '<' else if (u.eq(entity, "gt")) '>' else if (u.eq(entity, "quot")) '"' else if (u.eq(entity, "apos")) '\'' else if (std.mem.startsWith(u8, entity, "#x")) std.fmt.parseInt(u21, entity[2..], 16) catch return error.Malformed else if (std.mem.startsWith(u8, entity, "#")) std.fmt.parseInt(u21, entity[1..], 10) catch return error.Malformed else return error.Unsupported;
+            const character: u21 = if (u.eq(entity, "amp")) '&' else if (u.eq(entity, "lt")) '<' else if (u.eq(
+                entity,
+                "gt",
+            )) '>' else if (u.eq(
+                entity,
+                "quot",
+            )) '"' else if (u.eq(
+                entity,
+                "apos",
+            )) '\'' else if (std.mem.startsWith(
+                u8,
+                entity,
+                "#x",
+            )) std.fmt.parseInt(
+                u21,
+                entity[2..],
+                16,
+            ) catch return error.Malformed else if (std.mem.startsWith(
+                u8,
+                entity,
+                "#",
+            )) std.fmt.parseInt(
+                u21,
+                entity[1..],
+                10,
+            ) catch return error.Malformed else return error.Unsupported;
             if (character == 0 or (character < 32 and character != 9 and character != 10 and character != 13)) return error.Malformed;
             var buffer: [4]u8 = undefined;
             const n = std.unicode.utf8Encode(character, &buffer) catch return error.Malformed;
@@ -236,7 +299,7 @@ const Xml = struct {
         if (!std.unicode.utf8ValidateSlice(result.items)) return error.Malformed;
         return result.toOwnedSlice(self.a);
     }
-    fn value(self: *Xml, depth: usize) Failure!Value {
+    fn value(self: *Xml, depth: usize) Failure!Node {
         self.objects += 1;
         if (depth >= max_depth or self.objects > max_objects) return error.Oversized;
         try self.whitespace();
@@ -244,7 +307,11 @@ const Xml = struct {
         if (self.consume("<false/>")) return .{ .boolean = false };
         if (self.consume("<string/>")) return .{ .string = "" };
         if (self.consume("<string>")) return .{ .string = try self.content("</string>") };
-        if (self.consume("<integer>")) return .{ .integer = std.fmt.parseInt(u64, std.mem.trim(u8, try self.content("</integer>"), " \t\r\n"), 0) catch return error.Malformed };
+        if (self.consume("<integer>")) return .{ .integer = std.fmt.parseInt(
+            u64,
+            std.mem.trim(u8, try self.content("</integer>"), " \t\r\n"),
+            0,
+        ) catch return error.Malformed };
         if (self.consume("<real>")) {
             _ = try self.content("</real>");
             return .none;
@@ -261,13 +328,16 @@ const Xml = struct {
                 try compact.append(self.a, byte);
             };
             const decoder = std.base64.standard.Decoder;
-            const bytes = try self.a.alloc(u8, decoder.calcSizeForSlice(compact.items) catch return error.Malformed);
+            const bytes = try self.a.alloc(
+                u8,
+                decoder.calcSizeForSlice(compact.items) catch return error.Malformed,
+            );
             decoder.decode(bytes, compact.items) catch return error.Malformed;
             return .{ .data = bytes };
         }
         if (self.consume("<array/>")) return .{ .array = &.{} };
         if (self.consume("<array>")) {
-            var array: std.ArrayList(Value) = .empty;
+            var array: std.ArrayList(Node) = .empty;
             while (true) {
                 try self.whitespace();
                 if (self.consume("</array>")) break;

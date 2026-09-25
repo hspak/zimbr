@@ -1,7 +1,12 @@
 const std = @import("std");
 const rl = @import("raylib");
 pub fn color(hex: u32) rl.Color {
-    return .{ .r = @intCast(hex >> 24), .g = @intCast((hex >> 16) & 255), .b = @intCast((hex >> 8) & 255), .a = @intCast(hex & 255) };
+    return .{
+        .r = @intCast(hex >> 24),
+        .g = @intCast((hex >> 16) & 255),
+        .b = @intCast((hex >> 8) & 255),
+        .a = @intCast(hex & 255),
+    };
 }
 pub const Palette = struct {
     ink: rl.Color,
@@ -72,11 +77,22 @@ pub fn participant(sender: []const u8, participants: []const []const u8) Partici
 }
 
 test "group participant tints survive membership ordering" {
-    const members = [_][]const u8{ "alice", "bob", "carol" };
-    const reordered = [_][]const u8{ "carol", "alice", "bob" };
+    const members = [_][]const u8{
+        "alice",
+        "bob",
+        "carol",
+    };
+    const reordered = [_][]const u8{
+        "carol",
+        "alice",
+        "bob",
+    };
     for (members, 0..) |sender, i| {
         const style = participant(sender, &members);
         try std.testing.expectEqual(style, participant(sender, &reordered));
-        for (members[0..i]) |other| try std.testing.expect(!std.meta.eql(style.bubble, participant(other, &members).bubble));
+        for (members[0..i]) |other| try std.testing.expect(!std.meta.eql(
+            style.bubble,
+            participant(other, &members).bubble,
+        ));
     }
 }

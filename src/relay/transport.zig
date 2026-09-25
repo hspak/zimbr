@@ -7,7 +7,16 @@ pub const Reader = struct {
     connection: *tls.ZrTls,
     deadline: i64,
     pub fn init(connection: *tls.ZrTls, buffer: []u8) Reader {
-        return .{ .connection = connection, .deadline = u.c.zr_monotonic_ms() + 10000, .interface = .{ .buffer = buffer, .seek = 0, .end = 0, .vtable = &.{ .stream = stream, .readVec = readVec } } };
+        return .{
+            .connection = connection,
+            .deadline = u.c.zr_monotonic_ms() + 10000,
+            .interface = .{
+                .buffer = buffer,
+                .seek = 0,
+                .end = 0,
+                .vtable = &.{ .stream = stream, .readVec = readVec },
+            },
+        };
     }
     fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
         const dest = limit.slice(try w.writableSliceGreedy(1));
@@ -55,6 +64,11 @@ pub const Writer = struct {
         return n;
     }
     fn send(self: *Writer, bytes: []const u8) !void {
-        if (tls.zr_tls_write_deadline(self.connection, bytes.ptr, bytes.len, @min(self.deadline, u.c.zr_monotonic_ms() + 10000)) != 0) return error.WriteFailed;
+        if (tls.zr_tls_write_deadline(
+            self.connection,
+            bytes.ptr,
+            bytes.len,
+            @min(self.deadline, u.c.zr_monotonic_ms() + 10000),
+        ) != 0) return error.WriteFailed;
     }
 };

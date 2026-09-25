@@ -1,9 +1,21 @@
 const clay = @import("zclay");
 const rl = @import("raylib");
-pub const Areas = struct { rail: rl.Rectangle, sidebar: rl.Rectangle, sidebar_footer: rl.Rectangle, header: rl.Rectangle, history: rl.Rectangle, composer: rl.Rectangle };
+pub const Areas = struct {
+    rail: rl.Rectangle,
+    sidebar: rl.Rectangle,
+    sidebar_footer: rl.Rectangle,
+    header: rl.Rectangle,
+    history: rl.Rectangle,
+    composer: rl.Rectangle,
+};
 fn rect(name: []const u8) rl.Rectangle {
     const b = clay.getElementData(.ID(name)).bounding_box;
-    return .{ .x = b.x, .y = b.y, .width = b.width, .height = b.height };
+    return .{
+        .x = b.x,
+        .y = b.y,
+        .width = b.width,
+        .height = b.height,
+    };
 }
 pub const footer_height: f32 = 32;
 pub const list_bottom_padding: f32 = 8;
@@ -20,7 +32,12 @@ pub fn conversationWidth(width: f32) f32 {
 }
 
 pub fn footer(r: rl.Rectangle) rl.Rectangle {
-    return .{ .x = r.x, .y = r.y + r.height - footer_height, .width = r.width, .height = footer_height };
+    return .{
+        .x = r.x,
+        .y = r.y + r.height - footer_height,
+        .width = r.width,
+        .height = footer_height,
+    };
 }
 
 pub fn frame(width: f32, height: f32, composer_height: f32) Areas {
@@ -41,5 +58,12 @@ pub fn frame(width: f32, height: f32, composer_height: f32) Areas {
         });
     });
     _ = clay.endLayout();
-    return .{ .rail = rect("rail"), .sidebar = rect("sidebar"), .sidebar_footer = rect("sidebar_footer"), .header = rect("header"), .history = rect("history"), .composer = rect("composer") };
+    return .{
+        .rail = rect("rail"),
+        .sidebar = rect("sidebar"),
+        .sidebar_footer = rect("sidebar_footer"),
+        .header = rect("header"),
+        .history = rect("history"),
+        .composer = rect("composer"),
+    };
 }

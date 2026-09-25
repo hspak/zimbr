@@ -1,26 +1,36 @@
 const std = @import("std");
+pub const Allocator = std.mem.Allocator;
 pub const c = @cImport({
     // Zig 0.16 cannot translate glibc's fortified open/openat wrappers.
     // This only affects bindings; compiled C sources retain fortification.
     @cUndef("_FORTIFY_SOURCE");
     @cInclude("platform.h");
 });
-pub const Allocator = std.mem.Allocator;
-pub fn json(a: Allocator, v: anytype) ![]const u8 {
+
+pub const IdError = Allocator.Error || error{RandomUnavailable};
+pub const TimestampError = Allocator.Error || error{InvalidTimestamp};
+
+pub fn json(a: Allocator, v: anytype) Allocator.Error![]const u8 {
     return std.json.Stringify.valueAlloc(a, v, .{});
 }
-pub fn id(a: Allocator) ![]const u8 {
+pub fn id(a: Allocator) IdError![]const u8 {
     var b: [16]u8 = undefined;
     if (c.zr_random(&b, b.len) != 0) return error.RandomUnavailable;
     b[6] = (b[6] & 15) | 64;
     b[8] = (b[8] & 63) | 128;
     const h = std.fmt.bytesToHex(b, .lower);
-    return std.fmt.allocPrint(a, "{s}-{s}-{s}-{s}-{s}", .{ h[0..8], h[8..12], h[12..16], h[16..20], h[20..32] });
+    return std.fmt.allocPrint(a, "{s}-{s}-{s}-{s}-{s}", .{
+        h[0..8],
+        h[8..12],
+        h[12..16],
+        h[16..20],
+        h[20..32],
+    });
 }
-pub fn decimal(a: Allocator, n: i64) ![]const u8 {
+pub fn decimal(a: Allocator, n: i64) Allocator.Error![]const u8 {
     return std.fmt.allocPrint(a, "{d}", .{n});
 }
-pub fn timestamp(a: Allocator, n: i64) ![]const u8 {
+pub fn timestamp(a: Allocator, n: i64) TimestampError![]const u8 {
     var buf: [48]u8 = undefined;
     const len = c.zr_timestamp(n, &buf, buf.len);
     if (len < 0) return error.InvalidTimestamp;

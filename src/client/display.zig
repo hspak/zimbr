@@ -1,6 +1,6 @@
 //! Bound presentation work without modifying stored messages or copied text.
 const std = @import("std");
-const t = @import("../protocol/types.zig");
+const t = @import("../protocol.zig").types;
 const bridge = @import("c.zig").api;
 pub const max_bytes = 4096;
 pub const max_lines = 64;
@@ -8,7 +8,11 @@ pub const shortened = "\n… Preview shortened · select and Ctrl+C to copy full
 pub const unavailable = "Text preview unavailable · select and Ctrl+C to copy";
 
 pub const unknown_grace_ms = 30_000;
-pub const MessageStatus = union(enum) { none, label: []const u8, checks: bool };
+pub const MessageStatus = union(enum) {
+    none,
+    label: []const u8,
+    checks: bool,
+};
 
 // Use the original send time so snapshots, echo matching, navigation, and
 // restarts cannot restart the grace period. Missing dates must not hide a
@@ -25,15 +29,29 @@ pub fn messageStatus(m: t.Message, now_ms: i64) MessageStatus {
         .sent => .{ .checks = false },
         .delivered => .{ .checks = true },
         .unknown => if (deferUnknown(m.timestamp, now_ms)) .none else .{ .label = "unknown" },
-        else => .{ .label = @tagName(m.observed_status) },
+        .received, .failed => .{ .label = @tagName(m.observed_status) },
     };
 }
 
-pub fn pendingStatus(a: std.mem.Allocator, state: []const u8, detail: []const u8, sent_at: []const u8, now_ms: i64) []const u8 {
+pub fn pendingStatus(
+    a: std.mem.Allocator,
+    state: []const u8,
+    detail: []const u8,
+    sent_at: []const u8,
+    now_ms: i64,
+) []const u8 {
     const uncertain = std.mem.eql(u8, state, "unknown") or std.mem.eql(u8, state, "unconfirmed");
     // Details can also describe uncertainty; defer the entire warning.
     if (uncertain and deferUnknown(sent_at, now_ms)) return "Sending…";
-    const status = if (uncertain) "Uncertain · not automatically resent" else if (std.mem.eql(u8, state, "failed")) "Failed" else if (std.mem.eql(u8, state, "sending")) "Saving / submitting…" else state;
+    const status = if (uncertain) "Uncertain · not automatically resent" else if (std.mem.eql(
+        u8,
+        state,
+        "failed",
+    )) "Failed" else if (std.mem.eql(
+        u8,
+        state,
+        "sending",
+    )) "Saving / submitting…" else state;
     return if (detail.len > 0) std.fmt.allocPrint(a, "{s} · {s}", .{ status, label(a, detail) }) catch status else status;
 }
 
@@ -67,7 +85,11 @@ test "unknown delivery status waits thirty seconds while confirmed outcomes appe
     m.direction = .incoming;
     try std.testing.expect(messageStatus(m, sent_ms + 30_000) == .none);
     m.direction = .outgoing;
-    for ([_][]const u8{ "2025-12-31T23:59:00Z", "", "invalid" }) |stamp| {
+    for ([_][]const u8{
+        "2025-12-31T23:59:00Z",
+        "",
+        "invalid",
+    }) |stamp| {
         m.timestamp = stamp;
         try std.testing.expectEqualStrings("unknown", messageStatus(m, sent_ms).label);
     }
@@ -80,16 +102,35 @@ test "pending uncertainty and its details share a grace period based on the orig
     const sent_ms: i64 = 1767225600000;
     // Both supported timestamp precisions and timezone offsets describe the
     // same send, so importing an echo must not change the deadline.
-    for ([_][]const u8{ "2026-01-01T00:00:00Z", "2026-01-01T00:00:00.000000000Z", "2025-12-31T16:00:00-08:00" }) |stamp| {
+    for ([_][]const u8{
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:00.000000000Z",
+        "2025-12-31T16:00:00-08:00",
+    }) |stamp| {
         for ([_][]const u8{ "unknown", "unconfirmed" }) |state| {
-            try std.testing.expectEqualStrings("Sending…", pendingStatus(a, state, "Outcome uncertain", stamp, sent_ms + 29_999));
-            try std.testing.expectEqualStrings("Uncertain · not automatically resent · Outcome uncertain", pendingStatus(a, state, "Outcome uncertain", stamp, sent_ms + 30_000));
+            try std.testing.expectEqualStrings(
+                "Sending…",
+                pendingStatus(a, state, "Outcome uncertain", stamp, sent_ms + 29_999),
+            );
+            try std.testing.expectEqualStrings(
+                "Uncertain · not automatically resent · Outcome uncertain",
+                pendingStatus(a, state, "Outcome uncertain", stamp, sent_ms + 30_000),
+            );
         }
-        try std.testing.expectEqualStrings("Failed · Rejected", pendingStatus(a, "failed", "Rejected", stamp, sent_ms));
-        try std.testing.expectEqualStrings("Saving / submitting…", pendingStatus(a, "sending", "", stamp, sent_ms));
+        try std.testing.expectEqualStrings(
+            "Failed · Rejected",
+            pendingStatus(a, "failed", "Rejected", stamp, sent_ms),
+        );
+        try std.testing.expectEqualStrings(
+            "Saving / submitting…",
+            pendingStatus(a, "sending", "", stamp, sent_ms),
+        );
         try std.testing.expectEqualStrings("queued", pendingStatus(a, "queued", "", stamp, sent_ms));
     }
-    try std.testing.expectEqualStrings("Uncertain · not automatically resent", pendingStatus(a, "unknown", "", "", sent_ms));
+    try std.testing.expectEqualStrings(
+        "Uncertain · not automatically resent",
+        pendingStatus(a, "unknown", "", "", sent_ms),
+    );
 }
 
 pub fn prefix(value: []const u8, limit: usize, lines: usize) []const u8 {
@@ -156,20 +197,33 @@ fn content(a: std.mem.Allocator, m: t.Message) []const u8 {
             .unsupported => "Unsupported reaction",
             .malformed => "Reaction target could not be decoded",
         };
-        return std.fmt.allocPrint(a, "Reaction {s} · {s}{s}{s}", .{ event.emoji orelse event.key orelse "", state, if (text.len > 0) "\n" else "", text }) catch state;
+        return std.fmt.allocPrint(a, "Reaction {s} · {s}{s}{s}", .{
+            event.emoji orelse event.key orelse "",
+            state,
+            if (text.len > 0) "\n" else "",
+            text,
+        }) catch state;
     }
     if (text.len > 0) {
         if (m.kind == .text or m.kind == .attachment) return text;
         if (m.kind == .reaction or m.kind == .system or m.kind == .unsupported)
-            return std.fmt.allocPrint(a, "{s} · {s}", .{ if (m.kind == .reaction) "Reaction" else if (m.kind == .system) "Conversation update" else "Unsupported content", text }) catch text;
+            return std.fmt.allocPrint(
+                a,
+                "{s} · {s}",
+                .{ if (m.kind == .reaction) "Reaction" else if (m.kind == .system) "Conversation update" else "Unsupported content", text },
+            ) catch text;
     }
-    if (m.attachments.len > 0) return std.fmt.allocPrint(a, "Attachment · {s}\n{s} · {s} bytes\nDownloads are not available yet.", .{ m.attachments[0].name, m.attachments[0].mime_type, m.attachments[0].bytes }) catch "Attachment";
+    if (m.attachments.len > 0) return std.fmt.allocPrint(a, "Attachment · {s}\n{s} · {s} bytes\nDownloads are not available yet.", .{
+        m.attachments[0].name,
+        m.attachments[0].mime_type,
+        m.attachments[0].bytes,
+    }) catch "Attachment";
     return switch (m.kind) {
         .attachment => "Attachment · preview unavailable",
         .reaction => "Reaction · unsupported content",
         .system => "Conversation update · unsupported content",
         .empty => "Empty message",
-        else => "Unsupported message · content could not be decoded",
+        .text, .unsupported => "Unsupported message · content could not be decoded",
     };
 }
 
@@ -187,7 +241,11 @@ test "display limits preserve UTF8 and never change full message content" {
     try std.testing.expectEqualStrings(normal, message(a, normal));
     try std.testing.expectEqualStrings(normal, message(a, object_marker ++ normal ++ object_marker));
     try std.testing.expectEqualStrings("", message(a, object_marker ++ "\n" ++ object_marker));
-    const long = try std.mem.concat(a, u8, &.{ "x" ** (max_bytes - 1), "👩‍💻", "tail" });
+    const long = try std.mem.concat(a, u8, &.{
+        "x" ** (max_bytes - 1),
+        "👩‍💻",
+        "tail",
+    });
     const preview = message(a, long);
     try std.testing.expect(std.unicode.utf8ValidateSlice(preview));
     try std.testing.expect(std.mem.endsWith(u8, preview, shortened));
@@ -206,7 +264,11 @@ pub fn summary(a: std.mem.Allocator, m: t.Message) []const u8 {
     const text = withoutObjectMarkers(a, m.text orelse "");
     if (text.len > 0) return text;
     var photos: usize = 0;
-    for (m.attachments) |item| if (!item.preview_artwork and (item.image != null or std.mem.startsWith(u8, item.mime_type, "image/"))) {
+    for (m.attachments) |item| if (!item.preview_artwork and (item.image != null or std.mem.startsWith(
+        u8,
+        item.mime_type,
+        "image/",
+    ))) {
         photos += 1;
     };
     if (photos == 1) return "Photo";
@@ -216,7 +278,7 @@ pub fn summary(a: std.mem.Allocator, m: t.Message) []const u8 {
         .reaction => "Reaction",
         .system => "Conversation update",
         .empty => "Empty message",
-        else => "Unsupported message",
+        .text, .unsupported => "Unsupported message",
     };
 }
 

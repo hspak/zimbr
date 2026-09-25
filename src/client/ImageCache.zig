@@ -2,10 +2,16 @@
 const std = @import("std");
 const rl = @import("raylib");
 const Media = @import("Media.zig");
-const t = @import("../protocol/types.zig");
+const t = @import("../protocol.zig").types;
 const u = @import("../common.zig");
-const Self = @This();
+const ImageCache = @This();
 const a = std.heap.c_allocator;
+
+entries: std.AutoHashMapUnmanaged([64]u8, Entry) = .empty,
+bytes: usize = 0,
+frame: u64 = 0,
+changed: bool = false,
+
 pub const Entry = struct {
     texture: ?rl.Texture2D = null,
     bytes: usize = 0,
@@ -20,17 +26,14 @@ pub const Entry = struct {
         return if (entry.state == .retired) null else entry.texture;
     }
 };
-entries: std.AutoHashMapUnmanaged([64]u8, Entry) = .empty,
-bytes: usize = 0,
-frame: u64 = 0,
-changed: bool = false,
 
-pub fn deinit(s: *Self) void {
+pub fn deinit(s: *ImageCache) void {
     var it = s.entries.valueIterator();
     while (it.next()) |entry| if (entry.texture) |texture| rl.unloadTexture(texture);
     s.entries.deinit(a);
+    s.* = undefined;
 }
-pub fn contextChanged(s: *Self, avatars: bool) void {
+pub fn contextChanged(s: *ImageCache, avatars: bool) void {
     var it = s.entries.iterator();
     while (it.next()) |entry| {
         if ((!avatars and entry.key_ptr[0] == 'a') or entry.value_ptr.texture == null) {
@@ -42,7 +45,7 @@ pub fn contextChanged(s: *Self, avatars: bool) void {
         }
     }
 }
-pub fn nextFrame(s: *Self, media: *Media) void {
+pub fn nextFrame(s: *ImageCache, media: *Media) void {
     s.frame +%= 1;
     s.changed = false;
     if (media.take()) |result| {
@@ -54,11 +57,24 @@ pub fn nextFrame(s: *Self, media: *Media) void {
                 rl.unloadTexture(texture);
                 s.bytes -= entry.bytes;
             }
-            entry.* = .{ .used = s.frame, .state = result.state, .retry_at = result.retry_at, .reason = result.reason, .attempts = attempts +| 1, .refresh_owner = result.state == .retired };
+            entry.* = .{
+                .used = s.frame,
+                .state = result.state,
+                .retry_at = result.retry_at,
+                .reason = result.reason,
+                .attempts = attempts +| 1,
+                .refresh_owner = result.state == .retired,
+            };
             if (result.pixels.data != null and result.state == .ready) {
                 const bytes = result.pixels.bytes;
                 s.makeRoom(bytes);
-                const image = rl.Image{ .data = result.pixels.data, .width = result.pixels.width, .height = result.pixels.height, .mipmaps = 1, .format = .uncompressed_r8g8b8a8 };
+                const image = rl.Image{
+                    .data = result.pixels.data,
+                    .width = result.pixels.width,
+                    .height = result.pixels.height,
+                    .mipmaps = 1,
+                    .format = .uncompressed_r8g8b8a8,
+                };
                 // makeRoom only clears entries; pointers remain valid.
                 const texture = rl.loadTextureFromImage(image) catch return;
                 rl.setTextureFilter(texture, .bilinear);
@@ -67,7 +83,10 @@ pub fn nextFrame(s: *Self, media: *Media) void {
                 entry.attempts = 0;
                 s.bytes += bytes;
             } else if (entry.retry_at != 0) {
-                const delay = @min(@as(i64, 30000), @as(i64, 2000) << @intCast(@min(entry.attempts -| 1, 4)));
+                const delay = @min(
+                    @as(i64, 30000),
+                    @as(i64, 2000) << @intCast(@min(entry.attempts -| 1, 4)),
+                );
                 entry.retry_at = @max(entry.retry_at, u.now() + delay);
             }
             s.changed = true;
@@ -91,7 +110,7 @@ pub fn nextFrame(s: *Self, media: *Media) void {
         }
     }
 }
-fn makeRoom(s: *Self, bytes: usize) void {
+fn makeRoom(s: *ImageCache, bytes: usize) void {
     while (s.bytes + bytes > Media.texture_budget) {
         var oldest: ?*Entry = null;
         var it = s.entries.valueIterator();
@@ -104,7 +123,7 @@ fn makeRoom(s: *Self, bytes: usize) void {
         entry.* = .{};
     }
 }
-pub fn get(s: *Self, media: *Media, asset: t.AssetRef) ?*Entry {
+pub fn get(s: *ImageCache, media: *Media, asset: t.AssetRef) ?*Entry {
     if (!media.avatars and asset.variant == .avatar) return null;
     const cache_key = media.key(asset);
     if (s.entries.count() >= 1024 and !s.entries.contains(cache_key)) return null;
@@ -136,10 +155,23 @@ pub fn retry(entry: *Entry) void {
     entry.retry_at = 0;
 }
 pub fn draw(texture: rl.Texture2D, bounds: rl.Rectangle) void {
-    const scale = @min(bounds.width / @as(f32, @floatFromInt(texture.width)), bounds.height / @as(f32, @floatFromInt(texture.height)));
+    const scale = @min(
+        bounds.width / @as(f32, @floatFromInt(texture.width)),
+        bounds.height / @as(f32, @floatFromInt(texture.height)),
+    );
     const w = @as(f32, @floatFromInt(texture.width)) * scale;
     const h = @as(f32, @floatFromInt(texture.height)) * scale;
-    rl.drawTexturePro(texture, .{ .x = 0, .y = 0, .width = @floatFromInt(texture.width), .height = @floatFromInt(texture.height) }, .{ .x = bounds.x + (bounds.width - w) / 2, .y = bounds.y + (bounds.height - h) / 2, .width = w, .height = h }, .{ .x = 0, .y = 0 }, 0, rl.Color.white);
+    rl.drawTexturePro(texture, .{
+        .x = 0,
+        .y = 0,
+        .width = @floatFromInt(texture.width),
+        .height = @floatFromInt(texture.height),
+    }, .{
+        .x = bounds.x + (bounds.width - w) / 2,
+        .y = bounds.y + (bounds.height - h) / 2,
+        .width = w,
+        .height = h,
+    }, .{ .x = 0, .y = 0 }, 0, rl.Color.white);
 }
 
 pub fn drawAvatar(texture: rl.Texture2D, bounds: rl.Rectangle) void {
@@ -148,7 +180,10 @@ pub fn drawAvatar(texture: rl.Texture2D, bounds: rl.Rectangle) void {
     const center = rl.Vector2{ .x = bounds.x + bounds.width / 2, .y = bounds.y + bounds.height / 2 };
     // Center-crop rectangular photos to fill the circle without stretching.
     const crop: f32 = @floatFromInt(@min(texture.width, texture.height));
-    const uv = rl.Vector2{ .x = crop / @as(f32, @floatFromInt(texture.width)) / 2, .y = crop / @as(f32, @floatFromInt(texture.height)) / 2 };
+    const uv = rl.Vector2{ .x = crop / @as(f32, @floatFromInt(texture.width)) / 2, .y = crop / @as(
+        f32,
+        @floatFromInt(texture.height),
+    ) / 2 };
     const inner = @max(0, radius - 1 / @max(1, rl.getWindowScaleDPI().x));
     const segments = 64;
     rl.gl.rlSetTexture(texture.id);
@@ -174,8 +209,18 @@ pub fn drawAvatar(texture: rl.Texture2D, bounds: rl.Rectangle) void {
     rl.gl.rlSetTexture(0);
 }
 
-fn avatarVertex(center: rl.Vector2, direction: rl.Vector2, radius: f32, uv: rl.Vector2, distance: f32, alpha: u8) void {
+fn avatarVertex(
+    center: rl.Vector2,
+    direction: rl.Vector2,
+    radius: f32,
+    uv: rl.Vector2,
+    distance: f32,
+    alpha: u8,
+) void {
     rl.gl.rlColor4ub(255, 255, 255, alpha);
-    rl.gl.rlTexCoord2f(0.5 + direction.x * uv.x * distance / radius, 0.5 + direction.y * uv.y * distance / radius);
+    rl.gl.rlTexCoord2f(
+        0.5 + direction.x * uv.x * distance / radius,
+        0.5 + direction.y * uv.y * distance / radius,
+    );
     rl.gl.rlVertex2f(center.x + direction.x * distance, center.y + direction.y * distance);
 }

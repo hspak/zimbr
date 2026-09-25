@@ -1,9 +1,9 @@
 //! Synthetic CPU hot paths, with no network, display, or persistent database.
 const std = @import("std");
 const u = @import("common.zig");
-const Db = @import("relay/Sqlite.zig");
-const Json = @import("protocol/Json.zig");
-const c = @import("client/c.zig").api;
+const Db = @import("relay.zig").Sqlite;
+const json_bounds = @import("protocol.zig").json;
+const c = @import("client.zig").c.api;
 const samples = 15;
 
 fn clock() f64 {
@@ -34,7 +34,7 @@ pub fn main(init: std.process.Init) !void {
     for (0..samples + 1) |sample| {
         var started = clock();
         for (0..10000) |_| {
-            var query = try db.prepare("SELECT value FROM bench WHERE id=?");
+            const query = try db.prepare("SELECT value FROM bench WHERE id=?");
             defer query.close();
             try query.bind(&.{.{ .int = 1 }});
             if (!try query.step() or !u.eq(query.bytes(0), "synthetic")) return error.IncorrectQuery;
@@ -43,7 +43,7 @@ pub fn main(init: std.process.Init) !void {
         started = clock();
         for (0..500) |i| {
             bytes[1] = @as(u8, @intCast(i % 26)) + 'a';
-            try Json.check(bytes, bytes.len, 32);
+            try json_bounds.check(bytes, bytes.len, 32);
         }
         const json_us = (clock() - started) / 500;
         started = clock();
@@ -58,7 +58,13 @@ pub fn main(init: std.process.Init) !void {
             raster[sample - 1] = raster_us;
         }
     }
-    const result = try u.json(init.arena.allocator(), .{ .samples = samples, .json_bytes = bytes.len, .sql_lookup = stats(&sql), .json_check = stats(&json), .opaque_text_raster = stats(&raster) });
+    const result = try u.json(init.arena.allocator(), .{
+        .samples = samples,
+        .json_bytes = bytes.len,
+        .sql_lookup = stats(&sql),
+        .json_check = stats(&json),
+        .opaque_text_raster = stats(&raster),
+    });
     _ = u.c.write(1, result.ptr, result.len);
     _ = u.c.write(1, "\n", 1);
 }

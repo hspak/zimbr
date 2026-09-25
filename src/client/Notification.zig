@@ -1,36 +1,57 @@
 //! Owned, bounded notification content, independent of replaceable UI snapshots.
 const std = @import("std");
-const t = @import("../protocol/types.zig");
+const t = @import("../protocol.zig").types;
 const display = @import("display.zig");
 const Store = @import("Store.zig");
-const Self = @This();
+const Notification = @This();
 const a = std.heap.page_allocator;
+
 arena: std.heap.ArenaAllocator,
 chat: [:0]const u8,
 summary: [:0]const u8,
 body: [:0]const u8,
 
-pub fn create(store: Store, message: t.Message) !*Self {
+pub const CreateError = std.json.ParseError(std.json.Scanner) || error{
+    DatabaseBusy,
+    DatabaseFailure,
+    DatabaseUnavailable,
+    SchemaUnsupported,
+};
+
+pub fn create(store: Store, message: t.Message) CreateError!*Notification {
     var arena = std.heap.ArenaAllocator.init(a);
     errdefer arena.deinit();
     const ar = arena.allocator();
-    var q = try store.db.prepare("SELECT record FROM records WHERE kind='conversation' AND id=?");
+    const q = try store.db.prepare("SELECT record FROM records WHERE kind='conversation' AND id=?");
     defer q.close();
     try q.bind(&.{.{ .text = message.conversation_id }});
     const directory = try store.directory(ar);
     var title = directory.name(message.service, message.sender);
     if (try q.step()) {
-        const chat = (try std.json.parseFromSlice(t.Conversation, ar, q.bytes(0), .{ .ignore_unknown_fields = true })).value;
+        const chat = (try std.json.parseFromSlice(
+            t.Conversation,
+            ar,
+            q.bytes(0),
+            .{ .ignore_unknown_fields = true },
+        )).value;
         title = directory.conversation(ar, chat);
     }
-    const summary = try ar.dupeZ(u8, display.prefix(if (title.len > 0) title else "New message", 256, 1));
+    const summary = try ar.dupeZ(
+        u8,
+        display.prefix(if (title.len > 0) title else "New message", 256, 1),
+    );
     const body = try ar.dupeZ(u8, display.prefix(display.summary(ar, message), 1024, 4));
     const chat = try ar.dupeZ(u8, try store.threadKey(ar, message.conversation_id));
-    const result = try a.create(Self);
-    result.* = .{ .arena = arena, .chat = chat, .summary = summary, .body = body };
+    const result = try a.create(Notification);
+    result.* = .{
+        .arena = arena,
+        .chat = chat,
+        .summary = summary,
+        .body = body,
+    };
     return result;
 }
-pub fn destroy(s: *Self) void {
+pub fn destroy(s: *Notification) void {
     s.arena.deinit();
     a.destroy(s);
 }
@@ -39,7 +60,18 @@ test "notification previews bound UTF8, lines and NUL without changing source co
     const store = try Store.open(":memory:");
     defer store.close();
     const source = "👋" ** 400;
-    var message = t.Message{ .id = "id", .conversation_id = "chat", .sender = "Sender\nsecond line", .direction = .incoming, .service = "imessage", .timestamp = "", .kind = .text, .text = source, .decoding = .plain, .observed_status = .received };
+    var message = t.Message{
+        .id = "id",
+        .conversation_id = "chat",
+        .sender = "Sender\nsecond line",
+        .direction = .incoming,
+        .service = "imessage",
+        .timestamp = "",
+        .kind = .text,
+        .text = source,
+        .decoding = .plain,
+        .observed_status = .received,
+    };
     const long = try create(store, message);
     defer long.destroy();
     try std.testing.expectEqualStrings("Sender", long.summary);
@@ -59,12 +91,41 @@ test "new notifications resolve names, preserve captions and titles, and respect
     defer arena.deinit();
     const ar = arena.allocator();
     const u = @import("../common.zig");
-    const identity = t.Identity{ .id = "person", .revision = "1", .service = "imessage", .address = "peer@example.invalid", .display_name = "Zoë 👋", .match_state = .matched };
+    const identity = t.Identity{
+        .id = "person",
+        .revision = "1",
+        .service = "imessage",
+        .address = "peer@example.invalid",
+        .display_name = "Zoë 👋",
+        .match_state = .matched,
+    };
     _ = try store.upsert(ar, "identity", try u.json(ar, identity));
-    var conversation = t.Conversation{ .id = "chat", .revision = "1", .service = "imessage", .participants = &.{identity.address} };
+    var conversation = t.Conversation{
+        .id = "chat",
+        .revision = "1",
+        .service = "imessage",
+        .participants = &.{identity.address},
+    };
     _ = try store.upsert(ar, "conversation", try u.json(ar, conversation));
-    const photo = t.Attachment{ .id = "photo", .name = "photo.png", .mime_type = "image/png", .bytes = "123" };
-    var message = t.Message{ .id = "message", .conversation_id = "chat", .sender = identity.address, .direction = .incoming, .service = "imessage", .timestamp = "", .kind = .attachment, .text = "A caption 👋", .decoding = .plain, .observed_status = .received, .attachments = &.{ photo, photo } };
+    const photo = t.Attachment{
+        .id = "photo",
+        .name = "photo.png",
+        .mime_type = "image/png",
+        .bytes = "123",
+    };
+    var message = t.Message{
+        .id = "message",
+        .conversation_id = "chat",
+        .sender = identity.address,
+        .direction = .incoming,
+        .service = "imessage",
+        .timestamp = "",
+        .kind = .attachment,
+        .text = "A caption 👋",
+        .decoding = .plain,
+        .observed_status = .received,
+        .attachments = &.{ photo, photo },
+    };
     const caption = try create(store, message);
     defer caption.destroy();
     try std.testing.expectEqualStrings(identity.display_name.?, caption.summary);

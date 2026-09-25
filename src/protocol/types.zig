@@ -16,16 +16,35 @@ pub const max_inline_parts = 128;
 
 // Null enrichment fields mean "not supplied". A complete, empty aggregate
 // explicitly clears earlier content. No existing v1 enum is extended.
-pub const EnrichmentState = enum { pending, complete, unavailable, unsupported, malformed, oversized };
+pub const EnrichmentStatus = enum {
+    pending,
+    complete,
+    unavailable,
+    unsupported,
+    malformed,
+    oversized,
+};
 pub const AssetRef = struct {
     id: []const u8,
     version: []const u8,
-    variant: enum { avatar, inline_image, viewer },
+    variant: enum {
+        avatar,
+        inline_image,
+        viewer,
+    },
     mime_type: ?[]const u8 = null,
     bytes: ?[]const u8 = null,
     width: ?u32 = null,
     height: ?u32 = null,
-    availability: enum { pending, ready, not_local, unavailable, unsupported, oversized, retired } = .pending,
+    availability: enum {
+        pending,
+        ready,
+        not_local,
+        unavailable,
+        unsupported,
+        oversized,
+        retired,
+    } = .pending,
     reason: ?[]const u8 = null,
     still_preview: bool = false,
 };
@@ -36,12 +55,18 @@ pub const Identity = struct {
     address: []const u8,
     display_name: ?[]const u8 = null,
     avatar: ?AssetRef = null,
-    match_state: enum { pending, matched, unmatched, ambiguous, unavailable } = .pending,
+    match_state: enum {
+        pending,
+        matched,
+        unmatched,
+        ambiguous,
+        unavailable,
+    } = .pending,
     freshness: enum { fresh, stale } = .fresh,
 };
 pub const Aggregate = struct { total: usize = 0, complete: bool = true };
 pub const Enrichment = struct {
-    state: EnrichmentState = .pending,
+    state: EnrichmentStatus = .pending,
     part_mapping: enum { resolved, unresolved } = .unresolved,
     attachments: Aggregate = .{},
     previews: Aggregate = .{},
@@ -50,7 +75,11 @@ pub const Enrichment = struct {
 };
 pub const MessagePart = struct {
     id: []const u8,
-    kind: enum { text, attachment, link_preview },
+    kind: enum {
+        text,
+        attachment,
+        link_preview,
+    },
     // Source indices are supplied only when verified from the body structure.
     source_index: ?u32 = null,
     text: ?[]const u8 = null,
@@ -71,7 +100,7 @@ pub const LinkPreview = struct {
     site_name: ?[]const u8 = null,
     image: ?AssetRef = null,
     icon: ?AssetRef = null,
-    state: EnrichmentState = .pending,
+    state: EnrichmentStatus = .pending,
 };
 pub const ReactionActor = struct {
     address: ?[]const u8 = null,
@@ -91,10 +120,22 @@ pub const ReactionEvent = struct {
     part_id: ?[]const u8 = null,
     part_state: enum { resolved, unresolved } = .unresolved,
     actor: ReactionActor,
-    operation: enum { add, remove, current, retired, unknown },
+    operation: enum {
+        add,
+        remove,
+        current,
+        retired,
+        unknown,
+    },
     key: ?[]const u8 = null,
     emoji: ?[]const u8 = null,
-    resolution: enum { pending, resolved, unavailable, unsupported, malformed } = .pending,
+    resolution: enum {
+        pending,
+        resolved,
+        unavailable,
+        unsupported,
+        malformed,
+    } = .pending,
 };
 pub const Conversation = struct {
     id: []const u8 = "",
@@ -119,7 +160,14 @@ pub const Attachment = struct {
     preview_artwork: bool = false,
 };
 // A sidebar projection, never a replacement for the canonical message record.
-pub const ConversationPreview = struct { conversation_id: []const u8, message_id: []const u8, revision: []const u8, timestamp: []const u8, kind: []const u8, text: []const u8 };
+pub const ConversationPreview = struct {
+    conversation_id: []const u8,
+    message_id: []const u8,
+    revision: []const u8,
+    timestamp: []const u8,
+    kind: []const u8,
+    text: []const u8,
+};
 pub const Message = struct {
     id: []const u8 = "",
     revision: []const u8 = "0",
@@ -128,11 +176,31 @@ pub const Message = struct {
     direction: enum { incoming, outgoing },
     service: []const u8,
     timestamp: []const u8,
-    kind: enum { text, attachment, reaction, system, unsupported, empty },
+    kind: enum {
+        text,
+        attachment,
+        reaction,
+        system,
+        unsupported,
+        empty,
+    },
     text: ?[]const u8 = null,
-    decoding: enum { plain, attributed, empty, unsupported, malformed, oversized },
+    decoding: enum {
+        plain,
+        attributed,
+        empty,
+        unsupported,
+        malformed,
+        oversized,
+    },
     attachments: []const Attachment = &.{},
-    observed_status: enum { received, sent, delivered, failed, unknown },
+    observed_status: enum {
+        received,
+        sent,
+        delivered,
+        failed,
+        unknown,
+    },
     parts: ?[]const MessagePart = null,
     enrichment: ?Enrichment = null,
     link_previews: ?[]const LinkPreview = null,
@@ -146,22 +214,52 @@ pub const Target = struct {
     conversation_id: ?[]const u8 = null,
     recipient: ?struct { address: []const u8, service: []const u8 } = null,
 };
-pub const SendInput = struct { request_id: []const u8, server_epoch: []const u8, target: Target, text: []const u8 };
-pub const SendState = enum { queued, dispatching, submitted, delivered, failed, unknown };
-pub const SafeError = struct { code: []const u8, message: []const u8, outcome: enum { unstarted, uncertain } = .unstarted };
+pub const SendInput = struct {
+    request_id: []const u8,
+    server_epoch: []const u8,
+    target: Target,
+    text: []const u8,
+};
+pub const SendStatus = enum {
+    queued,
+    dispatching,
+    submitted,
+    delivered,
+    failed,
+    unknown,
+};
 pub const SendRequest = struct {
     request_id: []const u8,
     server_epoch: []const u8,
     revision: []const u8 = "0",
     target: Target,
     text: []const u8,
-    state: SendState = .queued,
+    state: SendStatus = .queued,
     message_id: ?[]const u8 = null,
     // Presentation-only echo while the observation window is still open.
     // It may be withdrawn if another matching message appears.
     candidate_message_id: ?[]const u8 = null,
     error_info: ?SafeError = null,
 };
+
+pub const SafeError = struct {
+    code: []const u8,
+    message: []const u8,
+    outcome: enum { unstarted, uncertain } = .unstarted,
+};
+
+pub const ValidateError = error{
+    InvalidRequest,
+    TextTooLarge,
+    UnsupportedTarget,
+};
+pub const ParseCursorError = error{ InvalidRequest, ResyncRequired };
+pub const NormalizeError = u.Allocator.Error || error{
+    InvalidRequest,
+    TextTooLarge,
+    UnsupportedTarget,
+};
+
 pub fn uuid(s: []const u8) bool {
     if (s.len != 36) return false;
     for (s, 0..) |ch, i| {
@@ -184,10 +282,14 @@ pub fn validAddress(s: []const u8) bool {
     for (s) |ch| if (ch <= 32 or ch >= 127 or std.mem.indexOfScalar(u8, "<>\\\"(),;:", ch) != null) return false;
     return true;
 }
-pub fn validate(v: SendInput) !void {
+pub fn validate(v: SendInput) ValidateError!void {
     if (!uuid(v.request_id) or !uuid(v.server_epoch)) return error.InvalidRequest;
     if (v.text.len > max_text) return error.TextTooLarge;
-    if (v.text.len == 0 or !std.unicode.utf8ValidateSlice(v.text) or std.mem.indexOfScalar(u8, v.text, 0) != null) return error.InvalidRequest;
+    if (v.text.len == 0 or !std.unicode.utf8ValidateSlice(v.text) or std.mem.indexOfScalar(
+        u8,
+        v.text,
+        0,
+    ) != null) return error.InvalidRequest;
     if ((v.target.conversation_id != null) == (v.target.recipient != null)) return error.InvalidRequest;
     if (v.target.conversation_id) |id| {
         if (!uuid(id)) return error.InvalidRequest;
@@ -197,10 +299,10 @@ pub fn validate(v: SendInput) !void {
         if (!validAddress(r.address)) return error.InvalidRequest;
     }
 }
-pub fn cursor(a: u.Allocator, epoch: []const u8, seq: i64) ![]const u8 {
+pub fn cursor(a: u.Allocator, epoch: []const u8, seq: i64) u.Allocator.Error![]const u8 {
     return std.fmt.allocPrint(a, "{s}:{d}", .{ epoch, seq });
 }
-pub fn parseCursor(s: []const u8, epoch: []const u8) !i64 {
+pub fn parseCursor(s: []const u8, epoch: []const u8) ParseCursorError!i64 {
     if (s.len < 38 or s[36] != ':' or !u.eq(s[0..36], epoch)) return error.ResyncRequired;
     const seq = std.fmt.parseInt(i64, s[37..], 10) catch return error.InvalidRequest;
     if (seq < 0) return error.InvalidRequest;
@@ -215,17 +317,23 @@ test "send input validation never guesses a service or address" {
 }
 test "cursor binds sequence to epoch without floating point" {
     const e = "12345678-1234-1234-1234-123456789012";
-    try std.testing.expectEqual(@as(i64, 9007199254740993), try parseCursor(e ++ ":9007199254740993", e));
+    try std.testing.expectEqual(
+        @as(i64, 9007199254740993),
+        try parseCursor(e ++ ":9007199254740993", e),
+    );
     try std.testing.expectError(error.ResyncRequired, parseCursor(e ++ ":1", "other"));
 }
 
 /// UUID spelling is normalized before idempotency lookup; changing letter case
 /// cannot turn the same client identity into another dispatch.
-pub fn normalize(a: u.Allocator, value: SendInput) !SendInput {
+pub fn normalize(a: u.Allocator, value: SendInput) NormalizeError!SendInput {
     try validate(value);
     var v = value;
     v.request_id = try std.ascii.allocLowerString(a, v.request_id);
     v.server_epoch = try std.ascii.allocLowerString(a, v.server_epoch);
-    if (v.target.conversation_id) |id| v.target.conversation_id = try std.ascii.allocLowerString(a, id);
+    if (v.target.conversation_id) |id| v.target.conversation_id = try std.ascii.allocLowerString(
+        a,
+        id,
+    );
     return v;
 }

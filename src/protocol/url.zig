@@ -10,7 +10,10 @@ pub fn safe(url: []const u8) bool {
         else => {},
     };
     const parsed = std.Uri.parse(url) catch return false;
-    if (!std.ascii.eqlIgnoreCase(parsed.scheme, "https") and !std.ascii.eqlIgnoreCase(parsed.scheme, "http")) return false;
+    if (!std.ascii.eqlIgnoreCase(parsed.scheme, "https") and !std.ascii.eqlIgnoreCase(
+        parsed.scheme,
+        "http",
+    )) return false;
     if (parsed.user != null or parsed.password != null or parsed.host == null) return false;
     const host = parsed.host.?.percent_encoded;
     if (host.len == 0 or std.mem.indexOfScalar(u8, host, '%') != null) return false;

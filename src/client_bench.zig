@@ -1,9 +1,9 @@
 //! Synthetic storage/publication benchmark. No relay, account, or real cache.
 const std = @import("std");
 const u = @import("common.zig");
-const t = @import("protocol/types.zig");
-const Store = @import("client/Store.zig");
-const SharedSnapshot = @import("client/SharedSnapshot.zig");
+const t = @import("protocol.zig").types;
+const Store = @import("client.zig").Store;
+const SharedSnapshot = @import("client.zig").SharedSnapshot;
 const samples = 15;
 
 fn clock() f64 {
@@ -15,7 +15,19 @@ fn record(store: Store, index: usize, revision: usize, text: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const message = t.Message{ .id = try std.fmt.allocPrint(a, "m{d:0>8}", .{index}), .revision = try std.fmt.allocPrint(a, "{d}", .{revision}), .conversation_id = "bench", .sender = "fixture@example.invalid", .direction = .incoming, .service = "imessage", .timestamp = "2026-01-01T00:00:00Z", .kind = .text, .text = text, .decoding = .plain, .observed_status = .received };
+    const message = t.Message{
+        .id = try std.fmt.allocPrint(a, "m{d:0>8}", .{index}),
+        .revision = try std.fmt.allocPrint(a, "{d}", .{revision}),
+        .conversation_id = "bench",
+        .sender = "fixture@example.invalid",
+        .direction = .incoming,
+        .service = "imessage",
+        .timestamp = "2026-01-01T00:00:00Z",
+        .kind = .text,
+        .text = text,
+        .decoding = .plain,
+        .observed_status = .received,
+    };
     _ = try store.upsert(a, "message", try u.json(a, message));
 }
 fn stats(values: *[samples]f64) struct { p50_ms: f64, p95_ms: f64 } {
@@ -59,7 +71,15 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     if (previous.snapshot.messages.len != count + samples) return error.IncorrectMessageCount;
-    const result = try u.json(init.arena.allocator(), .{ .messages = count, .text_bytes = bytes, .samples = samples, .cold_ms = cold, .unchanged = stats(&unchanged), .edit = stats(&edits), .append = stats(&appends) });
+    const result = try u.json(init.arena.allocator(), .{
+        .messages = count,
+        .text_bytes = bytes,
+        .samples = samples,
+        .cold_ms = cold,
+        .unchanged = stats(&unchanged),
+        .edit = stats(&edits),
+        .append = stats(&appends),
+    });
     _ = u.c.write(1, result.ptr, result.len);
     _ = u.c.write(1, "\n", 1);
 }

@@ -1,14 +1,18 @@
 const std = @import("std");
+const builtin = @import("builtin");
+const options = @import("options");
+const source_probe = @import("relay.zig").adapter.enrichment_probe;
+const Sqlite = @import("relay.zig").Sqlite;
 const u = @import("common.zig");
-const t = @import("protocol/types.zig");
-const Journal = @import("relay/Journal.zig");
-const Core = @import("relay/Core.zig");
-const Server = @import("relay/Server.zig");
-const Tls = @import("relay/Tls.zig");
-const Contacts = @import("relay/adapter/Contacts.zig");
-const Assets = @import("relay/Assets.zig");
-const Adapter = if (@import("options").fake) @import("relay/adapter/fake.zig") else @import("relay/adapter/macos.zig");
-const fake = @import("options").fake;
+const t = @import("protocol.zig").types;
+const Journal = @import("relay.zig").Journal;
+const Core = @import("relay.zig").Core;
+const Server = @import("relay.zig").Server;
+const Tls = @import("relay.zig").Tls;
+const contact_directory = @import("relay.zig").adapter.contacts;
+const Assets = @import("relay.zig").Assets;
+const adapter_api = if (options.fake) @import("relay.zig").adapter.fake else @import("relay.zig").adapter.macos;
+const fake = options.fake;
 pub fn main(init: std.process.Init) void {
     run(init) catch |err| {
         std.debug.print("relay: {s}\n", .{@errorName(err)});
@@ -20,11 +24,15 @@ fn run(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(a);
     // Private bounded child mode: no HOME, TLS config, Contacts enumeration or
     // permission request. Its exit status carries only the public OS decision.
-    if (args.len == 2 and u.eq(args[1], "contacts-permission-status")) Contacts.permissionProbeExit();
+    if (args.len == 2 and u.eq(args[1], "contacts-permission-status")) contact_directory.permissionProbeExit();
     // Contact reads use bounded private pipes and the same installed identity.
-    if (args.len == 2 and u.eq(args[1], "contacts-reader")) Contacts.readerProbeExit();
+    if (args.len == 2 and u.eq(args[1], "contacts-reader")) contact_directory.readerProbeExit();
     const home = init.environ_map.get("HOME") orelse return error.HomeRequired;
-    var data: []const u8 = try std.fmt.allocPrint(a, "{s}/Library/Application Support/Zimbr", .{home});
+    var data: []const u8 = try std.fmt.allocPrint(
+        a,
+        "{s}/Library/Application Support/Zimbr",
+        .{home},
+    );
     var source: []const u8 = try std.fmt.allocPrint(a, "{s}/Library/Messages/chat.db", .{home});
     var source_explicit = false;
     var config_path: ?[]const u8 = null;
@@ -81,17 +89,17 @@ fn run(init: std.process.Init) !void {
         return;
     }
     if (u.eq(cmd, "check-config")) {
-        const tls = try Tls.load(a, tls_path);
+        var tls = try Tls.load(a, tls_path);
         defer tls.deinit();
         try printJson(a, try tls.info(a));
         return;
     }
     if (u.eq(cmd, "doctor") or u.eq(cmd, "probe")) {
-        if (request_contacts) _ = try Contacts.requestPermission();
-        const tls = try Tls.load(a, tls_path);
+        if (request_contacts) _ = try contact_directory.requestPermission();
+        var tls = try Tls.load(a, tls_path);
         defer tls.deinit();
         const tls_info = try tls.info(a);
-        const opened = Adapter.open(a, source_path);
+        const opened = adapter_api.open(a, source_path);
         if (opened) |adapter| {
             defer adapter.close();
             var decoded: usize = 0;
@@ -104,18 +112,39 @@ fn run(init: std.process.Init) !void {
                 }
             }
             var automation_error: ?[]const u8 = null;
-            const automation: ?bool = if (check_automation) blk: {
-                if (fake) break :blk true;
-                Adapter.automation(a, "check", "", "") catch |err| {
-                    automation_error = Adapter.automationReason(err);
-                    break :blk false;
+            const automation: ?bool = if (check_automation) automation: {
+                if (comptime fake) break :automation true;
+                adapter_api.automation(a, "check", "", "") catch |err| {
+                    automation_error = adapter_api.automationReason(err);
+                    break :automation false;
                 };
-                break :blk true;
+                break :automation true;
             } else null;
-            const enrichment = if (enrichment_probe) try @import("relay/adapter/enrichment_probe.zig").run(a, adapter) else null;
-            try printJson(a, .{ .database_readable = true, .schema_supported = true, .source_features = adapter.features, .enrichment_probe = enrichment, .recent_decoded = decoded, .recent_other = unsupported, .pending = pending, .tls = tls_info, .automation_ready = automation, .automation_error = automation_error, .real_send_verified = false, .contacts_permission = Contacts.permission(), .contacts_phone_region = tls.config.contacts_phone_region, .suggested_contacts_phone_region = try Contacts.suggestedRegion(a) });
+            const enrichment = if (enrichment_probe) try source_probe.run(a, adapter) else null;
+            try printJson(a, .{
+                .database_readable = true,
+                .schema_supported = true,
+                .source_features = adapter.features,
+                .enrichment_probe = enrichment,
+                .recent_decoded = decoded,
+                .recent_other = unsupported,
+                .pending = pending,
+                .tls = tls_info,
+                .automation_ready = automation,
+                .automation_error = automation_error,
+                .real_send_verified = false,
+                .contacts_permission = contact_directory.permission(),
+                .contacts_phone_region = tls.config.contacts_phone_region,
+                .suggested_contacts_phone_region = try contact_directory.suggestedRegion(a),
+            });
         } else |err| {
-            try printJson(a, .{ .database_readable = false, .tls = tls_info, .error_code = @errorName(err), .automation_ready = false, .contacts_permission = Contacts.permission() });
+            try printJson(a, .{
+                .database_readable = false,
+                .tls = tls_info,
+                .error_code = @errorName(err),
+                .automation_ready = false,
+                .contacts_permission = contact_directory.permission(),
+            });
             std.process.exit(1);
         }
         return;
@@ -130,9 +159,12 @@ fn run(init: std.process.Init) !void {
     const tls = try Tls.load(a, tls_path);
     // The TLS context lives as long as detached connection threads.
     const tls_info = try tls.info(a);
-    if (tls_info.expiry_warning) std.debug.print("relay: certificate expires within 30 days; renew and restart\n", .{});
-    if (fake) {
-        const db = try @import("relay/Sqlite.zig").open(source_path, true);
+    if (tls_info.expiry_warning) std.debug.print(
+        "relay: certificate expires within 30 days; renew and restart\n",
+        .{},
+    );
+    if (comptime fake) {
+        const db = try Sqlite.open(source_path, true);
         defer db.close();
         if (try db.scalar("SELECT count(*) FROM zimbr_fixture WHERE key='synthetic' AND value='yes'") != 1) return error.NotAFixture;
     }
@@ -141,21 +173,40 @@ fn run(init: std.process.Init) !void {
     if (lock_fd < 0) return error.AlreadyRunning;
     // Retain the lock for the lifetime of this process, including its workers.
     const core = try a.create(Core);
-    core.* = .{ .io = init.io, .journal = try Journal.open(db_path), .source_path = source_path, .event_limit = event_limit, .automation_ready = if (read_only) false else fake, .automation_error = if (read_only) "read_only_mode" else "automation_unverified" };
+    core.* = .{
+        .io = init.io,
+        .journal = try Journal.open(db_path),
+        .source_path = source_path,
+        .event_limit = event_limit,
+        .automation_ready = if (read_only) false else fake,
+        .automation_error = if (read_only) "read_only_mode" else "automation_unverified",
+    };
     core.contacts_phone_region = tls.config.contacts_phone_region;
-    const attachment_root = if (fake) try std.fmt.allocPrint(a, "{s}.attachments", .{source}) else try std.fmt.allocPrint(a, "{s}/Library/Messages/Attachments", .{home});
+    const attachment_root = if (comptime fake) try std.fmt.allocPrint(
+        a,
+        "{s}.attachments",
+        .{source},
+    ) else try std.fmt.allocPrint(
+        a,
+        "{s}/Library/Messages/Attachments",
+        .{home},
+    );
     core.assets_service = Assets.init(a, init.io, data, attachment_root) catch null;
     core.assets_reason = if (core.assets_service != null) "" else "image_service_unavailable";
     core.journal.changed = .{ .signal = &core.changed, .io = init.io };
     try core.journal.recover(a);
-    if (!fake and @import("builtin").os.tag == .macos) {
-        Contacts.startAuthorizationChecks();
-        const authorization = try std.Thread.spawn(.{}, Contacts.authorizationLoop, .{core});
+    if (comptime !fake and builtin.os.tag == .macos) {
+        contact_directory.startAuthorizationChecks();
+        const authorization = try std.Thread.spawn(
+            .{},
+            contact_directory.authorizationLoop,
+            .{core},
+        );
         authorization.detach();
     }
     const ingestion = try std.Thread.spawn(.{}, Core.ingestLoop, .{core});
     ingestion.detach();
-    const contacts = try std.Thread.spawn(.{}, Contacts.loop, .{core});
+    const contacts = try std.Thread.spawn(.{}, contact_directory.loop, .{core});
     contacts.detach();
     if (core.assets_service != null) {
         const media = try std.Thread.spawn(.{}, Assets.loop, .{core});
@@ -166,10 +217,10 @@ fn run(init: std.process.Init) !void {
         sender.detach();
     }
     var server: Server = .{ .core = core, .tls = tls };
-    if (!fake and @import("builtin").os.tag == .macos) {
+    if (comptime !fake and builtin.os.tag == .macos) {
         var state = NativeServer{ .server = &server };
         const listener = try std.Thread.spawn(.{}, NativeServer.run, .{&state});
-        while (!state.done.load(.acquire)) Contacts.pumpMain();
+        while (!state.done.load(.acquire)) contact_directory.pumpMain();
         listener.join();
         if (state.failure) |err| return err;
     } else try server.run();
@@ -177,7 +228,7 @@ fn run(init: std.process.Init) !void {
 const NativeServer = struct {
     server: *Server,
     done: std.atomic.Value(bool) = .init(false),
-    failure: ?anyerror = null,
+    failure: ?Server.RunError = null,
     fn run(self: *NativeServer) void {
         self.server.run() catch |err| {
             self.failure = err;
@@ -191,14 +242,14 @@ fn printJson(a: u.Allocator, value: anytype) !void {
     _ = u.c.write(1, "\n", 1);
 }
 test {
-    _ = @import("protocol/types.zig");
+    _ = @import("protocol.zig").types;
     _ = @import("protocol/legacy_v1_test.zig");
-    _ = @import("relay/adapter/decoder.zig");
-    _ = @import("relay/adapter/body_parts.zig");
-    _ = @import("relay/adapter/link_preview.zig");
-    _ = @import("relay/adapter/reactions.zig");
-    _ = @import("relay/Journal.zig");
-    _ = @import("relay/Mutex.zig");
-    _ = Contacts;
+    _ = @import("relay.zig").adapter.decoder;
+    _ = @import("relay.zig").adapter.body_parts;
+    _ = @import("relay.zig").adapter.link_preview;
+    _ = @import("relay.zig").adapter.reactions;
+    _ = @import("relay.zig").Journal;
+    _ = @import("relay.zig").Mutex;
+    _ = contact_directory;
     _ = Assets;
 }

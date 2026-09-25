@@ -3,10 +3,22 @@
 //! text + attachment fallback. Nothing is instantiated or searched heuristically.
 const std = @import("std");
 const u = @import("../../common.zig");
-const t = @import("../../protocol/types.zig");
-const Failure = error{ Malformed, Unsupported, Oversized, OutOfMemory };
+const t = @import("../../protocol.zig").types;
+const Failure = error{
+    Malformed,
+    Unsupported,
+    Oversized,
+    OutOfMemory,
+};
 const Entry = struct { key: []const u8, value: Object };
-const Object = union(enum) { pending, class: []const u8, text: []const u8, number: i64, dict: []Entry, attributed: Body };
+const Object = union(enum) {
+    pending,
+    class: []const u8,
+    text: []const u8,
+    number: i64,
+    dict: []Entry,
+    attributed: Body,
+};
 const Range = struct { length: usize, attributes: []Entry };
 const Body = struct { text: []const u8, ranges: []Range };
 const Reader = struct {
@@ -28,8 +40,16 @@ const Reader = struct {
     fn integer(self: *Reader, signed: bool) Failure!i64 {
         const lead = try self.byte();
         return switch (lead) {
-            0x81 => if (signed) std.mem.readInt(i16, (try self.take(2))[0..2], .little) else std.mem.readInt(u16, (try self.take(2))[0..2], .little),
-            0x82 => if (signed) std.mem.readInt(i32, (try self.take(4))[0..4], .little) else std.mem.readInt(u32, (try self.take(4))[0..4], .little),
+            0x81 => if (signed) std.mem.readInt(i16, (try self.take(2))[0..2], .little) else std.mem.readInt(
+                u16,
+                (try self.take(2))[0..2],
+                .little,
+            ),
+            0x82 => if (signed) std.mem.readInt(i32, (try self.take(4))[0..4], .little) else std.mem.readInt(
+                u32,
+                (try self.take(4))[0..4],
+                .little,
+            ),
             0x80, 0x83...0x86 => error.Unsupported,
             else => if (signed) @as(i8, @bitCast(lead)) else lead,
         };
@@ -77,7 +97,17 @@ const Reader = struct {
         const name = try self.shared();
         const version = try self.integer(true);
         var allowed = false;
-        for ([_][]const u8{ "NSObject", "NSValue", "NSNumber", "NSString", "NSMutableString", "NSDictionary", "NSMutableDictionary", "NSAttributedString", "NSMutableAttributedString" }) |known| if (u.eq(name, known)) {
+        for ([_][]const u8{
+            "NSObject",
+            "NSValue",
+            "NSNumber",
+            "NSString",
+            "NSMutableString",
+            "NSDictionary",
+            "NSMutableDictionary",
+            "NSAttributedString",
+            "NSMutableAttributedString",
+        }) |known| if (u.eq(name, known)) {
             allowed = true;
             break;
         };
@@ -120,8 +150,15 @@ const Reader = struct {
                 if (std.mem.startsWith(u8, bytes, "\xff\xfe")) {
                     if (bytes.len % 2 != 0) return error.Malformed;
                     const units = try self.a.alloc(u16, (bytes.len - 2) / 2);
-                    for (units, 0..) |*unit, i| unit.* = std.mem.readInt(u16, bytes[2 + i * 2 ..][0..2], .little);
-                    break :result .{ .text = std.unicode.utf16LeToUtf8Alloc(self.a, units) catch return error.Malformed };
+                    for (units, 0..) |*unit, i| unit.* = std.mem.readInt(
+                        u16,
+                        bytes[2 + i * 2 ..][0..2],
+                        .little,
+                    );
+                    break :result .{ .text = std.unicode.utf16LeToUtf8Alloc(self.a, units) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.DanglingSurrogateHalf, error.ExpectedSecondSurrogateHalf, error.UnexpectedSecondSurrogateHalf => return error.Malformed,
+                    } };
                 }
                 if (!std.unicode.utf8ValidateSlice(bytes)) return error.Malformed;
                 break :result .{ .text = bytes };
@@ -157,11 +194,11 @@ const Reader = struct {
                     const format = try self.integer(true);
                     const length = try self.readLength();
                     if (format < 0 or length == 0) return error.Malformed;
-                    const attributes = formats.get(format) orelse blk: {
+                    const attributes = formats.get(format) orelse attributes: {
                         const dict = try self.groupedObject(depth + 1);
                         if (dict != .dict) return error.Malformed;
                         try formats.put(self.a, format, dict.dict);
-                        break :blk dict.dict;
+                        break :attributes dict.dict;
                     };
                     try ranges.append(self.a, .{ .length = length, .attributes = attributes });
                 }
@@ -174,11 +211,20 @@ const Reader = struct {
         return result;
     }
 };
-pub fn decode(a: u.Allocator, bytes: []const u8, text: []const u8, attachments: []const t.Attachment) Failure![]t.MessagePart {
+pub fn decode(
+    a: u.Allocator,
+    bytes: []const u8,
+    text: []const u8,
+    attachments: []const t.Attachment,
+) Failure![]t.MessagePart {
     if (bytes.len > t.max_decode) return error.Oversized;
     const header = "\x04\x0bstreamtyped\x81\xe8\x03";
     if (!std.mem.startsWith(u8, bytes, header)) return error.Unsupported;
-    var reader = Reader{ .a = a, .bytes = bytes, .pos = header.len };
+    var reader = Reader{
+        .a = a,
+        .bytes = bytes,
+        .pos = header.len,
+    };
     const object = try reader.groupedObject(0);
     if (object != .attributed or reader.pos != bytes.len or !u.eq(object.attributed.text, text)) return error.Unsupported;
     // UTF-16 range boundaries must coincide with whole Unicode scalars.
@@ -233,10 +279,21 @@ pub fn decode(a: u.Allocator, bytes: []const u8, text: []const u8, attachments: 
             };
             const match = matched orelse return error.Unsupported;
             try used.put(a, match, {});
-            try parts.append(a, .{ .id = id, .source_index = part_index, .kind = .attachment, .attachment_id = match });
+            try parts.append(a, .{
+                .id = id,
+                .source_index = part_index,
+                .kind = .attachment,
+                .attachment_id = match,
+            });
         } else {
             if (std.mem.indexOf(u8, text[start..end], "\xef\xbf\xbc") != null) return error.Unsupported;
-            try parts.append(a, .{ .id = id, .source_index = part_index, .kind = .text, .text_start = start, .text_length = end - start });
+            try parts.append(a, .{
+                .id = id,
+                .source_index = part_index,
+                .kind = .text,
+                .text_start = start,
+                .text_length = end - start,
+            });
         }
     }
     if (cursor != boundaries.items.len - 1) return error.Malformed;
@@ -252,16 +309,27 @@ test "Foundation ranges locate image GUIDs independently of SQL order and preser
     for ([_][]const u8{ "22222222-2222-2222-2222-222222222222", "11111111-1111-1111-1111-111111111111" }, 0..) |guid, i| {
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(guid, &digest, .{});
-        attachments[i] = .{ .id = try a.dupe(u8, &std.fmt.bytesToHex(digest, .lower)), .name = "fixture", .mime_type = "image/png", .bytes = "0" };
+        attachments[i] = .{
+            .id = try a.dupe(u8, &std.fmt.bytesToHex(digest, .lower)),
+            .name = "fixture",
+            .mime_type = "image/png",
+            .bytes = "0",
+        };
     }
     const bytes = @embedFile("fixtures/foundation-parts.bin");
     const text = @embedFile("fixtures/foundation-parts.txt");
     const parts = try decode(a, bytes, text, &attachments);
     try std.testing.expectEqual(@as(usize, 4), parts.len);
-    try std.testing.expectEqualStrings("Caption 👩🏽‍💻 ", text[parts[0].text_start.?..][0..parts[0].text_length.?]);
+    try std.testing.expectEqualStrings(
+        "Caption 👩🏽‍💻 ",
+        text[parts[0].text_start.?..][0..parts[0].text_length.?],
+    );
     try std.testing.expectEqualStrings(attachments[1].id, parts[1].attachment_id.?);
     try std.testing.expectEqualStrings(attachments[0].id, parts[3].attachment_id.?);
     try std.testing.expectEqual(@as(?u32, 3), parts[3].source_index);
     try std.testing.expectError(error.Unsupported, decode(a, bytes, text, attachments[0..1]));
-    try std.testing.expectError(error.Malformed, decode(a, bytes[0 .. bytes.len - 1], text, &attachments));
+    try std.testing.expectError(
+        error.Malformed,
+        decode(a, bytes[0 .. bytes.len - 1], text, &attachments),
+    );
 }

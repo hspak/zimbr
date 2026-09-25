@@ -1,7 +1,7 @@
 //! Immutable message blocks. Missing/unverified placement falls back to the
 //! original captions, then attachments and cards, without displaying anchors.
 const std = @import("std");
-const t = @import("../protocol/types.zig");
+const t = @import("../protocol.zig").types;
 const u = @import("../common.zig");
 const display = @import("display.zig");
 pub const Block = struct {
@@ -15,19 +15,35 @@ pub const Block = struct {
         more: Section,
     },
 };
-pub const Section = enum { attachments, previews, reactions, parts };
-pub const Chip = struct { label: []const u8, actors: []const t.ReactionActor, unresolved: bool };
+pub const Section = enum {
+    attachments,
+    previews,
+    reactions,
+    parts,
+};
+pub const Chip = struct {
+    label: []const u8,
+    actors: []const t.ReactionActor,
+    unresolved: bool,
+};
 
-pub fn prepare(a: u.Allocator, m: t.Message) ![]const Block {
+/// Allocate presentation blocks in the caller's arena. The message must outlive the blocks.
+pub fn prepare(a: u.Allocator, m: t.Message) u.Allocator.Error![]const Block {
     if (m.reaction_event != null) return &.{};
     const text: []const u8 = m.text orelse "";
     const complete = if (m.enrichment) |e| e.attachments.complete and e.previews.complete and e.reactions.complete and e.parts.complete else true;
-    if (m.attachments.len == 0 and (if (m.link_previews) |items| items.len == 0 else true) and (if (m.reactions) |items| items.len == 0 else true) and complete and std.ascii.indexOfIgnoreCase(text, "http://") == null and std.ascii.indexOfIgnoreCase(text, "https://") == null) return &.{};
+    if (m.attachments.len == 0 and (if (m.link_previews) |items| items.len == 0 else true) and (if (m.reactions) |items| items.len == 0 else true) and complete and std.ascii.indexOfIgnoreCase(
+        text,
+        "http://",
+    ) == null and std.ascii.indexOfIgnoreCase(
+        text,
+        "https://",
+    ) == null) return &.{};
     var blocks: std.ArrayList(Block) = .empty;
     const previews = m.link_previews orelse &.{};
-    var attachments_seen = try a.alloc(bool, m.attachments.len);
+    const attachments_seen = try a.alloc(bool, m.attachments.len);
     @memset(attachments_seen, false);
-    var previews_seen = try a.alloc(bool, previews.len);
+    const previews_seen = try a.alloc(bool, previews.len);
     @memset(previews_seen, false);
     const parts = m.parts orelse &.{};
     const mapped = if (m.enrichment) |e| e.part_mapping == .resolved and e.parts.complete else false;
@@ -42,9 +58,16 @@ pub fn prepare(a: u.Allocator, m: t.Message) ![]const Block {
                 valid_text = false;
                 continue;
             };
-            if (text_bytes > text.len or value.len > text.len - text_bytes or !u.eq(text[text_bytes..][0..value.len], value)) valid_text = false;
+            if (text_bytes > text.len or value.len > text.len - text_bytes or !u.eq(
+                text[text_bytes..][0..value.len],
+                value,
+            )) valid_text = false;
             text_bytes +|= value.len;
-        } else if (part.kind == .attachment and text_bytes <= text.len and std.mem.startsWith(u8, text[text_bytes..], display.object_marker)) {
+        } else if (part.kind == .attachment and text_bytes <= text.len and std.mem.startsWith(
+            u8,
+            text[text_bytes..],
+            display.object_marker,
+        )) {
             // Verified attachment parts consume an anchor in the source text,
             // even though that anchor is absent from the rendered text blocks.
             text_bytes += display.object_marker.len;
@@ -64,13 +87,20 @@ pub fn prepare(a: u.Allocator, m: t.Message) ![]const Block {
                 const value = partText(m, part) orelse continue;
                 const visible = display.message(a, value);
                 if (visible.len == 0) continue;
-                try blocks.append(a, .{ .part_id = part.id, .source_text = value, .value = .{ .text = visible } });
+                try blocks.append(a, .{
+                    .part_id = part.id,
+                    .source_text = value,
+                    .value = .{ .text = visible },
+                });
                 text_present = true;
             },
             .attachment => for (m.attachments, 0..) |item, i| {
                 if (!attachments_seen[i] and u.eq(item.id, part.attachment_id orelse "")) {
                     attachments_seen[i] = true;
-                    if (!item.preview_artwork) try blocks.append(a, .{ .part_id = part.id, .value = .{ .attachment = item } });
+                    if (!item.preview_artwork) try blocks.append(
+                        a,
+                        .{ .part_id = part.id, .value = .{ .attachment = item } },
+                    );
                 }
             },
             .link_preview => for (previews, 0..) |item, i| {
@@ -85,9 +115,15 @@ pub fn prepare(a: u.Allocator, m: t.Message) ![]const Block {
         try blocks.append(a, .{ .value = .{ .attachment = item } });
     };
     for (previews, 0..) |item, i| if (!previews_seen[i]) {
-        try blocks.append(a, .{ .part_id = if (mapped) item.part_id else null, .value = .{ .card = item } });
+        try blocks.append(
+            a,
+            .{ .part_id = if (mapped) item.part_id else null, .value = .{ .card = item } },
+        );
     };
-    if (blocks.items.len == 0 and !text_present) try blocks.append(a, .{ .value = .{ .text = display.record(a, m) } });
+    if (blocks.items.len == 0 and !text_present) try blocks.append(
+        a,
+        .{ .value = .{ .text = display.record(a, m) } },
+    );
     // Place chips immediately below the referenced block; unresolved or absent
     // parts get one message-level group with an explicit explanation in detail.
     const grouped = try ReactionGroups.init(a, m.reactions orelse &.{}, blocks.items);
@@ -96,13 +132,19 @@ pub fn prepare(a: u.Allocator, m: t.Message) ![]const Block {
         try result.append(a, block);
         if (block.part_id) |id| {
             const chips = grouped.groups[grouped.by_part.get(id).?];
-            if (chips.len > 0) try result.append(a, .{ .part_id = id, .value = .{ .reactions = chips } });
+            if (chips.len > 0) try result.append(
+                a,
+                .{ .part_id = id, .value = .{ .reactions = chips } },
+            );
         }
     }
     const chips = grouped.groups[0];
     if (chips.len > 0) try result.append(a, .{ .value = .{ .reactions = chips } });
     if (m.enrichment) |e| inline for (comptime std.meta.tags(Section)) |section| {
-        if (!@field(e, @tagName(section)).complete) try result.append(a, .{ .value = .{ .more = section } });
+        if (!@field(e, @tagName(section)).complete) try result.append(
+            a,
+            .{ .value = .{ .more = section } },
+        );
     };
     return result.items;
 }
@@ -147,15 +189,33 @@ const ReactionGroups = struct {
         const groups = try a.alloc([]const Chip, pending.items.len);
         for (pending.items, groups, 0..) |group, *chips, index| {
             const values = try a.alloc(Chip, group.chips.items.len);
-            for (group.chips.items, values) |chip, *value| value.* = .{ .label = chip.label, .actors = chip.actors.items, .unresolved = index == 0 };
+            for (group.chips.items, values) |chip, *value| value.* = .{
+                .label = chip.label,
+                .actors = chip.actors.items,
+                .unresolved = index == 0,
+            };
             chips.* = values;
         }
         return .{ .groups = groups, .by_part = by_part };
     }
 };
 fn reactionLabel(key: []const u8) []const u8 {
-    const keys = [_][]const u8{ "heart", "like", "dislike", "laugh", "emphasize", "question" };
-    const labels = [_][]const u8{ "❤️", "👍", "👎", "😂", "‼️", "❓" };
+    const keys = [_][]const u8{
+        "heart",
+        "like",
+        "dislike",
+        "laugh",
+        "emphasize",
+        "question",
+    };
+    const labels = [_][]const u8{
+        "❤️",
+        "👍",
+        "👎",
+        "😂",
+        "‼️",
+        "❓",
+    };
     for (keys, labels) |k, label| if (u.eq(key, k)) return label;
     return key;
 }
@@ -164,7 +224,40 @@ test "composite blocks keep captions, source order, part reactions and overflow"
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const m = t.Message{ .sender = "peer", .service = "imessage", .direction = .incoming, .timestamp = "", .kind = .attachment, .decoding = .plain, .observed_status = .received, .text = "Caption 👋", .attachments = &.{.{ .id = "a", .name = "photo", .mime_type = "image/png", .bytes = "20" }}, .parts = &.{.{ .id = "image-part", .kind = .attachment, .attachment_id = "a" }}, .enrichment = .{ .part_mapping = .resolved, .reactions = .{ .total = 3, .complete = false } }, .reactions = &.{ .{ .id = "r", .part_id = "image-part", .part_state = .resolved, .actor = .{ .service = "imessage", .is_self = true }, .key = "custom", .emoji = "👩🏽‍💻" }, .{ .id = "r2", .actor = .{ .service = "imessage", .address = "peer" }, .key = "love" } } };
+    const m = t.Message{
+        .sender = "peer",
+        .service = "imessage",
+        .direction = .incoming,
+        .timestamp = "",
+        .kind = .attachment,
+        .decoding = .plain,
+        .observed_status = .received,
+        .text = "Caption 👋",
+        .attachments = &.{.{
+            .id = "a",
+            .name = "photo",
+            .mime_type = "image/png",
+            .bytes = "20",
+        }},
+        .parts = &.{.{
+            .id = "image-part",
+            .kind = .attachment,
+            .attachment_id = "a",
+        }},
+        .enrichment = .{ .part_mapping = .resolved, .reactions = .{ .total = 3, .complete = false } },
+        .reactions = &.{ .{
+            .id = "r",
+            .part_id = "image-part",
+            .part_state = .resolved,
+            .actor = .{ .service = "imessage", .is_self = true },
+            .key = "custom",
+            .emoji = "👩🏽‍💻",
+        }, .{
+            .id = "r2",
+            .actor = .{ .service = "imessage", .address = "peer" },
+            .key = "love",
+        } },
+    };
     const blocks = try prepare(a, m);
     try std.testing.expectEqualStrings("Caption 👋", blocks[0].value.text);
     try std.testing.expectEqualStrings("a", blocks[1].value.attachment.id);
@@ -190,14 +283,39 @@ test "attachment anchors preserve mapped captions and reaction positions without
         .decoding = .attributed,
         .observed_status = .received,
         .text = source,
-        .attachments = &.{.{ .id = "photo", .name = "photo.png", .mime_type = "image/png", .bytes = "20" }},
+        .attachments = &.{.{
+            .id = "photo",
+            .name = "photo.png",
+            .mime_type = "image/png",
+            .bytes = "20",
+        }},
         .parts = &.{
-            .{ .id = "before", .kind = .text, .text_start = 0, .text_length = before.len },
-            .{ .id = "image", .kind = .attachment, .attachment_id = "photo" },
-            .{ .id = "after", .kind = .text, .text_start = before.len + display.object_marker.len, .text_length = after.len },
+            .{
+                .id = "before",
+                .kind = .text,
+                .text_start = 0,
+                .text_length = before.len,
+            },
+            .{
+                .id = "image",
+                .kind = .attachment,
+                .attachment_id = "photo",
+            },
+            .{
+                .id = "after",
+                .kind = .text,
+                .text_start = before.len + display.object_marker.len,
+                .text_length = after.len,
+            },
         },
         .enrichment = .{ .part_mapping = .resolved },
-        .reactions = &.{.{ .id = "r", .part_id = "after", .part_state = .resolved, .actor = .{ .service = "imessage", .is_self = true }, .key = "heart" }},
+        .reactions = &.{.{
+            .id = "r",
+            .part_id = "after",
+            .part_state = .resolved,
+            .actor = .{ .service = "imessage", .is_self = true },
+            .key = "heart",
+        }},
     };
     const blocks = try prepare(a, m);
     try std.testing.expectEqual(@as(usize, 4), blocks.len);
@@ -223,7 +341,12 @@ test "unmapped attachment anchors leave captions or attachment rows and keep una
         .decoding = .plain,
         .observed_status = .received,
         .text = source,
-        .attachments = &.{.{ .id = "photo", .name = "photo.png", .mime_type = "image/png", .bytes = "20" }},
+        .attachments = &.{.{
+            .id = "photo",
+            .name = "photo.png",
+            .mime_type = "image/png",
+            .bytes = "20",
+        }},
     };
     const caption = try prepare(a, m);
     try std.testing.expectEqual(@as(usize, 2), caption.len);
@@ -251,7 +374,13 @@ test "many reactions group each actor once across many target parts" {
     for (blocks, reactions, 0..) |*block, *reaction, i| {
         const id = try std.fmt.allocPrint(a, "part:{d}", .{i});
         block.* = .{ .part_id = id, .value = .{ .text = "text" } };
-        reaction.* = .{ .id = id, .part_id = id, .part_state = .resolved, .actor = .{ .address = "peer", .service = "imessage" }, .key = "like" };
+        reaction.* = .{
+            .id = id,
+            .part_id = id,
+            .part_state = .resolved,
+            .actor = .{ .address = "peer", .service = "imessage" },
+            .key = "like",
+        };
     }
     const grouped = try ReactionGroups.init(a, reactions, blocks);
     try std.testing.expectEqual(@as(usize, count + 1), grouped.groups.len);

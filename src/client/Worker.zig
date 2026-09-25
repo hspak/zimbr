@@ -1,16 +1,114 @@
 const std = @import("std");
+const json_bounds = @import("../protocol.zig").json;
+const content = @import("content.zig");
 const u = @import("../common.zig");
-const t = @import("../protocol/types.zig");
+const t = @import("../protocol.zig").types;
 const c = @import("c.zig").api;
 const Config = @import("Config.zig");
 const Store = @import("Store.zig");
 const Sse = @import("Sse.zig");
 const Notification = @import("Notification.zig");
-const Self = @This();
 const SharedSnapshot = @import("SharedSnapshot.zig");
+const log = std.log.scoped(.client_worker);
+const Worker = @This();
+
+io: std.Io,
+config: Config,
+mutex: std.Io.Mutex = .init,
+commands: std.ArrayList(Command) = .empty,
+notifications: std.ArrayList(*Notification) = .empty,
+batch_notifications: std.ArrayList(*Notification) = .empty,
+view: ?*View = null,
+on_ready: ?*const fn () callconv(.c) void = null,
+stop: std.atomic.Value(bool) = .init(false),
+thread: ?std.Thread = null,
+wake_pipe: [2]c_int = .{ -1, -1 },
+store: Store = undefined,
+net: ?*c.ZcNet = null,
+sse: Sse = .{},
+selected: []const u8 = "",
+redirect_from: []const u8 = "",
+viewed: bool = false,
+status: []const u8 = "Opening cached messages…",
+online: bool = false,
+send_direct: bool = false,
+reply_existing: bool = false,
+dirty: bool = true,
+content_dirty: bool = true,
+shared: ?*SharedSnapshot = null,
+content_generation: u64 = 0,
+credential_generation: u64 = 0,
+generation: u64 = 0,
+ack: u64 = 0,
+job: enum {
+    idle,
+    status,
+    sync,
+    chats,
+    identities,
+    history,
+    preview,
+    send,
+    recover,
+    enrichment,
+    hydrate,
+} = .idle,
+job_key: []const u8 = "",
+enrichment_request: ?Command = null,
+enrichment_after: []const u8 = "",
+hydration_request: ?Command = null,
+hydration_at: i64 = 0,
+text_first_history: bool = false,
+identities_before: ?[]const u8 = null,
+preview_at: i64 = 0,
+recover_row: i64 = 0,
+need_history: bool = false,
+older: bool = false,
+job_older: bool = false,
+need_sync: bool = false,
+stream_active: bool = false,
+want_identities: bool = false,
+stream_verified: bool = false,
+extension_rejected: bool = false,
+retry_at: i64 = 0,
+backoff: i64 = 1000,
+status_at: i64 = 0,
+recovery_at: i64 = 0,
+auth_blocked: bool = false,
+last_published: i64 = 0,
+last_status_ms: i64 = 0,
+last_event_ms: i64 = 0,
+last_response_ms: i64 = 0,
+last_http_status: i64 = 0,
+transport_error: c.ZcError = std.mem.zeroes(c.ZcError),
+identity: c.ZcIdentity = std.mem.zeroes(c.ZcIdentity),
+
 const a = std.heap.page_allocator;
-pub const Command = struct { kind: enum { select, draft, send, older, reconnect, check, viewed, hide, unhide, enrichment, hydrate }, key: []const u8 = "", text: []const u8 = "", recipient: []const u8 = "" };
-pub const Readiness = struct { ready: bool = false, reason: []const u8 = "", permission: ?[]const u8 = null, stale: bool = false, last_refresh_ms: ?i64 = null };
+pub const Command = struct {
+    kind: enum {
+        select,
+        draft,
+        send,
+        older,
+        reconnect,
+        check,
+        viewed,
+        hide,
+        unhide,
+        enrichment,
+        hydrate,
+    },
+    key: []const u8 = "",
+    text: []const u8 = "",
+    recipient: []const u8 = "",
+};
+pub const Readiness = struct {
+    ready: bool = false,
+    reason: []const u8 = "",
+    permission: ?[]const u8 = null,
+    stale: bool = false,
+    last_refresh_ms: ?i64 = null,
+};
 pub const RelayStatus = struct {
     event_extensions: []const []const u8 = &.{},
     enrichment_readiness: struct {
@@ -79,65 +177,13 @@ pub const View = struct {
         a.destroy(v);
     }
 };
-io: std.Io,
-config: Config,
-mutex: std.Io.Mutex = .init,
-commands: std.ArrayList(Command) = .empty,
-notifications: std.ArrayList(*Notification) = .empty,
-batch_notifications: std.ArrayList(*Notification) = .empty,
-view: ?*View = null,
-on_ready: ?*const fn () callconv(.c) void = null,
-stop: std.atomic.Value(bool) = .init(false),
-thread: ?std.Thread = null,
-wake_pipe: [2]c_int = .{ -1, -1 },
-store: Store = undefined,
-net: ?*c.ZcNet = null,
-sse: Sse = .{},
-selected: []const u8 = "",
-redirect_from: []const u8 = "",
-viewed: bool = false,
-status: []const u8 = "Opening cached messages…",
-online: bool = false,
-send_direct: bool = false,
-reply_existing: bool = false,
-dirty: bool = true,
-content_dirty: bool = true,
-shared: ?*SharedSnapshot = null,
-content_generation: u64 = 0,
-credential_generation: u64 = 0,
-generation: u64 = 0,
-ack: u64 = 0,
-job: enum { idle, status, sync, chats, identities, history, preview, send, recover, enrichment, hydrate } = .idle,
-job_key: []const u8 = "",
-enrichment_request: ?Command = null,
-enrichment_after: []const u8 = "",
-hydration_request: ?Command = null,
-hydration_at: i64 = 0,
-text_first_history: bool = false,
-identities_before: ?[]const u8 = null,
-preview_at: i64 = 0,
-recover_row: i64 = 0,
-need_history: bool = false,
-older: bool = false,
-job_older: bool = false,
-need_sync: bool = false,
-stream_active: bool = false,
-want_identities: bool = false,
-stream_verified: bool = false,
-extension_rejected: bool = false,
-retry_at: i64 = 0,
-backoff: i64 = 1000,
-status_at: i64 = 0,
-recovery_at: i64 = 0,
-auth_blocked: bool = false,
-last_published: i64 = 0,
-last_status_ms: i64 = 0,
-last_event_ms: i64 = 0,
-last_response_ms: i64 = 0,
-last_http_status: i64 = 0,
-transport_error: c.ZcError = std.mem.zeroes(c.ZcError),
-identity: c.ZcIdentity = std.mem.zeroes(c.ZcIdentity),
-pub fn start(s: *Self) !void {
+
+pub const StartError = std.Thread.SpawnError || error{
+    WorkerWakeUnavailable,
+};
+pub const PushError = u.Allocator.Error || error{Busy};
+
+pub fn start(s: *Worker) StartError!void {
     // The caller holds Config.lockCache() for the lifetime of the worker.
     if (u.c.pipe(&s.wake_pipe) != 0) return error.WorkerWakeUnavailable;
     errdefer {
@@ -145,14 +191,18 @@ pub fn start(s: *Self) !void {
         s.wake_pipe = .{ -1, -1 };
     }
     for (s.wake_pipe) |fd| {
-        if (u.c.fcntl(fd, u.c.F_SETFL, @as(c_int, u.c.O_NONBLOCK)) < 0 or u.c.fcntl(fd, u.c.F_SETFD, @as(c_int, u.c.FD_CLOEXEC)) < 0) return error.WorkerWakeUnavailable;
+        if (u.c.fcntl(fd, u.c.F_SETFL, @as(c_int, u.c.O_NONBLOCK)) < 0 or u.c.fcntl(
+            fd,
+            u.c.F_SETFD,
+            @as(c_int, u.c.FD_CLOEXEC),
+        ) < 0) return error.WorkerWakeUnavailable;
     }
     s.thread = try std.Thread.spawn(.{}, run, .{s});
 }
-fn wake(s: *Self) void {
+fn wake(s: *Worker) void {
     if (s.wake_pipe[1] >= 0) _ = u.c.write(s.wake_pipe[1], "x", 1);
 }
-pub fn shutdown(s: *Self) void {
+pub fn shutdown(s: *Worker) void {
     s.stop.store(true, .release);
     s.wake();
     if (s.thread) |th| th.join();
@@ -169,12 +219,12 @@ pub fn shutdown(s: *Self) void {
     for (s.batch_notifications.items) |n| n.destroy();
     s.batch_notifications.deinit(a);
 }
-pub fn takeNotification(s: *Self) ?*Notification {
+pub fn takeNotification(s: *Worker) ?*Notification {
     s.mutex.lockUncancelable(s.io);
     defer s.mutex.unlock(s.io);
     return if (s.notifications.items.len > 0) s.notifications.orderedRemove(0) else null;
 }
-pub fn push(s: *Self, cmd: Command) !void {
+pub fn push(s: *Worker, cmd: Command) PushError!void {
     s.mutex.lockUncancelable(s.io);
     defer s.mutex.unlock(s.io);
     if (s.commands.items.len >= 64) return error.Busy;
@@ -184,7 +234,12 @@ pub fn push(s: *Self, cmd: Command) !void {
     errdefer a.free(text);
     const recipient = try a.dupe(u8, cmd.recipient);
     errdefer a.free(recipient);
-    try s.commands.append(a, .{ .kind = cmd.kind, .key = key, .text = text, .recipient = recipient });
+    try s.commands.append(a, .{
+        .kind = cmd.kind,
+        .key = key,
+        .text = text,
+        .recipient = recipient,
+    });
     s.wake();
 }
 fn freeCommand(cmd: Command) void {
@@ -192,27 +247,44 @@ fn freeCommand(cmd: Command) void {
     a.free(cmd.text);
     a.free(cmd.recipient);
 }
-pub fn take(s: *Self) ?*View {
+pub fn take(s: *Worker) ?*View {
     s.mutex.lockUncancelable(s.io);
     defer s.mutex.unlock(s.io);
     const v = s.view;
     s.view = null;
     return v;
 }
-fn run(s: *Self) void {
+fn run(s: *Worker) void {
     s.work() catch |err| {
-        std.log.err("client worker: {s}", .{@errorName(err)});
+        log.err("client worker: {s}", .{@errorName(err)});
         s.status = "Client cache unavailable. Check the data directory and restart.";
         s.online = false;
         const v = a.create(View) catch return;
-        v.* = .{ .arena = std.heap.ArenaAllocator.init(a), .snapshot = .{ .chats = &.{}, .messages = &.{}, .pending = &.{}, .selected = "", .draft = "", .epoch = "", .more = false }, .status = s.status, .online = false, .send_direct = false, .reply_existing = false, .generation = s.generation + 1, .ack = s.ack };
+        v.* = .{
+            .arena = std.heap.ArenaAllocator.init(a),
+            .snapshot = .{
+                .chats = &.{},
+                .messages = &.{},
+                .pending = &.{},
+                .selected = "",
+                .draft = "",
+                .epoch = "",
+                .more = false,
+            },
+            .status = s.status,
+            .online = false,
+            .send_direct = false,
+            .reply_existing = false,
+            .generation = s.generation + 1,
+            .ack = s.ack,
+        };
         s.mutex.lockUncancelable(s.io);
         defer s.mutex.unlock(s.io);
         if (s.view) |old| old.destroy();
         s.view = v;
     };
 }
-fn work(s: *Self) !void {
+fn work(s: *Worker) !void {
     const path = try std.fmt.allocPrintSentinel(a, "{s}/client.db", .{s.config.data}, 0);
     defer a.free(path);
     s.store = try Store.open(path);
@@ -226,7 +298,7 @@ fn work(s: *Self) !void {
     defer if (s.selected.len > 0) a.free(s.selected);
     defer {
         if (s.net) |n| c.zc_net_free(n);
-        s.sse.deinit();
+        s.sse.reset();
         a.free(s.job_key);
         if (s.enrichment_request) |cmd| freeCommand(cmd);
         a.free(s.enrichment_after);
@@ -250,7 +322,7 @@ fn work(s: *Self) !void {
                 s.last_response_ms = u.now();
                 c.zc_net_ack(n, 1);
                 s.stream_active = false;
-                s.sse.deinit();
+                s.sse.reset();
                 if (s.transport_error.curl_code == 0 and (status == 409 or status == 410)) {
                     s.need_sync = true;
                     s.status = "Refreshing expired history…";
@@ -283,14 +355,26 @@ fn work(s: *Self) !void {
         var delay: i64 = if (s.dirty) @max(0, 16 - (now - s.last_published)) else 1000;
         if (!s.auth_blocked and s.job == .idle) {
             if (!s.online and !s.stream_active) delay = @min(delay, @max(0, s.retry_at - now));
-            if (s.online) delay = @min(delay, @max(0, @min(s.status_at, @min(s.recovery_at, s.preview_at)) - now));
+            if (s.online) delay = @min(
+                delay,
+                @max(0, @min(s.status_at, @min(s.recovery_at, s.preview_at)) - now),
+            );
         }
         if (c.zc_net_wait(s.net, s.wake_pipe[0], @intCast(delay)) == 0) return error.TransportFailure;
     }
 }
-fn connect(s: *Self) !void {
+fn connect(s: *Worker) !void {
     s.credential_generation +%= 1;
-    s.net = c.zc_net_new(s.config.relay_url, s.config.ca_file, s.config.client_cert_file, s.config.client_key_file, receive, s, &s.transport_error, &s.identity);
+    s.net = c.zc_net_new(
+        s.config.relay_url,
+        s.config.ca_file,
+        s.config.client_cert_file,
+        s.config.client_key_file,
+        receive,
+        s,
+        &s.transport_error,
+        &s.identity,
+    );
     if (s.net == null) {
         s.disconnected(0);
         return;
@@ -300,7 +384,7 @@ fn connect(s: *Self) !void {
     s.dirty = true;
 }
 fn receive(ctx: ?*anyopaque, bytes: [*c]const u8, len: usize) callconv(.c) c_int {
-    const s: *Self = @ptrCast(@alignCast(ctx.?));
+    const s: *Worker = @ptrCast(@alignCast(ctx.?));
     s.receiveBatch(bytes[0..len]) catch {
         s.status = "Invalid event stream · reconnecting from saved progress";
         s.dirty = true;
@@ -308,7 +392,7 @@ fn receive(ctx: ?*anyopaque, bytes: [*c]const u8, len: usize) callconv(.c) c_int
     };
     return 1;
 }
-fn verifyStream(s: *Self) !void {
+fn verifyStream(s: *Worker) !void {
     if (s.stream_verified) return;
     const accepted = std.mem.span(c.zc_net_extensions(s.net.?));
     if (!u.eq(accepted, if (s.want_identities) "identity-v1" else "")) {
@@ -319,7 +403,7 @@ fn verifyStream(s: *Self) !void {
     try s.store.set("accepted_extensions", accepted);
     s.stream_verified = true;
 }
-fn receiveBatch(s: *Self, bytes: []const u8) !void {
+fn receiveBatch(s: *Worker, bytes: []const u8) !void {
     // Tests feed the parser directly; transport deliveries require negotiation
     // before even the first event/cursor can enter the database.
     if (s.net != null) try s.verifyStream();
@@ -332,7 +416,7 @@ fn receiveBatch(s: *Self, bytes: []const u8) !void {
     // reconnect replays from the last durable cursor.
     try s.store.db.exec("BEGIN IMMEDIATE");
     errdefer s.store.db.exec("ROLLBACK") catch {};
-    try s.sse.feed(bytes, s, event);
+    try s.sse.feed(event, s, bytes);
     try s.store.db.exec("COMMIT");
     // Never publish side effects for a rolled-back frame or cursor update.
     s.mutex.lockUncancelable(s.io);
@@ -343,7 +427,7 @@ fn receiveBatch(s: *Self, bytes: []const u8) !void {
     }
     s.batch_notifications.clearRetainingCapacity();
 }
-fn event(s: *Self, arena: u.Allocator, raw: []const u8, id: []const u8, kind: []const u8) !void {
+fn event(s: *Worker, arena: u.Allocator, raw: []const u8, id: []const u8, kind: []const u8) !void {
     if (try s.store.eventNotification(arena, raw, id, kind, if (s.viewed) s.selected else "")) |message| {
         const notification = Notification.create(s.store, message) catch null;
         if (notification) |n| {
@@ -361,7 +445,7 @@ fn event(s: *Self, arena: u.Allocator, raw: []const u8, id: []const u8, kind: []
     s.dirty = true;
     s.content_dirty = true;
 }
-fn request(s: *Self, job: @FieldType(Self, "job"), path: []const u8, body: ?[]const u8) !void {
+fn request(s: *Worker, job: @FieldType(Worker, "job"), path: []const u8, body: ?[]const u8) !void {
     const url = try a.dupeZ(u8, path);
     defer a.free(url);
     const data = if (body) |b| try a.dupeZ(u8, b) else null;
@@ -370,11 +454,12 @@ fn request(s: *Self, job: @FieldType(Self, "job"), path: []const u8, body: ?[]co
     s.job = job;
     s.dirty = true;
 }
-fn setJobKey(s: *Self, key: []const u8) !void {
+fn setJobKey(s: *Worker, key: []const u8) !void {
+    const next_job_key = try a.dupe(u8, key);
     a.free(s.job_key);
-    s.job_key = try a.dupe(u8, key);
+    s.job_key = next_job_key;
 }
-fn disconnected(s: *Self, status: c_long) void {
+fn disconnected(s: *Worker, status: c_long) void {
     s.online = false;
     s.dirty = true;
     const kind = s.transport_error.kind;
@@ -395,13 +480,13 @@ fn disconnected(s: *Self, status: c_long) void {
     if (s.stream_active) {
         c.zc_net_cancel_stream(s.net.?);
         s.stream_active = false;
-        s.sse.deinit();
+        s.sse.reset();
     }
 }
-fn unresolved(s: *Self) !bool {
+fn unresolved(s: *Worker) !bool {
     return try s.store.db.scalar("SELECT count(*) FROM outbox WHERE epoch=(SELECT value FROM meta WHERE key='epoch') AND record IS NULL AND state IN ('sending','unknown')") > 0;
 }
-fn schedule(s: *Self) !void {
+fn schedule(s: *Worker) !void {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const ar = arena.allocator();
@@ -410,7 +495,11 @@ fn schedule(s: *Self) !void {
     if (!s.need_sync) if (s.identities_before) |before| {
         if (s.need_history and s.selected.len > 0 and !std.mem.startsWith(u8, s.selected, "new:")) {
             try s.requestHistory(ar);
-        } else try s.request(.identities, try std.fmt.allocPrint(ar, "/v1/identities?limit=200{s}{s}", .{ if (before.len > 0) "&before=" else "", try encode(ar, before) }), null);
+        } else try s.request(
+            .identities,
+            try std.fmt.allocPrint(ar, "/v1/identities?limit=200{s}{s}", .{ if (before.len > 0) "&before=" else "", try encode(ar, before) }),
+            null,
+        );
         return;
     };
     if (!s.online) {
@@ -420,12 +509,16 @@ fn schedule(s: *Self) !void {
             try s.request(.sync, "/v1/sync", null);
         } else try s.request(.status, "/v1/status", null);
     } else if (try s.unresolved() and u.now() >= s.recovery_at) {
-        var q = try s.store.db.prepare("SELECT id FROM outbox WHERE epoch=(SELECT value FROM meta WHERE key='epoch') AND record IS NULL AND state IN ('sending','unknown') ORDER BY rowid LIMIT 1");
+        const q = try s.store.db.prepare("SELECT id FROM outbox WHERE epoch=(SELECT value FROM meta WHERE key='epoch') AND record IS NULL AND state IN ('sending','unknown') ORDER BY rowid LIMIT 1");
         defer q.close();
         if (try q.step()) {
             try s.setJobKey(q.bytes(0));
             s.recovery_at = u.now() + 5000;
-            try s.request(.recover, try std.fmt.allocPrint(ar, "/v1/send-requests/{s}", .{s.job_key}), null);
+            try s.request(
+                .recover,
+                try std.fmt.allocPrint(ar, "/v1/send-requests/{s}", .{s.job_key}),
+                null,
+            );
         }
     } else if (u.now() >= s.hydration_at and try s.hydrateSend(ar)) {
         // A linked echo can arrive through reconciliation before its request.
@@ -435,9 +528,16 @@ fn schedule(s: *Self) !void {
     } else if (s.enrichment_request) |cmd| {
         const next = try s.store.enrichmentNext(ar, cmd.key, cmd.recipient, cmd.text);
         if (next) |after| {
+            const next_enrichment_after = try a.dupe(u8, after);
             a.free(s.enrichment_after);
-            s.enrichment_after = try a.dupe(u8, after);
-            try s.request(.enrichment, try std.fmt.allocPrint(ar, "/v1/messages/{s}/enrichment?section={s}&revision={s}&limit=200{s}{s}", .{ try encode(ar, cmd.key), try encode(ar, cmd.text), try encode(ar, cmd.recipient), if (after.len > 0) "&after=" else "", try encode(ar, after) }), null);
+            s.enrichment_after = next_enrichment_after;
+            try s.request(.enrichment, try std.fmt.allocPrint(ar, "/v1/messages/{s}/enrichment?section={s}&revision={s}&limit=200{s}{s}", .{
+                try encode(ar, cmd.key),
+                try encode(ar, cmd.text),
+                try encode(ar, cmd.recipient),
+                if (after.len > 0) "&after=" else "",
+                try encode(ar, after),
+            }), null);
         } else {
             freeCommand(cmd);
             s.enrichment_request = null;
@@ -446,69 +546,96 @@ fn schedule(s: *Self) !void {
         try s.request(.status, "/v1/status", null);
     } else if (u.now() >= s.recovery_at) {
         s.recovery_at = u.now() + 5000;
-        var q = try s.store.db.prepare("SELECT id,rowid FROM outbox WHERE epoch=? AND state IN ('sending','unknown','queued','dispatching','submitted') AND rowid>? ORDER BY rowid LIMIT 1");
+        const q = try s.store.db.prepare("SELECT id,rowid FROM outbox WHERE epoch=? AND state IN ('sending','unknown','queued','dispatching','submitted') AND rowid>? ORDER BY rowid LIMIT 1");
         defer q.close();
         try q.bind(&.{ .{ .text = try s.store.get(ar, "epoch") }, .{ .int = s.recover_row } });
         if (try q.step()) {
             s.recover_row = q.int(1);
             try s.setJobKey(q.bytes(0));
-            try s.request(.recover, try std.fmt.allocPrint(ar, "/v1/send-requests/{s}", .{s.job_key}), null);
+            try s.request(
+                .recover,
+                try std.fmt.allocPrint(ar, "/v1/send-requests/{s}", .{s.job_key}),
+                null,
+            );
         } else s.recover_row = 0;
     } else if (u.now() >= s.hydration_at and try s.hydrate(ar)) {
         // One visible message per cancellable request, after text and recovery.
     } else if (u.now() >= s.preview_at) {
         s.preview_at = u.now() + 100;
-        var q = try s.store.db.prepare("SELECT c.id FROM records c WHERE c.kind='conversation' AND NOT EXISTS(SELECT 1 FROM records m WHERE m.kind='message' AND m.chat=c.id) AND NOT EXISTS(SELECT 1 FROM previews p WHERE p.chat=c.id) ORDER BY c.sort_key DESC LIMIT 1");
+        const q = try s.store.db.prepare("SELECT c.id FROM records c WHERE c.kind='conversation' AND NOT EXISTS(SELECT 1 FROM records m WHERE m.kind='message' AND m.chat=c.id) AND NOT EXISTS(SELECT 1 FROM previews p WHERE p.chat=c.id) ORDER BY c.sort_key DESC LIMIT 1");
         defer q.close();
         if (try q.step()) {
             try s.setJobKey(q.bytes(0));
-            try s.request(.preview, try std.fmt.allocPrint(ar, "/v1/conversations/{s}/messages?limit=1{s}", .{ s.job_key, if (s.text_first_history) "&content=text" else "" }), null);
+            try s.request(
+                .preview,
+                try std.fmt.allocPrint(ar, "/v1/conversations/{s}/messages?limit=1{s}", .{ s.job_key, if (s.text_first_history) "&content=text" else "" }),
+                null,
+            );
         } else s.preview_at = u.now() + 30000;
     }
 }
-fn requestHistory(s: *Self, ar: u.Allocator) !void {
+fn requestHistory(s: *Worker, ar: u.Allocator) !void {
     s.need_history = false;
     try s.setJobKey(s.selected);
     s.job_older = s.older;
     const next = if (s.older) try s.store.nextPage(ar, s.selected) else @as(?[]const u8, "");
     s.older = false;
-    if (next) |cursor| try s.request(.history, try std.fmt.allocPrint(ar, "/v1/conversations/{s}/messages?limit={d}{s}{s}{s}", .{ s.selected, Store.recent_history_limit, if (cursor.len > 0) "&before=" else "", try encode(ar, cursor), if (s.text_first_history) "&content=text" else "" }), null);
+    if (next) |cursor| try s.request(.history, try std.fmt.allocPrint(ar, "/v1/conversations/{s}/messages?limit={d}{s}{s}{s}", .{
+        s.selected,
+        Store.recent_history_limit,
+        if (cursor.len > 0) "&before=" else "",
+        try encode(ar, cursor),
+        if (s.text_first_history) "&content=text" else "",
+    }), null);
 }
-fn hydrateSend(s: *Self, ar: u.Allocator) !bool {
-    var q = try s.store.db.prepare("SELECT " ++ Store.echo_id_sql ++ " AS id FROM outbox WHERE epoch=(SELECT value FROM meta WHERE key='epoch') AND " ++ Store.echo_id_sql ++ " IS NOT NULL AND NOT EXISTS(SELECT 1 FROM records m WHERE m.kind='message' AND m.id=" ++ Store.echo_id_sql ++ ") ORDER BY rowid DESC LIMIT 1");
+fn hydrateSend(s: *Worker, ar: u.Allocator) !bool {
+    const q = try s.store.db.prepare("SELECT " ++ Store.echo_id_sql ++ " AS id FROM outbox WHERE epoch=(SELECT value FROM meta WHERE key='epoch') AND " ++ Store.echo_id_sql ++ " IS NOT NULL AND NOT EXISTS(SELECT 1 FROM records m WHERE m.kind='message' AND m.id=" ++ Store.echo_id_sql ++ ") ORDER BY rowid DESC LIMIT 1");
     defer q.close();
     if (!try q.step()) return false;
     try s.setJobKey(q.bytes(0));
     s.hydration_at = u.now() + 5000;
-    try s.request(.hydrate, try std.fmt.allocPrint(ar, "/v1/messages/{s}", .{try encode(ar, s.job_key)}), null);
+    try s.request(
+        .hydrate,
+        try std.fmt.allocPrint(ar, "/v1/messages/{s}", .{try encode(ar, s.job_key)}),
+        null,
+    );
     return true;
 }
-fn hydrate(s: *Self, ar: u.Allocator) !bool {
+fn hydrate(s: *Worker, ar: u.Allocator) !bool {
     const cmd = s.hydration_request orelse return false;
     if (!u.eq(cmd.key, s.selected)) return false;
     const ids = try std.json.parseFromSliceLeaky([]const []const u8, ar, cmd.text, .{});
     for (ids[0..@min(ids.len, 64)]) |id| {
-        var q = try s.store.db.prepare("SELECT json_extract(record,'$.metadata_deferred') FROM records WHERE kind='message' AND id=?");
+        const q = try s.store.db.prepare("SELECT json_extract(record,'$.metadata_deferred') FROM records WHERE kind='message' AND id=?");
         defer q.close();
         try q.bind(&.{.{ .text = id }});
         if (!try q.step() or q.int(0) != 1) continue;
         try s.setJobKey(id);
-        try s.request(.hydrate, try std.fmt.allocPrint(ar, "/v1/messages/{s}", .{try encode(ar, id)}), null);
+        try s.request(
+            .hydrate,
+            try std.fmt.allocPrint(ar, "/v1/messages/{s}", .{try encode(ar, id)}),
+            null,
+        );
         return true;
     }
     return false;
 }
-fn attach(s: *Self, ar: u.Allocator) !void {
+fn attach(s: *Worker, ar: u.Allocator) !void {
     if (s.stream_active) return;
     const cursor = try s.store.get(ar, "cursor");
-    const path = try std.fmt.allocPrintSentinel(ar, "/v1/events?after={s}{s}", .{ try encode(ar, cursor), if (s.want_identities) "&extensions=identity-v1" else "" }, 0);
+    const path = try std.fmt.allocPrintSentinel(
+        ar,
+        "/v1/events?after={s}{s}",
+        .{ try encode(ar, cursor), if (s.want_identities) "&extensions=identity-v1" else "" },
+        0,
+    );
     if (c.zc_net_start(s.net.?, 1, path, null) == 0) return error.TransportFailure;
     s.stream_verified = false;
     s.stream_active = true;
     s.status = "Synchronizing live messages…";
     s.dirty = true;
 }
-fn complete(s: *Self) !void {
+fn complete(s: *Worker) !void {
     const n = s.net.?;
     const http_status = c.zc_net_status(n, 0);
     var request_error: c.ZcError = undefined;
@@ -554,9 +681,17 @@ fn complete(s: *Self) !void {
         if (job == .send) {
             // Transport failures and server errors may follow durable acceptance.
             const definite = status == 400 or status == 401 or status == 403 or status == 409 or status == 413;
-            try s.store.outcome(s.job_key, if (definite) "failed" else "unknown", if (definite) "Relay rejected this submission. Copy it to the composer to edit." else "Outcome uncertain. Checking the original request ID; no automatic resend.");
+            try s.store.outcome(
+                s.job_key,
+                if (definite) "failed" else "unknown",
+                if (definite) "Relay rejected this submission. Copy it to the composer to edit." else "Outcome uncertain. Checking the original request ID; no automatic resend.",
+            );
         } else if (job == .recover and status == 404) {
-            try s.store.outcome(s.job_key, "unconfirmed", "The relay has no record of this request. It will not be resent automatically.");
+            try s.store.outcome(
+                s.job_key,
+                "unconfirmed",
+                "The relay has no record of this request. It will not be resent automatically.",
+            );
             s.dirty = true;
             return;
         }
@@ -573,7 +708,7 @@ fn complete(s: *Self) !void {
     }
     if (s.auth_blocked and job != .send and job != .recover) return;
     s.handleResponse(ar, job, raw) catch |err| {
-        std.log.warn("client response: {s}", .{@errorName(err)});
+        log.warn("client response: {s}", .{@errorName(err)});
         if (job == .hydrate) {
             s.hydration_at = u.now() + 5000;
             s.dirty = true;
@@ -583,22 +718,34 @@ fn complete(s: *Self) !void {
             s.need_history = true;
             s.older = s.job_older;
         }
-        if (job == .send) try s.store.outcome(s.job_key, "unknown", "Response interrupted. Checking the original request ID; no automatic resend.");
+        if (job == .send) try s.store.outcome(
+            s.job_key,
+            "unknown",
+            "Response interrupted. Checking the original request ID; no automatic resend.",
+        );
         s.disconnected(0);
         s.status = "Invalid relay response · saved messages remain available";
     };
     s.dirty = true;
 }
-fn handleResponse(s: *Self, ar: u.Allocator, job: @FieldType(Self, "job"), raw: []const u8) !void {
-    try @import("../protocol/Json.zig").check(raw, t.max_history_bytes, 512 * 1024);
+fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), raw: []const u8) !void {
+    try json_bounds.check(raw, t.max_history_bytes, 512 * 1024);
     switch (job) {
         .status => {
-            const v = (try std.json.parseFromSlice(RelayStatus, ar, raw, .{ .ignore_unknown_fields = true })).value;
+            const v = (try std.json.parseFromSlice(
+                RelayStatus,
+                ar,
+                raw,
+                .{ .ignore_unknown_fields = true },
+            )).value;
             // Persist only the documented status fields, never credentials or
             // arbitrary HTTP response headers, for offline diagnostics.
             try s.store.set("relay_status", try u.json(ar, v));
             s.last_status_ms = u.now();
-            try s.store.set("server_checked_at", try std.fmt.allocPrint(ar, "{d}", .{s.last_status_ms}));
+            try s.store.set(
+                "server_checked_at",
+                try std.fmt.allocPrint(ar, "{d}", .{s.last_status_ms}),
+            );
             if (!u.eq(v.api_version, "1")) {
                 s.auth_blocked = true;
                 s.online = false;
@@ -625,17 +772,23 @@ fn handleResponse(s: *Self, ar: u.Allocator, job: @FieldType(Self, "job"), raw: 
             if (changed_extension and s.stream_active) {
                 c.zc_net_cancel_stream(s.net.?);
                 s.stream_active = false;
-                s.sse.deinit();
+                s.sse.reset();
                 s.online = false;
             }
             s.send_direct = v.capabilities.send_direct;
             s.reply_existing = v.capabilities.reply_existing;
             s.status_at = u.now() + 15000;
-            if (!u.eq(v.server_epoch, try s.store.get(ar, "epoch")) or !u.eq(try s.store.get(ar, "bootstrapped"), "1") or (identities and !u.eq(try s.store.get(ar, "identity_bootstrapped"), "1"))) {
+            if (!u.eq(v.server_epoch, try s.store.get(ar, "epoch")) or !u.eq(
+                try s.store.get(ar, "bootstrapped"),
+                "1",
+            ) or (identities and !u.eq(
+                try s.store.get(ar, "identity_bootstrapped"),
+                "1",
+            ))) {
                 if (s.stream_active) {
                     c.zc_net_cancel_stream(s.net.?);
                     s.stream_active = false;
-                    s.sse.deinit();
+                    s.sse.reset();
                 }
                 s.online = false;
                 try s.request(.sync, "/v1/sync", null);
@@ -647,28 +800,58 @@ fn handleResponse(s: *Self, ar: u.Allocator, job: @FieldType(Self, "job"), raw: 
         .sync => {
             if (s.identities_before) |before| a.free(before);
             s.identities_before = null;
-            const v = (try std.json.parseFromSlice(struct { server_epoch: []const u8, cursor: []const u8 }, ar, raw, .{ .ignore_unknown_fields = true })).value;
+            const v = (try std.json.parseFromSlice(
+                struct { server_epoch: []const u8, cursor: []const u8 },
+                ar,
+                raw,
+                .{ .ignore_unknown_fields = true },
+            )).value;
             try s.store.beginSync(v.server_epoch, v.cursor);
             s.status = "Downloading conversations…";
             try s.request(.chats, "/v1/conversations?limit=200&previews=1", null);
         },
         .chats => {
-            const v = (try std.json.parseFromSlice(struct { conversations: []const std.json.Value, next: ?[]const u8, previews: ?[]const std.json.Value = null }, ar, raw, .{ .ignore_unknown_fields = true })).value;
+            const v = (try std.json.parseFromSlice(
+                struct {
+                    conversations: []const std.json.Value,
+                    next: ?[]const u8,
+                    previews: ?[]const std.json.Value = null,
+                },
+                ar,
+                raw,
+                .{ .ignore_unknown_fields = true },
+            )).value;
             if (v.conversations.len > t.max_page or (if (v.previews) |items| items.len else 0) > t.max_page) return error.InvalidRecord;
             try s.store.db.exec("BEGIN IMMEDIATE");
             errdefer s.store.db.exec("ROLLBACK") catch {};
-            for (v.conversations) |chat| _ = try s.store.upsert(ar, "conversation", try u.json(ar, chat));
+            for (v.conversations) |chat| _ = try s.store.upsert(
+                ar,
+                "conversation",
+                try u.json(ar, chat),
+            );
             if (v.previews) |previews| {
                 for (previews) |preview| try s.store.savePreview(ar, try u.json(ar, preview));
                 // An empty chat was also covered by this page. Older relays
                 // omit projections and keep the existing preview fallback.
                 for (v.conversations) |chat| {
-                    const parsed = try std.json.parseFromValue(t.Conversation, ar, chat, .{ .ignore_unknown_fields = true });
-                    try s.store.exec("INSERT OR IGNORE INTO previews(chat) VALUES(?)", &.{.{ .text = parsed.value.id }});
+                    const parsed = try std.json.parseFromValue(
+                        t.Conversation,
+                        ar,
+                        chat,
+                        .{ .ignore_unknown_fields = true },
+                    );
+                    try s.store.exec(
+                        "INSERT OR IGNORE INTO previews(chat) VALUES(?)",
+                        &.{.{ .text = parsed.value.id }},
+                    );
                 }
             }
             try s.store.db.exec("COMMIT");
-            if (v.next) |next| try s.request(.chats, try std.fmt.allocPrint(ar, "/v1/conversations?limit=200&previews=1&before={s}", .{try encode(ar, next)}), null) else {
+            if (v.next) |next| try s.request(
+                .chats,
+                try std.fmt.allocPrint(ar, "/v1/conversations?limit=200&previews=1&before={s}", .{try encode(ar, next)}),
+                null,
+            ) else {
                 if (s.want_identities) {
                     s.status = "Downloading contact names…";
                     s.identities_before = try a.dupe(u8, "");
@@ -677,11 +860,20 @@ fn handleResponse(s: *Self, ar: u.Allocator, job: @FieldType(Self, "job"), raw: 
             }
         },
         .identities => {
-            const v = try std.json.parseFromSliceLeaky(struct { identities: []const std.json.Value, next: ?[]const u8 }, ar, raw, .{ .ignore_unknown_fields = true });
+            const v = try std.json.parseFromSliceLeaky(
+                struct { identities: []const std.json.Value, next: ?[]const u8 },
+                ar,
+                raw,
+                .{ .ignore_unknown_fields = true },
+            );
             if (v.identities.len > t.max_page) return error.InvalidRecord;
             try s.store.db.exec("BEGIN IMMEDIATE");
             errdefer s.store.db.exec("ROLLBACK") catch {};
-            for (v.identities) |identity| _ = try s.store.upsert(ar, "identity", try u.json(ar, identity));
+            for (v.identities) |identity| _ = try s.store.upsert(
+                ar,
+                "identity",
+                try u.json(ar, identity),
+            );
             if (v.next == null) try s.store.set("identity_bootstrapped", "1");
             try s.store.db.exec("COMMIT");
             if (s.identities_before) |before| a.free(before);
@@ -689,12 +881,24 @@ fn handleResponse(s: *Self, ar: u.Allocator, job: @FieldType(Self, "job"), raw: 
             if (v.next) |next| s.identities_before = try a.dupe(u8, next) else try s.finishBootstrap(ar);
         },
         .history, .preview => {
-            const v = (try std.json.parseFromSlice(struct { messages: []const std.json.Value, next: ?[]const u8 }, ar, raw, .{ .ignore_unknown_fields = true })).value;
+            const v = (try std.json.parseFromSlice(
+                struct { messages: []const std.json.Value, next: ?[]const u8 },
+                ar,
+                raw,
+                .{ .ignore_unknown_fields = true },
+            )).value;
             if (v.messages.len > t.max_page) return error.InvalidRecord;
             try s.store.db.exec("BEGIN IMMEDIATE");
             errdefer s.store.db.exec("ROLLBACK") catch {};
-            for (v.messages) |message| _ = try s.store.upsert(ar, "message", try u.json(ar, message));
-            if (job == .history) try s.store.page(s.job_key, v.next) else try s.store.exec("INSERT OR IGNORE INTO previews(chat) VALUES(?)", &.{.{ .text = s.job_key }});
+            for (v.messages) |message| _ = try s.store.upsert(
+                ar,
+                "message",
+                try u.json(ar, message),
+            );
+            if (job == .history) try s.store.page(s.job_key, v.next) else try s.store.exec(
+                "INSERT OR IGNORE INTO previews(chat) VALUES(?)",
+                &.{.{ .text = s.job_key }},
+            );
             try s.store.db.exec("COMMIT");
         },
         .enrichment => {
@@ -703,10 +907,22 @@ fn handleResponse(s: *Self, ar: u.Allocator, job: @FieldType(Self, "job"), raw: 
                 freeCommand(cmd);
                 s.enrichment_request = null;
             }
-            _ = try s.store.enrichmentPage(ar, raw, cmd.key, cmd.recipient, std.meta.stringToEnum(@import("Content.zig").Section, cmd.text) orelse return error.InvalidSection, s.enrichment_after);
+            _ = try s.store.enrichmentPage(
+                ar,
+                raw,
+                cmd.key,
+                cmd.recipient,
+                std.meta.stringToEnum(content.Section, cmd.text) orelse return error.InvalidSection,
+                s.enrichment_after,
+            );
         },
         .hydrate => {
-            const message = try std.json.parseFromSliceLeaky(t.Message, ar, raw, .{ .ignore_unknown_fields = true });
+            const message = try std.json.parseFromSliceLeaky(
+                t.Message,
+                ar,
+                raw,
+                .{ .ignore_unknown_fields = true },
+            );
             if (!u.eq(message.id, s.job_key) or message.metadata_deferred) return error.InvalidRecord;
             try s.store.db.exec("BEGIN IMMEDIATE");
             errdefer s.store.db.exec("ROLLBACK") catch {};
@@ -720,12 +936,12 @@ fn handleResponse(s: *Self, ar: u.Allocator, job: @FieldType(Self, "job"), raw: 
         .idle => {},
     }
 }
-fn finishBootstrap(s: *Self, ar: u.Allocator) !void {
+fn finishBootstrap(s: *Worker, ar: u.Allocator) !void {
     try s.store.set("bootstrapped", "1");
     s.need_history = true;
     try s.attach(ar);
 }
-fn drain(s: *Self) !void {
+fn drain(s: *Worker) !void {
     // A send can preempt an idempotent background GET. A POST is never
     // cancelled or repeated here: its result must remain authoritative.
     while (true) {
@@ -785,12 +1001,24 @@ fn drain(s: *Self) !void {
                 errdefer a.free(key);
                 const text = try a.dupe(u8, cmd.text);
                 if (s.hydration_request) |previous| freeCommand(previous);
-                s.hydration_request = .{ .kind = .hydrate, .key = key, .text = text };
+                s.hydration_request = .{
+                    .kind = .hydrate,
+                    .key = key,
+                    .text = text,
+                };
                 continue;
             },
             .enrichment => {
-                if (s.enrichment_request == null and std.meta.stringToEnum(@import("Content.zig").Section, cmd.text) != null) {
-                    s.enrichment_request = .{ .kind = .enrichment, .key = try a.dupe(u8, cmd.key), .text = try a.dupe(u8, cmd.text), .recipient = try a.dupe(u8, cmd.recipient) };
+                if (s.enrichment_request == null and std.meta.stringToEnum(
+                    content.Section,
+                    cmd.text,
+                ) != null) {
+                    s.enrichment_request = .{
+                        .kind = .enrichment,
+                        .key = try a.dupe(u8, cmd.key),
+                        .text = try a.dupe(u8, cmd.text),
+                        .recipient = try a.dupe(u8, cmd.recipient),
+                    };
                 }
             },
             .hide, .unhide => {
@@ -806,8 +1034,9 @@ fn drain(s: *Self) !void {
                 s.content_dirty = true;
                 a.free(s.redirect_from);
                 s.redirect_from = "";
-                if (s.selected.len > 0) a.free(s.selected);
-                s.selected = try a.dupe(u8, cmd.key);
+                const next_selected = try a.dupe(u8, cmd.key);
+                a.free(s.selected);
+                s.selected = next_selected;
                 s.viewed = !u.eq(cmd.text, "no");
                 try s.store.set("selected", cmd.key);
                 if (s.viewed) try s.store.read(cmd.key);
@@ -818,7 +1047,7 @@ fn drain(s: *Self) !void {
                 try s.store.saveDraft(cmd.key, cmd.text);
                 // Draft-only entries can appear/disappear in the sidebar;
                 // normal conversation drafts do not alter any cached records.
-                var q = try s.store.db.prepare("SELECT 1 FROM records WHERE kind='conversation' AND id=?");
+                const q = try s.store.db.prepare("SELECT 1 FROM records WHERE kind='conversation' AND id=?");
                 defer q.close();
                 try q.bind(&.{.{ .text = cmd.key }});
                 if (!try q.step()) s.content_dirty = true;
@@ -838,7 +1067,11 @@ fn drain(s: *Self) !void {
                 if (s.identities_before) |before| a.free(before);
                 s.identities_before = null;
                 if (s.job == .send) {
-                    try s.store.outcome(s.job_key, "unknown", "Connection changed. Checking the original request ID before any new submission.");
+                    try s.store.outcome(
+                        s.job_key,
+                        "unknown",
+                        "Connection changed. Checking the original request ID before any new submission.",
+                    );
                     s.content_dirty = true;
                 }
                 if (s.job == .history) {
@@ -858,7 +1091,7 @@ fn drain(s: *Self) !void {
                     s.net = null;
                     s.job = .idle;
                     s.stream_active = false;
-                    s.sse.deinit();
+                    s.sse.reset();
                 }
             },
             .check => {
@@ -874,13 +1107,21 @@ fn drain(s: *Self) !void {
                     s.recovery_at = 0;
                     s.status = "Checking the previous send's original request ID · new message kept as a draft";
                 } else {
-                    const target: t.Target = if (std.mem.startsWith(u8, cmd.key, "new:")) .{ .recipient = .{ .address = cmd.recipient, .service = "imessage" } } else try s.store.sendTarget(ar, cmd.key);
+                    const target: t.Target = if (std.mem.startsWith(u8, cmd.key, "new:")) .{ .recipient = .{ .address = cmd.recipient, .service = "imessage" } } else try s.store.sendTarget(
+                        ar,
+                        cmd.key,
+                    );
                     const direct = target.recipient != null;
                     if ((direct and !s.send_direct) or (!direct and !s.reply_existing)) {
                         s.status = "Sending unavailable · message kept as a draft";
                         try s.store.saveDraft(cmd.key, cmd.text);
                     } else {
-                        const input = t.SendInput{ .request_id = try u.id(ar), .server_epoch = try s.store.get(ar, "epoch"), .target = target, .text = cmd.text };
+                        const input = t.SendInput{
+                            .request_id = try u.id(ar),
+                            .server_epoch = try s.store.get(ar, "epoch"),
+                            .target = target,
+                            .text = cmd.text,
+                        };
                         try s.store.persistSend(ar, cmd.key, input);
                         try s.setJobKey(input.request_id);
                         try s.request(.send, "/v1/messages", try u.json(ar, input));
@@ -892,7 +1133,7 @@ fn drain(s: *Self) !void {
         s.dirty = true;
     }
 }
-fn resolveDirect(s: *Self) !void {
+fn resolveDirect(s: *Worker) !void {
     if (s.selected.len == 0 or (!s.content_dirty and !std.mem.startsWith(u8, s.selected, "new:"))) return;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -900,11 +1141,14 @@ fn resolveDirect(s: *Self) !void {
     const canonical = try s.store.threadKey(ar, s.selected);
     if (!u.eq(canonical, s.selected)) {
         try s.store.set("selected", canonical);
-        a.free(s.redirect_from);
-        s.redirect_from = try a.dupe(u8, s.selected);
-        a.free(s.selected);
-        s.selected = try a.dupe(u8, canonical);
         if (s.viewed) try s.store.read(canonical);
+        const next_redirect_from = try a.dupe(u8, s.selected);
+        errdefer a.free(next_redirect_from);
+        const next_selected = try a.dupe(u8, canonical);
+        a.free(s.redirect_from);
+        s.redirect_from = next_redirect_from;
+        a.free(s.selected);
+        s.selected = next_selected;
         s.need_history = true;
         s.older = false;
         s.dirty = true;
@@ -912,26 +1156,40 @@ fn resolveDirect(s: *Self) !void {
     }
     if (!std.mem.startsWith(u8, s.selected, "new:")) return;
     if ((try s.store.draft(ar, s.selected)).len > 0) return;
-    var q = try s.store.db.prepare("SELECT m.chat FROM outbox o JOIN records m ON m.kind='message' AND m.id=json_extract(o.record,'$.message_id') WHERE o.draft_key=? AND o.epoch=? LIMIT 1");
+    const q = try s.store.db.prepare("SELECT m.chat FROM outbox o JOIN records m ON m.kind='message' AND m.id=json_extract(o.record,'$.message_id') WHERE o.draft_key=? AND o.epoch=? LIMIT 1");
     defer q.close();
     try q.bind(&.{ .{ .text = s.selected }, .{ .text = try s.store.get(ar, "epoch") } });
     if (!try q.step()) return;
     const chat = try q.text(ar, 0);
-    try s.store.exec("UPDATE outbox SET draft_key=? WHERE draft_key=?", &.{ .{ .text = chat }, .{ .text = s.selected } });
-    try s.store.exec("INSERT OR IGNORE INTO hidden_chats SELECT ? WHERE EXISTS(SELECT 1 FROM hidden_chats WHERE key=?)", &.{ .{ .text = chat }, .{ .text = s.selected } });
+    try s.store.exec(
+        "UPDATE outbox SET draft_key=? WHERE draft_key=?",
+        &.{ .{ .text = chat }, .{ .text = s.selected } },
+    );
+    try s.store.exec(
+        "INSERT OR IGNORE INTO hidden_chats SELECT ? WHERE EXISTS(SELECT 1 FROM hidden_chats WHERE key=?)",
+        &.{ .{ .text = chat }, .{ .text = s.selected } },
+    );
     try s.store.setHidden(s.selected, false);
     try s.store.set("selected", chat);
+    const next_redirect_from = try a.dupe(u8, s.selected);
+    errdefer a.free(next_redirect_from);
+    const next_selected = try a.dupe(u8, chat);
     a.free(s.redirect_from);
-    s.redirect_from = try a.dupe(u8, s.selected);
+    s.redirect_from = next_redirect_from;
     a.free(s.selected);
-    s.selected = try a.dupe(u8, chat);
+    s.selected = next_selected;
     s.need_history = true;
     s.dirty = true;
     s.content_dirty = true;
 }
-fn publish(s: *Self) !void {
+fn publish(s: *Worker) !void {
     if (s.content_dirty or s.shared == null) {
-        const shared = try SharedSnapshot.create(s.store, s.selected, s.content_generation + 1, s.shared);
+        const shared = try SharedSnapshot.create(
+            s.store,
+            s.selected,
+            s.content_generation + 1,
+            s.shared,
+        );
         if (s.shared) |old| old.release();
         s.shared = shared;
         s.content_generation += 1;
@@ -944,12 +1202,30 @@ fn publish(s: *Self) !void {
     var arena = std.heap.ArenaAllocator.init(a);
     errdefer arena.deinit();
     s.generation += 1;
-    v.* = .{ .arena = arena, .snapshot = shared.snapshot, .shared = shared, .content_generation = shared.generation, .credential_generation = s.credential_generation, .status = try arena.allocator().dupe(u8, s.status), .online = s.online, .send_direct = s.send_direct, .reply_existing = s.reply_existing, .generation = s.generation, .ack = s.ack, .loading_history = s.need_history or s.job == .history, .redirect_from = try arena.allocator().dupe(u8, s.redirect_from) };
+    v.* = .{
+        .arena = arena,
+        .snapshot = shared.snapshot,
+        .shared = shared,
+        .content_generation = shared.generation,
+        .credential_generation = s.credential_generation,
+        .status = try arena.allocator().dupe(u8, s.status),
+        .online = s.online,
+        .send_direct = s.send_direct,
+        .reply_existing = s.reply_existing,
+        .generation = s.generation,
+        .ack = s.ack,
+        .loading_history = s.need_history or s.job == .history,
+        .redirect_from = try arena.allocator().dupe(u8, s.redirect_from),
+    };
     const ar = arena.allocator();
     v.snapshot.draft = try s.store.draft(ar, s.selected);
     const server = try s.store.get(ar, "relay_status");
     const expiring = s.identity.expires_at > 0 and s.identity.expires_at - @divTrunc(u.now(), 1000) <= 30 * 86400;
-    if (expiring and s.online) v.status = try std.fmt.allocPrint(ar, "{s} · client certificate expires {s}; renew and Reconnect", .{ s.status, std.mem.sliceTo(&s.identity.expires, 0) });
+    if (expiring and s.online) v.status = try std.fmt.allocPrint(
+        ar,
+        "{s} · client certificate expires {s}; renew and Reconnect",
+        .{ s.status, std.mem.sliceTo(&s.identity.expires, 0) },
+    );
     v.diagnostics = .{
         .transport = .{
             .failure = switch (s.transport_error.kind) {
@@ -969,7 +1245,12 @@ fn publish(s: *Self) !void {
             .expires = try ar.dupe(u8, std.mem.sliceTo(&s.identity.expires, 0)),
             .expiring = expiring,
         },
-        .server = if (server.len > 0) (try std.json.parseFromSlice(RelayStatus, ar, server, .{ .ignore_unknown_fields = true })).value else null,
+        .server = if (server.len > 0) (try std.json.parseFromSlice(
+            RelayStatus,
+            ar,
+            server,
+            .{ .ignore_unknown_fields = true },
+        )).value else null,
         .cursor = try s.store.get(ar, "cursor"),
         .job = @tagName(s.job),
         .bootstrapped = u.eq(try s.store.get(ar, "bootstrapped"), "1"),
@@ -994,11 +1275,18 @@ fn publish(s: *Self) !void {
     s.last_published = u.now();
     if (s.on_ready) |ready| ready();
 }
-pub fn encode(ar: u.Allocator, raw: []const u8) ![]const u8 {
+pub fn encode(ar: u.Allocator, raw: []const u8) u.Allocator.Error![]const u8 {
     var result: std.ArrayList(u8) = .empty;
     const hex = "0123456789ABCDEF";
     for (raw) |ch| {
-        if (std.ascii.isAlphanumeric(ch) or std.mem.indexOfScalar(u8, "-_.~", ch) != null) try result.append(ar, ch) else try result.appendSlice(ar, &.{ '%', hex[ch >> 4], hex[ch & 15] });
+        if (std.ascii.isAlphanumeric(ch) or std.mem.indexOfScalar(u8, "-_.~", ch) != null) try result.append(
+            ar,
+            ch,
+        ) else try result.appendSlice(ar, &.{
+            '%',
+            hex[ch >> 4],
+            hex[ch & 15],
+        });
     }
     return result.items;
 }
@@ -1010,14 +1298,32 @@ test "lazy metadata upgrades a text snapshot without changing its revision or lo
     const store = try Store.open(":memory:");
     defer store.close();
     const History = @import("MessageHistory.zig");
-    var message = t.Message{ .id = "message", .revision = "1", .conversation_id = "chat", .sender = "peer", .direction = .incoming, .service = "imessage", .timestamp = "2026-01-01T00:00:00Z", .kind = .attachment, .text = "Caption 👋", .decoding = .plain, .observed_status = .received, .metadata_deferred = true };
+    var message = t.Message{
+        .id = "message",
+        .revision = "1",
+        .conversation_id = "chat",
+        .sender = "peer",
+        .direction = .incoming,
+        .service = "imessage",
+        .timestamp = "2026-01-01T00:00:00Z",
+        .kind = .attachment,
+        .text = "Caption 👋",
+        .decoding = .plain,
+        .observed_status = .received,
+        .metadata_deferred = true,
+    };
     const projection = try u.json(ar, message);
     _ = try store.upsert(ar, "message", projection);
     const text = try History.create(store, "chat", null);
     defer text.release();
     try std.testing.expectEqualStrings("Caption 👋", text.presentations[0].text);
     message.metadata_deferred = false;
-    message.attachments = &.{.{ .id = "photo", .name = "Photo", .mime_type = "image/png", .bytes = "1" }};
+    message.attachments = &.{.{
+        .id = "photo",
+        .name = "Photo",
+        .mime_type = "image/png",
+        .bytes = "1",
+    }};
     const full = try u.json(ar, message);
     _ = try store.upsert(ar, "message", full);
     const rich = try History.create(store, "chat", text);
@@ -1043,7 +1349,7 @@ test "lazy metadata upgrades a text snapshot without changing its revision or lo
 }
 
 test "metadata views share immutable history while edited records replace it" {
-    var worker = Self{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
+    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
     worker.store = try Store.open(":memory:");
     defer worker.store.close();
     defer worker.shutdown();
@@ -1052,12 +1358,27 @@ test "metadata views share immutable history while edited records replace it" {
     defer arena.deinit();
     const ar = arena.allocator();
     _ = try worker.store.upsert(ar, "conversation", "{\"id\":\"chat\",\"service\":\"imessage\"}");
-    var message = t.Message{ .id = "message", .conversation_id = "chat", .sender = "peer", .direction = .incoming, .service = "imessage", .timestamp = "2026-01-01T00:00:00Z", .kind = .text, .text = "Original", .decoding = .plain, .observed_status = .received };
+    var message = t.Message{
+        .id = "message",
+        .conversation_id = "chat",
+        .sender = "peer",
+        .direction = .incoming,
+        .service = "imessage",
+        .timestamp = "2026-01-01T00:00:00Z",
+        .kind = .text,
+        .text = "Original",
+        .decoding = .plain,
+        .observed_status = .received,
+    };
     _ = try worker.store.upsert(ar, "message", try u.json(ar, message));
     try worker.publish();
     const first = worker.take().?;
     defer first.destroy();
-    try worker.push(.{ .kind = .draft, .key = "chat", .text = "New draft" });
+    try worker.push(.{
+        .kind = .draft,
+        .key = "chat",
+        .text = "New draft",
+    });
     try worker.drain();
     try worker.publish();
     const metadata = worker.take().?;
@@ -1095,33 +1416,54 @@ test "metadata views share immutable history while edited records replace it" {
 
 test "an invalid frame rolls back the complete network batch for safe replay" {
     const epoch = "12345678-1234-1234-1234-123456789012";
-    var worker = Self{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
+    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
     worker.store = try Store.open(":memory:");
     defer worker.store.close();
     defer worker.shutdown();
     defer worker.sse.deinit();
     try worker.store.beginSync(epoch, epoch ++ ":0");
     const frame = "id: " ++ epoch ++ ":1\nevent: conversation.upsert\ndata: {\"cursor\":\"" ++ epoch ++ ":1\",\"sequence\":\"1\",\"type\":\"conversation.upsert\",\"origin\":\"live\",\"record\":{\"id\":\"chat\",\"service\":\"imessage\"}}\n\n";
-    try std.testing.expectError(error.InvalidFrame, worker.receiveBatch(frame ++ "data: invalid\n\n"));
-    try std.testing.expectEqual(@as(i64, 0), try worker.store.db.scalar("SELECT count(*) FROM records"));
+    try std.testing.expectError(
+        error.InvalidFrame,
+        worker.receiveBatch(frame ++ "data: invalid\n\n"),
+    );
+    try std.testing.expectEqual(
+        @as(i64, 0),
+        try worker.store.db.scalar("SELECT count(*) FROM records"),
+    );
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    try std.testing.expectEqualStrings(epoch ++ ":0", try worker.store.get(arena.allocator(), "cursor"));
-    worker.sse.deinit();
+    try std.testing.expectEqualStrings(
+        epoch ++ ":0",
+        try worker.store.get(arena.allocator(), "cursor"),
+    );
+    worker.sse.reset();
     try worker.store.db.exec("CREATE TRIGGER reject_cursor BEFORE UPDATE ON meta WHEN NEW.key='cursor' BEGIN SELECT RAISE(ABORT,'failure'); END");
     try std.testing.expectError(error.DatabaseFailure, worker.receiveBatch(frame));
-    try std.testing.expectEqual(@as(i64, 0), try worker.store.db.scalar("SELECT count(*) FROM records"));
-    try std.testing.expectEqualStrings(epoch ++ ":0", try worker.store.get(arena.allocator(), "cursor"));
+    try std.testing.expectEqual(
+        @as(i64, 0),
+        try worker.store.db.scalar("SELECT count(*) FROM records"),
+    );
+    try std.testing.expectEqualStrings(
+        epoch ++ ":0",
+        try worker.store.get(arena.allocator(), "cursor"),
+    );
     try worker.store.db.exec("DROP TRIGGER reject_cursor");
-    worker.sse.deinit();
+    worker.sse.reset();
     try worker.receiveBatch(frame);
-    try std.testing.expectEqual(@as(i64, 1), try worker.store.db.scalar("SELECT count(*) FROM records"));
-    try std.testing.expectEqualStrings(epoch ++ ":1", try worker.store.get(arena.allocator(), "cursor"));
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        try worker.store.db.scalar("SELECT count(*) FROM records"),
+    );
+    try std.testing.expectEqualStrings(
+        epoch ++ ":1",
+        try worker.store.get(arena.allocator(), "cursor"),
+    );
 }
 
 test "notifications follow committed live events, never replay, history, outgoing or viewed messages" {
     const epoch = "12345678-1234-1234-1234-123456789012";
-    var worker = Self{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
+    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
     worker.store = try Store.open(":memory:");
     defer worker.store.close();
     defer worker.shutdown();
@@ -1130,17 +1472,35 @@ test "notifications follow committed live events, never replay, history, outgoin
     defer arena.deinit();
     const ar = arena.allocator();
     try worker.store.beginSync(epoch, epoch ++ ":0");
-    _ = try worker.store.upsert(ar, "conversation", "{\"id\":\"chat\",\"title\":\"Friends 👋\",\"service\":\"imessage\"}");
-    var message = t.Message{ .id = "first", .conversation_id = "chat", .sender = "peer", .direction = .incoming, .service = "imessage", .timestamp = "2026-01-01T00:00:00Z", .kind = .text, .text = "Hello <b>literal</b> & 👋", .decoding = .plain, .observed_status = .received };
+    _ = try worker.store.upsert(
+        ar,
+        "conversation",
+        "{\"id\":\"chat\",\"title\":\"Friends 👋\",\"service\":\"imessage\"}",
+    );
+    var message = t.Message{
+        .id = "first",
+        .conversation_id = "chat",
+        .sender = "peer",
+        .direction = .incoming,
+        .service = "imessage",
+        .timestamp = "2026-01-01T00:00:00Z",
+        .kind = .text,
+        .text = "Hello <b>literal</b> & 👋",
+        .decoding = .plain,
+        .observed_status = .received,
+    };
     const frame = try notificationFrame(ar, epoch, 1, "live", message);
-    try std.testing.expectError(error.InvalidFrame, worker.receiveBatch(try std.mem.concat(ar, u8, &.{ frame, "data: invalid\n\n" })));
+    try std.testing.expectError(
+        error.InvalidFrame,
+        worker.receiveBatch(try std.mem.concat(ar, u8, &.{ frame, "data: invalid\n\n" })),
+    );
     try std.testing.expect(worker.takeNotification() == null);
-    worker.sse.deinit();
+    worker.sse.reset();
     try worker.store.db.exec("CREATE TRIGGER reject_cursor BEFORE UPDATE ON meta WHEN NEW.key='cursor' BEGIN SELECT RAISE(ABORT,'failure'); END");
     try std.testing.expectError(error.DatabaseFailure, worker.receiveBatch(frame));
     try std.testing.expect(worker.takeNotification() == null);
     try worker.store.db.exec("DROP TRIGGER reject_cursor");
-    worker.sse.deinit();
+    worker.sse.reset();
     try worker.receiveBatch(frame);
     // Replacing snapshots must not consume or duplicate a queued alert.
     try worker.publish();
@@ -1180,15 +1540,36 @@ test "notifications follow committed live events, never replay, history, outgoin
     try std.testing.expect(worker.takeNotification() == null);
 }
 
-fn notificationFrame(ar: u.Allocator, epoch: []const u8, sequence: i64, origin: []const u8, message: t.Message) ![]const u8 {
+fn notificationFrame(
+    ar: u.Allocator,
+    epoch: []const u8,
+    sequence: i64,
+    origin: []const u8,
+    message: t.Message,
+) ![]const u8 {
     const cursor = try t.cursor(ar, epoch, sequence);
-    const payload = try u.json(ar, .{ .cursor = cursor, .sequence = try std.fmt.allocPrint(ar, "{d}", .{sequence}), .type = "message.upsert", .origin = origin, .record = message });
-    return std.fmt.allocPrint(ar, "id: {s}\nevent: message.upsert\ndata: {s}\n\n", .{ cursor, payload });
+    const payload = try u.json(ar, .{
+        .cursor = cursor,
+        .sequence = try std.fmt.allocPrint(ar, "{d}", .{sequence}),
+        .type = "message.upsert",
+        .origin = origin,
+        .record = message,
+    });
+    return std.fmt.allocPrint(
+        ar,
+        "id: {s}\nevent: message.upsert\ndata: {s}\n\n",
+        .{ cursor, payload },
+    );
 }
 
 test "an unresolved submission holds new text until the original ID has an authoritative outcome" {
     const epoch = "12345678-1234-1234-1234-123456789012";
-    var worker = Self{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" }, .online = true, .reply_existing = true };
+    var worker = Worker{
+        .io = std.testing.io,
+        .config = .{ .data = "/tmp/unused" },
+        .online = true,
+        .reply_existing = true,
+    };
     worker.store = try Store.open(":memory:");
     defer worker.store.close();
     defer worker.shutdown();
@@ -1196,17 +1577,35 @@ test "an unresolved submission holds new text until the original ID has an autho
     defer arena.deinit();
     const ar = arena.allocator();
     try worker.store.beginSync(epoch, epoch ++ ":0");
-    const input = t.SendInput{ .request_id = epoch, .server_epoch = epoch, .target = .{ .conversation_id = epoch }, .text = "Original submission" };
+    const input = t.SendInput{
+        .request_id = epoch,
+        .server_epoch = epoch,
+        .target = .{ .conversation_id = epoch },
+        .text = "Original submission",
+    };
     try worker.store.persistSend(ar, "chat", input);
     try worker.store.outcome(epoch, "unknown", "Connection interrupted");
     // Even with the stream back online, submitting must not allocate a new UUID
     // or clear the new text before lookup resolves the original submission.
-    try worker.push(.{ .kind = .send, .key = "chat", .text = "Keep this new draft" });
+    try worker.push(.{
+        .kind = .send,
+        .key = "chat",
+        .text = "Keep this new draft",
+    });
     try worker.drain();
-    try std.testing.expectEqual(@as(i64, 1), try worker.store.db.scalar("SELECT count(*) FROM outbox"));
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        try worker.store.db.scalar("SELECT count(*) FROM outbox"),
+    );
     try std.testing.expectEqualStrings("Keep this new draft", try worker.store.draft(ar, "chat"));
     try std.testing.expect(try worker.unresolved());
-    try worker.handleResponse(ar, .recover, try u.json(ar, t.SendRequest{ .request_id = epoch, .server_epoch = epoch, .target = input.target, .text = input.text, .state = .submitted }));
+    try worker.handleResponse(ar, .recover, try u.json(ar, t.SendRequest{
+        .request_id = epoch,
+        .server_epoch = epoch,
+        .target = input.target,
+        .text = input.text,
+        .state = .submitted,
+    }));
     try std.testing.expect(!try worker.unresolved());
     try std.testing.expectEqualStrings("Keep this new draft", try worker.store.draft(ar, "chat"));
 }

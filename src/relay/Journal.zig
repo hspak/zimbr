@@ -1,12 +1,56 @@
+//! Durable message and send journal. Allocation-taking queries use a caller-owned
+//! arena; returned records and any partial allocations share that arena's lifetime.
 const std = @import("std");
+const Signal = @import("../Signal.zig");
 const u = @import("../common.zig");
-const t = @import("../protocol/types.zig");
+const t = @import("../protocol.zig").types;
 const Db = @import("Sqlite.zig");
-pub const Enrichment = @import("Enrichment.zig");
-const Self = @This();
+pub const enrichment = @import("enrichment.zig");
+const Journal = @This();
+
 db: Db,
-changed: ?struct { signal: *@import("../Signal.zig"), io: std.Io } = null,
-pub fn open(path: [:0]const u8) !Self {
+changed: ?struct { signal: *Signal, io: std.Io } = null,
+
+pub const QueryError = Db.QueryError;
+pub const ReadError = Db.QueryError || u.Allocator.Error;
+pub const RecordError = Db.QueryError || std.json.ParseError(std.json.Scanner);
+pub const OpenError = ReadError || error{RandomUnavailable};
+pub const BeginError = error{DatabaseFailure};
+pub const CommitError = error{DatabaseFailure};
+pub const ConversationError = ReadError || error{RandomUnavailable};
+pub const SourceMessageError = RecordError || error{
+    MetadataItemTooLarge,
+    RandomUnavailable,
+    WriteFailed,
+};
+pub const MessageError = RecordError || error{
+    MetadataItemTooLarge,
+    RandomUnavailable,
+    WriteFailed,
+};
+pub const GetRouteError = ReadError || error{UnsupportedTarget};
+pub const AcceptError = ReadError || error{
+    AdapterUnavailable,
+    InvalidRequest,
+    RequestConflict,
+    ResyncRequired,
+    TextTooLarge,
+    UnsupportedTarget,
+};
+pub const ResetError = RecordError || error{RandomUnavailable};
+pub const CheckCursorError = ReadError || error{
+    CursorExpired,
+    InvalidRequest,
+    ResyncRequired,
+};
+pub const PageError = RecordError || error{InvalidRequest};
+pub const PageContentError = RecordError || error{InvalidRequest};
+pub const ObserveIdentityError = ReadError || error{RandomUnavailable};
+pub const UpdateIdentityError = ReadError || error{ InvalidRequest, NotFound };
+pub const IdentityPageError = RecordError || error{InvalidRequest};
+pub const BackfillIdentitiesError = RecordError || error{RandomUnavailable};
+
+pub fn open(path: [:0]const u8) OpenError!Journal {
     const db = try Db.open(path, false);
     errdefer db.close();
     try db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;");
@@ -16,7 +60,7 @@ pub fn open(path: [:0]const u8) !Self {
     if (try db.scalar("SELECT count(*) FROM relay_meta") == 0) {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
-        var s = try db.prepare("INSERT INTO relay_meta VALUES(1,1,?,0,0)");
+        const s = try db.prepare("INSERT INTO relay_meta VALUES(1,1,?,0,0)");
         defer s.close();
         try s.bind(&.{.{ .text = try u.id(arena.allocator()) }});
         _ = try s.step();
@@ -30,60 +74,77 @@ pub fn open(path: [:0]const u8) !Self {
     try db.exec("CREATE TEMP TABLE source_message_cache(slot INTEGER PRIMARY KEY,source TEXT NOT NULL UNIQUE,fingerprint BLOB NOT NULL)");
     return .{ .db = db };
 }
-pub fn close(self: Self) void {
+pub fn close(self: Journal) void {
     self.db.close();
 }
-pub fn begin(self: Self) !void {
+pub fn begin(self: Journal) BeginError!void {
     try self.db.exec("BEGIN IMMEDIATE");
 }
-pub fn commit(self: Self) !void {
+pub fn commit(self: Journal) CommitError!void {
     try self.db.exec("COMMIT");
     if (self.changed) |change| change.signal.notify(change.io);
 }
-pub fn rollback(self: Self) void {
+pub fn rollback(self: Journal) void {
     self.db.exec("ROLLBACK") catch {};
 }
-pub fn execute(self: Self, sql: [:0]const u8, args: []const Db.Value) !void {
-    var s = try self.db.prepare(sql);
+pub fn execute(self: Journal, sql: [:0]const u8, args: []const Db.Parameter) Db.QueryError!void {
+    const s = try self.db.prepare(sql);
     defer s.close();
     try s.bind(args);
     _ = try s.step();
 }
-pub fn epoch(self: Self, a: u.Allocator) ![]const u8 {
-    var s = try self.db.prepare("SELECT epoch FROM relay_meta");
+pub fn epoch(self: Journal, a: u.Allocator) ReadError![]const u8 {
+    const s = try self.db.prepare("SELECT epoch FROM relay_meta");
     defer s.close();
     _ = try s.step();
     return s.text(a, 0);
 }
-pub fn sequence(self: Self) !i64 {
+pub fn sequence(self: Journal) Db.QueryError!i64 {
     return self.db.scalar("SELECT sequence FROM relay_meta");
 }
-pub fn next(self: Self) !i64 {
+pub fn next(self: Journal) Db.QueryError!i64 {
     try self.execute("UPDATE relay_meta SET sequence=sequence+1", &.{});
     return self.sequence();
 }
-pub fn progress(self: Self, a: u.Allocator, key: []const u8) !?[]const u8 {
-    var s = try self.db.prepare("SELECT value FROM ingestion_progress WHERE key=?");
+pub fn progress(self: Journal, a: u.Allocator, key: []const u8) ReadError!?[]const u8 {
+    const s = try self.db.prepare("SELECT value FROM ingestion_progress WHERE key=?");
     defer s.close();
     try s.bind(&.{.{ .text = key }});
     return if (try s.step()) try s.text(a, 0) else null;
 }
-pub fn position(self: Self, a: u.Allocator, key: []const u8) !i64 {
+pub fn position(self: Journal, a: u.Allocator, key: []const u8) ReadError!i64 {
     return std.fmt.parseInt(i64, (try self.progress(a, key)) orelse "0", 10) catch error.DatabaseFailure;
 }
-pub fn setProgress(self: Self, key: []const u8, value: []const u8) !void {
-    try self.execute("INSERT INTO ingestion_progress VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", &.{ .{ .text = key }, .{ .text = value } });
+pub fn setProgress(self: Journal, key: []const u8, value: []const u8) Db.QueryError!void {
+    try self.execute(
+        "INSERT INTO ingestion_progress VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        &.{ .{ .text = key }, .{ .text = value } },
+    );
 }
-pub fn setPosition(self: Self, a: u.Allocator, key: []const u8, n: i64) !void {
+pub fn setPosition(self: Journal, a: u.Allocator, key: []const u8, n: i64) ReadError!void {
     try self.setProgress(key, try u.decimal(a, n));
 }
-pub fn event(self: Self, seq: i64, kind: []const u8, record: []const u8, origin: []const u8) !void {
-    try self.execute("INSERT INTO events(sequence,type,record,origin,created_ms) VALUES(?,?,?,?,?)", &.{ .{ .int = seq }, .{ .text = kind }, .{ .text = record }, .{ .text = origin }, .{ .int = u.now() } });
+pub fn event(self: Journal, seq: i64, kind: []const u8, record: []const u8, origin: []const u8) Db.QueryError!void {
+    try self.execute("INSERT INTO events(sequence,type,record,origin,created_ms) VALUES(?,?,?,?,?)", &.{
+        .{ .int = seq },
+        .{ .text = kind },
+        .{ .text = record },
+        .{ .text = origin },
+        .{ .int = u.now() },
+    });
 }
-pub fn conversation(self: Self, a: u.Allocator, source: []const u8, row: i64, route: []const u8, value: t.Conversation, origin: []const u8) ![]const u8 {
+pub fn conversation(
+    self: Journal,
+    a: u.Allocator,
+    source: []const u8,
+    row: i64,
+    route: []const u8,
+    value: t.Conversation,
+    origin: []const u8,
+) ConversationError![]const u8 {
     var v = value;
     for (v.participants) |address| _ = try self.observeIdentity(a, v.service, address);
-    var find = try self.db.prepare("SELECT id,content,source_row,route,service FROM conversations WHERE source=?");
+    const find = try self.db.prepare("SELECT id,content,source_row,route,service FROM conversations WHERE source=?");
     defer find.close();
     try find.bind(&.{.{ .text = source }});
     const exists = try find.step();
@@ -93,86 +154,150 @@ pub fn conversation(self: Self, a: u.Allocator, source: []const u8, row: i64, ro
     const content = try u.json(a, v);
     if (exists and u.eq(find.bytes(1), content)) {
         if (find.int(2) != row or !u.eq(find.bytes(3), route) or !u.eq(find.bytes(4), v.service))
-            try self.execute("UPDATE conversations SET source_row=?,route=?,service=? WHERE id=?", &.{ .{ .int = row }, .{ .text = route }, .{ .text = v.service }, .{ .text = v.id } });
+            try self.execute("UPDATE conversations SET source_row=?,route=?,service=? WHERE id=?", &.{
+                .{ .int = row },
+                .{ .text = route },
+                .{ .text = v.service },
+                .{ .text = v.id },
+            });
         return v.id;
     }
     const seq = try self.next();
     v.revision = try u.decimal(a, seq);
     const record = try u.json(a, v);
-    try self.execute("INSERT INTO conversations(id,source,source_row,route,service,content,record) VALUES(?,?,?,?,?,?,?) ON CONFLICT(source) DO UPDATE SET source_row=excluded.source_row,route=excluded.route,service=excluded.service,content=excluded.content,record=excluded.record", &.{ .{ .text = v.id }, .{ .text = source }, .{ .int = row }, .{ .text = route }, .{ .text = v.service }, .{ .text = content }, .{ .text = record } });
+    try self.execute("INSERT INTO conversations(id,source,source_row,route,service,content,record) VALUES(?,?,?,?,?,?,?) ON CONFLICT(source) DO UPDATE SET source_row=excluded.source_row,route=excluded.route,service=excluded.service,content=excluded.content,record=excluded.record", &.{
+        .{ .text = v.id },
+        .{ .text = source },
+        .{ .int = row },
+        .{ .text = route },
+        .{ .text = v.service },
+        .{ .text = content },
+        .{ .text = record },
+    });
     try self.execute("DELETE FROM participants WHERE conversation_id=?", &.{.{ .text = v.id }});
-    for (v.participants) |address| try self.execute("INSERT OR IGNORE INTO participants VALUES(?,?)", &.{ .{ .text = v.id }, .{ .text = address } });
+    for (v.participants) |address| try self.execute(
+        "INSERT OR IGNORE INTO participants VALUES(?,?)",
+        &.{ .{ .text = v.id }, .{ .text = address } },
+    );
     try self.event(seq, "conversation.upsert", record, origin);
     return v.id;
 }
 /// Only source ingestion uses this shortcut. Hash the entire decoded input,
 /// including joined metadata and mutable status, before merging worker state.
 /// Worker writes invalidate it in message(); resets and rollback are atomic.
-pub fn sourceMessage(self: Self, a: u.Allocator, source: []const u8, row: i64, date: i64, value: t.Message, origin: []const u8) !void {
+pub fn sourceMessage(
+    self: Journal,
+    a: u.Allocator,
+    source: []const u8,
+    row: i64,
+    date: i64,
+    value: t.Message,
+    origin: []const u8,
+) SourceMessageError!void {
     var buffer: [4096]u8 = undefined;
     var hash: std.Io.Writer.Hashing(std.crypto.hash.sha2.Sha256) = .init(&buffer);
-    try std.json.Stringify.value(.{ .row = row, .date = date, .value = value }, .{}, &hash.writer);
+    try std.json.Stringify.value(.{
+        .row = row,
+        .date = date,
+        .value = value,
+    }, .{}, &hash.writer);
     try hash.writer.flush();
     const fingerprint = hash.hasher.finalResult();
     {
-        var cached = try self.db.prepare("SELECT fingerprint FROM source_message_cache WHERE source=?");
+        const cached = try self.db.prepare("SELECT fingerprint FROM source_message_cache WHERE source=?");
         defer cached.close();
         try cached.bind(&.{.{ .text = source }});
         if (try cached.step() and u.eq(cached.bytes(0), &fingerprint)) return;
     }
     try self.message(a, source, row, date, value, origin);
-    try self.execute("INSERT OR REPLACE INTO source_message_cache VALUES(?,?,?)", &.{ .{ .int = @intCast(std.hash.Wyhash.hash(0, source) % 4096) }, .{ .text = source }, .{ .blob = &fingerprint } });
+    try self.execute("INSERT OR REPLACE INTO source_message_cache VALUES(?,?,?)", &.{
+        .{ .int = @intCast(std.hash.Wyhash.hash(0, source) % 4096) },
+        .{ .text = source },
+        .{ .blob = &fingerprint },
+    });
 }
-pub fn message(self: Self, a: u.Allocator, source: []const u8, row: i64, date: i64, value: t.Message, origin: []const u8) !void {
+pub fn message(
+    self: Journal,
+    a: u.Allocator,
+    source: []const u8,
+    row: i64,
+    date: i64,
+    value: t.Message,
+    origin: []const u8,
+) MessageError!void {
     try self.execute("DELETE FROM source_message_cache WHERE source=?", &.{.{ .text = source }});
     var v = value;
     if (v.direction == .incoming) _ = try self.observeIdentity(a, v.service, v.sender);
     if (v.reaction_event) |ev| if (!ev.actor.is_self) {
         if (ev.actor.address) |address| _ = try self.observeIdentity(a, ev.actor.service, address);
     };
-    var find = try self.db.prepare("SELECT id,content,source_row,record FROM messages WHERE source=?");
+    const find = try self.db.prepare("SELECT id,content,source_row,record FROM messages WHERE source=?");
     defer find.close();
     try find.bind(&.{.{ .text = source }});
     const exists = try find.step();
     v.id = if (exists) try find.text(a, 0) else try u.id(a);
     v.revision = "0";
-    const previous = if (exists) (try std.json.parseFromSlice(t.Message, a, find.bytes(3), .{ .allocate = .alloc_always, .ignore_unknown_fields = true })).value else null;
-    const enrichment = try Enrichment.prepare(self, a, v, previous);
-    v = enrichment.value;
+    const previous = if (exists) (try std.json.parseFromSlice(
+        t.Message,
+        a,
+        find.bytes(3),
+        .{ .allocate = .alloc_always, .ignore_unknown_fields = true },
+    )).value else null;
+    const prepared = try enrichment.prepare(a, self, v, previous);
+    v = prepared.value;
     const content = try u.json(a, v);
-    if (exists and !enrichment.changed and u.eq(find.bytes(1), content)) {
-        if (find.int(2) != row) try self.execute("UPDATE messages SET source_row=? WHERE id=?", &.{ .{ .int = row }, .{ .text = v.id } });
+    if (exists and !prepared.changed and u.eq(find.bytes(1), content)) {
+        if (find.int(2) != row) try self.execute(
+            "UPDATE messages SET source_row=? WHERE id=?",
+            &.{ .{ .int = row }, .{ .text = v.id } },
+        );
         return;
     }
     const seq = try self.next();
     v.revision = try u.decimal(a, seq);
     const record = try u.json(a, v);
-    try self.execute("INSERT INTO messages(id,source,source_row,conversation_id,date_ns,direction,text,status,content,record) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source) DO UPDATE SET source_row=excluded.source_row,conversation_id=excluded.conversation_id,date_ns=excluded.date_ns,direction=excluded.direction,text=excluded.text,status=excluded.status,content=excluded.content,record=excluded.record", &.{ .{ .text = v.id }, .{ .text = source }, .{ .int = row }, .{ .text = v.conversation_id }, .{ .int = date }, .{ .text = @tagName(v.direction) }, .{ .text = v.text orelse "" }, .{ .text = @tagName(v.observed_status) }, .{ .text = content }, .{ .text = record } });
-    try Enrichment.persist(self, v.id, enrichment);
+    try self.execute("INSERT INTO messages(id,source,source_row,conversation_id,date_ns,direction,text,status,content,record) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source) DO UPDATE SET source_row=excluded.source_row,conversation_id=excluded.conversation_id,date_ns=excluded.date_ns,direction=excluded.direction,text=excluded.text,status=excluded.status,content=excluded.content,record=excluded.record", &.{
+        .{ .text = v.id },
+        .{ .text = source },
+        .{ .int = row },
+        .{ .text = v.conversation_id },
+        .{ .int = date },
+        .{ .text = @tagName(v.direction) },
+        .{ .text = v.text orelse "" },
+        .{ .text = @tagName(v.observed_status) },
+        .{ .text = content },
+        .{ .text = record },
+    });
+    try enrichment.persist(self, v.id, prepared);
     try self.event(seq, "message.upsert", record, origin);
 }
-pub fn getRecord(self: Self, a: u.Allocator, kind: enum { conversation, request }, id: []const u8) !?[]const u8 {
-    var s = try self.db.prepare(if (kind == .conversation) "SELECT record FROM conversations WHERE id=?" else "SELECT record FROM send_requests WHERE id=?");
+pub fn getRecord(
+    self: Journal,
+    a: u.Allocator,
+    kind: enum { conversation, request },
+    id: []const u8,
+) ReadError!?[]const u8 {
+    const s = try self.db.prepare(if (kind == .conversation) "SELECT record FROM conversations WHERE id=?" else "SELECT record FROM send_requests WHERE id=?");
     defer s.close();
     try s.bind(&.{.{ .text = id }});
     return if (try s.step()) try s.text(a, 0) else null;
 }
 pub const Route = struct { mode: []const u8, destination: []const u8 };
-pub fn getRoute(self: Self, a: u.Allocator, target: t.Target) !Route {
+pub fn getRoute(self: Journal, a: u.Allocator, target: t.Target) GetRouteError!Route {
     if (target.recipient) |r| return .{ .mode = "direct", .destination = r.address };
-    var s = try self.db.prepare("SELECT route,service FROM conversations WHERE id=?");
+    const s = try self.db.prepare("SELECT route,service FROM conversations WHERE id=?");
     defer s.close();
     try s.bind(&.{.{ .text = target.conversation_id.? }});
     if (!try s.step() or !u.eq(s.bytes(1), "imessage")) return error.UnsupportedTarget;
     return .{ .mode = "chat", .destination = try s.text(a, 0) };
 }
-pub fn accept(self: Self, a: u.Allocator, raw_input: t.SendInput, ready: bool) !struct { record: []const u8, fresh: bool } {
+pub fn accept(self: Journal, a: u.Allocator, raw_input: t.SendInput, ready: bool) AcceptError!struct { record: []const u8, fresh: bool } {
     const input = try t.normalize(a, raw_input);
     try self.begin();
     errdefer self.rollback();
     if (!u.eq(input.server_epoch, try self.epoch(a))) return error.ResyncRequired;
     const payload = try u.json(a, input);
-    var s = try self.db.prepare("SELECT payload,record FROM send_requests WHERE id=?");
+    const s = try self.db.prepare("SELECT payload,record FROM send_requests WHERE id=?");
     defer s.close();
     try s.bind(&.{.{ .text = input.request_id }});
     if (try s.step()) {
@@ -183,91 +308,142 @@ pub fn accept(self: Self, a: u.Allocator, raw_input: t.SendInput, ready: bool) !
     }
     if (!ready) return error.AdapterUnavailable;
     const r = try self.getRoute(a, input.target);
-    const v: t.SendRequest = .{ .request_id = input.request_id, .server_epoch = input.server_epoch, .target = input.target, .text = input.text };
-    try self.execute("INSERT INTO send_requests(id,epoch,payload,record,state,mode,route,accepted_ms) VALUES(?,?,?,?,'queued',?,?,?)", &.{ .{ .text = input.request_id }, .{ .text = input.server_epoch }, .{ .text = payload }, .{ .text = try u.json(a, v) }, .{ .text = r.mode }, .{ .text = r.destination }, .{ .int = u.now() } });
+    const v: t.SendRequest = .{
+        .request_id = input.request_id,
+        .server_epoch = input.server_epoch,
+        .target = input.target,
+        .text = input.text,
+    };
+    try self.execute("INSERT INTO send_requests(id,epoch,payload,record,state,mode,route,accepted_ms) VALUES(?,?,?,?,'queued',?,?,?)", &.{
+        .{ .text = input.request_id },
+        .{ .text = input.server_epoch },
+        .{ .text = payload },
+        .{ .text = try u.json(a, v) },
+        .{ .text = r.mode },
+        .{ .text = r.destination },
+        .{ .int = u.now() },
+    });
     const record_json = try self.updateRequest(a, v);
     try self.commit();
     return .{ .record = record_json, .fresh = true };
 }
-pub fn updateRequest(self: Self, a: u.Allocator, value: t.SendRequest) ![]const u8 {
+pub fn updateRequest(self: Journal, a: u.Allocator, value: t.SendRequest) ReadError![]const u8 {
     var v = value;
     const seq = try self.next();
     v.revision = try u.decimal(a, seq);
     const record_json = try u.json(a, v);
-    try self.execute("UPDATE send_requests SET state=?,record=?,message_id=? WHERE id=?", &.{ .{ .text = @tagName(v.state) }, .{ .text = record_json }, if (v.message_id) |m| .{ .text = m } else .null_value, .{ .text = v.request_id } });
+    try self.execute("UPDATE send_requests SET state=?,record=?,message_id=? WHERE id=?", &.{
+        .{ .text = @tagName(v.state) },
+        .{ .text = record_json },
+        if (v.message_id) |m| .{ .text = m } else .null_value,
+        .{ .text = v.request_id },
+    });
     try self.event(seq, "send_request.updated", record_json, "reconciliation");
     return record_json;
 }
-pub fn recover(self: Self, a: u.Allocator) !void {
+pub fn recover(self: Journal, a: u.Allocator) RecordError!void {
     try self.begin();
     errdefer self.rollback();
-    var s = try self.db.prepare("SELECT record FROM send_requests WHERE state='dispatching'");
+    const s = try self.db.prepare("SELECT record FROM send_requests WHERE state='dispatching'");
     defer s.close();
     var items: std.ArrayList(t.SendRequest) = .empty;
-    while (try s.step()) try items.append(a, (try std.json.parseFromSlice(t.SendRequest, a, s.bytes(0), .{ .allocate = .alloc_always })).value);
+    while (try s.step()) try items.append(
+        a,
+        (try std.json.parseFromSlice(t.SendRequest, a, s.bytes(0), .{ .allocate = .alloc_always })).value,
+    );
     for (items.items) |item| {
         var v = item;
         v.state = .unknown;
-        v.error_info = .{ .code = "interrupted_dispatch", .message = "Dispatch was interrupted; delivery is uncertain.", .outcome = .uncertain };
+        v.error_info = .{
+            .code = "interrupted_dispatch",
+            .message = "Dispatch was interrupted; delivery is uncertain.",
+            .outcome = .uncertain,
+        };
         _ = try self.updateRequest(a, v);
     }
     try self.commit();
 }
-pub fn reset(self: Self, a: u.Allocator) !void {
+pub fn reset(self: Journal, a: u.Allocator) ResetError!void {
     // Caller owns a transaction. Preserve all idempotency identities, hold queued sends.
     try self.execute("DELETE FROM source_message_cache", &.{});
-    var s = try self.db.prepare("SELECT record FROM send_requests WHERE state IN ('queued','dispatching','submitted','unknown')");
+    const s = try self.db.prepare("SELECT record FROM send_requests WHERE state IN ('queued','dispatching','submitted','unknown')");
     defer s.close();
     var items: std.ArrayList(t.SendRequest) = .empty;
-    while (try s.step()) try items.append(a, (try std.json.parseFromSlice(t.SendRequest, a, s.bytes(0), .{ .allocate = .alloc_always })).value);
-    try self.execute("UPDATE relay_meta SET epoch=?,sequence=0,pruned_through=0", &.{.{ .text = try u.id(a) }});
+    while (try s.step()) try items.append(
+        a,
+        (try std.json.parseFromSlice(t.SendRequest, a, s.bytes(0), .{ .allocate = .alloc_always })).value,
+    );
+    try self.execute(
+        "UPDATE relay_meta SET epoch=?,sequence=0,pruned_through=0",
+        &.{.{ .text = try u.id(a) }},
+    );
     try self.db.exec("DELETE FROM events; DELETE FROM reaction_work; DELETE FROM reaction_sources; DELETE FROM ordinary_anchors; DELETE FROM asset_work; DELETE FROM asset_owners; DELETE FROM asset_representations; DELETE FROM asset_blobs; DELETE FROM asset_sources; DELETE FROM contact_mappings; DELETE FROM identity_work; DELETE FROM identities; DELETE FROM enrichment_items; DELETE FROM enrichment_sections; DELETE FROM participants; DELETE FROM messages; DELETE FROM conversations; DELETE FROM ingestion_progress; DELETE FROM pending_source; DELETE FROM reconcile_chats;");
     for (items.items) |item| {
         var v = item;
         v.state = .unknown;
         v.message_id = null;
         v.candidate_message_id = null;
-        v.error_info = .{ .code = "source_reset", .message = "Source changed; this request is held for review.", .outcome = .uncertain };
+        v.error_info = .{
+            .code = "source_reset",
+            .message = "Source changed; this request is held for review.",
+            .outcome = .uncertain,
+        };
         _ = try self.updateRequest(a, v);
     }
 }
-pub fn checkCursor(self: Self, a: u.Allocator, cursor: []const u8) !i64 {
+pub fn checkCursor(self: Journal, a: u.Allocator, cursor: []const u8) CheckCursorError!i64 {
     const seq = try t.parseCursor(cursor, try self.epoch(a));
     if (seq > try self.sequence()) return error.ResyncRequired;
     if (seq < try self.db.scalar("SELECT pruned_through FROM relay_meta")) return error.CursorExpired;
     return seq;
 }
-pub fn prune(self: Self, count_limit: i64) !void {
+pub fn prune(self: Journal, count_limit: i64) Db.QueryError!void {
     try self.begin();
     errdefer self.rollback();
-    var s = try self.db.prepare("SELECT coalesce(max(sequence),0) FROM events WHERE created_ms<? OR sequence<=(SELECT sequence FROM relay_meta)-?");
+    const s = try self.db.prepare("SELECT coalesce(max(sequence),0) FROM events WHERE created_ms<? OR sequence<=(SELECT sequence FROM relay_meta)-?");
     defer s.close();
     try s.bind(&.{ .{ .int = u.now() - 7 * 24 * 60 * 60 * 1000 }, .{ .int = count_limit } });
     _ = try s.step();
     const cut = s.int(0);
-    try self.execute("UPDATE relay_meta SET pruned_through=max(pruned_through,?)", &.{.{ .int = cut }});
+    try self.execute(
+        "UPDATE relay_meta SET pruned_through=max(pruned_through,?)",
+        &.{.{ .int = cut }},
+    );
     try self.execute("DELETE FROM events WHERE sequence<=?", &.{.{ .int = cut }});
     try self.commit();
 }
 pub const Page = struct { records: []std.json.Value, next: ?[]const u8 };
 pub const thread_members = "SELECT id FROM conversations WHERE coalesce(json_extract(record,'$.thread_id'),id)=coalesce((SELECT coalesce(json_extract(record,'$.thread_id'),id) FROM conversations WHERE id=?),?)";
-pub fn threadMembers(self: Self, a: u.Allocator, id: []const u8) ![][]const u8 {
-    var q = try self.db.prepare(thread_members);
+pub fn threadMembers(self: Journal, a: u.Allocator, id: []const u8) ReadError![][]const u8 {
+    const q = try self.db.prepare(thread_members);
     defer q.close();
     try q.bind(&.{ .{ .text = id }, .{ .text = id } });
     var members: std.ArrayList([]const u8) = .empty;
     while (try q.step()) try members.append(a, try q.text(a, 0));
     return members.toOwnedSlice(a);
 }
-pub fn page(self: Self, a: u.Allocator, conversation_id: ?[]const u8, before: ?[]const u8, limit: usize) !Page {
+pub fn page(
+    self: Journal,
+    a: u.Allocator,
+    conversation_id: ?[]const u8,
+    before: ?[]const u8,
+    limit: usize,
+) PageError!Page {
     return self.pageContent(a, conversation_id, before, limit, false);
 }
 
-pub fn pageContent(self: Self, a: u.Allocator, conversation_id: ?[]const u8, before: ?[]const u8, limit: usize, text_only: bool) !Page {
+pub fn pageContent(
+    self: Journal,
+    a: u.Allocator,
+    conversation_id: ?[]const u8,
+    before: ?[]const u8,
+    limit: usize,
+    text_only: bool,
+) PageContentError!Page {
     // Strip optional arrays in SQLite, before allocating/parsing the response.
     // Keep reaction_event: it determines whether a source row is displayed.
     const projection = "CASE WHEN coalesce(json_array_length(record,'$.attachments'),0)>0 OR coalesce(json_array_length(record,'$.link_previews'),0)>0 OR coalesce(json_array_length(record,'$.reactions'),0)>0 OR coalesce(json_extract(record,'$.enrichment.attachments.total'),0)>0 OR coalesce(json_extract(record,'$.enrichment.previews.total'),0)>0 OR coalesce(json_extract(record,'$.enrichment.reactions.total'),0)>0 THEN json_set(json_remove(record,'$.attachments','$.link_previews','$.reactions','$.parts','$.enrichment'),'$.metadata_deferred',json('true')) ELSE record END";
-    var s = try self.db.prepare(if (conversation_id != null)
+    const s = try self.db.prepare(if (conversation_id != null)
         if (text_only)
             "SELECT " ++ projection ++ ",date_ns,id FROM messages WHERE conversation_id IN (" ++ thread_members ++ ") AND (date_ns<? OR (date_ns=? AND id<?)) ORDER BY date_ns DESC,id DESC LIMIT ?"
         else
@@ -284,7 +460,14 @@ pub fn pageContent(self: Self, a: u.Allocator, conversation_id: ?[]const u8, bef
             key = b[split + 1 ..];
             if (!t.uuid(key)) return error.InvalidRequest;
         }
-        try s.bind(&.{ .{ .text = id }, .{ .text = id }, .{ .int = date }, .{ .int = date }, .{ .text = key }, .{ .int = @intCast(limit + 1) } });
+        try s.bind(&.{
+            .{ .text = id },
+            .{ .text = id },
+            .{ .int = date },
+            .{ .int = date },
+            .{ .text = key },
+            .{ .int = @intCast(limit + 1) },
+        });
     } else try s.bind(&.{ .{ .text = before orelse "~" }, .{ .int = @intCast(limit + 1) } });
     var items: std.ArrayList(std.json.Value) = .empty;
     var next_key: ?[]const u8 = null;
@@ -295,17 +478,27 @@ pub fn pageContent(self: Self, a: u.Allocator, conversation_id: ?[]const u8, bef
             next_key = last;
             break;
         }
-        try items.append(a, (try std.json.parseFromSlice(std.json.Value, a, s.bytes(0), .{ .allocate = .alloc_always })).value);
+        try items.append(
+            a,
+            (try std.json.parseFromSlice(std.json.Value, a, s.bytes(0), .{ .allocate = .alloc_always })).value,
+        );
         byte_count += s.bytes(0).len + 1;
-        last = if (conversation_id != null) try std.fmt.allocPrint(a, "{d}:{s}", .{ s.int(1), s.bytes(2) }) else try s.text(a, 2);
+        last = if (conversation_id != null) try std.fmt.allocPrint(
+            a,
+            "{d}:{s}",
+            .{ s.int(1), s.bytes(2) },
+        ) else try s.text(
+            a,
+            2,
+        );
     }
     return .{ .records = try items.toOwnedSlice(a), .next = next_key };
 }
 pub const Frame = struct { sequence: i64, frame: []const u8 };
-pub fn previews(self: Self, a: u.Allocator, before: ?[]const u8, limit: usize) ![]t.ConversationPreview {
+pub fn previews(self: Journal, a: u.Allocator, before: ?[]const u8, limit: usize) ReadError![]t.ConversationPreview {
     // The same conversation page, with one indexed latest-message lookup per
     // chat. Keep payloads small without ever truncating canonical messages.
-    var q = try self.db.prepare("SELECT m.conversation_id,m.id,json_extract(m.record,'$.revision'),json_extract(m.record,'$.timestamp'),json_extract(m.record,'$.kind'),substr(m.text,1,256) FROM conversations c LEFT JOIN messages m ON m.id=(SELECT id FROM messages WHERE conversation_id=c.id AND coalesce(json_extract(record,'$.reaction_event.resolution'),'')<>'resolved' ORDER BY date_ns DESC,id DESC LIMIT 1) WHERE c.id<? ORDER BY c.id DESC LIMIT ?");
+    const q = try self.db.prepare("SELECT m.conversation_id,m.id,json_extract(m.record,'$.revision'),json_extract(m.record,'$.timestamp'),json_extract(m.record,'$.kind'),substr(m.text,1,256) FROM conversations c LEFT JOIN messages m ON m.id=(SELECT id FROM messages WHERE conversation_id=c.id AND coalesce(json_extract(record,'$.reaction_event.resolution'),'')<>'resolved' ORDER BY date_ns DESC,id DESC LIMIT 1) WHERE c.id<? ORDER BY c.id DESC LIMIT ?");
     defer q.close();
     try q.bind(&.{ .{ .text = before orelse "~" }, .{ .int = @intCast(limit) } });
     var result: std.ArrayList(t.ConversationPreview) = .empty;
@@ -313,21 +506,32 @@ pub fn previews(self: Self, a: u.Allocator, before: ?[]const u8, limit: usize) !
         if (q.bytes(1).len == 0) continue;
         var text = try q.text(a, 5);
         if (text.len == 0 and u.eq(q.bytes(4), "attachment")) {
-            var images = try self.db.prepare("SELECT count(*) FROM enrichment_items WHERE message_id=? AND section='attachments' AND (json_extract(record,'$.mime_type') LIKE 'image/%' OR json_extract(record,'$.image.availability')='ready')");
+            const images = try self.db.prepare("SELECT count(*) FROM enrichment_items WHERE message_id=? AND section='attachments' AND (json_extract(record,'$.mime_type') LIKE 'image/%' OR json_extract(record,'$.image.availability')='ready')");
             defer images.close();
             try images.bind(&.{.{ .text = q.bytes(1) }});
             _ = try images.step();
-            if (images.int(0) > 0) text = if (images.int(0) == 1) "Photo" else try std.fmt.allocPrint(a, "{d} photos", .{images.int(0)});
+            if (images.int(0) > 0) text = if (images.int(0) == 1) "Photo" else try std.fmt.allocPrint(
+                a,
+                "{d} photos",
+                .{images.int(0)},
+            );
         }
-        try result.append(a, .{ .conversation_id = try q.text(a, 0), .message_id = try q.text(a, 1), .revision = try q.text(a, 2), .timestamp = try q.text(a, 3), .kind = try q.text(a, 4), .text = text });
+        try result.append(a, .{
+            .conversation_id = try q.text(a, 0),
+            .message_id = try q.text(a, 1),
+            .revision = try q.text(a, 2),
+            .timestamp = try q.text(a, 3),
+            .kind = try q.text(a, 4),
+            .text = text,
+        });
     }
     return result.toOwnedSlice(a);
 }
-pub fn events(self: Self, a: u.Allocator, after: i64) ![]const Frame {
+pub fn events(self: Journal, a: u.Allocator, after: i64) RecordError![]const Frame {
     return self.eventsWithIdentities(a, after, false);
 }
-pub fn eventsWithIdentities(self: Self, a: u.Allocator, after: i64, identities: bool) ![]const Frame {
-    var s = try self.db.prepare("SELECT sequence,type,record,origin FROM events WHERE sequence>? ORDER BY sequence LIMIT 100");
+pub fn eventsWithIdentities(self: Journal, a: u.Allocator, after: i64, identities: bool) RecordError![]const Frame {
+    const s = try self.db.prepare("SELECT sequence,type,record,origin FROM events WHERE sequence>? ORDER BY sequence LIMIT 100");
     defer s.close();
     try s.bind(&.{.{ .int = after }});
     var items: std.ArrayList(Frame) = .empty;
@@ -344,26 +548,51 @@ pub fn eventsWithIdentities(self: Self, a: u.Allocator, after: i64, identities: 
         if (byte_count + s.bytes(2).len > 512 * 1024 and items.items.len > 0) break;
         byte_count += s.bytes(2).len;
         const cur = try t.cursor(a, e, seq);
-        const record_value = (try std.json.parseFromSlice(std.json.Value, a, s.bytes(2), .{ .allocate = .alloc_always })).value;
-        const data = try u.json(a, .{ .cursor = cur, .sequence = try u.decimal(a, seq), .type = s.bytes(1), .record = record_value, .origin = s.bytes(3) });
-        try items.append(a, .{ .sequence = seq, .frame = try std.fmt.allocPrint(a, "id: {s}\nevent: {s}\ndata: {s}\n\n", .{ cur, s.bytes(1), data }) });
+        const record_value = (try std.json.parseFromSlice(
+            std.json.Value,
+            a,
+            s.bytes(2),
+            .{ .allocate = .alloc_always },
+        )).value;
+        const data = try u.json(a, .{
+            .cursor = cur,
+            .sequence = try u.decimal(a, seq),
+            .type = s.bytes(1),
+            .record = record_value,
+            .origin = s.bytes(3),
+        });
+        try items.append(a, .{ .sequence = seq, .frame = try std.fmt.allocPrint(a, "id: {s}\nevent: {s}\ndata: {s}\n\n", .{
+            cur,
+            s.bytes(1),
+            data,
+        }) });
     }
     return items.toOwnedSlice(a);
 }
 
-pub fn observeIdentity(self: Self, a: u.Allocator, service: []const u8, address: []const u8) !?[]const u8 {
+pub fn observeIdentity(self: Journal, a: u.Allocator, service: []const u8, address: []const u8) ObserveIdentityError!?[]const u8 {
     if (address.len == 0) return null;
-    var s = try self.db.prepare("SELECT id FROM identities WHERE service=? AND address=?");
+    const s = try self.db.prepare("SELECT id FROM identities WHERE service=? AND address=?");
     defer s.close();
     try s.bind(&.{ .{ .text = service }, .{ .text = address } });
     if (try s.step()) return try s.text(a, 0);
     const id = try u.id(a);
-    var v: t.Identity = .{ .id = id, .service = service, .address = address };
+    var v: t.Identity = .{
+        .id = id,
+        .service = service,
+        .address = address,
+    };
     const content = try u.json(a, v);
     const seq = try self.next();
     v.revision = try u.decimal(a, seq);
     const record = try u.json(a, v);
-    try self.execute("INSERT INTO identities VALUES(?,?,?,?,?)", &.{ .{ .text = id }, .{ .text = service }, .{ .text = address }, .{ .text = content }, .{ .text = record } });
+    try self.execute("INSERT INTO identities VALUES(?,?,?,?,?)", &.{
+        .{ .text = id },
+        .{ .text = service },
+        .{ .text = address },
+        .{ .text = content },
+        .{ .text = record },
+    });
     try self.execute("INSERT INTO identity_work(identity_id) VALUES(?)", &.{.{ .text = id }});
     try self.event(seq, "identity.upsert", record, "reconciliation");
     return id;
@@ -371,8 +600,8 @@ pub fn observeIdentity(self: Self, a: u.Allocator, service: []const u8, address:
 
 // Only observed identities can be updated. Contacts identifiers are kept in a
 // separate private table and never serialized into directory records/events.
-pub fn updateIdentity(self: Self, a: u.Allocator, value: t.Identity) !void {
-    var s = try self.db.prepare("SELECT service,address,content FROM identities WHERE id=?");
+pub fn updateIdentity(self: Journal, a: u.Allocator, value: t.Identity) UpdateIdentityError!void {
+    const s = try self.db.prepare("SELECT service,address,content FROM identities WHERE id=?");
     defer s.close();
     try s.bind(&.{.{ .text = value.id }});
     if (!try s.step()) return error.NotFound;
@@ -388,13 +617,17 @@ pub fn updateIdentity(self: Self, a: u.Allocator, value: t.Identity) !void {
     const seq = try self.next();
     v.revision = try u.decimal(a, seq);
     const record = try u.json(a, v);
-    try self.execute("UPDATE identities SET content=?,record=? WHERE id=?", &.{ .{ .text = content }, .{ .text = record }, .{ .text = v.id } });
+    try self.execute("UPDATE identities SET content=?,record=? WHERE id=?", &.{
+        .{ .text = content },
+        .{ .text = record },
+        .{ .text = v.id },
+    });
     try self.event(seq, "identity.upsert", record, "reconciliation");
 }
 
-pub fn identityPage(self: Self, a: u.Allocator, before: ?[]const u8, limit: usize) !Page {
+pub fn identityPage(self: Journal, a: u.Allocator, before: ?[]const u8, limit: usize) IdentityPageError!Page {
     if (before) |b| if (!t.uuid(b)) return error.InvalidRequest;
-    var s = try self.db.prepare("SELECT id,record FROM identities WHERE id<? ORDER BY id DESC LIMIT ?");
+    const s = try self.db.prepare("SELECT id,record FROM identities WHERE id<? ORDER BY id DESC LIMIT ?");
     defer s.close();
     try s.bind(&.{ .{ .text = before orelse "~" }, .{ .int = @intCast(limit + 1) } });
     var records: std.ArrayList(std.json.Value) = .empty;
@@ -407,7 +640,10 @@ pub fn identityPage(self: Self, a: u.Allocator, before: ?[]const u8, limit: usiz
             break;
         }
         bytes += s.bytes(1).len + 1;
-        try records.append(a, (try std.json.parseFromSlice(std.json.Value, a, s.bytes(1), .{ .allocate = .alloc_always })).value);
+        try records.append(
+            a,
+            (try std.json.parseFromSlice(std.json.Value, a, s.bytes(1), .{ .allocate = .alloc_always })).value,
+        );
         last = try s.text(a, 0);
     }
     return .{ .records = try records.toOwnedSlice(a), .next = next_key };
@@ -415,16 +651,21 @@ pub fn identityPage(self: Self, a: u.Allocator, before: ?[]const u8, limit: usiz
 
 // Independent, versioned backfill also covers old senders no longer present in
 // chat participants. Checkpoint and new identities share the writer transaction.
-pub fn backfillIdentities(self: Self, a: u.Allocator) !void {
+pub fn backfillIdentities(self: Journal, a: u.Allocator) BackfillIdentitiesError!void {
     const key = "identity_backfill_v1";
     const after = (try self.progress(a, key)) orelse "";
     if (u.eq(after, "complete")) return;
-    var s = try self.db.prepare("SELECT id,record FROM messages WHERE id>? ORDER BY id LIMIT 100");
+    const s = try self.db.prepare("SELECT id,record FROM messages WHERE id>? ORDER BY id LIMIT 100");
     defer s.close();
     try s.bind(&.{.{ .text = after }});
     var last: ?[]const u8 = null;
     while (try s.step()) {
-        const v = (try std.json.parseFromSlice(t.Message, a, s.bytes(1), .{ .ignore_unknown_fields = true, .allocate = .alloc_always })).value;
+        const v = (try std.json.parseFromSlice(
+            t.Message,
+            a,
+            s.bytes(1),
+            .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
+        )).value;
         if (v.direction == .incoming) _ = try self.observeIdentity(a, v.service, v.sender);
         last = try s.text(a, 0);
     }
@@ -432,8 +673,8 @@ pub fn backfillIdentities(self: Self, a: u.Allocator) !void {
 }
 
 test "subscribers are notified only after a successful durable commit" {
-    var signal = @import("../Signal.zig"){};
-    var j = try Self.open(":memory:");
+    var signal = Signal{};
+    var j = try Journal.open(":memory:");
     defer j.close();
     j.changed = .{ .signal = &signal, .io = std.testing.io };
     const before = signal.observe();
@@ -451,33 +692,74 @@ test "atomic ingestion rollback preserves progress, records, and event sequence"
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const j = try Self.open(":memory:");
+    const j = try Journal.open(":memory:");
     defer j.close();
     try j.begin();
-    _ = try j.conversation(a, "private-chat", 1, "iMessage;-;fixture", .{ .service = "imessage" }, "historical_import");
+    _ = try j.conversation(
+        a,
+        "private-chat",
+        1,
+        "iMessage;-;fixture",
+        .{ .service = "imessage" },
+        "historical_import",
+    );
     try j.setPosition(a, "live", 99);
     j.rollback();
     try std.testing.expectEqual(@as(i64, 0), try j.sequence());
     try std.testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM conversations"));
     try std.testing.expectEqual(@as(i64, 0), try j.position(a, "live"));
     try j.begin();
-    const id = try j.conversation(a, "private-chat", 1, "iMessage;-;fixture", .{ .service = "imessage" }, "historical_import");
+    const id = try j.conversation(
+        a,
+        "private-chat",
+        1,
+        "iMessage;-;fixture",
+        .{ .service = "imessage" },
+        "historical_import",
+    );
     try j.commit();
     const seq = try j.sequence();
     try j.begin();
-    const same = try j.conversation(a, "private-chat", 2, "iMessage;-;fixture", .{ .service = "imessage" }, "reconciliation");
+    const same = try j.conversation(
+        a,
+        "private-chat",
+        2,
+        "iMessage;-;fixture",
+        .{ .service = "imessage" },
+        "reconciliation",
+    );
     try j.commit();
     try std.testing.expectEqualStrings(id, same);
-    try std.testing.expectEqual(@as(i64, 2), try j.db.scalar("SELECT source_row FROM conversations"));
+    try std.testing.expectEqual(
+        @as(i64, 2),
+        try j.db.scalar("SELECT source_row FROM conversations"),
+    );
     try std.testing.expectEqual(seq, try j.sequence());
-    const value = t.Message{ .conversation_id = id, .sender = "fixture", .direction = .incoming, .service = "imessage", .timestamp = "2026-01-01T00:00:00Z", .kind = .text, .text = "Fixture", .decoding = .plain, .observed_status = .received };
+    const value = t.Message{
+        .conversation_id = id,
+        .sender = "fixture",
+        .direction = .incoming,
+        .service = "imessage",
+        .timestamp = "2026-01-01T00:00:00Z",
+        .kind = .text,
+        .text = "Fixture",
+        .decoding = .plain,
+        .observed_status = .received,
+    };
     try j.message(a, "private-message", 3, 1, value, "historical_import");
     const message_seq = try j.sequence();
     try j.message(a, "private-message", 4, 1, value, "reconciliation");
     try std.testing.expectEqual(@as(i64, 4), try j.db.scalar("SELECT source_row FROM messages"));
     try std.testing.expectEqual(message_seq, try j.sequence());
     const changes = u.c.sqlite3_total_changes64(j.db.handle);
-    _ = try j.conversation(a, "private-chat", 2, "iMessage;-;fixture", .{ .service = "imessage" }, "reconciliation");
+    _ = try j.conversation(
+        a,
+        "private-chat",
+        2,
+        "iMessage;-;fixture",
+        .{ .service = "imessage" },
+        "reconciliation",
+    );
     try j.message(a, "private-message", 4, 1, value, "reconciliation");
     try std.testing.expectEqual(changes, u.c.sqlite3_total_changes64(j.db.handle));
 }
@@ -485,10 +767,27 @@ test "unchanged source skips normalization but mutable fields and joins are impo
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const j = try Self.open(":memory:");
+    const j = try Journal.open(":memory:");
     defer j.close();
-    const cid = try j.conversation(a, "chat", 1, "route", .{ .service = "imessage" }, "historical_import");
-    var value = t.Message{ .conversation_id = cid, .sender = "", .direction = .outgoing, .service = "imessage", .timestamp = "2026-01-01T00:00:00Z", .kind = .text, .text = "Caption", .decoding = .plain, .observed_status = .sent };
+    const cid = try j.conversation(
+        a,
+        "chat",
+        1,
+        "route",
+        .{ .service = "imessage" },
+        "historical_import",
+    );
+    var value = t.Message{
+        .conversation_id = cid,
+        .sender = "",
+        .direction = .outgoing,
+        .service = "imessage",
+        .timestamp = "2026-01-01T00:00:00Z",
+        .kind = .text,
+        .text = "Caption",
+        .decoding = .plain,
+        .observed_status = .sent,
+    };
     try j.sourceMessage(a, "message", 1, 10, value, "live");
     const changes = u.c.sqlite3_total_changes64(j.db.handle);
     // Full normalization allocates. A warmed source hit must need no arena.
@@ -499,15 +798,32 @@ test "unchanged source skips normalization but mutable fields and joins are impo
     try j.sourceMessage(a, "message", 1, 10, value, "reconciliation");
     try std.testing.expectEqual(seq + 1, try j.sequence());
     seq = try j.sequence();
-    value.attachments = &.{.{ .id = "attachment", .name = "Photo", .mime_type = "image/png", .bytes = "100" }};
+    value.attachments = &.{.{
+        .id = "attachment",
+        .name = "Photo",
+        .mime_type = "image/png",
+        .bytes = "100",
+    }};
     try j.sourceMessage(a, "message", 1, 10, value, "reconciliation");
     try std.testing.expectEqual(seq + 1, try j.sequence());
     seq = try j.sequence();
-    value.link_previews = &.{.{ .id = "preview", .part_id = "preview", .title = "Delayed preview", .state = .complete }};
+    value.link_previews = &.{.{
+        .id = "preview",
+        .part_id = "preview",
+        .title = "Delayed preview",
+        .state = .complete,
+    }};
     try j.sourceMessage(a, "message", 1, 10, value, "reconciliation");
     try std.testing.expectEqual(seq + 1, try j.sequence());
     seq = try j.sequence();
-    value.conversation_id = try j.conversation(a, "other-chat", 2, "other-route", .{ .service = "imessage" }, "reconciliation");
+    value.conversation_id = try j.conversation(
+        a,
+        "other-chat",
+        2,
+        "other-route",
+        .{ .service = "imessage" },
+        "reconciliation",
+    );
     try j.sourceMessage(a, "message", 1, 10, value, "reconciliation");
     try std.testing.expectEqual(seq + 2, try j.sequence());
     seq = try j.sequence();
@@ -525,23 +841,49 @@ test "source cache follows rollback, failed publication, and source reset" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const j = try Self.open(":memory:");
+    const j = try Journal.open(":memory:");
     defer j.close();
-    const cid = try j.conversation(a, "chat", 1, "route", .{ .service = "imessage" }, "historical_import");
-    const value = t.Message{ .conversation_id = cid, .sender = "", .direction = .outgoing, .service = "imessage", .timestamp = "2026-01-01T00:00:00Z", .kind = .text, .text = "Caption", .decoding = .plain, .observed_status = .sent };
+    const cid = try j.conversation(
+        a,
+        "chat",
+        1,
+        "route",
+        .{ .service = "imessage" },
+        "historical_import",
+    );
+    const value = t.Message{
+        .conversation_id = cid,
+        .sender = "",
+        .direction = .outgoing,
+        .service = "imessage",
+        .timestamp = "2026-01-01T00:00:00Z",
+        .kind = .text,
+        .text = "Caption",
+        .decoding = .plain,
+        .observed_status = .sent,
+    };
     const seq = try j.sequence();
     try j.begin();
     try j.sourceMessage(a, "message", 1, 10, value, "live");
     j.rollback();
-    try std.testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM source_message_cache"));
+    try std.testing.expectEqual(
+        @as(i64, 0),
+        try j.db.scalar("SELECT count(*) FROM source_message_cache"),
+    );
     try std.testing.expectEqual(seq, try j.sequence());
     try j.db.exec("CREATE TEMP TRIGGER fail_event BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'fixture'); END");
     try j.begin();
-    try std.testing.expectError(error.DatabaseFailure, j.sourceMessage(a, "message", 1, 10, value, "live"));
+    try std.testing.expectError(
+        error.DatabaseFailure,
+        j.sourceMessage(a, "message", 1, 10, value, "live"),
+    );
     j.rollback();
     try j.db.exec("DROP TRIGGER fail_event");
     try std.testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM messages"));
-    try std.testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM source_message_cache"));
+    try std.testing.expectEqual(
+        @as(i64, 0),
+        try j.db.scalar("SELECT count(*) FROM source_message_cache"),
+    );
     try j.begin();
     try j.sourceMessage(a, "message", 1, 10, value, "live");
     try j.commit();
@@ -558,34 +900,62 @@ test "source cache follows rollback, failed publication, and source reset" {
     try j.begin();
     try j.reset(a);
     try j.commit();
-    try std.testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM source_message_cache"));
-    edited.conversation_id = try j.conversation(a, "chat", 1, "route", .{ .service = "imessage" }, "historical_import");
+    try std.testing.expectEqual(
+        @as(i64, 0),
+        try j.db.scalar("SELECT count(*) FROM source_message_cache"),
+    );
+    edited.conversation_id = try j.conversation(
+        a,
+        "chat",
+        1,
+        "route",
+        .{ .service = "imessage" },
+        "historical_import",
+    );
     try j.sourceMessage(a, "message", 1, 10, edited, "historical_import");
     try std.testing.expectEqual(@as(i64, 1), try j.db.scalar("SELECT count(*) FROM messages"));
-    try std.testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM main.sqlite_master WHERE name='source_message_cache'"));
+    try std.testing.expectEqual(
+        @as(i64, 0),
+        try j.db.scalar("SELECT count(*) FROM main.sqlite_master WHERE name='source_message_cache'"),
+    );
 }
 
 test "durable sends retain idempotency after recovery and event pruning" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const j = try Self.open(":memory:");
+    const j = try Journal.open(":memory:");
     defer j.close();
-    var input: t.SendInput = .{ .request_id = try u.id(a), .server_epoch = try j.epoch(a), .target = .{ .recipient = .{ .address = "fixture@example.invalid", .service = "imessage" } }, .text = "hello\n👩‍💻" };
+    var input: t.SendInput = .{
+        .request_id = try u.id(a),
+        .server_epoch = try j.epoch(a),
+        .target = .{ .recipient = .{ .address = "fixture@example.invalid", .service = "imessage" } },
+        .text = "hello\n👩‍💻",
+    };
     try std.testing.expect((try j.accept(a, input, true)).fresh);
     try std.testing.expect(!(try j.accept(a, input, false)).fresh);
     const original = input.text;
     input.text = "changed";
     try std.testing.expectError(error.RequestConflict, j.accept(a, input, true));
     input.text = original;
-    var v = (try std.json.parseFromSlice(t.SendRequest, a, (try j.getRecord(a, .request, input.request_id)).?, .{})).value;
+    var v = (try std.json.parseFromSlice(
+        t.SendRequest,
+        a,
+        (try j.getRecord(a, .request, input.request_id)).?,
+        .{},
+    )).value;
     try j.begin();
     v.state = .dispatching;
     _ = try j.updateRequest(a, v);
     try j.commit();
     try j.recover(a);
-    const recovered = (try std.json.parseFromSlice(t.SendRequest, a, (try j.getRecord(a, .request, input.request_id)).?, .{})).value;
-    try std.testing.expectEqual(t.SendState.unknown, recovered.state);
+    const recovered = (try std.json.parseFromSlice(
+        t.SendRequest,
+        a,
+        (try j.getRecord(a, .request, input.request_id)).?,
+        .{},
+    )).value;
+    try std.testing.expectEqual(t.SendStatus.unknown, recovered.state);
     try j.prune(0);
     try std.testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM events"));
     try std.testing.expect(!(try j.accept(a, input, true)).fresh);
@@ -601,10 +971,15 @@ test "failed journal acceptance never leaves a queued send" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const j = try Self.open(":memory:");
+    const j = try Journal.open(":memory:");
     defer j.close();
     try j.db.exec("CREATE TRIGGER fail_event BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'injected failure'); END");
-    const input: t.SendInput = .{ .request_id = try u.id(a), .server_epoch = try j.epoch(a), .target = .{ .recipient = .{ .address = "fixture@example.invalid", .service = "imessage" } }, .text = "never dispatched" };
+    const input: t.SendInput = .{
+        .request_id = try u.id(a),
+        .server_epoch = try j.epoch(a),
+        .target = .{ .recipient = .{ .address = "fixture@example.invalid", .service = "imessage" } },
+        .text = "never dispatched",
+    };
     try std.testing.expectError(error.DatabaseFailure, j.accept(a, input, true));
     try std.testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM send_requests"));
     try std.testing.expectEqual(@as(i64, 0), try j.sequence());
@@ -614,14 +989,23 @@ test "directory tombstones preserve identity and legacy streams skip extension e
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const j = try Self.open(":memory:");
+    const j = try Journal.open(":memory:");
     defer j.close();
     try j.begin();
     const id = (try j.observeIdentity(a, "imessage", "Alias@Example.invalid")).?;
-    try std.testing.expectEqualStrings(id, (try j.observeIdentity(a, "imessage", "Alias@Example.invalid")).?);
+    try std.testing.expectEqualStrings(
+        id,
+        (try j.observeIdentity(a, "imessage", "Alias@Example.invalid")).?,
+    );
     const other = (try j.observeIdentity(a, "sms", "Alias@Example.invalid")).?;
     try std.testing.expect(!u.eq(id, other));
-    var v: t.Identity = .{ .id = id, .service = "imessage", .address = "Alias@Example.invalid", .display_name = "Synthetic Élodie", .match_state = .matched };
+    var v: t.Identity = .{
+        .id = id,
+        .service = "imessage",
+        .address = "Alias@Example.invalid",
+        .display_name = "Synthetic Élodie",
+        .match_state = .matched,
+    };
     try j.updateIdentity(a, v);
     const named_revision = try j.sequence();
     try j.updateIdentity(a, v);

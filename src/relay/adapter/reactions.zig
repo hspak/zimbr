@@ -3,7 +3,7 @@
 //! Unknown types never acquire an invented reaction value.
 const std = @import("std");
 const u = @import("../../common.zig");
-const t = @import("../../protocol/types.zig");
+const t = @import("../../protocol.zig").types;
 pub const Observation = struct {
     target_guid: ?[]const u8 = null,
     source_part: ?u32 = null,
@@ -15,15 +15,39 @@ pub const Observation = struct {
 pub fn candidate(code: i64) bool {
     return code == 1000 or (code >= 2000 and code < 4000);
 }
-pub fn decode(a: u.Allocator, code: i64, target: []const u8, emoji: []const u8, actor: t.ReactionActor) !?Observation {
+pub fn decode(
+    a: u.Allocator,
+    code: i64,
+    target: []const u8,
+    emoji: []const u8,
+    actor: t.ReactionActor,
+) u.Allocator.Error!?Observation {
     if (!candidate(code)) return null; // ordinary replies also carry GUIDs
-    var value = Observation{ .event = .{ .actor = actor, .operation = .unknown, .resolution = .unsupported } };
+    var value = Observation{ .event = .{
+        .actor = actor,
+        .operation = .unknown,
+        .resolution = .unsupported,
+    } };
     const base = if (code >= 3000) code - 3000 else code - 2000;
     if (base >= 0 and base <= 6) {
         value.event.operation = if (code >= 3000) .remove else .add;
         if (base < 6) {
-            const keys = [_][]const u8{ "heart", "like", "dislike", "laugh", "emphasize", "question" };
-            const symbols = [_][]const u8{ "❤️", "👍", "👎", "😂", "‼️", "❓" };
+            const keys = [_][]const u8{
+                "heart",
+                "like",
+                "dislike",
+                "laugh",
+                "emphasize",
+                "question",
+            };
+            const symbols = [_][]const u8{
+                "❤️",
+                "👍",
+                "👎",
+                "😂",
+                "‼️",
+                "❓",
+            };
             value.event.key = keys[@intCast(base)];
             value.event.emoji = symbols[@intCast(base)];
         } else if (emoji.len > 0 and emoji.len <= 256 and std.unicode.utf8ValidateSlice(emoji)) {
@@ -74,7 +98,14 @@ test "reaction mapping preserves emoji sequences and rejects replies, stickers, 
     const a = arena.allocator();
     const target = "p:2/12345678-1234-1234-1234-123456789abc";
     const actor: t.ReactionActor = .{ .service = "imessage", .address = "fixture@example.invalid" };
-    const expected = [_][]const u8{ "heart", "like", "dislike", "laugh", "emphasize", "question" };
+    const expected = [_][]const u8{
+        "heart",
+        "like",
+        "dislike",
+        "laugh",
+        "emphasize",
+        "question",
+    };
     for (expected, 0..) |key, i| {
         const add = (try decode(a, 2000 + @as(i64, @intCast(i)), target, "", actor)).?;
         const remove = (try decode(a, 3000 + @as(i64, @intCast(i)), target, "", actor)).?;
@@ -83,8 +114,17 @@ test "reaction mapping preserves emoji sequences and rejects replies, stickers, 
         try std.testing.expectEqual(.remove, remove.event.operation);
         try std.testing.expectEqual(@as(?u32, 2), add.source_part);
     }
-    try std.testing.expectEqualStrings("👩🏽‍💻", (try decode(a, 2006, target, "👩🏽‍💻", actor)).?.event.emoji.?);
+    try std.testing.expectEqualStrings(
+        "👩🏽‍💻",
+        (try decode(a, 2006, target, "👩🏽‍💻", actor)).?.event.emoji.?,
+    );
     try std.testing.expect((try decode(a, 0, target, "", actor)) == null);
-    try std.testing.expectEqual(.unsupported, (try decode(a, 2007, target, "", actor)).?.event.resolution);
-    try std.testing.expectEqual(.malformed, (try decode(a, 2001, "p:bad/not-a-guid", "", actor)).?.event.resolution);
+    try std.testing.expectEqual(
+        .unsupported,
+        (try decode(a, 2007, target, "", actor)).?.event.resolution,
+    );
+    try std.testing.expectEqual(
+        .malformed,
+        (try decode(a, 2001, "p:bad/not-a-guid", "", actor)).?.event.resolution,
+    );
 }

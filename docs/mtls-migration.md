@@ -172,7 +172,7 @@ from network interruptions, and uses the existing cache and outbox unchanged.
    direct local `doctor` checks do not require network access.
 
 3. **Replace raw socket I/O beneath the existing parser.** Adapt
-   `src/relay/Transport.zig` to use a TLS connection object. The C wrapper owns
+   `src/relay/transport.zig` to use a TLS connection object. The C wrapper owns
    handshake, reads, writes, buffered TLS data, peer identity, and bounded
    shutdown. Use nonblocking sockets and monotonic deadlines; handle both
    `WANT_READ` and `WANT_WRITE` for each operation. Preserve the existing

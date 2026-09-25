@@ -1,20 +1,36 @@
 const std = @import("std");
 const u = @import("../../common.zig");
-const t = @import("../../protocol/types.zig");
+const t = @import("../../protocol.zig").types;
 const plist = @import("plist.zig");
-const V = plist.Value;
+pub const safeUrl = @import("../../protocol.zig").url.safe;
+const V = plist.Node;
 pub const provider = "com.apple.messages.URLBalloonProvider";
-pub const Artwork = struct { preview_id: []const u8, icon: bool = false, data: ?[]const u8 = null, attachment_guid: ?[]const u8 = null, attachment_index: ?u32 = null };
-pub const Result = struct { previews: []const t.LinkPreview = &.{}, artwork: []const Artwork = &.{}, state: t.EnrichmentState };
-const Failure = error{ Malformed, Unsupported, Oversized, OutOfMemory };
+pub const Artwork = struct {
+    preview_id: []const u8,
+    icon: bool = false,
+    data: ?[]const u8 = null,
+    attachment_guid: ?[]const u8 = null,
+    attachment_index: ?u32 = null,
+};
+pub const Result = struct {
+    previews: []const t.LinkPreview = &.{},
+    artwork: []const Artwork = &.{},
+    state: t.EnrichmentStatus,
+};
+const Failure = error{
+    Malformed,
+    Unsupported,
+    Oversized,
+    OutOfMemory,
+};
 
-pub fn decode(a: u.Allocator, bytes: []const u8) !Result {
+pub fn decode(a: u.Allocator, bytes: []const u8) u.Allocator.Error!Result {
     if (bytes.len == 0) return .{ .state = .pending };
     return parse(a, bytes) catch |err| switch (err) {
-        error.OutOfMemory => err,
+        error.OutOfMemory => error.OutOfMemory,
         error.Oversized => .{ .state = .oversized },
         error.Unsupported => .{ .state = .unsupported },
-        else => .{ .state = .malformed },
+        error.Malformed => .{ .state = .malformed },
     };
 }
 fn parse(a: u.Allocator, bytes: []const u8) Failure!Result {
@@ -40,35 +56,70 @@ fn parse(a: u.Allocator, bytes: []const u8) Failure!Result {
         if (metadata != .dict) return error.Malformed;
         // URLBalloonProvider also stores richer app/music/map objects. Retain
         // their readable message fallback until their own layouts are verified.
-        for ([_][]const u8{ "musicMetadata", "collaborationMetadata", "appStoreMetadata", "mapMetadata", "specialization" }) |key| if (metadata.get(key) != null) return error.Unsupported;
+        for ([_][]const u8{
+            "musicMetadata",
+            "collaborationMetadata",
+            "appStoreMetadata",
+            "mapMetadata",
+            "specialization",
+        }) |key| if (metadata.get(key) != null) return error.Unsupported;
         const id = try std.fmt.allocPrint(a, "link:{d}", .{i});
         const original = try urlField(metadata, "originalURL");
         const final = try urlField(metadata, "URL");
         if (original == null and final == null) return error.Malformed;
         const placeholder = item.get("richLinkIsPlaceholder") orelse metadata.get("richLinkIsPlaceholder");
-        try previews.append(a, .{ .id = id, .part_id = id, .original_url = original, .metadata_url = final, .title = try field(metadata, "title", 2048), .summary = try field(metadata, "summary", 4096), .site_name = try field(metadata, "siteName", 512), .state = if (placeholder != null and placeholder.? == .boolean and placeholder.?.boolean) .pending else .complete });
+        try previews.append(a, .{
+            .id = id,
+            .part_id = id,
+            .original_url = original,
+            .metadata_url = final,
+            .title = try field(metadata, "title", 2048),
+            .summary = try field(metadata, "summary", 4096),
+            .site_name = try field(metadata, "siteName", 512),
+            .state = if (placeholder != null and placeholder.? == .boolean and placeholder.?.boolean) .pending else .complete,
+        });
         // Leave room for both eventual asset descriptors in overflow pages.
         if ((try u.json(a, previews.items[previews.items.len - 1])).len > 24 * 1024) return error.Oversized;
         for ([_][]const u8{ "image", "icon" }, 0..) |key, role| if (metadata.get(key)) |image| {
             if (image == .none) continue;
             if (image == .data) {
-                if (image.data.len > 0) try artwork.append(a, .{ .preview_id = id, .icon = role == 1, .data = image.data });
+                if (image.data.len > 0) try artwork.append(a, .{
+                    .preview_id = id,
+                    .icon = role == 1,
+                    .data = image.data,
+                });
             } else if (image == .dict) {
                 if (image.get("data")) |data| {
                     if (data != .data) return error.Malformed;
-                    if (data.data.len > 0) try artwork.append(a, .{ .preview_id = id, .icon = role == 1, .data = data.data });
+                    if (data.data.len > 0) try artwork.append(a, .{
+                        .preview_id = id,
+                        .icon = role == 1,
+                        .data = data.data,
+                    });
                 } else if (try field(image, "attachmentGUID", 1024)) |guid| {
-                    try artwork.append(a, .{ .preview_id = id, .icon = role == 1, .attachment_guid = guid });
+                    try artwork.append(a, .{
+                        .preview_id = id,
+                        .icon = role == 1,
+                        .attachment_guid = guid,
+                    });
                 } else if (image.get("richLinkImageAttachmentSubstituteIndex")) |index| {
                     if (index != .integer or index.integer > std.math.maxInt(u32)) return error.Malformed;
-                    try artwork.append(a, .{ .preview_id = id, .icon = role == 1, .attachment_index = @intCast(index.integer) });
+                    try artwork.append(a, .{
+                        .preview_id = id,
+                        .icon = role == 1,
+                        .attachment_index = @intCast(index.integer),
+                    });
                 }
                 // Remote URL-only artwork remains unavailable. It never
                 // becomes a network job or a locally guessed file path.
             } else return error.Malformed;
         };
     }
-    return .{ .previews = try previews.toOwnedSlice(a), .artwork = try artwork.toOwnedSlice(a), .state = .complete };
+    return .{
+        .previews = try previews.toOwnedSlice(a),
+        .artwork = try artwork.toOwnedSlice(a),
+        .state = .complete,
+    };
 }
 fn field(value: V, key: []const u8, maximum: usize) Failure!?[]const u8 {
     const item = value.get(key) orelse return null;
@@ -86,10 +137,30 @@ fn urlField(value: V, key: []const u8) Failure!?[]const u8 {
     if (url.len > 4096) return error.Oversized;
     return if (safeUrl(url)) url else null;
 }
-pub const safeUrl = @import("../../protocol/Url.zig").safe;
 
 fn knownKey(key: []const u8) bool {
-    for ([_][]const u8{ "richLinkMetadata", "metadata", "title", "summary", "siteName", "URL", "originalURL", "richLinkIsPlaceholder", "image", "icon", "data", "attachmentGUID", "richLinkImageAttachmentSubstituteIndex", "images", "icons", "musicMetadata", "collaborationMetadata", "appStoreMetadata", "mapMetadata", "specialization" }) |known| if (u.eq(key, known)) return true;
+    for ([_][]const u8{
+        "richLinkMetadata",
+        "metadata",
+        "title",
+        "summary",
+        "siteName",
+        "URL",
+        "originalURL",
+        "richLinkIsPlaceholder",
+        "image",
+        "icon",
+        "data",
+        "attachmentGUID",
+        "richLinkImageAttachmentSubstituteIndex",
+        "images",
+        "icons",
+        "musicMetadata",
+        "collaborationMetadata",
+        "appStoreMetadata",
+        "mapMetadata",
+        "specialization",
+    }) |known| if (u.eq(key, known)) return true;
     return false;
 }
 const Archive = struct {
@@ -113,18 +184,24 @@ const Archive = struct {
             .data => value.data.len,
             .array => value.array.len * @sizeOf(V),
             .dict => value.dict.len * @sizeOf(plist.Entry),
-            else => 0,
+            .none, .boolean, .integer, .uid => 0,
         });
         if (value == .uid) {
             if (value.uid >= self.objects.len or self.active[value.uid]) return error.Malformed;
-            if (value.uid == 0 and self.objects[0] == .string and u.eq(self.objects[0].string, "$null")) return .none;
+            if (value.uid == 0 and self.objects[0] == .string and u.eq(
+                self.objects[0].string,
+                "$null",
+            )) return .none;
             self.active[value.uid] = true;
             defer self.active[value.uid] = false;
             return self.resolve(self.objects[value.uid], depth + 1);
         }
         if (value == .array) {
             const items = try self.a.alloc(V, value.array.len);
-            for (items, value.array) |*item, original| item.* = try self.resolve(original, depth + 1);
+            for (items, value.array) |*item, original| item.* = try self.resolve(
+                original,
+                depth + 1,
+            );
             return .{ .array = items };
         }
         if (value != .dict) return value;
@@ -132,7 +209,24 @@ const Archive = struct {
             if (class != .uid or class.uid >= self.objects.len) return error.Malformed;
             const name = (self.objects[class.uid].get("$classname") orelse return error.Malformed).text() orelse return error.Malformed;
             var known = false;
-            for ([_][]const u8{ "NSDictionary", "NSMutableDictionary", "NSArray", "NSMutableArray", "NSString", "NSMutableString", "NSURL", "NSData", "NSMutableData", "LPLinkMetadata", "LPImage", "LPImageMetadata", "LPIconMetadata", "RichLink", "LPSharingMetadataWrapper", "RichLinkImageAttachmentSubstitute" }) |allowed| if (u.eq(name, allowed)) {
+            for ([_][]const u8{
+                "NSDictionary",
+                "NSMutableDictionary",
+                "NSArray",
+                "NSMutableArray",
+                "NSString",
+                "NSMutableString",
+                "NSURL",
+                "NSData",
+                "NSMutableData",
+                "LPLinkMetadata",
+                "LPImage",
+                "LPImageMetadata",
+                "LPIconMetadata",
+                "RichLink",
+                "LPSharingMetadataWrapper",
+                "RichLinkImageAttachmentSubstitute",
+            }) |allowed| if (u.eq(name, allowed)) {
                 known = true;
                 break;
             };
@@ -153,20 +247,31 @@ const Archive = struct {
                 const name = key.text() orelse return error.Malformed;
                 if (!knownKey(name)) continue;
                 for (entries.items) |entry| if (u.eq(entry.key, name)) return error.Malformed;
-                try entries.append(self.a, .{ .key = name, .value = try self.resolve(item, depth + 1) });
+                try entries.append(
+                    self.a,
+                    .{ .key = name, .value = try self.resolve(item, depth + 1) },
+                );
             }
         } else if (value.get("NS.objects")) |array| {
             return self.resolve(array, depth + 1);
         } else {
             for (value.dict) |entry| if (knownKey(entry.key)) {
-                try entries.append(self.a, .{ .key = entry.key, .value = try self.resolve(entry.value, depth + 1) });
+                try entries.append(
+                    self.a,
+                    .{ .key = entry.key, .value = try self.resolve(entry.value, depth + 1) },
+                );
             };
         }
         return .{ .dict = try entries.toOwnedSlice(self.a) };
     }
 };
 
-pub fn bindLocalArtwork(a: u.Allocator, source_guid: []const u8, attachments: []const t.Attachment, artwork: []const Artwork) ![]const Artwork {
+pub fn bindLocalArtwork(
+    a: u.Allocator,
+    source_guid: []const u8,
+    attachments: []const t.Attachment,
+    artwork: []const Artwork,
+) u.Allocator.Error![]const Artwork {
     const result = try a.dupe(Artwork, artwork);
     for (result) |*item| if (item.attachment_index) |index| {
         // Observed RichLink substitutes use at_<index>_<message GUID>. Require
@@ -185,6 +290,21 @@ pub fn bindLocalArtwork(a: u.Allocator, source_guid: []const u8, attachments: []
 }
 
 test "URL activation contract rejects unsafe schemes, credentials, and hidden destinations" {
-    for ([_][]const u8{ "https://example.invalid/path?q=a%20b#fragment", "http://example.invalid:8080/", "https://[::1]/" }) |url| try std.testing.expect(safeUrl(url));
-    for ([_][]const u8{ "file:///etc/passwd", "javascript:alert(1)", "https:///missing", "https://user:pass@example.invalid", "https://example.invalid\\@evil.invalid", "https://example.invalid\n", "https://%65xample.invalid", "https://[not-ip]/", "https://example..invalid/", "https://host<>/" }) |url| try std.testing.expect(!safeUrl(url));
+    for ([_][]const u8{
+        "https://example.invalid/path?q=a%20b#fragment",
+        "http://example.invalid:8080/",
+        "https://[::1]/",
+    }) |url| try std.testing.expect(safeUrl(url));
+    for ([_][]const u8{
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "https:///missing",
+        "https://user:pass@example.invalid",
+        "https://example.invalid\\@evil.invalid",
+        "https://example.invalid\n",
+        "https://%65xample.invalid",
+        "https://[not-ip]/",
+        "https://example..invalid/",
+        "https://host<>/",
+    }) |url| try std.testing.expect(!safeUrl(url));
 }

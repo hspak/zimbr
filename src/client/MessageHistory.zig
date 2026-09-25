@@ -1,14 +1,27 @@
 //! Immutable, independently owned message records. Updating one record never
 //! reparses unchanged text or pins an obsolete snapshot's entire arena.
 const std = @import("std");
+const builtin = @import("builtin");
 const u = @import("../common.zig");
-const t = @import("../protocol/types.zig");
+const t = @import("../protocol.zig").types;
 const Store = @import("Store.zig");
 const display = @import("display.zig");
-const Content = @import("Content.zig");
-const Self = @This();
-const allocator = if (@import("builtin").is_test) std.testing.allocator else std.heap.c_allocator;
-pub const Presentation = struct { text: []const u8, key: u64, blocks: []const Content.Block = &.{} };
+const content = @import("content.zig");
+const MessageHistory = @This();
+const allocator = if (builtin.is_test) std.testing.allocator else std.heap.c_allocator;
+
+refs: std.atomic.Value(usize) = .init(1),
+arena: std.heap.ArenaAllocator,
+records: []const *Record,
+messages: []const t.Message,
+presentations: []const Presentation,
+index: std.StringHashMapUnmanaged(*Record),
+
+pub const Presentation = struct {
+    text: []const u8,
+    key: u64,
+    blocks: []const content.Block = &.{},
+};
 
 const Record = struct {
     refs: std.atomic.Value(usize) = .init(1),
@@ -23,10 +36,25 @@ const Record = struct {
         errdefer allocator.destroy(record);
         var arena = std.heap.ArenaAllocator.init(allocator);
         errdefer arena.deinit();
-        const message = try std.json.parseFromSliceLeaky(t.Message, arena.allocator(), raw, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+        const message = try std.json.parseFromSliceLeaky(
+            t.Message,
+            arena.allocator(),
+            raw,
+            .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
+        );
         const text = display.record(arena.allocator(), message);
-        const blocks = try Content.prepare(arena.allocator(), message);
-        record.* = .{ .arena = arena, .message = message, .revision = revision, .enrichment_serial = serial, .presentation = .{ .text = text, .key = std.hash.Wyhash.hash(0, if (blocks.len == 0) text else raw), .blocks = blocks } };
+        const blocks = try content.prepare(arena.allocator(), message);
+        record.* = .{
+            .arena = arena,
+            .message = message,
+            .revision = revision,
+            .enrichment_serial = serial,
+            .presentation = .{
+                .text = text,
+                .key = std.hash.Wyhash.hash(0, if (blocks.len == 0) text else raw),
+                .blocks = blocks,
+            },
+        };
         return record;
     }
     fn retain(record: *Record) *Record {
@@ -41,38 +69,39 @@ const Record = struct {
     }
 };
 
-refs: std.atomic.Value(usize) = .init(1),
-arena: std.heap.ArenaAllocator,
-records: []const *Record,
-messages: []const t.Message,
-presentations: []const Presentation,
-index: std.StringHashMapUnmanaged(*Record),
+pub const CreateError = std.json.ParseError(std.json.Scanner) || error{
+    DatabaseBusy,
+    DatabaseFailure,
+    DatabaseUnavailable,
+    MissingMessage,
+    SchemaUnsupported,
+};
 
-pub fn create(store: Store, selected: []const u8, previous: ?*Self) !*Self {
+pub fn create(store: Store, selected: []const u8, previous: ?*MessageHistory) CreateError!*MessageHistory {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const ar = arena.allocator();
     var records: std.ArrayList(*Record) = .empty;
     errdefer for (records.items) |record| record.release();
     if (previous) |old| try records.ensureTotalCapacity(ar, old.records.len);
-    var query = try store.db.prepare(if (previous == null) Store.history_query else Store.history_versions_query);
+    const query = try store.db.prepare(if (previous == null) Store.history_query else Store.history_versions_query);
     defer query.close();
     try query.bind(&.{.{ .text = selected }});
-    var lookup = try store.db.prepare(Store.message_query);
+    const lookup = try store.db.prepare(Store.message_query);
     defer lookup.close();
     var unchanged = previous != null;
     while (try query.step()) {
         const id = query.bytes(1);
         const revision = query.int(2);
-        const cached = if (previous) |old| blk: {
+        const cached = if (previous) |old| cached: {
             // Appends and edits usually leave the prefix in the same order.
             if (records.items.len < old.records.len) {
                 const at = old.records[records.items.len];
-                if (u.eq(at.message.id, id)) break :blk at;
+                if (u.eq(at.message.id, id)) break :cached at;
             }
-            break :blk old.index.get(id);
+            break :cached old.index.get(id);
         } else null;
-        const record = if (cached != null and cached.?.revision == revision and cached.?.enrichment_serial == query.int(4)) cached.?.retain() else blk: {
+        const record = if (cached != null and cached.?.revision == revision and cached.?.enrichment_serial == query.int(4)) cached.?.retain() else record: {
             var raw = query.bytes(0);
             if (previous != null) {
                 _ = u.c.sqlite3_reset(lookup.handle);
@@ -80,7 +109,7 @@ pub fn create(store: Store, selected: []const u8, previous: ?*Self) !*Self {
                 if (!try lookup.step()) return error.MissingMessage;
                 raw = lookup.bytes(0);
             }
-            break :blk try Record.create(raw, revision, query.int(4));
+            break :record try Record.create(raw, revision, query.int(4));
         };
         errdefer record.release();
         if (unchanged) unchanged = records.items.len < previous.?.records.len and previous.?.records[records.items.len] == record;
@@ -100,15 +129,21 @@ pub fn create(store: Store, selected: []const u8, previous: ?*Self) !*Self {
         presentation.* = record.presentation;
         index.putAssumeCapacity(message.id, record);
     }
-    const history = try allocator.create(Self);
-    history.* = .{ .arena = arena, .records = records.items, .messages = messages, .presentations = presentations, .index = index };
+    const history = try allocator.create(MessageHistory);
+    history.* = .{
+        .arena = arena,
+        .records = records.items,
+        .messages = messages,
+        .presentations = presentations,
+        .index = index,
+    };
     return history;
 }
-pub fn retain(history: *Self) *Self {
+pub fn retain(history: *MessageHistory) *MessageHistory {
     _ = history.refs.fetchAdd(1, .monotonic);
     return history;
 }
-pub fn release(history: *Self) void {
+pub fn release(history: *MessageHistory) void {
     if (history.refs.fetchSub(1, .acq_rel) == 1) {
         for (history.records) |record| record.release();
         history.arena.deinit();
