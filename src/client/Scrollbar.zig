@@ -1,6 +1,7 @@
 const std = @import("std");
 const rl = @import("raylib");
 const theme = @import("theme.zig");
+const shapes = @import("shapes.zig");
 const Scrollbar = @This();
 
 dragging: bool = false,
@@ -81,17 +82,16 @@ pub fn update(s: *Scrollbar, viewport: rl.Rectangle, content: f64, offset: f64, 
 
 pub fn draw(s: Scrollbar, viewport: rl.Rectangle, content: f64, offset: f64) void {
     const g = geometry(viewport, content, offset) orelse return;
-    rl.drawRectangleRounded(.{
+    shapes.drawRectangle(.{
         .x = g.track.x + 6,
         .y = g.track.y,
         .width = 4,
         .height = g.track.height,
-    }, 1, 8, theme.colors.line);
+    }, 1, theme.colors.line);
     const hot = rl.checkCollisionPointRec(rl.getMousePosition(), g.track);
-    rl.drawRectangleRounded(
+    shapes.drawRectangle(
         g.thumb,
         1,
-        8,
         if (s.dragging or hot) theme.colors.accent else theme.colors.muted,
     );
 }

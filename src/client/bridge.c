@@ -396,7 +396,18 @@ int zc_url_open(const char *url) {
     return 1;
 }
 
-struct ZcText { PangoLayout *layout; cairo_surface_t *surface; int width, height, subpixel; double scale; };
+struct TextLine {
+    PangoLayoutLine *layout; // Borrowed from the immutable parent layout.
+    PangoRectangle ink, logical;
+    int baseline;
+};
+struct ZcText {
+    PangoLayout *layout;
+    cairo_surface_t *surface;
+    struct TextLine *lines;
+    int line_count, width, height, subpixel;
+    double scale;
+};
 static cairo_t *text_context(cairo_surface_t *surface, double scale, int top, int subpixel) {
     cairo_t *cr = cairo_create(surface);
     // Keep glyph coordinates unchanged across tiles, including color emoji.
@@ -407,14 +418,58 @@ static cairo_t *text_context(cairo_surface_t *surface, double scale, int top, in
     // Transparent textures use grayscale; RGB coverage needs an opaque backdrop.
     cairo_font_options_set_antialias(options, subpixel ? CAIRO_ANTIALIAS_SUBPIXEL : CAIRO_ANTIALIAS_GRAY);
     cairo_font_options_set_subpixel_order(options, CAIRO_SUBPIXEL_ORDER_RGB);
-    cairo_font_options_set_hint_style(options, CAIRO_HINT_STYLE_SLIGHT);
+    cairo_font_options_set_hint_style(options, CAIRO_HINT_STYLE_FULL);
     cairo_font_options_set_hint_metrics(options, CAIRO_HINT_METRICS_ON);
     cairo_set_font_options(cr, options);
     cairo_font_options_destroy(options);
     return cr;
 }
-ZcText *zc_text_new_with_options(const char *text, int length, double size, int width, double scale, int single_line, int subpixel) {
+static int text_measure_lines(ZcText *t, const PangoFontDescription *description) {
+    PangoContext *context = pango_layout_get_context(t->layout);
+    PangoFont *font = pango_context_load_font(context, description);
+    if (!font) return 0;
+    PangoFontMetrics *metrics = pango_font_get_metrics(font, pango_context_get_language(context));
+    const int ascent = pango_font_metrics_get_ascent(metrics);
+    const int descent = pango_font_metrics_get_descent(metrics);
+    pango_font_metrics_unref(metrics);
+    g_object_unref(font);
+    t->line_count = pango_layout_get_line_count(t->layout);
+    t->lines = calloc((size_t)t->line_count, sizeof(*t->lines));
+    if (!t->lines) return 0;
+    PangoLayoutIter *it = pango_layout_get_iter(t->layout);
+    const int spacing = pango_layout_get_spacing(t->layout);
+    int64_t y = 0;
+    for (int i = 0; i < t->line_count; i++) {
+        struct TextLine *line = &t->lines[i];
+        line->layout = pango_layout_iter_get_line_readonly(it);
+        pango_layout_iter_get_line_extents(it, &line->ink, &line->logical);
+        const int baseline = pango_layout_iter_get_baseline(it);
+        // Fallback fonts often reserve much more ascent/descent than their ink
+        // needs. Keep the primary font's baseline and leading unless real glyphs
+        // (including accents and emoji) need extra room to avoid clipping.
+        int64_t above = ascent, below = descent;
+        if (line->ink.height > 0) {
+            above = MAX(above, (int64_t)baseline - line->ink.y);
+            below = MAX(below, (int64_t)line->ink.y + line->ink.height - baseline);
+        }
+        if (y + above + below + spacing > INT_MAX) {
+            pango_layout_iter_free(it);
+            return 0;
+        }
+        line->baseline = (int)(y + above);
+        line->ink.y += line->baseline - baseline;
+        line->logical.y = (int)y;
+        line->logical.height = (int)(above + below);
+        y += above + below;
+        if (i + 1 < t->line_count) y += spacing;
+        pango_layout_iter_next_line(it);
+    }
+    pango_layout_iter_free(it);
+    return (int)y;
+}
+ZcText *zc_text_new_weighted(const char *text, int length, double size, int width, double scale, int single_line, int subpixel, int weight) {
     if (length < 0 || length > 65536 || !isfinite(size) || size < 1 || size > 256 ||
+        weight < PANGO_WEIGHT_THIN || weight > PANGO_WEIGHT_ULTRAHEAVY ||
         length*(size + 4)*PANGO_SCALE > INT_MAX - 1048576.0 ||
         !isfinite(scale) || scale < .5 || scale > 8 || width < 1 || (width + 2.0)*scale > 4096) return NULL;
     if (!length) text = "";
@@ -443,7 +498,8 @@ ZcText *zc_text_new_with_options(const char *text, int length, double size, int 
     PangoFontDescription *font = pango_font_description_new();
     pango_font_description_set_family(font, "sans-serif");
     pango_font_description_set_absolute_size(font, size * PANGO_SCALE);
-    pango_layout_set_font_description(t->layout, font); pango_font_description_free(font);
+    pango_font_description_set_weight(font, (PangoWeight)weight);
+    pango_layout_set_font_description(t->layout, font);
     pango_layout_set_text(t->layout, text, length);
     pango_layout_set_width(t->layout, width > 0 ? width * PANGO_SCALE : -1);
     pango_layout_set_wrap(t->layout, char_wrap ? PANGO_WRAP_CHAR : PANGO_WRAP_WORD_CHAR);
@@ -453,15 +509,20 @@ ZcText *zc_text_new_with_options(const char *text, int length, double size, int 
         pango_layout_set_ellipsize(t->layout, PANGO_ELLIPSIZE_END);
     }
     pango_layout_set_spacing(t->layout, 3 * PANGO_SCALE);
-    pango_layout_get_pixel_size(t->layout, &t->width, &t->height);
+    pango_layout_get_pixel_size(t->layout, &t->width, NULL);
+    const int logical_height = text_measure_lines(t, font);
+    pango_font_description_free(font);
     // A single unbreakable grapheme can exceed the requested width. Clip it;
     // never make an enormous texture or stretch it to fit the message bubble.
     t->width = (int)((MIN(t->width, width) + 2.0) * scale + .5);
-    double height = (t->height + 2.0) * scale + .5;
+    double height = (ceil(logical_height / (double)PANGO_SCALE) + 2.0) * scale + .5;
     cairo_destroy(cr); cairo_surface_destroy(surface);
-    if (height < 1 || height > INT_MAX || t->width < 1) { zc_text_free(t); return NULL; }
+    if (!logical_height || height < 1 || height > INT_MAX || t->width < 1) { zc_text_free(t); return NULL; }
     t->height = (int)height;
     return t;
+}
+ZcText *zc_text_new_with_options(const char *text, int length, double size, int width, double scale, int single_line, int subpixel) {
+    return zc_text_new_weighted(text, length, size, width, scale, single_line, subpixel, PANGO_WEIGHT_NORMAL);
 }
 ZcText *zc_text_new(const char *text, int length, double size, int width, double scale) {
     return zc_text_new_with_options(text, length, size, width, scale, 0, 0);
@@ -470,23 +531,32 @@ ZcText *zc_text_new_line(const char *text, int length, double size, int width, d
     return zc_text_new_with_options(text, length, size, width, scale, 1, 0);
 }
 void zc_text_clear_pixels(ZcText *t) { if (t->surface) cairo_surface_destroy(t->surface); t->surface = NULL; }
-void zc_text_free(ZcText *t) { if (!t) return; zc_text_clear_pixels(t); g_object_unref(t->layout); free(t); }
+void zc_text_free(ZcText *t) { if (!t) return; zc_text_clear_pixels(t); free(t->lines); g_object_unref(t->layout); free(t); }
 int zc_text_width(ZcText *t) { return t->width; }
 int zc_text_height(ZcText *t) { return t->height; }
+double zc_text_baseline(ZcText *t) { return t->lines[0].baseline / (double)PANGO_SCALE; }
 double zc_text_ink_center_x(ZcText *t) {
     PangoRectangle ink;
     pango_layout_get_extents(t->layout, &ink, NULL);
     return (ink.x + ink.width / 2.0) / PANGO_SCALE;
 }
 double zc_text_ink_center_y(ZcText *t) {
-    PangoRectangle ink;
-    pango_layout_get_extents(t->layout, &ink, NULL);
-    return (ink.y + ink.height / 2.0) / PANGO_SCALE;
+    int top = INT_MAX, bottom = 0;
+    for (int i = 0; i < t->line_count; i++) {
+        const PangoRectangle *ink = &t->lines[i].ink;
+        if (!ink->height) continue;
+        top = MIN(top, ink->y);
+        bottom = MAX(bottom, ink->y + ink->height);
+    }
+    return top == INT_MAX ? 0 : (top + (bottom - top) / 2.0) / PANGO_SCALE;
 }
 unsigned char *zc_text_pixels(ZcText *t, unsigned color, int start, int end, int top, int height) {
     return zc_text_pixels_on(t, color, start, end, top, height, 0);
 }
 unsigned char *zc_text_pixels_on(ZcText *t, unsigned color, int start, int end, int top, int height, unsigned background) {
+    return zc_text_pixels_with_selection(t, color, start, end, top, height, background, 0);
+}
+unsigned char *zc_text_pixels_with_selection(ZcText *t, unsigned color, int start, int end, int top, int height, unsigned background, unsigned selection) {
     zc_text_clear_pixels(t);
     if (top < 0 || top >= t->height || height < 1 || height > 2048 ||
         height > t->height - top || (size_t)t->width * (size_t)height > 8*1024*1024 ||
@@ -494,17 +564,14 @@ unsigned char *zc_text_pixels_on(ZcText *t, unsigned color, int start, int end, 
     // Cairo can clip glyph coverage differently when a glyph straddles a surface
     // edge. Include whole intersecting lines, then return just the requested tile.
     int raster_top = top, raster_bottom = top + height;
-    PangoLayoutIter *bounds = pango_layout_get_iter(t->layout);
-    do {
-        PangoRectangle ink, logical;
-        pango_layout_iter_get_line_extents(bounds, &ink, &logical);
+    for (int i = 0; i < t->line_count; i++) {
+        const PangoRectangle ink = t->lines[i].ink, logical = t->lines[i].logical;
         int y = (int)floor(MIN(ink.y, logical.y)/(double)PANGO_SCALE*t->scale) - 2;
         int bottom = (int)ceil(MAX(ink.y + ink.height, logical.y + logical.height)/(double)PANGO_SCALE*t->scale) + 2;
         if (bottom < top || y > top + height) continue;
         raster_top = MIN(raster_top, y);
         raster_bottom = MAX(raster_bottom, bottom);
-    } while (pango_layout_iter_next_line(bounds));
-    pango_layout_iter_free(bounds);
+    }
     if ((size_t)t->width * (size_t)(raster_bottom - raster_top) > 8*1024*1024) return NULL;
     t->surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, t->width, raster_bottom - raster_top);
     if (cairo_surface_status(t->surface) != CAIRO_STATUS_SUCCESS) { zc_text_clear_pixels(t); return NULL; }
@@ -515,29 +582,27 @@ unsigned char *zc_text_pixels_on(ZcText *t, unsigned color, int start, int end, 
         cairo_set_source_rgb(cr, ((background>>24)&255)/255., ((background>>16)&255)/255., ((background>>8)&255)/255.);
         cairo_paint(cr);
     }
-    // Use the measured layout unchanged. Only draw lines intersecting this
-    // tile; drawing the entire document still shapes/rasterizes offscreen text.
-    PangoLayoutIter *it = pango_layout_get_iter(t->layout);
-    do {
-        PangoRectangle ink, logical;
-        pango_layout_iter_get_line_extents(it, &ink, &logical);
+    // Reuse Pango's shaped lines at the measured display baselines. Only draw
+    // intersecting lines; rasterizing the whole document would defeat tiling.
+    for (int i = 0; i < t->line_count; i++) {
+        const PangoRectangle ink = t->lines[i].ink, logical = t->lines[i].logical;
         double bottom = MAX(ink.y + ink.height, logical.y + logical.height)/(double)PANGO_SCALE*t->scale;
         double line_top = MIN(ink.y, logical.y)/(double)PANGO_SCALE*t->scale;
         // LCD filtering can extend glyph coverage beyond the reported ink box.
         if (bottom + 2 < top || line_top - 2 > top + height) continue;
-        PangoLayoutLine *line = pango_layout_iter_get_line_readonly(it);
+        PangoLayoutLine *line = t->lines[i].layout;
         if (start != end) {
             int *ranges, n;
             pango_layout_line_get_x_ranges(line, start, end, &ranges, &n);
-            cairo_set_source_rgba(cr, .24, .48, .86, .42);
+            if (selection) cairo_set_source_rgba(cr, ((selection>>24)&255)/255., ((selection>>16)&255)/255., ((selection>>8)&255)/255., (selection&255)/255.);
+            else cairo_set_source_rgba(cr, .24, .48, .86, .42);
             for (int i=0; i<n; ++i) cairo_rectangle(cr, ranges[i*2]/(double)PANGO_SCALE, logical.y/(double)PANGO_SCALE, (ranges[i*2+1]-ranges[i*2])/(double)PANGO_SCALE, logical.height/(double)PANGO_SCALE);
             cairo_fill(cr); g_free(ranges);
         }
         cairo_set_source_rgba(cr, ((color>>24)&255)/255., ((color>>16)&255)/255., ((color>>8)&255)/255., (color&255)/255.);
-        cairo_move_to(cr, logical.x/(double)PANGO_SCALE, pango_layout_iter_get_baseline(it)/(double)PANGO_SCALE);
+        cairo_move_to(cr, logical.x/(double)PANGO_SCALE, t->lines[i].baseline/(double)PANGO_SCALE);
         pango_cairo_show_layout_line(cr, line);
-    } while (pango_layout_iter_next_line(it));
-    pango_layout_iter_free(it);
+    }
     cairo_status_t status = cairo_status(cr);
     cairo_destroy(cr); cairo_surface_flush(t->surface);
     if (status != CAIRO_STATUS_SUCCESS) { zc_text_clear_pixels(t); return NULL; }
@@ -572,11 +637,26 @@ void zc_text_caret(ZcText *t, int index, int *x, int *y, int *height) {
     index = CLAMP(index, 0, (int)strlen(text));
     while (index > 0 && ((unsigned char)text[index] & 0xc0) == 0x80) --index;
     PangoRectangle r; pango_layout_get_cursor_pos(t->layout,index,&r,NULL);
-    *x=r.x/PANGO_SCALE; *y=r.y/PANGO_SCALE; *height=r.height/PANGO_SCALE;
+    int line;
+    pango_layout_index_to_line_x(t->layout,index,FALSE,&line,NULL);
+    const PangoRectangle logical = t->lines[line].logical;
+    *x=r.x/PANGO_SCALE; *y=logical.y/PANGO_SCALE; *height=logical.height/PANGO_SCALE;
 }
 int zc_text_hit(ZcText *t, int x, int y) {
+    // Locate the displayed line, including half the gap on either side. Let
+    // Pango resolve clusters and bidi within it using its unchanged shaping.
+    const int64_t py = (int64_t)y * PANGO_SCALE;
+    const int half_spacing = pango_layout_get_spacing(t->layout) / 2;
+    int lo = 0, hi = t->line_count - 1;
+    while (lo < hi) {
+        const int mid = lo + (hi - lo) / 2;
+        const PangoRectangle r = t->lines[mid].logical;
+        if (py < (int64_t)r.y + r.height + half_spacing) hi = mid;
+        else lo = mid + 1;
+    }
+    const struct TextLine *line = &t->lines[lo];
     int index, trailing;
-    pango_layout_xy_to_index(t->layout,(int)CLAMP((int64_t)x*PANGO_SCALE,INT_MIN,INT_MAX),(int)CLAMP((int64_t)y*PANGO_SCALE,INT_MIN,INT_MAX),&index,&trailing);
+    pango_layout_line_x_to_index(line->layout,(int)CLAMP((int64_t)x*PANGO_SCALE-line->logical.x,INT_MIN,INT_MAX),&index,&trailing);
     const char *text = pango_layout_get_text(t->layout); const char *p = text+index;
     while (trailing-- > 0 && *p) p=g_utf8_next_char(p);
     return (int)(p-text);

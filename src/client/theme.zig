@@ -14,12 +14,13 @@ pub const Palette = struct {
     disabled: rl.Color,
     accent: rl.Color,
     accent_hover: rl.Color,
-    on_accent: rl.Color = color(0xffffffff),
+    on_accent: rl.Color,
     paper: rl.Color,
     sidebar: rl.Color,
     line: rl.Color,
     incoming: rl.Color,
     selected: rl.Color,
+    selection: rl.Color,
     avatar: rl.Color,
     focus: rl.Color,
     danger: rl.Color,
@@ -28,39 +29,44 @@ pub const Palette = struct {
     success: rl.Color,
 };
 pub const colors = Palette{
-    .ink = color(0xede9f0ff),
-    .muted = color(0xaca5b4ff),
-    .disabled = color(0x77717fff),
-    .accent = color(0x875cabff),
-    .accent_hover = color(0x9a6cbeff),
-    .paper = color(0x1c1d22ff),
-    .sidebar = color(0x25202dff),
-    .line = color(0x39353fff),
-    .incoming = color(0x2b2b33ff),
-    .selected = color(0x49365fff),
-    .avatar = color(0x473851ff),
-    .focus = color(0xb39acbff),
-    .danger = color(0xe3aa8dff),
-    .rail = color(0x21182bff),
-    .surface = color(0x24252bff),
-    .success = color(0x65c9a3ff),
+    .ink = color(0xf1eef6ff),
+    .muted = color(0xb8b1c4ff),
+    .disabled = color(0x817a8eff),
+    // The logo's illuminated lavender carries actions and interaction feedback.
+    .accent = color(0xc4a3e6ff),
+    .accent_hover = color(0xd5b9efff),
+    .on_accent = color(0x241b30ff),
+    .focus = color(0xd0b6eaff),
+    .selected = color(0x393148ff),
+    .selection = color(0xc4a3e650),
+    // Graphite surfaces share a violet undertone, with the rail deepest in the stack.
+    .rail = color(0x141219ff),
+    .paper = color(0x19181fff),
+    .sidebar = color(0x211f2aff),
+    .surface = color(0x24212dff),
+    .incoming = color(0x2a2635ff),
+    .avatar = color(0x30283dff),
+    .line = color(0x494253ff),
+    // Sage and apricot remain reserved for status feedback.
+    .success = color(0x90c8b0ff),
+    .danger = color(0xeeb099ff),
 };
 
 pub const Participant = struct { bubble: rl.Color, label: rl.Color };
 // Reserved for read-only conversation avatars; never part of the participant palette.
 pub const read_only_avatar = Participant{
-    .bubble = color(0x38383cff),
-    .label = color(0x96969cff),
+    .bubble = color(0x302d36ff),
+    .label = color(0xa39baeff),
 };
 const participant_colors = [_]Participant{
-    .{ .bubble = color(0x253346ff), .label = color(0x9dbbe0ff) },
-    .{ .bubble = color(0x352c43ff), .label = color(0xc2a8deff) },
-    .{ .bubble = color(0x3d3028ff), .label = color(0xdab292ff) },
-    .{ .bubble = color(0x2a3728ff), .label = color(0xaac89bff) },
-    .{ .bubble = color(0x402b35ff), .label = color(0xdaa5beff) },
-    .{ .bubble = color(0x23393dff), .label = color(0x94c6ccff) },
-    .{ .bubble = color(0x383522ff), .label = color(0xcfc18aff) },
-    .{ .bubble = color(0x2e2d43ff), .label = color(0xb3aee3ff) },
+    .{ .bubble = color(0x30324aff), .label = color(0xb6c3eeff) },
+    .{ .bubble = color(0x382d47ff), .label = color(0xd2b6edff) },
+    .{ .bubble = color(0x40312cff), .label = color(0xe5bc9eff) },
+    .{ .bubble = color(0x293b36ff), .label = color(0xa8d2bfff) },
+    .{ .bubble = color(0x412d39ff), .label = color(0xe7b2c9ff) },
+    .{ .bubble = color(0x293b40ff), .label = color(0xa6cbd8ff) },
+    .{ .bubble = color(0x3c382bff), .label = color(0xd8c89eff) },
+    .{ .bubble = color(0x312e46ff), .label = color(0xc2bbeaff) },
 };
 
 pub fn participant(sender: []const u8, participants: []const []const u8) Participant {

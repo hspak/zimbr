@@ -73,30 +73,25 @@ DER SHA-256** printed by the helper in the relay's enabled-device allowlist.
 The CA key stays in protected administrator storage; neither the helper nor the
 Linux application needs it. Private-key contents are never command arguments.
 
-Create `~/.config/zimbr/config.json` (or `$XDG_CONFIG_HOME/zimbr/config.json`):
+Launch Zimbr and enter the relay HTTPS origin and the absolute paths to
+`ca.pem`, `client.pem` and `client-key.pem` in **Settings** (Ctrl+,). Click
+**Save and connect**. Settings are stored with client state in `client.db`;
+there is no JSON file to maintain. Missing or invalid required settings keep
+the pane open until corrected and saved.
 
-```json
-{
-  "relay_url": "https://relay.example:8731",
-  "ca_file": "/home/USER/.config/zimbr/tls/ca.pem",
-  "client_cert_file": "/home/USER/.config/zimbr/tls/client.pem",
-  "client_key_file": "/home/USER/.config/zimbr/tls/client-key.pem",
-  "enter_to_send": true
-}
-```
+Runtime credential files must be owned by the current user, mode 0600, in owned
+0700 containing directories. Symlinks (including parent components), hardlinked
+files, unsafe writable ancestors, missing material and key mismatches are
+rejected. Shared system ancestors such as `/home` may be root-owned; they need
+not be 0700. The root-owned sticky `/tmp` ancestor is allowed for temporary tests.
 
-Use real absolute paths and set the config file to 0600. Runtime credential and
-configuration files must be owned by the current user, mode 0600, in owned 0700
-containing directories. Symlinks (including parent components), hardlinked files,
-unsafe writable ancestors, missing material, and key mismatches are rejected.
-Shared system ancestors such as `/home` may be root-owned; they need not be 0700.
-The root-owned sticky `/tmp` ancestor is allowed for temporary test directories.
-
-CLI overrides are `--relay-url`, `--ca-file`, `--client-cert-file`,
-`--client-key-file`, and `--data-dir`. An origin may include a port and
-a trailing `/`, but no userinfo, query, fragment, or application path. Old
-`port`/`token_file` settings and `--port`/`--token-file` fail with migration guidance.
-Remove obsolete fields even when providing new CLI overrides.
+State lives in `$XDG_STATE_HOME/zimbr` or `$HOME/.local/share/zimbr`. `--data-dir`
+selects another directory. Connection flags `--relay-url`, `--ca-file`,
+`--client-cert-file` and `--client-key-file` override saved settings for one
+launch. An origin may include a port and a trailing `/`, but no userinfo, query,
+fragment or application path. Old `--port`/`--token-file` options fail with
+migration guidance. See [configuration migration](linux-client.md#provisioning-and-configuration)
+for existing JSON files and caches.
 
 ## Operation and renewal
 
@@ -114,13 +109,12 @@ continue until the connection succeeds or you click Reconnect.
 
 Reconnect validates and reloads credentials and destroys all old HTTP/SSE
 connections and TLS session state. File changes alone do not change a running
-credential snapshot. Changing configuration paths or endpoint requires restarting
-the application. Renewal does not clear the cache, drafts, cursor, or outbox.
+credential snapshot. Changing paths or the endpoint in Settings and saving reconnects
+automatically. Renewal does not clear the cache, drafts, cursor, or outbox.
 
 For renewal, generate a new key/CSR in another private directory, have it signed,
 import and verify it there, and enroll the new leaf fingerprint on the Mac. A
-brief overlap of enabled device fingerprints is permitted. Quit the client,
-update its credential paths and restart, or replace the validated files at its
+brief overlap of enabled device fingerprints is permitted. Update the credential paths in Settings and save, or replace the validated files at its
 existing paths while disconnected and click Reconnect. Remove the old enrollment
 after verifying the new fingerprint. Server renewal retains its hostname and CA;
 CA replacement requires a coordinated trust update.

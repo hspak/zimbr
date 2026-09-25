@@ -7,9 +7,11 @@ const u = @import("common.zig");
 const Media = @import("client.zig").Media;
 const types = @import("protocol.zig").types;
 pub fn main(init: std.process.Init) !void {
-    const config = try Config.parse(init);
+    var config = try Config.parse(init);
     const cache_lock = try config.lockCache();
     defer _ = u.c.close(cache_lock);
+    try config.load(init.arena.allocator());
+    try config.validate();
     var worker = Worker{ .io = init.io, .config = config };
     try worker.start();
     defer worker.shutdown();

@@ -6,6 +6,7 @@ const t = @import("../protocol.zig").types;
 const u = @import("../common.zig");
 const ImageCache = @This();
 const a = std.heap.c_allocator;
+const log = std.log.scoped(.client_images);
 
 entries: std.AutoHashMapUnmanaged([64]u8, Entry) = .empty,
 bytes: usize = 0,
@@ -104,6 +105,7 @@ pub fn nextFrame(s: *ImageCache, media: *Media) void {
         };
         const cache_key = oldest orelse break;
         const removed = s.entries.fetchRemove(cache_key).?.value;
+        log.debug("Image {s}: memory cache entry evicted at entry limit", .{cache_key});
         if (removed.texture) |texture| {
             rl.unloadTexture(texture);
             s.bytes -= removed.bytes;
@@ -118,6 +120,10 @@ fn makeRoom(s: *ImageCache, bytes: usize) void {
             oldest = entry;
         };
         const entry = oldest orelse break;
+        log.debug("Image texture evicted: {d} bytes; memory cache limit {d} bytes", .{
+            entry.bytes,
+            Media.texture_budget,
+        });
         rl.unloadTexture(entry.texture.?);
         s.bytes -= entry.bytes;
         entry.* = .{};
@@ -174,19 +180,25 @@ pub fn draw(texture: rl.Texture2D, bounds: rl.Rectangle) void {
     }, .{ .x = 0, .y = 0 }, 0, rl.Color.white);
 }
 
-pub fn drawAvatar(texture: rl.Texture2D, bounds: rl.Rectangle) void {
+/// Draws a circular, center-cropped photo, or a solid tint when texture is null.
+pub fn drawAvatar(texture: ?rl.Texture2D, bounds: rl.Rectangle, tint: rl.Color) void {
     const radius = @min(bounds.width, bounds.height) / 2;
-    if (radius <= 0 or texture.width <= 0 or texture.height <= 0) return;
+    if (radius <= 0) return;
+    if (texture) |photo| if (photo.width <= 0 or photo.height <= 0) return;
     const center = rl.Vector2{ .x = bounds.x + bounds.width / 2, .y = bounds.y + bounds.height / 2 };
     // Center-crop rectangular photos to fill the circle without stretching.
-    const crop: f32 = @floatFromInt(@min(texture.width, texture.height));
-    const uv = rl.Vector2{ .x = crop / @as(f32, @floatFromInt(texture.width)) / 2, .y = crop / @as(
-        f32,
-        @floatFromInt(texture.height),
-    ) / 2 };
+    const uv: rl.Vector2 = if (texture) |photo| crop: {
+        const size: f32 = @floatFromInt(@min(photo.width, photo.height));
+        break :crop .{
+            .x = size / @as(f32, @floatFromInt(photo.width)) / 2,
+            .y = size / @as(f32, @floatFromInt(photo.height)) / 2,
+        };
+    } else .{ .x = 0, .y = 0 };
     const inner = @max(0, radius - 1 / @max(1, rl.getWindowScaleDPI().x));
+    var transparent = tint;
+    transparent.a = 0;
     const segments = 64;
-    rl.gl.rlSetTexture(texture.id);
+    rl.gl.rlSetTexture(if (texture) |photo| photo.id else rl.gl.rlGetTextureIdDefault());
     rl.gl.rlBegin(rl.gl.rl_triangles);
     rl.gl.rlNormal3f(0, 0, 1);
     for (0..segments) |i| {
@@ -194,16 +206,16 @@ pub fn drawAvatar(texture: rl.Texture2D, bounds: rl.Rectangle) void {
         const next = -2 * std.math.pi * @as(f32, @floatFromInt(i + 1)) / segments;
         const p = rl.Vector2{ .x = @cos(angle), .y = @sin(angle) };
         const q = rl.Vector2{ .x = @cos(next), .y = @sin(next) };
-        avatarVertex(center, .{ .x = 0, .y = 0 }, radius, uv, 0, 255);
-        avatarVertex(center, p, radius, uv, inner, 255);
-        avatarVertex(center, q, radius, uv, inner, 255);
+        avatarVertex(center, .{ .x = 0, .y = 0 }, radius, uv, 0, tint);
+        avatarVertex(center, p, radius, uv, inner, tint);
+        avatarVertex(center, q, radius, uv, inner, tint);
         // A one-pixel transparent fringe smooths the edge at every DPI.
-        avatarVertex(center, p, radius, uv, inner, 255);
-        avatarVertex(center, p, radius, uv, radius, 0);
-        avatarVertex(center, q, radius, uv, radius, 0);
-        avatarVertex(center, p, radius, uv, inner, 255);
-        avatarVertex(center, q, radius, uv, radius, 0);
-        avatarVertex(center, q, radius, uv, inner, 255);
+        avatarVertex(center, p, radius, uv, inner, tint);
+        avatarVertex(center, p, radius, uv, radius, transparent);
+        avatarVertex(center, q, radius, uv, radius, transparent);
+        avatarVertex(center, p, radius, uv, inner, tint);
+        avatarVertex(center, q, radius, uv, radius, transparent);
+        avatarVertex(center, q, radius, uv, inner, tint);
     }
     rl.gl.rlEnd();
     rl.gl.rlSetTexture(0);
@@ -215,9 +227,9 @@ fn avatarVertex(
     radius: f32,
     uv: rl.Vector2,
     distance: f32,
-    alpha: u8,
+    color: rl.Color,
 ) void {
-    rl.gl.rlColor4ub(255, 255, 255, alpha);
+    rl.gl.rlColor4ub(color.r, color.g, color.b, color.a);
     rl.gl.rlTexCoord2f(
         0.5 + direction.x * uv.x * distance / radius,
         0.5 + direction.y * uv.y * distance / radius,

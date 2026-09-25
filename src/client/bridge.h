@@ -54,13 +54,18 @@ typedef struct ZcText ZcText;
 ZcText *zc_text_new(const char *text, int length, double size, int width, double scale);
 ZcText *zc_text_new_line(const char *text, int length, double size, int width, double scale);
 ZcText *zc_text_new_with_options(const char *text, int length, double size, int width, double scale, int single_line, int subpixel);
+/* Pango weights range from 100 to 1000; 400 is normal and 600 is semibold. */
+ZcText *zc_text_new_weighted(const char *text, int length, double size, int width, double scale, int single_line, int subpixel, int weight);
 void zc_text_free(ZcText *text);
 int zc_text_width(ZcText *text);
 int zc_text_height(ZcText *text);
+double zc_text_baseline(ZcText *text);
 double zc_text_ink_center_x(ZcText *text);
 double zc_text_ink_center_y(ZcText *text);
 unsigned char *zc_text_pixels(ZcText *text, unsigned color, int start, int end, int top, int height);
 unsigned char *zc_text_pixels_on(ZcText *text, unsigned color, int start, int end, int top, int height, unsigned background);
+// Colors are packed RGBA; zero selection keeps the default highlight.
+unsigned char *zc_text_pixels_with_selection(ZcText *text, unsigned color, int start, int end, int top, int height, unsigned background, unsigned selection);
 void zc_text_clear_pixels(ZcText *text);
 int zc_local_time(const char *timestamp, char *output, size_t size, int compact);
 int zc_timestamp_ms(const char *timestamp, size_t length, int64_t *output);

@@ -5,14 +5,14 @@ at an angle, so its soft supports and broad curved span suggest a Z. The support
 tips hint at speech tails. A shallow extrusion, shaded lavender side walls, a
 fine highlighted contour, and a soft cast shadow give the bridge depth.
 
-Colors are based on [`src/client/theme.zig`](../../src/client/theme.zig): the tile
-runs vertically from `accent_hover` (`#9A6CBE`) through `accent` (`#875CAB`) to a
-deeper violet (`#714F90`, a blend of `accent` and `selected`). A broad, soft
-`focus`-colored highlight lights the upper left, and a fine inset rim gives the
-tile a gently rounded edge. The bridge face shades
-from `on_accent` white through `ink` (`#EDE9F0`) to a lavender tint (`#D5C7E1`).
-The sides use `focus` (`#B39ACB`) and `accent`; the shadow uses `rail` (`#21182B`).
-The dark preview uses the app's `paper` (`#1C1D22`).
+The tile runs vertically from light violet (`#9A6CBE`) through `#875CAB` to
+deeper violet (`#714F90`). A broad lavender highlight (`#B39ACB`) lights the upper
+left, and a fine inset rim gives the tile a gently rounded edge. The bridge face
+shades from white through `#EDE9F0` to pale lavender (`#D5C7E1`), with lavender
+sides and a deep violet shadow (`#21182B`). The dark preview uses charcoal
+(`#1C1D22`). These artwork colors inspire the lighter lavender accents and
+graphite surfaces in [`src/client/theme.zig`](../../src/client/theme.zig); the
+icon retains its own shading palette.
 
 The bridge path is defined once in the SVG and reused for the face, extrusion,
 and shadow. Depth is 14 units on the 512-unit canvas; lighting and contours

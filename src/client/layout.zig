@@ -19,16 +19,16 @@ fn rect(name: []const u8) rl.Rectangle {
 }
 pub const footer_height: f32 = 32;
 pub const list_bottom_padding: f32 = 8;
-pub const composer_top_padding: f32 = 8;
+pub const conversation_padding: f32 = 20;
+pub const message_spacing: f32 = 16;
+// The last row supplies the remaining gap; the composer box is shifted up one pixel.
+pub const composer_top_padding: f32 = conversation_padding - message_spacing + 1;
 pub const action_right_padding: f32 = 32;
 const rail_width: f32 = 64;
-
-fn sidebarWidth(width: f32) f32 {
-    return if (width < 950) 220 else 244;
-}
+const sidebar_width: f32 = 244;
 
 pub fn conversationWidth(width: f32) f32 {
-    return width - rail_width - sidebarWidth(width);
+    return width - rail_width - sidebar_width;
 }
 
 pub fn footer(r: rl.Rectangle) rl.Rectangle {
@@ -46,7 +46,7 @@ pub fn frame(width: f32, height: f32, composer_height: f32) Areas {
     clay.UI()(.{ .id = .ID("root"), .layout = .{ .sizing = .grow, .direction = .top_to_bottom } })({
         clay.UI()(.{ .layout = .{ .sizing = .grow, .direction = .left_to_right } })({
             clay.UI()(.{ .id = .ID("rail"), .layout = .{ .sizing = .{ .w = .fixed(rail_width), .h = .grow } } })({});
-            clay.UI()(.{ .layout = .{ .sizing = .{ .w = .fixed(sidebarWidth(width)), .h = .grow }, .direction = .top_to_bottom } })({
+            clay.UI()(.{ .layout = .{ .sizing = .{ .w = .fixed(sidebar_width), .h = .grow }, .direction = .top_to_bottom } })({
                 clay.UI()(.{ .id = .ID("sidebar"), .layout = .{ .sizing = .grow } })({});
                 clay.UI()(.{ .id = .ID("sidebar_footer"), .layout = .{ .sizing = .{ .w = .grow, .h = .fixed(footer_height) } } })({});
             });

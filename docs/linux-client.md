@@ -41,38 +41,52 @@ The relay must enable the device's entire-leaf SHA-256 fingerprint. Use a direct
 reachable hostname covered by its server certificate; proxies and redirects are
 disabled. Both API and SSE connections require TLS 1.3 and client authentication.
 
-Default data is `$XDG_DATA_HOME/zimbr` (fallback `~/.local/share/zimbr`). The cache
-and drafts remain in their existing database and contain plaintext. Credentials
-and security configuration must be owned 0600 files in 0700 directories with no
-symlinks. The GUI never receives Apple account credentials.
+Settings, cached messages and drafts live in `client.db` under
+`$XDG_STATE_HOME/zimbr`, falling back to `$HOME/.local/share/zimbr` when
+`XDG_STATE_HOME` is unset, empty or relative. `--data-dir PATH` overrides that
+location, including when `HOME` is unset. `XDG_DATA_HOME` is no longer used.
+To keep an existing cache in another location, launch with `--data-dir` pointing
+to that directory. The database and media cache contain plaintext.
 
-`$XDG_CONFIG_HOME/zimbr/config.json` (fallback `~/.config/zimbr/config.json`):
+Launch Zimbr and open **Settings** in the navigation rail (Ctrl+,). Enter the
+HTTPS relay origin and absolute paths to your CA certificate, client certificate
+and private key, then click **Save and connect** (Ctrl+Enter). The pane also
+controls **Enter to send**. Tab and Shift+Tab move between fields; Cancel or Escape
+discards edits when setup is already valid.
 
-```json
-{
-  "relay_url": "https://mac-mini.local:8731",
-  "ca_file": "/home/USER/.config/zimbr/tls/ca.pem",
-  "client_cert_file": "/home/USER/.config/zimbr/tls/client.pem",
-  "client_key_file": "/home/USER/.config/zimbr/tls/client-key.pem",
-  "enter_to_send": true
-}
-```
+Missing or invalid required settings open Settings automatically. It cannot be
+closed or bypassed until valid settings are saved. Validation checks the HTTPS
+origin, file permissions, certificate validity and key matching locally; the relay
+need not be online to save. Credentials must be owned 0600 files in 0700
+directories with no symlinks. The GUI never receives Apple account credentials.
+Saving reconnects both messaging and media with the new settings, preserving
+drafts, cached messages and send recovery.
 
-Use actual absolute paths. Matching CLI flags are `--relay-url`, `--ca-file`,
-`--client-cert-file`, `--client-key-file`, and `--data-dir`. Old transport fields
-and options fail with migration guidance. Legacy `theme` settings in the config
-file and saved appearance are ignored; the color scheme is fixed.
-`--details` opens diagnostics at launch. After replacing credentials click
-**Reconnect** in the Details pane, which reloads the files and discards all old
-TLS connections.
-Configuration path or endpoint changes require restart. Certificate errors wait
-for correction and Reconnect; transient network failures use bounded backoff.
+On the first launch for a database without settings, Zimbr imports an existing
+`$XDG_CONFIG_HOME/zimbr/config.json` (fallback `~/.config/zimbr/config.json`) if it
+is safe and readable. The JSON file is ignored thereafter and may be removed
+after checking the imported settings. Invalid or obsolete JSON opens setup for
+repair. Legacy `theme` and `data_dir` fields are ignored; use `--data-dir` to
+select an existing database outside the default location.
+
+Optional `--relay-url`, `--ca-file`, `--client-cert-file` and `--client-key-file`
+flags override saved values for one launch. **Save and connect** explicitly saves
+the values displayed in Settings, including any overrides. `--settings` opens
+Settings at launch; `--details` opens diagnostics when setup is valid. Old
+`--port` and `--token-file` options fail with migration guidance.
+
+After replacing credentials at their existing paths, **Reconnect** in Details
+reloads them and discards old TLS connections. Certificate errors wait for
+correction and Reconnect; transient network failures use bounded backoff.
 A client-certificate expiry warning starts 30 days before its actual expiry.
 
 ## Conversations and history
 
-The client uses a Slack-inspired dark layout: a plum navigation rail and sidebar,
-a sidebar search bar (Ctrl+F), and a compact conversation list with unread counts.
+The client pairs graphite surfaces with the logo's soft lavender: brighter accents
+mark actions, focus, unread badges, and selections. Sage and apricot indicate
+connection status and warnings; participant tints share the same muted palette.
+The navigation rail sits beside a sidebar search bar (Ctrl+F) and a compact
+conversation list with unread counts.
 Group and direct conversations appear together, ordered by their latest message,
 newest first, beside a charcoal conversation pane. Incoming and outgoing messages
 share a left-aligned feed with square avatars, sender labels, timestamps, and
@@ -116,13 +130,19 @@ Unsupported services remain readable with sending disabled.
 Pango supplies shaping, font fallback, wrapping, and grapheme boundaries. Text is
 rasterized at the Wayland display scale and aligned to physical pixels, including
 at fractional scales; moving between display scales refreshes the text cache.
+Font sizes are used without a global reduction, with full outline hinting and
+hinted metrics to fit lettering to the physical pixel grid.
+Line baselines and spacing use the main font's metrics, so Korean and other
+fallback fonts do not add empty padding. Lines still expand for visible glyphs
+that need extra space, such as stacked accents or tall emoji. Drawing, selection,
+and caret placement share these line bounds.
 Lettering requests RGB subpixel antialiasing on opaque backgrounds, with a
 grayscale fallback where unsupported. Transparent text overlays use grayscale
 antialiasing; text on solid surfaces is composited against its actual background
 to preserve the RGB coverage at glyph edges.
 Combining marks and joined emoji survive editing and restart. Full input-method/preedit
 integration, visual bidirectional cursor navigation, and accessibility are future
-work. For input-method users, set `enter_to_send` to `false` to reserve plain Enter
+work. For input-method users, turn off **Enter to send** in Settings to reserve plain Enter
 for text input and use Ctrl+Enter or the Send button; paste committed text from an
 IME-capable editor when needed. Missing glyphs remain copyable as original UTF-8.
 
@@ -166,7 +186,7 @@ chips. Click an image for a larger view; Left/Right navigate that message's phot
 Escape closes, and R retries a failed image. Tab focuses visible image, link, and
 reaction controls; Enter activates them. Reaction details identify each actor,
 including your own reaction and any unresolved target part. Clicking a URL or card
-shows its actual destination and full URL before opening or copying it. Displaying
+opens its destination directly in your default browser. Displaying
 a card never fetches a website or remote artwork. Ctrl+C on selected message text
 keeps the original full text. **Show more** loads overflow metadata when needed.
 
@@ -204,15 +224,26 @@ unresponsive notification daemon does not interrupt messaging.
 ## Connection details
 
 Connection status appears in the sidebar. **Details** in the navigation rail
-(Ctrl+D) includes **Reconnect** in its header and opens
-a scrollable pane with connection and retry status, relay capabilities, saved
+(Ctrl+D) opens a scrollable pane with connection and retry status, relay capabilities, saved
 sync cursor, cache counts, display information,
 client certificate fingerprint and expiry, TLS failure details, and local file
-paths. Private-key contents are never shown. Escape or **Back** returns
-to messages. The sidebar search stays fixed while the list scrolls.
+paths. Private-key contents are never shown. Details fills the area beside the
+navigation rail, hiding the conversation sidebar. The refresh icon beside the
+status reconnects; hover it to see **Reconnect**. Escape or **Messages** in the
+rail returns to messages. In Messages, the sidebar search stays fixed while the list scrolls.
 Conversation lists, message history, Details, and overflowing drafts show a
 scrollbar: drag its thumb or click the track to move. Wheel scrolling is 25%
 faster. Participant avatars and sender labels use matching colors on the dark background.
+
+The **Logs** textbox at the top of Details streams the latest 200 session
+entries with local timestamps in `YYYY-MM-DD:HH:MM:SSSS` format (the final two
+digits are hundredths of a second). The footer shows the host's timezone
+abbreviation and UTC offset. Logs include connection changes, request results,
+image disk-cache hits and misses, downloads, and texture evictions. Scroll inside
+the textbox to read earlier entries; **Latest** resumes following new entries.
+**Copy** copies the retained logs, and **Clear** empties them. Click the textbox
+to use arrow keys, Page Up/Down, Home/End, or Ctrl+C. Logs stay in memory until
+the client exits and continue to be written to the terminal.
 
 ## Rendering and performance
 
@@ -253,6 +284,7 @@ zig build test client-probe fake-relay
 python3 tests/cert_management.py  # real mkcert required
 python3 tests/client_native_tls.py
 python3 tests/client_tls.py
+python3 tests/client_settings.py
 python3 tests/client_integration.py
 python3 tests/conversations.py
 python3 tests/client_transport.py
@@ -262,7 +294,7 @@ python3 tests/contact_refresh.py
 python3 tests/client_enrichment_protocol.py
 python3 tests/client_media_transport.py
 python3 tests/client_details.py
-# Requires a running Wayland desktop:
+# Requires a running Wayland desktop and Python cryptography for temporary test certificates:
 zig build test-gui
 python3 tests/integration.py
 python3 tests/mac_acceptance_test.py

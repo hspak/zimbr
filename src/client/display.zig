@@ -198,7 +198,13 @@ pub const object_marker = "\u{fffc}";
 /// Attachment anchors are structural text, not a user-visible caption. Keep
 /// source strings intact because part offsets and whole-message copying use them.
 pub fn withoutObjectMarkers(a: std.mem.Allocator, value: []const u8) []const u8 {
-    if (std.mem.indexOf(u8, value, object_marker) == null) return value;
+    // Skip bytes that cannot start an anchor before comparing the UTF-8 sequence.
+    // Most long messages contain no anchors and need no allocation or rewriting.
+    var start: usize = 0;
+    while (std.mem.findScalarPos(u8, value, start, object_marker[0])) |candidate| {
+        if (std.mem.startsWith(u8, value[candidate..], object_marker)) break;
+        start = candidate + 1;
+    } else return value;
     const text = std.mem.replaceOwned(u8, a, value, object_marker, "") catch return unavailable;
     if (std.mem.trim(u8, text, " \t\r\n").len == 0) {
         a.free(text);
@@ -287,6 +293,34 @@ test "display limits preserve UTF8 and never change full message content" {
     try std.testing.expectEqualStrings("a" ** 32, prefix("a" ** 32 ++ "\ntrailing", 64, 1));
     try std.testing.expectEqualStrings("a" ** 32, prefix("a" ** 32 ++ "\u{2028}trailing", 64, 1));
     try std.testing.expectEqualStrings("a" ** 32, prefix("a" ** 32 ++ "\x00trailing", 64, 2));
+}
+
+test "object marker removal preserves other Unicode and incomplete byte sequences" {
+    const unchanged = [_][]const u8{
+        "",
+        "Ordinary ASCII " ** 4096,
+        "\u{feff}Café \u{fffd} 👩‍💻",
+        "trailing\xef",
+        "trailing\xef\xbf",
+        "\xef\xef\xbf",
+    };
+    for (unchanged) |input| {
+        const result = withoutObjectMarkers(std.testing.failing_allocator, input);
+        try std.testing.expectEqual(input.ptr, result.ptr);
+        try std.testing.expectEqualStrings(input, result);
+    }
+    const cases = .{
+        .{ "\u{fffd}" ++ object_marker ++ "\u{feff}", "\u{fffd}\u{feff}" },
+        .{ "x" ** 31 ++ object_marker ++ "tail", "x" ** 31 ++ "tail" },
+        .{ object_marker ++ object_marker ++ "caption" ++ object_marker, "caption" },
+        .{ "\xef" ++ object_marker ++ "\xef\xbf", "\xef\xef\xbf" },
+        .{ " \t" ++ object_marker ++ "\r\n", "" },
+    };
+    inline for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        try std.testing.expectEqualStrings(case[1], withoutObjectMarkers(arena.allocator(), case[0]));
+    }
 }
 
 /// Captions always win; image arrival never changes notification eligibility.

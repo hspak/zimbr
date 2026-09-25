@@ -2,6 +2,7 @@ const std = @import("std");
 const rl = @import("raylib");
 const c = @import("c.zig").api;
 const display = @import("display.zig");
+const theme = @import("theme.zig");
 const Text = @This();
 const a = std.heap.page_allocator;
 
@@ -10,8 +11,15 @@ texture_bytes: usize = 0,
 frame: u64 = 0,
 scale: f32 = 1,
 
-// Apply the same modest reduction to labels, messages, and editor metrics.
-pub const font_scale = 0.94;
+pub const font_scale = 1.0;
+pub const Weight = enum(c_int) {
+    normal = 400,
+    semibold = 600,
+};
+pub const Style = struct {
+    size: i32,
+    weight: Weight = .normal,
+};
 const Entry = struct {
     hash: u64,
     text: []const u8,
@@ -21,6 +29,7 @@ const Entry = struct {
     used: u64 = 0,
     width: f32,
     height: f32,
+    ink_center_y: ?f32 = null,
     fallback: bool = false,
     raster_failed: bool = false,
     color: rl.Color = rl.Color.white,
@@ -57,9 +66,13 @@ pub fn nextFrame(s: *Text, scale: f32) void {
     s.frame += 1;
 }
 fn get(s: *Text, text: []const u8, size: i32, width: f32, single_line: bool, subpixel: bool) !*Entry {
+    return s.getStyled(text, .{ .size = size }, width, single_line, subpixel);
+}
+fn getStyled(s: *Text, text: []const u8, style: Style, width: f32, single_line: bool, subpixel: bool) !*Entry {
     var hash = std.hash.Wyhash.init(0);
     hash.update(text);
-    hash.update(std.mem.asBytes(&size));
+    hash.update(std.mem.asBytes(&style.size));
+    hash.update(std.mem.asBytes(&style.weight));
     hash.update(std.mem.asBytes(&single_line));
     hash.update(std.mem.asBytes(&subpixel));
     if (!std.math.isFinite(width) or !std.math.isFinite(s.scale) or s.scale < 0.5 or s.scale > 8) return error.TextLayoutFailed;
@@ -70,23 +83,25 @@ fn get(s: *Text, text: []const u8, size: i32, width: f32, single_line: bool, sub
         e.used = s.frame;
         return e;
     };
-    const original = if (text.len <= 65536) c.zc_text_new_with_options(
+    const original = if (text.len <= 65536) c.zc_text_new_weighted(
         text.ptr,
         @intCast(text.len),
-        @as(f64, @floatFromInt(size)) * font_scale,
+        @as(f64, @floatFromInt(style.size)) * font_scale,
         w,
         s.scale,
         @intFromBool(single_line),
         @intFromBool(subpixel),
+        @intFromEnum(style.weight),
     ) else null;
-    const layout = original orelse c.zc_text_new_with_options(
+    const layout = original orelse c.zc_text_new_weighted(
         display.unavailable.ptr,
         display.unavailable.len,
-        @as(f64, @floatFromInt(size)) * font_scale,
+        @as(f64, @floatFromInt(style.size)) * font_scale,
         w,
         s.scale,
         @intFromBool(single_line),
         @intFromBool(subpixel),
+        @intFromEnum(style.weight),
     ) orelse return error.TextLayoutFailed;
     errdefer c.zc_text_free(layout);
     const copy = try a.dupe(u8, text);
@@ -168,7 +183,20 @@ pub fn drawLine(
     color: rl.Color,
     background: ?rl.Color,
 ) void {
-    const e = s.get(text, size, width, true, isOpaque(background)) catch return;
+    s.drawLineStyled(text, x, y, .{ .size = size }, width, color, background);
+}
+/// Draws one ellipsized line using the requested font size and weight.
+pub fn drawLineStyled(
+    s: *Text,
+    text: []const u8,
+    x: f32,
+    y: f32,
+    style: Style,
+    width: f32,
+    color: rl.Color,
+    background: ?rl.Color,
+) void {
+    const e = s.getStyled(text, style, width, true, isOpaque(background)) catch return;
     s.drawEntry(e, x, y, color, 0, 0, background);
 }
 pub fn drawLineCentered(
@@ -186,11 +214,66 @@ pub fn drawLineCentered(
     s.drawEntry(e, x, y, color, 0, 0, background);
 }
 pub fn lineSize(s: *Text, text: []const u8, size: i32, width: f32) rl.Vector2 {
-    const e = s.get(text, size, width, true, true) catch return .{ .x = 0, .y = 18 };
+    return s.lineSizeStyled(text, .{ .size = size }, width);
+}
+/// Measures one ellipsized line with the same metrics used by drawLineStyled.
+pub fn lineSizeStyled(s: *Text, text: []const u8, style: Style, width: f32) rl.Vector2 {
+    const e = s.getStyled(text, style, width, true, true) catch return .{ .x = 0, .y = 18 };
     return .{ .x = e.width, .y = e.height };
 }
+/// Returns the visible glyph center relative to the line's drawing origin at the current scale.
 pub fn lineInkCenterY(s: *Text, text: []const u8, size: i32, width: f32) f32 {
     const e = s.get(text, size, width, true, true) catch return 9;
+    if (e.ink_center_y) |center| return center;
+    const fallback: f32 = @floatCast(c.zc_text_ink_center_y(e.layout));
+    const height_pixels = c.zc_text_height(e.layout);
+    if (height_pixels > 2048) return fallback;
+    // Hinting and fallback fonts can put ink outside Pango's reported extents.
+    // Measure a neutral raster once per cached layout at its actual display scale.
+    const pixels = c.zc_text_pixels_on(
+        e.layout,
+        0xffffffff,
+        0,
+        0,
+        0,
+        height_pixels,
+        0x000000ff,
+    );
+    if (pixels == null) return fallback;
+    defer c.zc_text_clear_pixels(e.layout);
+    const stride = @as(usize, @intCast(c.zc_text_width(e.layout))) * 4;
+    var first = height_pixels;
+    var last: i32 = 0;
+    var y: i32 = 0;
+    while (y < height_pixels) : (y += 1) {
+        const row = pixels + @as(usize, @intCast(y)) * stride;
+        var x: usize = 0;
+        while (x < stride) : (x += 4) {
+            if (row[x] | row[x + 1] | row[x + 2] == 0) continue;
+            first = @min(first, y);
+            last = y;
+            break;
+        }
+    }
+    const center = if (first <= last)
+        @as(f32, @floatFromInt(first + last + 1)) / (2 * s.scale)
+    else
+        fallback;
+    e.ink_center_y = center;
+    return center;
+}
+/// Returns the font's capital-letter center relative to this line's drawing origin.
+/// Descenders and accents do not move the center; fallback fonts may move the line's baseline.
+pub fn lineCapCenterY(s: *Text, text: []const u8, size: i32, width: f32) f32 {
+    const e = s.get(text, size, width, true, true) catch return 9;
+    const baseline: f32 = @floatCast(c.zc_text_baseline(e.layout));
+    const reference_width = @as(f32, @floatFromInt(size)) * 2;
+    const reference = s.get("H", size, reference_width, true, true) catch return baseline;
+    const reference_baseline: f32 = @floatCast(c.zc_text_baseline(reference.layout));
+    return baseline - reference_baseline + s.lineInkCenterY("H", size, reference_width);
+}
+pub fn inkCenterY(s: *Text, text: []const u8, size: i32, width: f32) f32 {
+    const e = s.get(text, size, width, false, true) catch return 9;
     return @floatCast(c.zc_text_ink_center_y(e.layout));
 }
 pub fn drawSelection(
@@ -259,7 +342,7 @@ fn drawEntry(
             e.background = background;
             e.start = start;
             e.end = end;
-            const pixels = c.zc_text_pixels_on(
+            const pixels = c.zc_text_pixels_with_selection(
                 e.layout,
                 rgba(color),
                 if (e.fallback) 0 else @intCast(start),
@@ -267,6 +350,7 @@ fn drawEntry(
                 top,
                 tile_height,
                 if (background) |bg| rgba(bg) else 0,
+                rgba(theme.colors.selection),
             );
             if (pixels == null) {
                 e.raster_failed = true;

@@ -76,6 +76,7 @@ pub fn open(path: [:0]const u8) ReadError!Store {
     errdefer db.close();
     try db.exec(
         \\PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+        \\CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1),relay_url TEXT NOT NULL,ca_file TEXT NOT NULL,client_cert_file TEXT NOT NULL,client_key_file TEXT NOT NULL,enter_to_send INTEGER NOT NULL CHECK(enter_to_send IN (0,1)));
         \\CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
         \\CREATE TABLE IF NOT EXISTS enrichment_cache(message_id TEXT PRIMARY KEY,revision INTEGER NOT NULL,record TEXT NOT NULL,serial INTEGER NOT NULL);
         \\CREATE TABLE IF NOT EXISTS enrichment_pages(message_id TEXT NOT NULL,section TEXT NOT NULL,revision TEXT NOT NULL,items TEXT NOT NULL,next TEXT,PRIMARY KEY(message_id,section));

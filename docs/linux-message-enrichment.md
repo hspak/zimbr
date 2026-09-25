@@ -53,8 +53,9 @@ evidence and remaining native reaction verification limits.
 - The viewer supports close/Escape, Left/Right, and retry. Captions, multiple
   images, still-preview labels, non-image rows, and full-text copy are retained.
   Cards show literal metadata and the chosen destination hostname. Activation
-  accepts only HTTP(S), uses the desktop URI API, and exposes the full URL for
-  inspection/copy. Plain URLs remain text links. No remote previews are generated.
+  accepts only HTTP(S) and opens the destination directly in the default browser
+  using the desktop URI API. Plain URLs remain text links. No remote previews are
+  generated.
 - Prepared keys cover parts, reactions, asset versions, sender identity revision,
   width, and scale. Immutable unaffected message records and text layouts are
   reused. Message/part anchors keep the reading position when geometry changes.

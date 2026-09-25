@@ -53,7 +53,7 @@ compromised relay. This follows the [OWASP input validation guidance](https://ch
 - Stored cards and client activation share the same HTTP(S) URL policy:
   bounded valid UTF-8, no credentials, no encoded hostnames, no raw controls or
   backslashes, and no Unicode directional controls that could obscure the
-  destination. URL confirmation still shows the destination before opening.
+  destination. Clicking a validated URL opens it directly in the default browser.
   These checks do not establish that a website is trustworthy.
 
 These boundaries cover Zimbr's processing after Messages receives content. They

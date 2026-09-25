@@ -95,6 +95,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='zimbr-tls-') as temp:
         root = Path(temp)
         os.environ['XDG_CONFIG_HOME'] = str(root/'config')
+        os.environ['XDG_STATE_HOME'] = str(root/'state')
         pki, other = PKI(root/'tls'), PKI(root/'other')
         counter = 0
         def start(srv, *, args=None, data=None):
@@ -326,16 +327,24 @@ def configuration(root, pki):
         assert b'ObsoleteTransportConfiguration' in result.stderr
     conf = root/'config/zimbr'
     conf.mkdir(parents=True, mode=0o700)
+    # Legacy import failures now allow interactive repair instead of preventing
+    # launch. Each fresh database attempts import once and reports the problem.
     for field in ('port', 'token_file', 'token_path'):
         private_write(conf/'config.json', json.dumps({field: None}).encode())
-        result = subprocess.run(args, capture_output=True, timeout=5)
+        fresh = list(args)
+        fresh[fresh.index('--data-dir')+1] = str(root/f'legacy-{field}')
+        fresh[fresh.index('--relay-url')+1] = 'http://invalid'
+        result = subprocess.run(fresh, capture_output=True, timeout=5)
         assert b'ObsoleteTransportConfiguration' in result.stderr
+        assert b'InvalidRelayOrigin' in result.stderr
     (conf/'config.json').chmod(0o644)
-    result = subprocess.run(args, capture_output=True, timeout=5)
+    fresh[fresh.index('--data-dir')+1] = str(root/'unsafe-legacy')
+    result = subprocess.run(fresh, capture_output=True, timeout=5)
     assert b'UnsafeConfiguration' in result.stderr
     (conf/'config.json').unlink()
-    # A real configuration owns its strings after the secure read buffer is
-    # cleared; CLI endpoint override retains credential/data/editor preferences.
+    # Import retains its own strings after clearing the secure read buffer.
+    # The directory is selected by XDG_STATE_HOME or the explicit flag; the
+    # obsolete JSON data_dir field no longer redirects the database.
     srv = server(pki)
     private_write(conf/'config.json', json.dumps(dict(
         relay_url='http://obsolete-value-overridden-by-cli',
@@ -345,7 +354,8 @@ def configuration(root, pki):
     probe = Probe([str(BIN), '--control', '--relay-url', f'https://localhost:{srv.server_port}'], None)
     try:
         probe.until(lambda v: v['online'])
-        assert (root/'configured-cache/client.db').exists()
+        assert (root/'state/zimbr/client.db').exists()
+        assert not (root/'configured-cache').exists()
     finally:
         probe.close(); srv.close(); (conf/'config.json').unlink()
     missing = list(args)

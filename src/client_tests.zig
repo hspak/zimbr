@@ -4,7 +4,9 @@ const Editor = @import("client.zig").Editor;
 const Sse = @import("client.zig").Sse;
 const u = @import("common.zig");
 test {
+    _ = @import("client.zig").LogBuffer;
     _ = @import("client.zig").Config;
+    _ = @import("client.zig").Settings;
     _ = @import("client.zig").content;
     _ = @import("client.zig").Media;
     _ = @import("client.zig").links;
@@ -1191,10 +1193,72 @@ test "RGB glyph edges use opaque backgrounds and transparent text stays grayscal
     if (chromatic == 0) return error.SkipZigTest;
 }
 
+test "Korean fallback keeps English aligned in labels and multiline text" {
+    const c = @import("client.zig").c.api;
+    for ([_]f64{
+        1,
+        1.25,
+        1.5,
+        2,
+    }) |scale| for ([_]bool{ false, true }) |single_line| {
+        const english = if (single_line) "Test Test" else "Test Test\nTest Test\nTest Test";
+        const korean = if (single_line) "Test 한글" else "Test 한글\nTest Test\nTest 한국어";
+        const reference = c.zc_text_new_with_options(
+            english.ptr,
+            @intCast(english.len),
+            16,
+            300,
+            scale,
+            @intFromBool(single_line),
+            0,
+        ) orelse return error.NoLayout;
+        defer c.zc_text_free(reference);
+        const mixed = c.zc_text_new_with_options(
+            korean.ptr,
+            @intCast(korean.len),
+            16,
+            300,
+            scale,
+            @intFromBool(single_line),
+            0,
+        ) orelse return error.NoLayout;
+        defer c.zc_text_free(mixed);
+        const height = c.zc_text_height(reference);
+        try std.testing.expectEqual(height, c.zc_text_height(mixed));
+        const before = c.zc_text_pixels(reference, 0xffffffff, 0, 0, 0, height);
+        const after = c.zc_text_pixels(mixed, 0xffffffff, 0, 0, 0, height);
+        try std.testing.expect(before != null and after != null);
+        var x: c_int = 0;
+        var y: c_int = 0;
+        var h: c_int = 0;
+        c.zc_text_caret(reference, "Test".len, &x, &y, &h);
+        const prefix_bytes: usize = @intFromFloat(@as(f64, @floatFromInt(x)) * scale * 4);
+        const reference_stride = @as(usize, @intCast(c.zc_text_width(reference))) * 4;
+        const mixed_stride = @as(usize, @intCast(c.zc_text_width(mixed))) * 4;
+        // The unchanged English prefix must occupy the same pixels on every line.
+        for (0..@intCast(height)) |row| try std.testing.expectEqualSlices(
+            u8,
+            before[row * reference_stride ..][0..prefix_bytes],
+            after[row * mixed_stride ..][0..prefix_bytes],
+        );
+        var index: usize = 0;
+        while (index <= korean.len) : (index += 1) {
+            if (index < korean.len and korean[index] & 0xc0 == 0x80) continue;
+            c.zc_text_caret(mixed, @intCast(index), &x, &y, &h);
+            try std.testing.expect(y >= 0 and h > 0);
+            try std.testing.expect(@as(f64, @floatFromInt(y + h)) * scale <= @as(f64, @floatFromInt(height)));
+            try std.testing.expectEqual(@as(c_int, @intCast(index)), c.zc_text_hit(mixed, x, y + @divTrunc(h, 2)));
+        }
+    };
+}
+
 test "fractional scale tiles match full text rendering including selection and bidi" {
     const c = @import("client.zig").c.api;
-    const text = "Café é 👩‍💻 שלום مرحبا\n" ** 12;
-    for ([_]f64{
+    const texts = [_][]const u8{
+        "Café é 👩‍💻 שלום مرحبا\n" ** 12,
+        "English 한글 👩‍💻\n한국어 Test\n" ** 12,
+    };
+    for (texts) |text| for ([_]f64{
         1,
         1.25,
         1.5,
@@ -1202,7 +1266,7 @@ test "fractional scale tiles match full text rendering including selection and b
     }) |scale| for ([_]bool{ false, true }) |subpixel| {
         const layout = c.zc_text_new_with_options(
             text.ptr,
-            text.len,
+            @intCast(text.len),
             16,
             300,
             scale,
@@ -1250,6 +1314,32 @@ test "fractional scale tiles match full text rendering including selection and b
             );
         }
     };
+}
+
+test "tall combining marks still expand the text line and caret" {
+    const c = @import("client.zig").c.api;
+    const plain = c.zc_text_new("A", 1, 16, 300, 1) orelse return error.NoLayout;
+    defer c.zc_text_free(plain);
+    const accented = "A م" ++ "\u{0651}\u{064f}" ** 4;
+    const tall = c.zc_text_new(accented.ptr, accented.len, 16, 300, 1) orelse return error.NoLayout;
+    defer c.zc_text_free(tall);
+    const height = c.zc_text_height(tall);
+    try std.testing.expect(height > c.zc_text_height(plain));
+    var x: c_int = 0;
+    var y: c_int = 0;
+    var h: c_int = 0;
+    c.zc_text_caret(tall, accented.len, &x, &y, &h);
+    try std.testing.expect(h > c.zc_text_height(plain));
+    try std.testing.expect(y >= 0 and y + h <= height);
+    const pixels = c.zc_text_pixels(tall, 0xffffffff, 0, 0, 0, height);
+    try std.testing.expect(pixels != null);
+    // The accents must actually rasterize above the space a normal line reserves.
+    const stride = @as(usize, @intCast(c.zc_text_width(tall))) * 4;
+    const extra = @as(usize, @intCast(height - c.zc_text_height(plain)));
+    var ink = false;
+    var i: usize = 3;
+    while (i < extra * stride) : (i += 4) ink = ink or pixels[i] != 0;
+    try std.testing.expect(ink);
 }
 
 test "identity events are negotiated, revision merged, atomic and cleared on reset" {

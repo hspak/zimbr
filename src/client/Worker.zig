@@ -166,6 +166,7 @@ pub const View = struct {
     generation: u64,
     ack: u64,
     loading_history: bool = false,
+    cache_unavailable: bool = false,
     redirect_from: []const u8 = "",
     diagnostics: Diagnostics = .{},
     shared: ?*SharedSnapshot = null,
@@ -272,6 +273,7 @@ fn run(s: *Worker) void {
                 .more = false,
             },
             .status = s.status,
+            .cache_unavailable = true,
             .online = false,
             .send_direct = false,
             .reply_existing = false,
@@ -655,6 +657,20 @@ fn complete(s: *Worker) !void {
     const raw = try ar.dupe(u8, if (ptr == null) "" else ptr[0..len]);
     c.zc_net_ack(n, 0);
     const job = s.job;
+    if (request_error.curl_code == 0) {
+        log.info("{s} response: HTTP {d}, {d} bytes", .{
+            @tagName(job),
+            http_status,
+            len,
+        });
+    } else {
+        log.info("{s} response: HTTP {d}, curl {d}, {d} bytes", .{
+            @tagName(job),
+            http_status,
+            request_error.curl_code,
+            len,
+        });
+    }
     s.job = .idle;
     if (job != .status) s.content_dirty = true;
     if (status < 200 or status >= 300) {

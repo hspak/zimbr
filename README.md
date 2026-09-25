@@ -28,7 +28,7 @@ and direct network access from Linux to the relay.
    [provision certificates](docs/macos-tls.md), install, and grant Full Disk Access
    and Messages Automation. Contacts access is optional.
 2. **Enroll Linux.** Follow [Linux mTLS setup](docs/linux-mtls.md) to create the
-   device key, have its certificate signed and enrolled, and write the client config.
+   device key, have its certificate signed and enrolled, and enter the paths in Settings.
 3. **Build and run.** Install the [Linux dependencies](docs/linux-client.md#build-and-install),
    then run from this checkout:
 

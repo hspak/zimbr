@@ -394,7 +394,7 @@ Render a constrained card with title, hostname, up to three summary lines, and
 optional cached image. Treat all strings as text, not HTML. Link activation is an
 explicit click/keyboard action using the desktop URL opener with an argument,
 never shell interpolation. Permit only well-formed HTTP(S) URLs for activation;
-show the actual destination hostname and expose the full URL for inspection/copy.
+show the actual destination hostname and open the URL directly on activation.
 Use the original shared URL when valid, otherwise the stored metadata URL, and
 derive the displayed hostname from the chosen target. Broken metadata must not
 hide the original message or its URL. Reconcile delayed payloads and image joins

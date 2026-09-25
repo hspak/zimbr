@@ -7,6 +7,7 @@ const c = @import("c.zig").api;
 const Config = @import("Config.zig");
 const Media = @This();
 const a = std.heap.c_allocator;
+const log = std.log.scoped(.client_media);
 pub const disk_budget = 512 * 1024 * 1024;
 pub const texture_budget = 64 * 1024 * 1024;
 
@@ -119,6 +120,13 @@ pub fn context(
     defer s.mutex.unlock(s.io);
     const changed = !u.eq(epoch, s.epoch) or !u.eq(chat, s.chat) or credentials != s.credential_generation or online != s.online or avatars != s.avatars;
     if (!changed) return false;
+    log.debug("Image context changed: epoch={}, conversation={}, credentials={}, online={}, avatars={}", .{
+        !u.eq(epoch, s.epoch),
+        !u.eq(chat, s.chat),
+        credentials != s.credential_generation,
+        online,
+        avatars,
+    });
     const next_epoch = try a.dupe(u8, epoch);
     errdefer a.free(next_epoch);
     const next_chat = try a.dupe(u8, chat);
@@ -232,6 +240,11 @@ pub fn release(s: *Media, result: *Result) void {
     s.wake();
 }
 fn deliver(s: *Media, request_value: *Request, result: *Result, lane: usize) void {
+    if (result.state != .ready) log.debug("Image {s}: {s} ({s})", .{
+        result.key,
+        @tagName(result.state),
+        std.mem.sliceTo(&result.reason, 0),
+    });
     s.mutex.lockUncancelable(s.io);
     defer s.mutex.unlock(s.io);
     s.active[lane] = null;
@@ -249,7 +262,7 @@ fn resultFor(r: *Request, message: []const u8) !*Result {
     return result;
 }
 fn run(s: *Media) void {
-    s.work() catch {};
+    s.work() catch |err| log.err("Image worker stopped: {s}", .{@errorName(err)});
 }
 fn work(s: *Media) !void {
     var net: ?*c.ZcNet = null;
@@ -271,6 +284,7 @@ fn work(s: *Media) !void {
             if (net) |n| c.zc_net_free(n);
             net = null;
             for (&s.active) |*active| if (active.*) |r| {
+                log.debug("Image {s}: transfer cancelled after context change", .{r.key});
                 r.destroy(s.dir);
                 active.* = null;
             };
@@ -278,6 +292,7 @@ fn work(s: *Media) !void {
         }
         for (&s.active, 0..) |*active, lane| if (active.*) |r| {
             if (u.now() - r.wanted_at > 2000) {
+                log.debug("Image {s}: transfer cancelled after leaving view", .{r.key});
                 if (net) |n| c.zc_net_ack(n, @intCast(lane + 2));
                 r.destroy(s.dir);
                 active.* = null;
@@ -299,6 +314,15 @@ fn work(s: *Media) !void {
                     var failure: c.ZcError = undefined;
                     c.zc_net_error(net.?, @intCast(lane + 2), &failure);
                     const status = c.zc_net_status(net.?, @intCast(lane + 2));
+                    if (failure.curl_code == 0) {
+                        log.debug("Image {s}: download response HTTP {d}", .{ r.key, status });
+                    } else {
+                        log.debug("Image {s}: download response HTTP {d}, curl {d}", .{
+                            r.key,
+                            status,
+                            failure.curl_code,
+                        });
+                    }
                     if (failure.curl_code == 0 and status == 200) {
                         if (c.zc_image_read(s.dir, &r.temporary, &result.pixels) == 1 and c.zc_cache_install(
                             s.dir,
@@ -307,6 +331,7 @@ fn work(s: *Media) !void {
                             r.fd,
                         ) == 1) {
                             result.state = .ready;
+                            log.debug("Image {s}: download saved to disk cache", .{r.key});
                             c.zc_cache_prune(s.dir, disk_budget - 16 * 1024 * 1024);
                         } else {
                             c.zc_pixels_free(&result.pixels);
@@ -377,11 +402,15 @@ fn work(s: *Media) !void {
                 }
                 const cached = c.zc_image_read(s.dir, &r.key, &result.pixels);
                 if (cached == 1) {
+                    log.debug("Image {s}: disk cache hit ({s})", .{ r.key, @tagName(r.asset.variant) });
                     result.state = .ready;
                     s.deliver(r, result, lane);
                     break;
                 }
-                if (cached < 0) c.zc_cache_remove(s.dir, &r.key);
+                if (cached < 0) {
+                    log.debug("Image {s}: disk cache file rejected; removing", .{r.key});
+                    c.zc_cache_remove(s.dir, &r.key);
+                } else log.debug("Image {s}: disk cache miss ({s})", .{ r.key, @tagName(r.asset.variant) });
                 if (!online) {
                     result.state = .offline;
                     setReason(result, "Photo not cached · reconnect to load");
@@ -419,6 +448,12 @@ fn work(s: *Media) !void {
                     s.deliver(r, result, lane);
                     break;
                 }
+                log.debug("Image {s}: downloading {s} version {s} ({s})", .{
+                    r.key,
+                    r.asset.id,
+                    r.asset.version,
+                    @tagName(r.asset.variant),
+                });
                 result.destroy();
             }
         }
