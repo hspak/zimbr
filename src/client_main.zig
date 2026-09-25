@@ -766,21 +766,40 @@ const App = struct {
                 if (row.y + row.height < clip.y or row.y > clip.y + clip.height) continue;
                 const selected = u.eq(s.key, chat.value.id) and !s.new_mode and !s.show_details;
                 const hot = hover(row) and hover(clip);
-                const bg = if (selected) theme.colors.selected else if (hot) theme.colors.avatar else theme.colors.sidebar;
+                const read_only = !chat.value.sendable and Store.selfRecipient(chat.value) == null;
+                const emphasized = selected or chat.unread > 0;
+                const foreground = if (read_only)
+                    (if (emphasized) theme.colors.muted else theme.colors.disabled)
+                else if (emphasized) theme.colors.ink else theme.colors.muted;
+                const bg = if (selected)
+                    (if (read_only) theme.colors.line else theme.colors.selected)
+                else if (hot)
+                    (if (read_only) theme.colors.incoming else theme.colors.avatar)
+                else
+                    theme.colors.sidebar;
                 if (selected or hot) rl.drawRectangleRounded(row, 0.2, 8, bg);
                 const name = display.label(ar, v.snapshot.directory.conversation(ar, chat.value));
+                const avatar = rl.Rectangle{ .x = row.x + sidebar_icon_inset, .y = row.y + 6, .width = sidebar_icon_size, .height = sidebar_icon_size };
                 if (!chat.value.is_self and chat.value.participants.len > 1) {
-                    s.text.drawLine("#", row.x + 11, row.y + 5, 20, 20, if (selected) theme.colors.ink else theme.colors.muted, bg);
+                    if (read_only) {
+                        rl.drawCircleV(.{ .x = avatar.x + avatar.width / 2, .y = avatar.y + avatar.height / 2 }, sidebar_icon_size / 2, theme.read_only_avatar.bubble);
+                        s.text.drawLineCentered("#", avatar, 16, theme.read_only_avatar.label, null);
+                    } else {
+                        s.text.drawLine("#", row.x + 11, row.y + 5, 20, 20, if (selected) theme.colors.ink else theme.colors.muted, bg);
+                    }
+                } else if (read_only) {
+                    s.drawAvatar(avatar, name, theme.read_only_avatar, 12);
                 } else {
-                    s.drawPeerAvatar(.{ .x = row.x + sidebar_icon_inset, .y = row.y + 6, .width = sidebar_icon_size, .height = sidebar_icon_size }, name, theme.participant(chat.value.id, &.{}), 12, chat.value.service, if (chat.value.participants.len == 1) chat.value.participants[0] else "");
+                    s.drawPeerAvatar(avatar, name, theme.participant(chat.value.id, &.{}), 12, chat.value.service, if (chat.value.participants.len == 1) chat.value.participants[0] else "");
                 }
-                s.text.drawLine(name, row.x + sidebar_text_inset, row.y + 8, 14, row.width - (if (chat.unread > 0) @as(f32, 76) else 46), if (selected or chat.unread > 0) theme.colors.ink else theme.colors.muted, bg);
+                s.text.drawLine(name, row.x + sidebar_text_inset, row.y + 8, 14, row.width - (if (chat.unread > 0) @as(f32, 76) else 46), foreground, bg);
                 if (chat.unread > 0) {
                     const badge = rl.Rectangle{ .x = row.x + row.width - 30, .y = row.y + 8, .width = 24, .height = 19 };
-                    rl.drawRectangleRounded(badge, 0.5, 8, theme.colors.ink);
+                    const badge_color = if (read_only) theme.colors.muted else theme.colors.ink;
+                    rl.drawRectangleRounded(badge, 0.5, 8, badge_color);
                     const label = if (chat.unread > 99) "99+" else std.fmt.allocPrint(ar, "{d}", .{chat.unread}) catch "";
                     const size = s.text.lineSize(label, 10, 24);
-                    s.text.drawLine(label, badge.x + (24 - size.x) / 2, badge.y + 2, 10, 24, theme.colors.sidebar, theme.colors.ink);
+                    s.text.drawLine(label, badge.x + (24 - size.x) / 2, badge.y + 2, 10, 24, theme.colors.sidebar, badge_color);
                 }
                 if (hot) rl.setMouseCursor(.pointing_hand);
                 if (hot and rl.isMouseButtonPressed(.left)) s.select(chat.value.id) catch s.info("Could not open conversation.");

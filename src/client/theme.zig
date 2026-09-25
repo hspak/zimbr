@@ -42,6 +42,11 @@ pub const colors = Palette{
 };
 
 pub const Participant = struct { bubble: rl.Color, label: rl.Color };
+// Reserved for read-only conversation avatars; never part of the participant palette.
+pub const read_only_avatar = Participant{
+    .bubble = color(0x38383cff),
+    .label = color(0x96969cff),
+};
 const participant_colors = [_]Participant{
     .{ .bubble = color(0x253346ff), .label = color(0x9dbbe0ff) },
     .{ .bubble = color(0x352c43ff), .label = color(0xc2a8deff) },
