@@ -1,1 +1,68 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128"><rect width="128" height="128" rx="30" fill="#167b69"/><path d="M30 34h68v48H64L43 98V82H30z" fill="#fff"/><path d="M46 49h36L46 68h36" fill="none" stroke="#167b69" stroke-width="7" stroke-linejoin="round"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 512 512">
+  <title>Zimbr</title>
+  <desc>A raised pale lavender bridge seen at an angle, with shaded side walls and a soft shadow on a violet tile with gentle surface lighting and a fine rim.</desc>
+  <defs>
+    <linearGradient id="tile" gradientUnits="userSpaceOnUse" x1="256" y1="32" x2="256" y2="480">
+      <stop stop-color="#9A6CBE"/>
+      <stop offset="0.55" stop-color="#875CAB"/>
+      <stop offset="1" stop-color="#714F90"/>
+    </linearGradient>
+    <path id="tile-shape" d="M176 32H336C431 32 480 81 480 176V336C480 431 431 480 336 480H176C81 480 32 431 32 336V176C32 81 81 32 176 32Z"/>
+    <clipPath id="tile-clip"><use href="#tile-shape"/></clipPath>
+    <radialGradient id="tile-light" gradientUnits="userSpaceOnUse" cx="148" cy="84" r="420">
+      <stop stop-color="#B39ACB" stop-opacity="0.48"/>
+      <stop offset="0.65" stop-color="#B39ACB" stop-opacity="0.1"/>
+      <stop offset="1" stop-color="#B39ACB" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="tile-rim" gradientUnits="userSpaceOnUse" x1="164" y1="32" x2="340" y2="480">
+      <stop stop-color="#EDE9F0" stop-opacity="0.6"/>
+      <stop offset="0.35" stop-color="#EDE9F0" stop-opacity="0.1"/>
+      <stop offset="0.65" stop-color="#49365F" stop-opacity="0.06"/>
+      <stop offset="1" stop-color="#49365F" stop-opacity="0.42"/>
+    </linearGradient>
+    <path id="bridge" transform="translate(256 256) scale(0.92) matrix(0.55 -0.8 1 0.22 0 0) translate(-256 -256)" d="M156 154C141 154 128 167 128 182V358L184 326V266C228 302 284 302 328 266V326L384 358V182C384 167 371 154 356 154C341 154 328 167 328 182V202C289 248 223 248 184 202V182C184 167 171 154 156 154Z"/>
+    <linearGradient id="bridge-face" gradientUnits="userSpaceOnUse" x1="200" y1="130" x2="280" y2="390">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="0.62" stop-color="#EDE9F0"/>
+      <stop offset="1" stop-color="#D5C7E1"/>
+    </linearGradient>
+    <linearGradient id="bridge-side" gradientUnits="userSpaceOnUse" x1="180" y1="150" x2="300" y2="400">
+      <stop stop-color="#B39ACB"/>
+      <stop offset="1" stop-color="#875CAB"/>
+    </linearGradient>
+    <linearGradient id="bridge-rim" gradientUnits="userSpaceOnUse" x1="190" y1="130" x2="300" y2="390">
+      <stop stop-color="#FFFFFF" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#EDE9F0" stop-opacity="0.1"/>
+    </linearGradient>
+    <filter id="bridge-shadow" x="-25%" y="-25%" width="150%" height="165%" color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="7" result="blur"/>
+      <feOffset in="blur" dx="2" dy="20" result="offset"/>
+      <feFlood flood-color="#21182B" flood-opacity="0.34"/>
+      <feComposite in2="offset" operator="in"/>
+    </filter>
+  </defs>
+  <use href="#tile-shape" fill="url(#tile)"/>
+  <use href="#tile-shape" fill="url(#tile-light)"/>
+  <use href="#tile-shape" fill="none" stroke="url(#tile-rim)" stroke-width="4" clip-path="url(#tile-clip)"/>
+  <g transform="translate(0 -5)">
+    <use href="#bridge" filter="url(#bridge-shadow)"/>
+    <!-- Reuse the silhouette to form a continuous shallow side wall. -->
+    <g fill="url(#bridge-side)">
+      <use href="#bridge" y="14"/>
+      <use href="#bridge" y="13"/>
+      <use href="#bridge" y="12"/>
+      <use href="#bridge" y="11"/>
+      <use href="#bridge" y="10"/>
+      <use href="#bridge" y="9"/>
+      <use href="#bridge" y="8"/>
+      <use href="#bridge" y="7"/>
+      <use href="#bridge" y="6"/>
+      <use href="#bridge" y="5"/>
+      <use href="#bridge" y="4"/>
+      <use href="#bridge" y="3"/>
+      <use href="#bridge" y="2"/>
+      <use href="#bridge" y="1"/>
+    </g>
+    <use href="#bridge" fill="url(#bridge-face)" stroke="url(#bridge-rim)" stroke-width="1.4" stroke-linejoin="round"/>
+  </g>
+</svg>

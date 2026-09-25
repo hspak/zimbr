@@ -17,10 +17,9 @@ Run the commands below from the repository root.
 
 Use Zig **0.16.0**, `pkg-config`, and development headers/libraries for SQLite,
 libcurl (7.88+ with the OpenSSL 3 backend), OpenSSL 3, Pango/Cairo, GLib/GIO,
-libpng, libjpeg, OpenGL, Wayland, and xkbcommon, plus `wayland-scanner`.
-Clay and raylib are pinned in [`build.zig.zon`](../build.zig.zon); Flamez is not a
-build or runtime dependency. Install a system sans-serif font and an emoji font
-for the scripts you use.
+libpng, libjpeg, OpenGL, Wayland, and xkbcommon, plus `wayland-scanner`. Clay
+and raylib are pinned in [`build.zig.zon`](../build.zig.zon); Install a system
+sans-serif font and an emoji font for the scripts you use.
 
 ```sh
 zig build client -Doptimize=ReleaseFast
@@ -29,6 +28,8 @@ zig build run -Doptimize=ReleaseFast
 # Optional user-local executable, icon, and application launcher:
 packaging/linux/install.sh
 ```
+
+For Arch packages and maintainer releases, see [Linux packaging](linux-packaging.md).
 
 ## Provisioning and configuration
 

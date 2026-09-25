@@ -112,9 +112,11 @@ def main():
     shutil.copy2(args.binary, macos/'relay'); (macos/'relay').chmod(0o755)
     shutil.copy2(args.image_helper, macos/'image-helper'); (macos/'image-helper').chmod(0o755)
     resources = contents/'Resources'; resources.mkdir()
+    shutil.copy2(ROOT/'packaging/macos/zimbr.icns', resources/'zimbr.icns')
     shutil.copy2(args.openssl_license, resources/'OpenSSL-LICENSE.txt')
     shutil.copy2(args.phone_license, resources/'libPhoneNumber-LICENSE.txt')
     info = {'CFBundleIdentifier': LABEL, 'CFBundleName': 'Zimbr Relay', 'CFBundleDisplayName': 'Zimbr Relay', 'CFBundleExecutable': 'relay', 'CFBundlePackageType': 'APPL', 'CFBundleVersion': '2', 'CFBundleShortVersionString': '0.2.0', 'LSUIElement': True, 'LSMinimumSystemVersion': '27.0', 'NSAppleEventsUsageDescription': 'Zimbr sends text through your Messages account when you submit a message to your authenticated relay.', 'NSContactsUsageDescription': 'Zimbr uses contact names and photos to identify conversations on your enrolled clients.'}
+    info['CFBundleIconFile'] = 'zimbr.icns'
     with (contents/'Info.plist').open('wb') as f: plistlib.dump(info, f)
     entitlements = staging/'entitlements.plist'
     with entitlements.open('wb') as f: plistlib.dump({'com.apple.security.automation.apple-events': True}, f)
