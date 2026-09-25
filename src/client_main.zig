@@ -376,10 +376,6 @@ const App = struct {
     }
     fn update(s: *App) !void {
         if (s.worker.take()) |v| {
-            const refresh = v.diagnostics.contacts_refresh;
-            const refresh_changed = if (s.view) |old| refresh != old.diagnostics.contacts_refresh or
-                v.diagnostics.contacts_refresh_attempt != old.diagnostics.contacts_refresh_attempt else true;
-            if (refresh != .idle and refresh_changed) s.info(refresh.message());
             // Metadata-only views retain the same immutable records, so their
             // history previews and measurements remain valid across updates.
             const same_history = if (s.view) |old| old.shared != null and v.shared != null and old.shared.?.history == v.shared.?.history and old.snapshot.pending.len == 0 and v.snapshot.pending.len == 0 and old.snapshot.directory.fingerprint() == v.snapshot.directory.fingerprint() else false;
@@ -1177,50 +1173,6 @@ const App = struct {
         );
         y.* += height + 10;
     }
-    fn drawContactFreshness(
-        s: *App,
-        clip: rl.Rectangle,
-        right: f32,
-        y: *f32,
-        freshness: []const u8,
-        refresh: Worker.ContactRefresh,
-    ) void {
-        const label = switch (refresh) {
-            .idle, .unsupported, .offline => "Refresh contacts",
-            .queued, .waiting, .downloading => "Refreshing…",
-            .complete => "Refresh again",
-            .failed => "Retry refresh",
-        };
-        const size = s.buttonSize(label);
-        const refresh_button = rl.Rectangle{
-            .x = right - size.x,
-            .y = y.*,
-            .width = size.x,
-            .height = 30,
-        };
-        var freshness_bounds = clip;
-        freshness_bounds.width = refresh_button.x - 12 - clip.x;
-        y.* += 5;
-        s.detailRow("Contacts freshness", freshness, freshness_bounds, y);
-        if (s.button(refresh_button, label, refresh.active()) and hover(clip) and !refresh.active()) {
-            if (s.worker.push(.{ .kind = .refresh_contacts })) |_| {
-                s.info("Contact refresh requested…");
-            } else |_| {
-                s.info("Could not request a contact refresh. Try again.");
-            }
-        }
-        y.* = @max(y.*, refresh_button.y + refresh_button.height + 10);
-        const status_x = clip.x + 122;
-        const status_width = @max(1, clip.x + clip.width - status_x);
-        const color = switch (refresh) {
-            .idle => theme.colors.muted,
-            .queued, .waiting, .downloading => theme.colors.focus,
-            .complete => theme.colors.success,
-            .failed, .unsupported, .offline => theme.colors.danger,
-        };
-        s.text.draw(refresh.message(), status_x, y.*, 13, status_width, color, theme.colors.paper);
-        y.* += @max(20, s.text.height(refresh.message(), 13, status_width)) + 10;
-    }
     fn drawDetails(s: *App, r: rl.Rectangle, ar: u.Allocator) void {
         const back_size = s.buttonSize("Back");
         const reconnect_size = s.buttonSize("Reconnect");
@@ -1390,12 +1342,11 @@ const App = struct {
                     clip,
                     &y,
                 );
-                s.drawContactFreshness(
-                    clip,
-                    reconnect.x + reconnect.width,
-                    &y,
+                s.detailRow(
+                    "Contacts freshness",
                     if (contacts.stale) "Cached matches are stale" else if (contacts.last_refresh_ms) |ms| elapsed(ar, ms) else "Not reported",
-                    d.contacts_refresh,
+                    clip,
+                    &y,
                 );
             }
             s.detailSection("Participants", clip, &y);
@@ -3875,135 +3826,6 @@ fn expectScrollbarPixel(shot: rl.Image, viewport: rl.Rectangle, content: f64, of
         pixel,
         theme.colors.accent,
     ));
-}
-
-test "contact refresh acknowledges clicks and announces progress and results" {
-    rl.setTraceLogLevel(.none);
-    rl.setConfigFlags(.{ .window_highdpi = true });
-    rl.initWindow(780, 560, "Zimbr contact refresh checks");
-    defer rl.closeWindow();
-    rl.pollInputEvents();
-    for (0..4) |_| {
-        rl.beginDrawing();
-        rl.clearBackground(theme.colors.paper);
-        rl.endDrawing();
-    }
-    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
-    defer worker.shutdown();
-    var app = App{ .worker = &worker, .show_details = true, .focus = .none };
-    defer app.deinit();
-    const clip = rl.Rectangle{
-        .x = 24,
-        .y = 78,
-        .width = 448,
-        .height = 300,
-    };
-    const right: f32 = 408;
-    const scale = WindowMetrics.current().scale;
-    for ([_]Worker.ContactRefresh{ .idle, .waiting }) |refresh| {
-        rl.playAutomationEvent(.{
-            .frame = 0,
-            .type = 7,
-            .params = .{
-                @intFromFloat(right - 10),
-                115,
-                0,
-                0,
-            },
-        });
-        rl.playAutomationEvent(.{
-            .frame = 0,
-            .type = 6,
-            .params = .{
-                0,
-                0,
-                0,
-                0,
-            },
-        });
-        app.text.nextFrame(scale);
-        rl.beginDrawing();
-        rl.clearBackground(theme.colors.paper);
-        const reconnect_size = app.buttonSize("Reconnect");
-        _ = app.button(.{
-            .x = right - reconnect_size.x,
-            .y = 20,
-            .width = reconnect_size.x,
-            .height = 30,
-        }, "Reconnect", false);
-        var y: f32 = 100;
-        beginClip(clip);
-        app.drawContactFreshness(clip, right, &y, "Just now", refresh);
-        endClip();
-        rl.gl.rlDrawRenderBatchActive();
-        const shot = try rl.loadImageFromScreen();
-        defer rl.unloadImage(shot);
-        rl.endDrawing();
-        for ([_]f32{ 35, 115 }) |center_y| {
-            try std.testing.expect(!std.meta.eql(theme.colors.paper, rl.getImageColor(
-                shot,
-                @intFromFloat((right - 3) * scale),
-                @intFromFloat(center_y * scale),
-            )));
-            try std.testing.expectEqual(theme.colors.paper, rl.getImageColor(
-                shot,
-                @intFromFloat((right + 1) * scale),
-                @intFromFloat(center_y * scale),
-            ));
-        }
-        try std.testing.expectEqual(@as(usize, 1), worker.commands.items.len);
-        try std.testing.expectEqual(.refresh_contacts, worker.commands.items[0].kind);
-        try std.testing.expectEqualStrings("Contact refresh requested…", app.notice);
-        try std.testing.expect(app.notice_until > u.now());
-        rl.playAutomationEvent(.{
-            .frame = 0,
-            .type = 5,
-            .params = .{
-                0,
-                0,
-                0,
-                0,
-            },
-        });
-        rl.beginDrawing();
-        rl.endDrawing();
-    }
-    for ([_]Worker.ContactRefresh{
-        .queued,
-        .waiting,
-        .downloading,
-        .complete,
-        .complete,
-        .failed,
-        .unsupported,
-        .offline,
-    }, 1..) |refresh, id| {
-        app.notice = "";
-        const view = try a.create(Worker.View);
-        view.* = .{
-            .arena = .init(a),
-            .snapshot = .{
-                .chats = &.{},
-                .messages = &.{},
-                .pending = &.{},
-                .selected = "",
-                .draft = "",
-                .epoch = "",
-                .more = false,
-            },
-            .status = "Connected",
-            .online = true,
-            .send_direct = false,
-            .reply_existing = false,
-            .generation = id,
-            .ack = 0,
-            .diagnostics = .{ .contacts_refresh = refresh, .contacts_refresh_attempt = id },
-        };
-        worker.view = view;
-        try app.update();
-        try std.testing.expectEqualStrings(refresh.message(), app.notice);
-        try std.testing.expect(app.notice_until > u.now());
-    }
 }
 
 test "shared message presentations survive replaced views and refresh edited text" {

@@ -6,8 +6,6 @@ const IdentityDirectory = @This();
 entries: std.HashMapUnmanaged(Key, t.Identity, Context, 80) = .empty,
 available: bool = true,
 revision_key: u64 = 0,
-// Manual refresh invalidates presentation even when source revisions agree.
-cache_generation: u64 = 0,
 
 const Key = struct { service: []const u8, address: []const u8 };
 const Context = struct {
@@ -36,10 +34,10 @@ fn identityKey(identity: t.Identity) u64 {
 }
 pub fn presentationKey(s: IdentityDirectory, service: []const u8, address: []const u8) u64 {
     const identity = s.get(service, address) orelse return 0;
-    return identityKey(identity) ^ s.cache_generation;
+    return identityKey(identity);
 }
 pub fn fingerprint(s: IdentityDirectory) u64 {
-    return if (s.available) s.revision_key ^ s.cache_generation else 0;
+    return if (s.available) s.revision_key else 0;
 }
 pub fn name(s: IdentityDirectory, service: []const u8, address: []const u8) []const u8 {
     if (s.get(service, address)) |identity| if (identity.match_state == .matched) {

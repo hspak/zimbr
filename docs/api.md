@@ -18,7 +18,6 @@ for enrollment and an authenticated status example.
 | GET | `/v1/assets/:id/:version/:variant` | Approved immutable JPEG/PNG bytes or availability/retry response |
 | GET | `/v1/messages/:id/enrichment?section=...&revision=...&after=...` | Bounded overflow metadata and revision-bound `next` |
 | POST | `/v1/messages` | Durable send request; 202 new, 200 retry |
-| POST | `/v1/contacts/refresh` | Force a Contacts scan; empty body, 202 with `refresh_id` |
 | GET | `/v1/send-requests/:id` | Current send request |
 | GET | `/v1/events?after=...` | SSE replay followed by live events |
 
@@ -69,18 +68,10 @@ types and skip identity sequences. Bootstrap identities after capturing a sync
 cursor, then replay and merge by revision. Capability support and readiness are
 separate, so permission loss can still synchronize clearing records.
 
-Relays advertising `refresh_contacts_v1` accept an authenticated, empty-body
-`POST /v1/contacts/refresh`. It schedules a fresh Contacts snapshot and rematches
-all observed identities, bypassing the periodic scan and cached index. Contact
-photos receive fresh asset versions. The response is `202 {"refresh_id": N}`.
-Poll `enrichment_readiness.identity_directory_v1` in `/v1/status`: its
-`refresh_requested` and `refresh_completed` identify the latest requested scan
-and the last scan whose identity work has finished. Completion is successful
-only when `ready` is true and `stale` is false; permission and persistence failures
-remain visible in `reason`. Refresh IDs are process-local; if a restarted relay
-reports `refresh_requested` below the accepted ID, request another refresh.
-After success, clients can replace their identity cache from `/v1/identities`,
-merging live identity events by revision while preserving their saved event cursor.
+The relay updates observed identities automatically when Contacts changes on the
+Mac and through periodic scans. Clients receive those updates through negotiated
+identity events. `enrichment_readiness.identity_directory_v1` in `/v1/status`
+reports `ready`, `stale`, `permission`, `reason`, and `last_refresh_ms`.
 
 ## Events
 

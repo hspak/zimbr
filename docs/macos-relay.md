@@ -11,6 +11,50 @@ signing identity](macos-tls.md), then [install and grant permissions](#install-a
 For an existing installation, see [Update the running relay](#update-the-running-relay).
 Run the commands below from the repository root unless noted otherwise.
 
+## Homebrew
+
+After the first combined release is published, install the Apple Silicon relay
+on macOS 27 or newer with:
+
+```sh
+brew install --cask hspak/tap/zimbr-relay
+```
+
+The cask installs `~/Applications/Zimbr Relay.app` and exposes `zimbr-relay` and
+`zimbr-relay-service`. It preserves the existing application identifier and
+keeps credentials and history in `~/Library/Application Support/Zimbr`.
+An existing manually installed app must be moved aside after stopping its
+LaunchAgent before the first Homebrew install; retain its Application Support
+directory and keep the old app available until the new installation is verified.
+
+For first-time setup, use the provisioning tools from the matching source tag
+and follow [macOS TLS setup](macos-tls.md#provisioning). Keep the configuration at
+`~/Library/Application Support/Zimbr/relay.json`, mode 0600 in an owner-only
+directory, referencing persistent credential paths. Grant Full Disk Access and
+Messages Automation as described [below](#install-and-permissions), then run:
+
+```sh
+zimbr-relay check-config
+zimbr-relay doctor --check-automation
+zimbr-relay-service start
+zimbr-relay-service status
+```
+
+The service helper validates the existing TLS configuration and installs the
+per-user LaunchAgent with login startup and restart-on-exit behavior. It does
+not provision credentials or grant macOS permissions. Use
+`zimbr-relay-service stop` to stop it.
+
+Homebrew upgrades stop the old service. Run `zimbr-relay-service start` after
+`brew upgrade --cask hspak/tap/zimbr-relay`, then check `zimbr-relay doctor` and
+the relay log. Uninstalling stops the service and preserves configuration,
+credentials, and history. Homebrew installs the publisher's signed app; moving
+from a locally signed build may require granting macOS permissions again.
+The current packaging flow does not notarize the app, so Gatekeeper approval
+may also be needed. It does not disable quarantine or Gatekeeper checks.
+
+For maintainers, see [combined releases](linux-packaging.md).
+
 ## Build and test
 
 Install Zig **0.16.0**, Apple's Command Line Tools, and a target build of

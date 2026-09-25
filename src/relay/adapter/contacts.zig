@@ -49,8 +49,6 @@ pub const Status = struct {
     reason: []const u8 = "starting",
     last_refresh_ms: ?i64 = null,
     stale: bool = false,
-    refresh_requested: u64 = 0,
-    refresh_completed: u64 = 0,
 };
 pub const Contact = struct {
     id: []const u8,
@@ -353,17 +351,13 @@ pub fn loop(core: *Core) void {
     var generation: ?u64 = null;
     var old_permission: ?Permission = null;
     var next_refresh: i64 = 0;
-    var refreshed: u64 = 0;
     var query_failed = false;
     var source_version: []const u8 = "";
     while (!core.stop.load(.acquire)) {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        core.lock();
-        const requested = core.contacts_status.refresh_requested;
-        core.unlock();
-        const refresh = requested != refreshed or u.now() >= next_refresh;
+        const refresh = u.now() >= next_refresh;
         const observed = snapshot(a, core, generation, old_permission, refresh) catch Snapshot{
             .permission = old_permission orelse .unavailable,
             .generation = generation orelse 0,
@@ -428,7 +422,6 @@ pub fn loop(core: *Core) void {
             core.sleep(1000);
             continue;
         }
-        refreshed = requested;
         if (jobs != null and epoch != null) {
             for (jobs.?) |job| {
                 var value = job.value;
@@ -479,9 +472,7 @@ pub fn loop(core: *Core) void {
         if (needs_refresh) next_refresh = u.now() + if (failed) @as(i64, 30000) else 15 * 60 * 1000;
         core.lock();
         const remaining = j.db.scalar("SELECT count(*) FROM identity_work") catch 1;
-        if (remaining == 0) core.contacts_status.refresh_completed = refreshed;
-        core.contacts_status.ready = !failed and observed.permission == .authorized and remaining == 0 and
-            refreshed == core.contacts_status.refresh_requested;
+        core.contacts_status.ready = !failed and observed.permission == .authorized and remaining == 0;
         if (core.contacts_status.ready) core.contacts_status.reason = "";
         core.unlock();
         if (!failed and observed.permission == .authorized) Assets.contactWork(a, core) catch {};

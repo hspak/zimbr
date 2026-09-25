@@ -136,8 +136,6 @@ fn handle(
         try self.events(req, cursor, peer, identities);
         return;
     }
-    const refresh_contacts = req.head.method == .POST and u.eq(path, "/v1/contacts/refresh");
-    if (refresh_contacts and ((req.head.content_length orelse 0) != 0 or req.head.transfer_encoding == .chunked)) return error.InvalidRequest;
     var input: ?t.SendInput = null;
     if (req.head.method == .POST and u.eq(path, "/v1/messages")) {
         const content_type = req.head.content_type orelse return error.InvalidRequest;
@@ -159,7 +157,7 @@ fn handle(
             if (err == error.OutOfMemory) return error.OutOfMemory;
             return error.InvalidRequest;
         }).value;
-    } else if (req.head.method != .GET and !refresh_contacts) return error.NotFound;
+    } else if (req.head.method != .GET) return error.NotFound;
     if (Tls.c.zr_tls_valid(peer) == 0) return error.CertificateExpired;
     var response: []const u8 = undefined;
     var status: std.http.Status = .ok;
@@ -167,14 +165,7 @@ fn handle(
         self.core.lock();
         defer self.core.unlock();
         const j = self.core.journal;
-        if (refresh_contacts) {
-            const refresh_id = @max(self.core.contacts_status.refresh_requested + 1, @as(u64, @intCast(u.now())));
-            response = try u.json(a, .{ .refresh_id = refresh_id });
-            self.core.contacts_status.refresh_requested = refresh_id;
-            self.core.contacts_status.ready = false;
-            self.core.contacts_status.reason = "refresh_requested";
-            status = .accepted;
-        } else if (input) |v| {
+        if (input) |v| {
             const accepted = try j.accept(
                 a,
                 v,
@@ -199,7 +190,6 @@ fn handle(
                     .attachments = true,
                     .group_creation = false,
                     .identity_directory_v1 = true,
-                    .refresh_contacts_v1 = true,
                     .image_assets_v1 = true,
                     .image_attachments_v1 = true,
                     .stored_link_previews_v1 = true,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Force a missed Contacts change and repair the production client's directory cache."""
+"""Synchronize automatic Contacts changes through the production relay and client."""
 import json
 import os
 from pathlib import Path
@@ -25,19 +25,21 @@ def main():
         source, relay, client = root / 'source.db', root / 'relay', root / 'client'
         create(source, count=5)
         # Cross both the relay's 100-identity work batches and the client's
-        # 200-identity pages before reporting refresh completion.
+        # 200-identity pages while synchronizing automatic updates.
         aliases = [f'alias-{i}@example.invalid' for i in range(205)]
         with sqlite3.connect(source) as db:
             for handle_id, address in enumerate(aliases, 10):
                 db.execute('INSERT INTO handle VALUES(?,?,?)', (handle_id, address, 'iMessage'))
                 add_message(db, 'Observed alias', chat=2, handle_id=handle_id)
         contacts_path = root / 'source.db.contacts.json'
+        generation = 0
 
         def contacts(name, permission='authorized', failed=False):
-            # Simulate a missed native change notification: generation never advances.
+            nonlocal generation
+            generation += 1
             temporary = contacts_path.with_suffix('.tmp')
             temporary.write_text(json.dumps(dict(
-                permission=permission, generation=1, failed=failed,
+                permission=permission, generation=generation, failed=failed,
                 contacts=[dict(id='private-alice', name=name, emails=['alice@example.invalid', *aliases])],
             )))
             temporary.replace(contacts_path)
@@ -100,26 +102,18 @@ def main():
                 proc.stdin.write(json.dumps(value) + '\n')
                 proc.stdin.flush()
 
-            def refresh():
-                pump()
-                latest.clear()
-                command(kind='refresh_contacts')
-                return wait(lambda: pump().get('diagnostics', {}).get('contacts_refresh') in ('complete', 'failed'))
-
             try:
                 wait(ready)
-                contacts('Renamed without notification')
                 before = relay_directory()
                 assert len(before) > 200
                 assert any(value.get('display_name') == 'Original name' for value in before)
-                status, accepted = request('/v1/contacts/refresh', 'POST', '')
-                assert status == 202, (status, accepted)
-                refresh_id = accepted['refresh_id']
-                wait(lambda: request('/v1/status')[1]['enrichment_readiness']['identity_directory_v1']['refresh_completed'] >= refresh_id)
-                assert all(value.get('display_name') == 'Renamed without notification'
-                           for value in relay_directory() if value['address'] in aliases)
+                contacts('Renamed automatically')
+                wait(lambda: all(value.get('display_name') == 'Renamed automatically'
+                                 for value in relay_directory() if value['address'] in aliases))
+                assert 'refresh_contacts_v1' not in request('/v1/status')[1]['capabilities']
                 assert request('/v1/contacts/refresh', 'GET')[0] == 404
-                assert request('/v1/contacts/refresh', 'POST', '{}')[0] == 400
+                assert request('/v1/contacts/refresh', 'POST', '')[0] == 404
+                assert request('/v1/contacts/refresh', 'POST', '{}')[0] == 404
 
                 proc = subprocess.Popen(
                     [str(BIN / 'client-probe'), '--control', '--data-dir', str(client), *tls.client_args()],
@@ -127,7 +121,7 @@ def main():
                 )
                 threading.Thread(target=read, daemon=True).start()
                 wait(lambda: pump().get('online'))
-                wait(lambda: directory().get('display_name') == 'Renamed without notification')
+                wait(lambda: directory().get('display_name') == 'Renamed automatically')
                 cid = rows("SELECT id FROM records WHERE kind='conversation' AND json_extract(record,'$.participants[0]')='alice@example.invalid' AND json_array_length(json_extract(record,'$.participants'))=1")[0][0]
                 command(kind='select', key=cid, text='no')
                 wait(lambda: pump().get('messages', 0) > 0)
@@ -138,33 +132,13 @@ def main():
                 messages = rows("SELECT id,record FROM records WHERE kind='message' ORDER BY id")
                 epoch = rows("SELECT value FROM meta WHERE key='epoch'")
 
-                contacts('Manually refreshed 👋')
-                refresh()
-                assert latest['diagnostics']['contacts_refresh'] == 'complete', latest
-                assert directory()['display_name'] == 'Manually refreshed 👋'
-                assert latest['selected_title'] == 'Manually refreshed 👋', latest
-
-                # No relay revision changes on this second refresh. A bogus local
-                # revision must not prevent the authoritative directory replacing it.
-                relay_revision = directory()['revision']
-                with sqlite3.connect(client / 'client.db') as db:
-                    db.execute("UPDATE identities SET revision=999999999,record=json_set(record,'$.revision','999999999','$.display_name','Stale cached name') WHERE address='alice@example.invalid'")
-                command(kind='select', key=cid, text='no')
-                wait(lambda: pump().get('selected_title') == 'Stale cached name')
-                refresh()
-                assert latest['diagnostics']['contacts_refresh'] == 'complete', latest
-                assert directory()['display_name'] == 'Manually refreshed 👋'
-                assert latest['selected_title'] == 'Manually refreshed 👋', latest
-                assert directory()['revision'] == relay_revision
-
-                # A forced refresh invalidates rendered names even when both the
-                # database and relay already agree on the contact revision.
+                wait(lambda: pump().get('selected_title') == 'Renamed automatically')
                 directory_revision = latest['directory_revision']
-                refresh()
-                assert latest['diagnostics']['contacts_refresh'] == 'complete', latest
-                assert directory()['revision'] == relay_revision
+                contacts('Automatically refreshed 👋')
+                wait(lambda: directory().get('display_name') == 'Automatically refreshed 👋')
+                wait(lambda: pump().get('selected_title') == 'Automatically refreshed 👋')
                 assert latest['directory_revision'] != directory_revision
-                assert rows("SELECT count(*) FROM identities WHERE json_extract(record,'$.display_name')='Manually refreshed 👋'") == [(206,)]
+                wait(lambda: rows("SELECT count(*) FROM identities WHERE json_extract(record,'$.display_name')='Automatically refreshed 👋'") == [(206,)])
                 assert rows("SELECT id,record FROM records WHERE kind='message' ORDER BY id") == messages
                 assert rows('SELECT count FROM unread WHERE chat=?', (cid,)) == [(3,)]
                 assert rows('SELECT text FROM drafts WHERE key=?', (cid,)) == [('Keep my draft',)]
@@ -173,32 +147,29 @@ def main():
                 with sqlite3.connect(relay / 'relay.db') as db:
                     db.execute("CREATE TRIGGER reject_contact_queue BEFORE INSERT ON identity_work BEGIN SELECT RAISE(ABORT,'synthetic queue failure'); END")
                 contacts('Recovered queue')
-                command(kind='refresh_contacts')
                 wait(lambda: request('/v1/status')[1]['enrichment_readiness']['identity_directory_v1']['reason'] == 'contacts_persistence_failure')
                 pending = request('/v1/status')[1]['enrichment_readiness']['identity_directory_v1']
-                assert pending['refresh_completed'] < pending['refresh_requested']
+                assert not pending['ready']
                 with sqlite3.connect(relay / 'relay.db') as db:
                     db.execute('DROP TRIGGER reject_contact_queue')
                 wait(lambda: directory().get('display_name') == 'Recovered queue')
-                wait(lambda: pump().get('diagnostics', {}).get('contacts_refresh') == 'complete')
+                wait(ready)
 
                 contacts('Unreadable rename', failed=True)
-                refresh()
-                assert latest['diagnostics']['contacts_refresh'] == 'failed', latest
+                wait(lambda: directory().get('freshness') == 'stale')
                 assert directory()['display_name'] == 'Recovered queue'
                 contacts('Retry succeeded')
-                refresh()
-                assert latest['diagnostics']['contacts_refresh'] == 'complete', latest
-                assert directory()['display_name'] == 'Retry succeeded'
+                wait(lambda: directory().get('display_name') == 'Retry succeeded')
+                assert directory()['freshness'] == 'fresh'
+                wait(ready)
 
                 contacts('Permission denied', permission='denied')
-                refresh()
-                assert latest['diagnostics']['contacts_refresh'] == 'failed', latest
-                assert rows("SELECT value FROM meta WHERE key='contacts_blocked'") == [('1',)]
+                wait(lambda: directory().get('match_state') == 'unavailable')
+                wait(lambda: rows("SELECT value FROM meta WHERE key='contacts_blocked'") == [('1',)])
                 proc.stdin.write('quit\n')
                 proc.stdin.flush()
                 assert proc.wait(timeout=10) == 0
-                print('PASS: forced relay scan, client cache replacement, preserved messages/drafts/unread, refresh failure and retry')
+                print('PASS: automatic contact updates across batches/pages, preserved messages/drafts/unread, scan failure and recovery, removed manual refresh endpoint')
             except Exception:
                 log.flush()
                 log.seek(0)

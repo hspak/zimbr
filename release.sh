@@ -2,8 +2,9 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 <version> [--check]" >&2
-  echo "  --check builds the current checkout as an Arch package without publishing." >&2
+  echo "Usage: $0 <version> [--check] [--macos-archive PATH]" >&2
+  echo "  Publishing requires a relay archive built from the same version and commit." >&2
+  echo "  --check builds the Arch package and checks any supplied relay archive without publishing." >&2
 }
 
 die() {
@@ -11,14 +12,22 @@ die() {
   exit 1
 }
 
-[[ $# -ge 1 && $# -le 2 ]] || { usage; exit 2; }
+[[ $# -ge 1 ]] || { usage; exit 2; }
 version=$1
+shift
 [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "version must use the X.Y.Z format"
 check_only=false
-if [[ $# -eq 2 ]]; then
-  [[ $2 == --check ]] || { usage; exit 2; }
-  check_only=true
-fi
+macos_archive=
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --check) check_only=true; shift ;;
+    --macos-archive)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      macos_archive=$2; shift 2 ;;
+    *) usage; exit 2 ;;
+  esac
+done
+$check_only || [[ -n $macos_archive ]] || die "build the relay on macOS with packaging/macos/release.py build and pass --macos-archive PATH"
 
 for command in git makepkg python3 sha256sum mktemp install zig; do
   command -v "$command" >/dev/null || die "required command not found: $command"
@@ -51,6 +60,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if [[ -n $macos_archive ]]; then
+  command -v ruby >/dev/null || die "required command not found: ruby"
+  relay_archive=$release_dir/zimbr-relay-$version-aarch64-macos.zip
+  install -m644 "$macos_archive" "$relay_archive"
+  python3 "$repo_dir/packaging/macos/release.py" validate "$relay_archive" \
+    --version "$version" --revision "$(git -C "$repo_dir" rev-parse HEAD)" \
+    --cask-output "$release_dir/zimbr-relay.rb"
+  ruby -c "$release_dir/zimbr-relay.rb"
+fi
+
 stage_recipe() {
   local archive=$1 checksum
   checksum=$(sha256sum "$archive")
@@ -71,10 +90,23 @@ PY
 }
 
 build_package() {
+  local archive=$1
   (
     cd -- "$stage"
     export PKGDEST="$stage" SRCDEST="$stage" BUILDDIR="$stage" LOGDEST="$stage"
     makepkg --printsrcinfo >.SRCINFO
+    python3 - "$archive" .SRCINFO <<'PY'
+import hashlib
+from pathlib import Path
+import re
+import sys
+archive, metadata = map(Path, sys.argv[1:])
+checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
+checksums = re.findall(r'^\s*sha256sums(?:_[A-Za-z0-9_]+)?\s*=\s*(\S+)\s*$',
+                      metadata.read_text(), re.M)
+if checksums != [checksum]:
+    sys.exit('release.sh: PKGBUILD/.SRCINFO must pin the source archive SHA-256; SKIP is forbidden')
+PY
     makepkg --force --cleanbuild --noconfirm
   )
 }
@@ -100,7 +132,7 @@ with tarfile.open(destination, 'w:gz') as archive:
             archive.add(path, arcname=f'zimbr-{version}/{name}', recursive=False)
 PY
   stage_recipe "$archive"
-  build_package
+  build_package "$archive"
   output=$repo_dir/zig-out/release
   mkdir -p "$output"
   package_list=$(cd -- "$stage" && PKGDEST="$stage" makepkg --packagelist)
@@ -109,6 +141,10 @@ PY
     install -m644 "$archive" "$output/"
     echo "Checked package: $output/${archive##*/}"
   done <<<"$package_list"
+  if [[ -n $macos_archive ]]; then
+    install -m644 "$relay_archive" "$release_dir/zimbr-relay.rb" "$output/"
+    echo "Checked relay archive and Homebrew cask: $output"
+  fi
   echo "Local package check passed; no tags, releases, or AUR changes were published."
   exit 0
 fi
@@ -135,6 +171,18 @@ if [[ -n $remote_revision ]]; then
   [[ $(git -C "$aur_dir" rev-parse HEAD) == "${remote_revision%%[[:space:]]*}" ]] ||
     die "push or pull the AUR checkout so it matches origin/master"
 fi
+tap_dir=$(cd -- "${ZIMBR_TAP_DIR:-$repo_dir/../homebrew-tap}" && pwd) ||
+  die "Homebrew tap not found; set ZIMBR_TAP_DIR to override ../homebrew-tap"
+[[ $(git -C "$tap_dir" rev-parse --show-toplevel) == "$tap_dir" ]] ||
+  die "the Homebrew tap must be its own git repository"
+tap_branch=$(git -C "$tap_dir" symbolic-ref --quiet --short HEAD) ||
+  die "Homebrew tap HEAD is detached"
+git -C "$tap_dir" diff --quiet -- && git -C "$tap_dir" diff --cached --quiet -- ||
+  die "the Homebrew tap has uncommitted tracked changes"
+git -C "$tap_dir" var GIT_AUTHOR_IDENT >/dev/null || die "configure the Homebrew git author first"
+remote_revision=$(git -C "$tap_dir" ls-remote origin "refs/heads/$tap_branch")
+[[ $(git -C "$tap_dir" rev-parse HEAD) == "${remote_revision%%[[:space:]]*}" ]] ||
+  die "push or pull the Homebrew tap so HEAD matches origin/$tap_branch"
 gh auth status --hostname github.com >/dev/null 2>&1 || die "run gh auth login first"
 github_repo=$(cd -- "$repo_dir" && gh repo view --json nameWithOwner --jq .nameWithOwner)
 [[ $github_repo == hspak/zimbr ]] || die "the PKGBUILD targets hspak/zimbr, not $github_repo"
@@ -173,7 +221,15 @@ archive=$stage/zimbr-$version.tar.gz
 curl --fail --location --silent --show-error --retry 5 --retry-delay 2 --retry-all-errors \
   --output "$archive" "https://github.com/$github_repo/archive/$version.tar.gz"
 stage_recipe "$archive"
-build_package
+build_package "$archive"
+
+# Both artifacts must pass before either package repository is updated.
+(
+  cd -- "$release_dir"
+  sha256sum "${relay_archive##*/}" >SHA256SUMS
+)
+gh release upload "$version" "$relay_archive" "$release_dir/SHA256SUMS" \
+  --repo "$github_repo" --clobber
 
 install -m644 "$stage/PKGBUILD" "$aur_dir/PKGBUILD"
 install -m644 "$stage/.SRCINFO" "$aur_dir/.SRCINFO"
@@ -186,5 +242,15 @@ install -m644 "$stage/.SRCINFO" "$aur_dir/.SRCINFO"
   fi
   git push --set-upstream origin HEAD:master
 )
+install -Dm644 "$release_dir/zimbr-relay.rb" "$tap_dir/Casks/zimbr-relay.rb"
+(
+  cd -- "$tap_dir"
+  git diff --check
+  git add -- Casks/zimbr-relay.rb
+  if ! git diff --cached --quiet --; then
+    git commit -m "release: publish Zimbr Relay $version"
+  fi
+  git push origin "HEAD:$tap_branch"
+)
 gh release edit "$version" --repo "$github_repo" --draft=false
-echo "Published Zimbr $version to GitHub and the AUR."
+echo "Published Zimbr $version: Linux client on the AUR and macOS relay on Homebrew."

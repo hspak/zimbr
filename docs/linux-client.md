@@ -156,14 +156,10 @@ intact; Details keeps participant addresses available. Names and photos remain
 cached offline. A permission revocation learned from the relay clears contact
 presentation; its other messaging features continue independently.
 
-To force a name or photo update, open **Details** and click **Refresh contacts**
-beside **Contacts freshness**. The button shows **Refreshing…** while working;
-the status below it and an in-app notice report progress, completion, or failure.
-The relay rereads Contacts immediately, then the client clears and downloads its
-contact directory again, refreshing displayed
-names and photo references. Messages, drafts, and unread counts are preserved.
-The refresh status reports completion or failure; Contacts permission must be
-enabled on the relay. This requires a relay advertising manual contact refresh.
+Names and photos update automatically when Contacts changes on the Mac. The relay
+also scans Contacts periodically. **Details** shows **Contacts permission** and
+**Contacts freshness**. If an edit made on another Apple device has not appeared,
+check that it has reached Contacts on the Mac.
 
 Messages retain captions alongside multiple images, stored URL cards, and reaction
 chips. Click an image for a larger view; Left/Right navigate that message's photos,
