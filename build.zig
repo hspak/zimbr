@@ -300,6 +300,14 @@ fn module(
             "-Wextra",
             "-Werror",
         } });
+        m.addCSourceFile(.{ .file = b.path("src/relay/menu.m"), .flags = &.{
+            "-fobjc-arc",
+            "-fblocks",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+        } });
+        m.linkFramework("AppKit", .{});
         m.linkFramework("Foundation", .{});
         m.linkFramework("Contacts", .{});
         m.linkSystemLibrary("objc", .{});

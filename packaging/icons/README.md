@@ -45,6 +45,14 @@ Both platforms use identical artwork and padding. The Mac installer copies the
 ICNS into the app's `Contents/Resources` and sets `CFBundleIconFile`, following
 [Apple's bundle convention](https://developer.apple.com/documentation/bundleresources/information-property-list/cfbundleiconfile).
 
+The relay's menu bar uses a separate monochrome derivative:
+[`../macos/status.svg`](../macos/status.svg), exported as
+[`../macos/statusTemplate.pdf`](../macos/statusTemplate.pdf). It retains the bridge
+silhouette and removes the tile, extrusion, contour, and shadow. AppKit displays
+the vector PDF at 18 points with `isTemplate` enabled; the system supplies light,
+dark, and selected appearances. Warnings add a monochrome exclamation mark.
+Keep this silhouette aligned with changes to the shared bridge mark.
+
 After editing the SVG, regenerate the committed exports from the repository root:
 
 ```sh
@@ -52,4 +60,5 @@ python3 tools/render-icons.py
 ```
 
 Exporting requires `rsvg-convert` from librsvg. Normal builds and installations
-use the committed files and do not require an image renderer.
+use the committed files and do not require an image renderer. The exporter also
+regenerates the menu bar PDF from its SVG.

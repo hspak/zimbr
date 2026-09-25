@@ -23,6 +23,7 @@ APP = 'Zimbr Relay.app/Contents'
 REQUIRED = {
     f'{APP}/Info.plist', f'{APP}/MacOS/relay', f'{APP}/MacOS/image-helper',
     f'{APP}/Resources/zimbr-relay-service', f'{APP}/Resources/zimbr.icns',
+    f'{APP}/Resources/statusTemplate.pdf',
     f'{APP}/Resources/LICENSE', f'{APP}/Resources/OpenSSL-LICENSE.txt',
     f'{APP}/Resources/libPhoneNumber-LICENSE.txt', f'{APP}/_CodeSignature/CodeResources',
 }

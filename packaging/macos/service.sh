@@ -46,7 +46,7 @@ cat >"$temporary" <<EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>$label</string>
-<key>ProgramArguments</key><array><string>$(xml "$binary")</string><string>serve</string><string>--config</string><string>$(xml "$data/relay.json")</string></array>
+<key>ProgramArguments</key><array><string>$(xml "$binary")</string><string>serve</string><string>--menu-bar</string><string>--config</string><string>$(xml "$data/relay.json")</string></array>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
 <key>ThrottleInterval</key><integer>30</integer>
 <key>ProcessType</key><string>Standard</string>

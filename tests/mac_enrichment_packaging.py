@@ -25,6 +25,8 @@ def main():
     assert info['CFBundleIdentifier'] == 'com.hsp.zimbr.relay'
     assert 'enrolled clients' in info['NSContactsUsageDescription']
     assert info['NSAppleEventsUsageDescription']
+    assert info['LSUIElement']
+    assert (bundle / 'Contents/Resources/statusTemplate.pdf').read_bytes().startswith(b'%PDF-')
     assert (bundle / 'Contents/Resources/libPhoneNumber-LICENSE.txt').is_file()
     assert (bundle / 'Contents/Resources/OpenSSL-LICENSE.txt').is_file()
     subprocess.run(['codesign', '--verify', '--strict', str(bundle)], check=True)

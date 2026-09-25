@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="80 110 352 292">
+  <title>Zimbr Relay menu bar icon</title>
+  <desc>The shared bridge silhouette, black on transparent, without the tile or shading.</desc>
+  <path fill="black" transform="translate(256 256) scale(0.92) matrix(0.55 -0.8 1 0.22 0 0) translate(-256 -256)" d="M156 154C141 154 128 167 128 182V358L184 326V266C228 302 284 302 328 266V326L384 358V182C384 167 371 154 356 154C341 154 328 167 328 182V202C289 248 223 248 184 202V182C184 167 171 154 156 154Z"/>
+</svg>

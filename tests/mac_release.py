@@ -98,8 +98,14 @@ class MacRelease(unittest.TestCase):
         info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
         self.assertEqual(info['CFBundleShortVersionString'], bundle.source_version())
         self.assertEqual(info['CFBundleVersion'], bundle.source_version())
+        self.assertTrue(info['LSUIElement'])
         self.assertEqual(sign.call_count, 2)
         self.assertTrue((app / 'Contents/Resources/zimbr-relay-service').stat().st_mode & 0o111)
+        self.assertEqual((app / 'Contents/Resources/statusTemplate.pdf').read_bytes(),
+                         (ROOT / 'packaging/macos/statusTemplate.pdf').read_bytes())
+        self.assertTrue((app / 'Contents/Resources/statusTemplate.pdf').read_bytes().startswith(b'%PDF-'))
+        self.assertIn('<string>--menu-bar</string>',
+                      (app / 'Contents/Resources/zimbr-relay-service').read_text())
         self.assertFalse(list(app.rglob('*.key')))
         self.assertFalse(list(app.rglob('relay.json')))
 

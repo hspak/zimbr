@@ -58,11 +58,17 @@ pub fn readPrivate(a: u.Allocator, path: []const u8) ReadPrivateError![]const u8
 }
 /// Configuration allocations belong to the caller's arena; deinit releases the native TLS context.
 pub fn load(a: u.Allocator, path: []const u8) LoadError!Tls {
-    const config = std.json.parseFromSliceLeaky(Config, a, try readPrivate(a, path), .{}) catch |err| {
+    return loadBytes(a, try readPrivate(a, path));
+}
+
+/// Validates proposed settings, including credentials, without changing the running relay.
+/// Configuration allocations belong to the caller's arena; deinit releases the TLS context.
+pub fn loadBytes(a: u.Allocator, bytes: []const u8) LoadError!Tls {
+    const config = std.json.parseFromSliceLeaky(Config, a, bytes, .{}) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
         std.debug.print(
-            "relay: invalid TLS config {s}; expected listen_address, port, server_name, server_cert_file, server_key_file, client_ca_file, device_allowlist_file\n",
-            .{path},
+            "relay: invalid TLS config; expected listen_address, port, server_name, server_cert_file, server_key_file, client_ca_file, device_allowlist_file\n",
+            .{},
         );
         return error.InvalidTlsConfiguration;
     };

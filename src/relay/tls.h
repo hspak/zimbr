@@ -5,6 +5,12 @@ typedef struct ZrTlsContext ZrTlsContext;
 typedef struct ZrTls ZrTls;
 /* Paths must be absolute, owner-only files in owner-only directories. */
 int zr_tls_read_file(const char *path, char *out, size_t capacity);
+/* Like read_file, with -2 only for an absent leaf in a validated private directory. */
+int zr_tls_read_config(const char *path, char *out, size_t capacity);
+/* Optimistic replacement: expected == NULL requires an absent destination.
+ * 0: saved; 1: saved but directory sync failed; -2: changed; -1: unsafe/I/O error. */
+int zr_tls_replace_config(const char *path, const char *expected, size_t expected_length,
+    const char *bytes, size_t length);
 ZrTlsContext *zr_tls_context(const char *cert, const char *key, const char *ca,
     const char *name, const unsigned char *fingerprints, size_t count, char *error, size_t capacity);
 void zr_tls_context_free(ZrTlsContext *ctx);

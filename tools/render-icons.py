@@ -14,6 +14,8 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'packaging/linux/zimbr.svg'
 OUTPUT = ROOT / 'packaging/icons'
+STATUS_SOURCE = ROOT / 'packaging/macos/status.svg'
+STATUS_ICON = ROOT / 'packaging/macos/statusTemplate.pdf'
 MAC_ICON = ROOT / 'packaging/macos/zimbr.icns'
 
 # Standard and Retina representations, stored as lossless PNG payloads.
@@ -35,6 +37,8 @@ def render(source, width, height):
 def main():
     if not shutil.which('rsvg-convert'):
         raise SystemExit('Install librsvg (rsvg-convert) to regenerate the icons.')
+    subprocess.run(['rsvg-convert', '--format', 'pdf', '--output', str(STATUS_ICON),
+                    str(STATUS_SOURCE)], check=True)
     OUTPUT.mkdir(parents=True, exist_ok=True)
     images = {size: render(SOURCE, size, size) for size in sorted({s for _, s in ICNS_SIZES})}
     (OUTPUT / 'zimbr-1024.png').write_bytes(images[1024])
@@ -73,7 +77,7 @@ def main():
         preview_source = Path(temporary) / 'preview.svg'
         preview_source.write_text(preview)
         (OUTPUT / 'preview.png').write_bytes(render(preview_source, 1120, 752))
-    print('Exported packaging/icons/{zimbr-1024,preview}.png and packaging/macos/zimbr.icns')
+    print('Exported app icons, preview, and packaging/macos/statusTemplate.pdf')
 
 
 if __name__ == '__main__':

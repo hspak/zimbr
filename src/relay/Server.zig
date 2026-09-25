@@ -13,6 +13,7 @@ const Server = @This();
 
 core: *Core,
 tls: Tls,
+listening: ?*std.atomic.Value(bool) = null,
 handshakes: std.atomic.Value(usize) = .init(0),
 asset_responses: std.atomic.Value(usize) = .init(0),
 
@@ -30,6 +31,8 @@ pub fn run(self: *Server) RunError!void {
     );
     var listener = try address.listen(self.core.io, .{ .reuse_address = true });
     defer listener.deinit(self.core.io);
+    if (self.listening) |ready| ready.store(true, .release);
+    defer if (self.listening) |ready| ready.store(false, .release);
     std.debug.print(
         "relay: HTTPS mTLS listening on {s}:{d}\n",
         .{ self.tls.config.listen_address, self.tls.config.port },

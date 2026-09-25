@@ -1,6 +1,8 @@
 //! Relay services and their source adapter boundary.
 
 pub const Assets = @import("relay/Assets.zig");
+pub const Menu = @import("relay/Menu.zig");
+pub const settings = @import("relay/settings.zig");
 pub const Core = @import("relay/Core.zig");
 pub const Journal = @import("relay/Journal.zig");
 pub const Mutex = @import("relay/Mutex.zig");

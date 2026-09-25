@@ -37,6 +37,7 @@ def stage(bundle, binary, image_helper, openssl_license, phone_license, *,
         shutil.copy2(source, macos / name)
         (macos / name).chmod(0o755)
     for source, name in ((ROOT / 'packaging/macos/zimbr.icns', 'zimbr.icns'),
+                         (ROOT / 'packaging/macos/statusTemplate.pdf', 'statusTemplate.pdf'),
                          (ROOT / 'LICENSE', 'LICENSE'),
                          (openssl_license, 'OpenSSL-LICENSE.txt'),
                          (phone_license, 'libPhoneNumber-LICENSE.txt')):

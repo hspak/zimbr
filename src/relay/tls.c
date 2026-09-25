@@ -22,7 +22,7 @@ struct ZrTls { SSL *ssl; X509 *peer; int fd; };
 /* Walk with openat/O_NOFOLLOW so neither leaf nor ancestor symlinks can change
  * the object being validated. Only the immediate containing directory must be
  * private; system ancestors (e.g. /Users) need not be owner-only. */
-static int private_open(const char *path) {
+static int private_parent(const char *path, char leaf[PATH_MAX]) {
     if (!path || path[0] != '/' || strlen(path) >= PATH_MAX) return -1;
     char copy[PATH_MAX]; strcpy(copy, path + 1);
     int dir = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -45,15 +45,17 @@ static int private_open(const char *path) {
     }
     struct stat s;
     if (fstat(dir, &s) || s.st_uid != getuid() || (s.st_mode & 077) || (s.st_mode & 0700) != 0700) { close(dir); return -1; }
-    int fd = openat(dir, part, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
-    close(dir);
-    if (fd < 0) return -1;
+    strcpy(leaf, part);
+    return dir;
+}
+static int private_open_at(int dir, const char *leaf) {
+    int fd = openat(dir, leaf, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0) return errno == ENOENT ? -2 : -1;
+    struct stat s;
     if (fstat(fd, &s) || !S_ISREG(s.st_mode) || s.st_uid != getuid() || (s.st_mode & 077) || s.st_nlink != 1 || s.st_size > 65536) { close(fd); return -1; }
     return fd;
 }
-int zr_tls_read_file(const char *path, char *out, size_t cap) {
-    int fd = private_open(path);
-    if (fd < 0) return -1;
+static int private_read(int fd, char *out, size_t cap) {
     size_t used = 0;
     while (used < cap) {
         ssize_t n = read(fd, out + used, cap - used);
@@ -63,6 +65,64 @@ int zr_tls_read_file(const char *path, char *out, size_t cap) {
         used += (size_t)n;
     }
     close(fd); return -1;
+}
+int zr_tls_read_config(const char *path, char *out, size_t cap) {
+    char leaf[PATH_MAX];
+    int dir = private_parent(path, leaf);
+    if (dir < 0) return -1;
+    int fd = private_open_at(dir, leaf);
+    close(dir);
+    return fd < 0 ? fd : private_read(fd, out, cap);
+}
+int zr_tls_read_file(const char *path, char *out, size_t cap) {
+    int result = zr_tls_read_config(path, out, cap);
+    return result < 0 ? -1 : result;
+}
+static int config_matches(int dir, const char *leaf, const char *expected, size_t length) {
+    int fd = private_open_at(dir, leaf);
+    if (fd == -2) return expected ? -2 : 0;
+    if (fd < 0) return -1;
+    char current[65536];
+    int n = private_read(fd, current, sizeof(current));
+    if (n < 0) return -1;
+    return expected && (size_t)n == length && !memcmp(current, expected, length) ? 0 : -2;
+}
+int zr_tls_replace_config(const char *path, const char *expected, size_t expected_length,
+                         const char *bytes, size_t length) {
+    if (length >= 65536 || expected_length >= 65536) return -1;
+    char leaf[PATH_MAX];
+    int dir = private_parent(path, leaf);
+    if (dir < 0) return -1;
+    int result = config_matches(dir, leaf, expected, expected_length);
+    if (result) { close(dir); return result; }
+    unsigned char random[16];
+    if (zr_random(random, sizeof(random))) { close(dir); return -1; }
+    char temporary[64] = ".relay-settings-";
+    for (size_t i = 0; i < sizeof(random); ++i)
+        snprintf(temporary + sizeof(".relay-settings-") - 1 + i * 2, 3, "%02x", random[i]);
+    /* No path-based temporary opens: keep every operation on the validated parent. */
+    int fd = openat(dir, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) { close(dir); return -1; }
+    result = -1;
+    if (fchmod(fd, 0600)) goto done;
+    size_t written = 0;
+    while (written < length) {
+        ssize_t n = write(fd, bytes + written, length - written);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) goto done;
+        written += (size_t)n;
+    }
+    if (fsync(fd)) goto done;
+    /* Detect edits made while the settings window or validation was open. */
+    result = config_matches(dir, leaf, expected, expected_length);
+    if (result) goto done;
+    if (renameat(dir, temporary, dir, leaf)) { result = -1; goto done; }
+    result = fsync(dir) ? 1 : 0;
+done:
+    close(fd);
+    unlinkat(dir, temporary, 0);
+    close(dir);
+    return result;
 }
 static BIO *private_bio(const char *path, const char *kind) {
     char bytes[65536];

@@ -3,13 +3,51 @@
 The Zig 0.16 relay serves the Messages account on a logged-in Mac. It reads
 Apple's SQLite database without modifying it, exposes a TLS 1.3 HTTPS/SSE API
 requiring an enrolled client certificate, and sends through a bounded Messages
-AppleScript subprocess. It uses system SQLite and has no GUI or Homebrew runtime
-dependency. The Linux client never receives Apple account credentials.
+AppleScript subprocess. Its native menu bar interface uses AppKit, with system
+SQLite and no Homebrew runtime dependency. The Linux client never receives Apple
+account credentials.
 
 For first-time setup, build the relay, [provision TLS credentials and a persistent
 signing identity](macos-tls.md), then [install and grant permissions](#install-and-permissions).
 For an existing installation, see [Update the running relay](#update-the-running-relay).
 Run the commands below from the repository root unless noted otherwise.
+
+## Menu bar and settings
+
+The installed LaunchAgent starts `serve --menu-bar`. Open **Zimbr Relay.app** to
+show Settings; closing the window keeps the relay running. The monochrome bridge
+icon uses a template image so macOS supplies its appearance. A monochrome
+exclamation mark indicates a warning. The menu shows reading/sending readiness,
+delayed synchronization, startup errors, and certificate expiry warnings. It also
+offers **Check Permissions**, **Open Logs**, and **Restart Relay**.
+
+Settings edits the existing `relay.json`: listening address, port, server name,
+and optional Contacts phone region. **Advanced** exposes file pickers for the
+server certificate, server key, client CA, and device list. **Save and Restart**
+uses the same configuration and credential validation as startup, then replaces
+the file atomically with mode 0600. If the file changed while editing, reload it
+before saving again. Invalid settings leave the existing file untouched.
+Unsupported JSON entries are removed on save, with a notice in the window.
+
+Startup failures leave the interface available for repair. Missing or malformed
+configuration can be replaced through Settings after credentials have been
+provisioned. The interface does not issue certificates, enroll devices, or edit
+the contents of the device list. Permissions still require macOS approval.
+Changing the server name requires matching certificate identities; changing the
+address or port may also require updating clients.
+
+Restart replaces the running process with the same command and arguments, keeping
+LaunchAgent supervision. Closing Settings does not stop the service. Use
+`zimbr-relay-service stop` for an installed service. Opening the app manually does
+not install a LaunchAgent or enable login startup. Logs opened from the menu are
+the installed service's log; command-line launches write to their inherited output.
+
+Plain `serve` remains headless. After upgrading an older installation, reinstall
+or regenerate its LaunchAgent with the current installer/service helper to add
+`--menu-bar`; an already-running headless process cannot reveal Settings.
+
+Native compilation, appearance, and installed behavior still require the
+[Mac menu bar validation handoff](macos-menu-bar-validation.md).
 
 ## Homebrew
 
@@ -60,7 +98,7 @@ For maintainers, see [combined releases](linux-packaging.md).
 Install Zig **0.16.0**, Apple's Command Line Tools, and a target build of
 **OpenSSL 3.5 LTS** with static archives. The packaged build uses 3.5.8; use current
 3.5 security patches and rebuild/re-sign the app when updating OpenSSL. The relay
-uses system SQLite and has no GUI or Homebrew runtime dependency.
+uses system SQLite and native AppKit, with no Homebrew runtime dependency.
 
 For the M1 Mac mini, build the deployed relay with optimization and an explicit
 M1 CPU target (including NEON and ARM SHA-256 instructions):
@@ -87,6 +125,7 @@ python3 tests/links.py
 python3 tests/reactions.py
 python3 tests/native_images.py
 python3 tests/relay_tls.py
+python3 tests/relay_settings.py
 python3 tests/mac_acceptance_test.py
 ZIMBR_MKCERT=/path/to/mkcert python3 tests/cert_management.py
 zig fmt --check build.zig src
