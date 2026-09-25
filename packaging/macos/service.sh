@@ -48,7 +48,7 @@ cat >"$temporary" <<EOF
 <key>Label</key><string>$label</string>
 <key>ProgramArguments</key><array><string>$(xml "$binary")</string><string>serve</string><string>--menu-bar</string><string>--config</string><string>$(xml "$data/relay.json")</string></array>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
-<key>ThrottleInterval</key><integer>30</integer>
+<key>ThrottleInterval</key><integer>1</integer>
 <key>ProcessType</key><string>Standard</string>
 <key>LimitLoadToSessionType</key><string>Aqua</string>
 <key>WorkingDirectory</key><string>$(xml "$data")</string>

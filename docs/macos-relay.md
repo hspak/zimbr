@@ -19,7 +19,10 @@ show Settings; closing the window keeps the relay running. The monochrome bridge
 icon uses a template image so macOS supplies its appearance. A monochrome
 exclamation mark indicates a warning. The menu shows reading/sending readiness,
 delayed synchronization, startup errors, and certificate expiry warnings. It also
-offers **Check Permissions**, **Open Logs**, and **Restart Relay**.
+offers **Check Permissions**, **Open Logs**, **Restart Relay**, and **Quit Relay**.
+When Messages reading, sending, and Contacts access are ready, **Check Permissions**
+shows a simple confirmation with an **OK** button. Otherwise it shows the current
+status and permission setup actions.
 
 Settings edits the existing `relay.json`: listening address, port, server name,
 and optional Contacts phone region. **Advanced** exposes file pickers for the
@@ -36,18 +39,36 @@ the contents of the device list. Permissions still require macOS approval.
 Changing the server name requires matching certificate identities; changing the
 address or port may also require updating clients.
 
-Restart replaces the running process with the same command and arguments, keeping
-LaunchAgent supervision. Closing Settings does not stop the service. Use
-`zimbr-relay-service stop` for an installed service. Opening the app manually does
-not install a LaunchAgent or enable login startup. Logs opened from the menu are
-the installed service's log; command-line launches write to their inherited output.
+Restart starts a fresh process. Installed services retain LaunchAgent supervision
+with a one-second minimum launch interval; manual launches retain their original
+command and arguments. The icon appears independently of backend initialization,
+and status refreshes every 250 milliseconds for the first five seconds before
+returning to its two-second cadence. Closing Settings does not stop the service.
+
+**Quit Relay**, below Restart, stops the app and relay. For an installed service,
+it unloads the current LaunchAgent job so `KeepAlive` does not immediately restart
+it. Login startup remains enabled. Open the app to run it manually again, or use
+`zimbr-relay-service start` to restore service supervision before the next login.
+The command-line equivalent is `zimbr-relay-service stop`. Quitting a manual
+launch simply exits that process. Quit is unavailable while settings are loading
+or saving, or a restart is underway.
+
+Opening the app manually does not install a LaunchAgent or enable login startup.
+Logs opened from the menu are the installed service's log; command-line launches
+write to their inherited output.
 
 Plain `serve` remains headless. After upgrading an older installation, reinstall
 or regenerate its LaunchAgent with the current installer/service helper to add
-`--menu-bar`; an already-running headless process cannot reveal Settings.
+`--menu-bar` and apply the shorter restart interval. Replacing only the app bundle
+leaves the previous LaunchAgent settings in place. An already-running headless
+process cannot reveal Settings.
 
-Native compilation, appearance, and installed behavior still require the
-[Mac menu bar validation handoff](macos-menu-bar-validation.md).
+Native builds, signed installation, permission attribution, and basic menu and
+Settings interactions have passed validation. Restart failures found during
+validation have fixes and native regression coverage. The user confirmed that
+installed Save and Restart works, the icon returns promptly, and Settings reopens.
+Remaining appearance, recovery, and lifecycle cases are tracked in the
+[Mac menu bar validation record](macos-menu-bar-validation.md).
 
 ## Homebrew
 
@@ -126,6 +147,7 @@ python3 tests/reactions.py
 python3 tests/native_images.py
 python3 tests/relay_tls.py
 python3 tests/relay_settings.py
+python3 tests/mac_menu_restart.py
 python3 tests/mac_acceptance_test.py
 ZIMBR_MKCERT=/path/to/mkcert python3 tests/cert_management.py
 zig fmt --check build.zig src

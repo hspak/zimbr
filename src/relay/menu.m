@@ -1,12 +1,38 @@
 #import <AppKit/AppKit.h>
-#import <crt_externs.h>
 #import <dispatch/dispatch.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <spawn.h>
 #include <string.h>
+#include <sys/event.h>
 #include <unistd.h>
 #include "menu.h"
 
 static NSString *const reopenNotification = @"com.hsp.zimbr.relay.show-settings";
+extern char **environ;
+
+static int spawnReplacement(NSArray<NSString *> *arguments) {
+    char **argv = calloc(arguments.count + 1, sizeof(char *));
+    if (!argv) return ENOMEM;
+    for (NSUInteger i = 0; i < arguments.count; i++) argv[i] = (char *)arguments[i].UTF8String;
+    posix_spawnattr_t attributes;
+    int reason = posix_spawnattr_init(&attributes);
+    if (reason) { free(argv); return reason; }
+    posix_spawn_file_actions_t files;
+    reason = posix_spawn_file_actions_init(&files);
+    if (reason) { posix_spawnattr_destroy(&attributes); free(argv); return reason; }
+    // A manual Launch Services job can kill its old process group on exit.
+    // The replacement waits for that exit in its own session, with no old sockets.
+    reason = posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT);
+    for (int fd = 0; fd < 3 && !reason; fd++)
+        if (fcntl(fd, F_GETFD) >= 0) reason = posix_spawn_file_actions_addinherit_np(&files, fd);
+    pid_t child;
+    if (!reason) reason = posix_spawn(&child, argv[0], &files, &attributes, argv, environ);
+    posix_spawn_file_actions_destroy(&files);
+    posix_spawnattr_destroy(&attributes);
+    free(argv);
+    return reason;
+}
 
 static NSString *explanation(NSString *code) {
     NSDictionary *messages = @{
@@ -50,6 +76,7 @@ static NSString *explanation(NSString *code) {
 @property(nonatomic, strong) NSMenuItem *summary;
 @property(nonatomic, strong) NSMenuItem *detail;
 @property(nonatomic, strong) NSMenuItem *restartItem;
+@property(nonatomic, strong) NSMenuItem *quitItem;
 @property(nonatomic, strong) NSImage *normalImage;
 @property(nonatomic, strong) NSImage *warningImage;
 @property(nonatomic, strong) NSTimer *timer;
@@ -120,24 +147,37 @@ static NSString *explanation(NSString *code) {
     self.summary.enabled = NO;
     self.detail = [self addItem:@"" action:NULL menu:menu];
     self.detail.enabled = NO;
+    self.detail.hidden = YES;
     [menu addItem:NSMenuItem.separatorItem];
     [self addItem:@"Settings…" action:@selector(showSettings:) menu:menu];
     [self addItem:@"Check Permissions…" action:@selector(checkPermissions:) menu:menu];
     [self addItem:@"Open Logs…" action:@selector(openLogs:) menu:menu];
     [menu addItem:NSMenuItem.separatorItem];
     self.restartItem = [self addItem:@"Restart Relay…" action:@selector(confirmRestart:) menu:menu];
+    self.quitItem = [self addItem:@"Quit Relay" action:@selector(quit:) menu:menu];
     self.item.menu = menu;
     [NSDistributedNotificationCenter.defaultCenter addObserver:self selector:@selector(showSettings:)
         name:reopenNotification object:self.configPath suspensionBehavior:NSNotificationSuspensionBehaviorDeliverImmediately];
+    // Readiness often settles within a second; don't leave the initial snapshot
+    // on screen until the slower steady-state timer fires.
+    [self scheduleRefresh:0.25];
     __weak ZrMenuController *weakSelf = self;
-    self.timer = [NSTimer timerWithTimeInterval:2 repeats:YES block:^(NSTimer *timer) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        [weakSelf scheduleRefresh:2];
+    });
+    [self refresh];
+    if (self.showOnLaunch) [self showSettings:nil];
+}
+
+- (void)scheduleRefresh:(NSTimeInterval)interval {
+    [self.timer invalidate];
+    __weak ZrMenuController *weakSelf = self;
+    self.timer = [NSTimer timerWithTimeInterval:interval repeats:YES block:^(NSTimer *timer) {
         (void)timer;
         [weakSelf refresh];
     }];
-    self.timer.tolerance = 0.5;
+    self.timer.tolerance = interval / 4;
     [NSRunLoop.mainRunLoop addTimer:self.timer forMode:NSRunLoopCommonModes];
-    [self refresh];
-    if (self.showOnLaunch) [self showSettings:nil];
 }
 
 - (BOOL)applicationShouldHandleReopen:(NSApplication *)application hasVisibleWindows:(BOOL)visible {
@@ -170,8 +210,11 @@ static NSString *explanation(NSString *code) {
             self.summary.title = status[@"summary"] ?: @"Status unavailable";
             NSString *detail = explanation(status[@"detail"] ?: @"Open Logs for details.");
             self.detail.title = detail.length > 72 ? [[detail substringToIndex:71] stringByAppendingString:@"…"] : detail;
+            self.detail.hidden = detail.length == 0;
             self.detail.toolTip = detail;
-            self.item.button.toolTip = [NSString stringWithFormat:@"Zimbr Relay: %@\n%@", self.summary.title, detail];
+            self.item.button.toolTip = detail.length ?
+                [NSString stringWithFormat:@"Zimbr Relay: %@\n%@", self.summary.title, detail] :
+                [NSString stringWithFormat:@"Zimbr Relay: %@", self.summary.title];
             self.item.button.image = !status || [status[@"warning"] boolValue] ? self.warningImage : self.normalImage;
         });
     });
@@ -282,6 +325,7 @@ static NSString *explanation(NSString *code) {
     self.saveButton.enabled = !busy && self.loaded;
     self.reloadButton.enabled = !busy;
     self.restartItem.enabled = !busy;
+    self.quitItem.enabled = !busy;
 }
 
 - (void)loadSettings {
@@ -393,14 +437,65 @@ static NSString *explanation(NSString *code) {
     if ([alert runModal] == NSAlertFirstButtonReturn) [self restart];
 }
 
+- (NSString *)serviceTarget {
+    const char *service = getenv("XPC_SERVICE_NAME");
+    NSString *identifier = NSBundle.mainBundle.bundleIdentifier;
+    if (!service || !identifier || strcmp(service, identifier.UTF8String) != 0) return nil;
+    return [NSString stringWithFormat:@"gui/%u/%@", getuid(), identifier];
+}
+
+- (void)controlService:(NSArray<NSString *> *)arguments failureTitle:(NSString *)title message:(NSString *)message {
+    [self setEditingBusy:YES];
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:@"/bin/launchctl"];
+    task.arguments = arguments;
+    task.terminationHandler = ^(NSTask *finished) {
+        if (finished.terminationStatus != 0) dispatch_async(dispatch_get_main_queue(), ^{
+            [self setEditingBusy:NO];
+            [self alert:title message:message];
+        });
+    };
+    NSError *error = nil;
+    if (![task launchAndReturnError:&error]) {
+        [self setEditingBusy:NO];
+        [self alert:title message:error.localizedDescription];
+    }
+}
+
+- (void)quit:(id)sender {
+    (void)sender;
+    if (self.busy) return;
+    NSString *service = [self serviceTarget];
+    if (service) {
+        // Unload this session's job so KeepAlive cannot undo an explicit quit.
+        // Leave the plist and enablement intact for the next login or start.
+        [self controlService:@[@"bootout", service] failureTitle:@"Could not quit relay"
+            message:@"The service could not be stopped. Open Logs for details."];
+        return;
+    }
+    [NSApp terminate:nil];
+}
+
 - (void)restart {
-    // Replacing this process preserves launchd ownership and works for manual launches.
-    // The journal's existing crash recovery handles interrupted work on startup.
-    NSString *executable = NSBundle.mainBundle.executablePath;
-    execv(executable.fileSystemRepresentation, *_NSGetArgv());
-    int reason = errno;
-    [self alert:@"Could not restart relay" message:[NSString stringWithFormat:
-        @"Saved settings will apply on the next launch. %@", [NSString stringWithUTF8String:strerror(reason)]]];
+    // AppKit loses its Launch Services registration across execv. A fresh process
+    // must own the next status item, while launchd retains installed supervision.
+    NSString *service = [self serviceTarget];
+    if (service) {
+        [self controlService:@[@"kickstart", @"-k", service] failureTitle:@"Could not restart relay"
+            message:@"The service restart was rejected. Open Logs for details."];
+        return;
+    }
+    [self setEditingBusy:YES];
+    NSMutableArray<NSString *> *arguments = [NSMutableArray arrayWithArray:
+        @[NSBundle.mainBundle.executablePath, @"menu-relaunch", [NSString stringWithFormat:@"%d", getpid()]]];
+    NSArray<NSString *> *original = NSProcessInfo.processInfo.arguments;
+    if (original.count > 3 && [original[1] isEqualToString:@"menu-relaunch"])
+        original = [original subarrayWithRange:NSMakeRange(3, original.count - 3)];
+    [arguments addObjectsFromArray:original];
+    int reason = spawnReplacement(arguments);
+    if (!reason) exit(0);
+    [self setEditingBusy:NO];
+    [self alert:@"Could not restart relay" message:[NSString stringWithUTF8String:strerror(reason)]];
 }
 
 - (void)openLogs:(id)sender {
@@ -413,6 +508,18 @@ static NSString *explanation(NSString *code) {
 - (void)checkPermissions:(id)sender {
     (void)sender;
     NSAlert *alert = [[NSAlert alloc] init];
+    if ([self.latestStatus[@"messages_readable"] boolValue] &&
+        [self.latestStatus[@"sending_available"] boolValue] &&
+        [self.latestStatus[@"contacts_permission"] isEqualToString:@"authorized"]) {
+        alert.alertStyle = NSAlertStyleInformational;
+        alert.messageText = @"Permissions are all set";
+        alert.informativeText = @"Zimbr Relay can read and send Messages and access Contacts.";
+        [alert addButtonWithTitle:@"OK"];
+        [NSApp activateIgnoringOtherApps:YES];
+        if (self.window.visible) [alert beginSheetModalForWindow:self.window completionHandler:nil];
+        else [alert runModal];
+        return;
+    }
     alert.messageText = @"Messages and Contacts permissions";
     NSDictionary *permissionNames = @{
         @"authorized": @"Allowed", @"denied": @"Denied", @"restricted": @"Restricted",
@@ -470,4 +577,20 @@ void zr_menu_reopen(const char *config) {
         [NSDistributedNotificationCenter.defaultCenter postNotificationName:reopenNotification
             object:[NSString stringWithUTF8String:config] userInfo:nil deliverImmediately:YES];
     }
+}
+
+int zr_menu_wait_for_exit(int pid) {
+    if (pid <= 1 || pid == getpid()) return -1;
+    int queue = kqueue();
+    if (queue < 0) return -1;
+    struct kevent change, event;
+    EV_SET(&change, (uintptr_t)pid, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0, NULL);
+    struct timespec timeout = { .tv_sec = 15, .tv_nsec = 0 };
+    int count = kevent(queue, &change, 1, &event, 1, &timeout);
+    int reason = errno;
+    close(queue);
+    if (count < 0) return reason == ESRCH ? 0 : -1;
+    if (count != 1) return -1;
+    if (event.flags & EV_ERROR) return event.data == ESRCH ? 0 : -1;
+    return event.fflags & NOTE_EXIT ? 0 : -1;
 }

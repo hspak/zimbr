@@ -12,3 +12,5 @@ typedef struct {
 
 void zr_menu_run(const ZrMenu *menu, const char *config, const char *data, int show_settings);
 void zr_menu_reopen(const char *config);
+/* Wait for the old process to release its listener and journal lock. */
+int zr_menu_wait_for_exit(int pid);

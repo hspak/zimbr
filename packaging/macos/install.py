@@ -42,6 +42,22 @@ def service_pid(service):
     return int(match.group(1)) if match else None
 
 
+def launch_agent(app, data, home):
+    # HTTPS requests cannot obtain Adaptive's XPC boosts. Use Standard and let
+    # per-thread QoS distinguish user requests from ingestion/enrichment work.
+    return {
+        'Label': LABEL,
+        'ProgramArguments': [str(app/'Contents/MacOS/relay'), 'serve', '--menu-bar',
+                             '--config', str(data/'relay.json')],
+        # launchd also applies this delay to explicit kickstart requests.
+        'RunAtLoad': True, 'KeepAlive': True, 'ThrottleInterval': 1,
+        'ProcessType': 'Standard', 'LimitLoadToSessionType': 'Aqua',
+        'WorkingDirectory': str(data),
+        'StandardOutPath': str(data/'relay.log'), 'StandardErrorPath': str(data/'relay.log'),
+        'Umask': 0o077, 'EnvironmentVariables': {'HOME': str(home)},
+    }
+
+
 def wait_exit(pid):
     if not pid: return
     deadline = time.monotonic()+15
@@ -104,9 +120,7 @@ def main():
     bundle = staging/'Zimbr Relay.app'
     stage(bundle, args.binary, args.image_helper, args.openssl_license, args.phone_license,
           identity=args.identity, signing_directory=args.signing_directory)
-    # HTTPS requests cannot obtain Adaptive's XPC boosts. Use Standard and let
-    # per-thread QoS distinguish user requests from ingestion/enrichment work.
-    config = {'Label': LABEL, 'ProgramArguments': [str(destination/'Contents/MacOS/relay'), 'serve', '--menu-bar', '--config', str(data/'relay.json')], 'RunAtLoad': True, 'KeepAlive': True, 'ThrottleInterval': 30, 'ProcessType': 'Standard', 'LimitLoadToSessionType': 'Aqua', 'WorkingDirectory': str(data), 'StandardOutPath': str(data/'relay.log'), 'StandardErrorPath': str(data/'relay.log'), 'Umask': 0o077, 'EnvironmentVariables': {'HOME': str(home)}}
+    config = launch_agent(destination, data, home)
     plist = staging/(LABEL+'.plist')
     with plist.open('wb') as f: plistlib.dump(config, f)
     subprocess.run(['plutil', '-lint', str(plist)], check=True)

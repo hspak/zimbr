@@ -272,7 +272,7 @@ fn module(
     if (sdk) |s| {
         m.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ s, "usr/include" }) });
         m.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ s, "usr/lib" }) });
-        m.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ s, "System/Library/Frameworks" }) });
+        m.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ s, "System/Library/Frameworks" }) });
     }
     if (!fake and target.result.os.tag == .macos) {
         const phone = b.lazyDependency("libphonenumber", .{}) orelse return m;
@@ -342,7 +342,7 @@ fn imageHelper(
     if (sdk) |s| {
         m.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ s, "usr/include" }) });
         m.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ s, "usr/lib" }) });
-        m.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ s, "System/Library/Frameworks" }) });
+        m.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ s, "System/Library/Frameworks" }) });
     }
     if (!fake) {
         m.linkFramework("Foundation", .{});

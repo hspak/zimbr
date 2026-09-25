@@ -44,6 +44,20 @@ pub fn reopen(config_path: [:0]const u8) void {
     if (comptime available) c.zr_menu_reopen(config_path);
 }
 
+pub const RelaunchError = error{ InvalidArguments, RestartHandoffFailed };
+
+/// Removes a private relaunch prefix after the previous process exits.
+/// The returned argument slices borrow the caller's storage.
+pub fn resumeRestart(args: []const [:0]const u8) RelaunchError![]const [:0]const u8 {
+    if (args.len < 2 or !std.mem.eql(u8, args[1], "menu-relaunch")) return args;
+    if (comptime !available) return error.InvalidArguments;
+    if (args.len < 4) return error.InvalidArguments;
+    const pid = std.fmt.parseInt(c_int, args[2], 10) catch return error.InvalidArguments;
+    if (pid <= 1) return error.InvalidArguments;
+    if (c.zr_menu_wait_for_exit(pid) != 0) return error.RestartHandoffFailed;
+    return args[3..];
+}
+
 fn readConfig(raw: ?*anyopaque, out: [*c]u8, capacity: usize) callconv(.c) c_int {
     const self: *Menu = @ptrCast(@alignCast(raw.?));
     return Tls.c.zr_tls_read_config(self.config_path, out, capacity);
@@ -108,7 +122,7 @@ fn snapshot(self: *Menu, a: std.mem.Allocator) std.mem.Allocator.Error![]const u
         .detail = if (!core.read_ready) core.degraded else if (!core.automation_ready)
             core.automation_error
         else
-            "Messages available",
+            "",
         .warning = health.warning,
         .messages_readable = core.read_ready,
         .sending_available = core.read_ready and core.automation_ready,

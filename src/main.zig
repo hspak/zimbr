@@ -23,7 +23,7 @@ pub fn main(init: std.process.Init) void {
 }
 fn run(init: std.process.Init) !void {
     const a = init.arena.allocator();
-    const args = try init.minimal.args.toSlice(a);
+    const args = try Menu.resumeRestart(try init.minimal.args.toSlice(a));
     // Private bounded child mode: no HOME, TLS config, Contacts enumeration or
     // permission request. Its exit status carries only the public OS decision.
     if (args.len == 2 and u.eq(args[1], "contacts-permission-status")) contact_directory.permissionProbeExit();
