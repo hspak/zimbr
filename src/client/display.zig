@@ -11,7 +11,13 @@ pub const unknown_grace_ms = 30_000;
 pub const MessageStatus = union(enum) {
     none,
     label: []const u8,
-    checks: bool,
+    checks: Checks,
+
+    pub const Checks = enum {
+        sent,
+        group_sent,
+        delivered,
+    };
 };
 
 // Use the original send time so snapshots, echo matching, navigation, and
@@ -23,11 +29,11 @@ fn deferUnknown(timestamp: []const u8, now_ms: i64) bool {
     return now_ms < sent_ms + unknown_grace_ms;
 }
 
-pub fn messageStatus(m: t.Message, now_ms: i64) MessageStatus {
+pub fn messageStatus(m: t.Message, is_group: bool, now_ms: i64) MessageStatus {
     if (m.direction != .outgoing) return .none;
     return switch (m.observed_status) {
-        .sent => .{ .checks = false },
-        .delivered => .{ .checks = true },
+        .sent => .{ .checks = if (is_group) .group_sent else .sent },
+        .delivered => .{ .checks = .delivered },
         .unknown => if (deferUnknown(m.timestamp, now_ms)) .none else .{ .label = "unknown" },
         .received, .failed => .{ .label = @tagName(m.observed_status) },
     };
@@ -71,23 +77,31 @@ test "unknown delivery status waits thirty seconds while confirmed outcomes appe
         .decoding = .plain,
         .observed_status = .unknown,
     };
-    try std.testing.expect(messageStatus(m, sent_ms) == .none);
-    try std.testing.expect(messageStatus(m, sent_ms + 29_999) == .none);
+    try std.testing.expect(messageStatus(m, false, sent_ms) == .none);
+    try std.testing.expect(messageStatus(m, false, sent_ms + 29_999) == .none);
     // No record update is needed for a stalled message to become visible.
-    try std.testing.expectEqualStrings("unknown", messageStatus(m, sent_ms + 30_000).label);
-    try std.testing.expectEqualStrings("unknown", messageStatus(m, sent_ms + 60_000).label);
+    try std.testing.expectEqualStrings("unknown", messageStatus(m, false, sent_ms + 30_000).label);
+    try std.testing.expectEqualStrings("unknown", messageStatus(m, false, sent_ms + 60_000).label);
     try std.testing.expectEqual(.unknown, m.observed_status);
     m.observed_status = .sent;
-    try std.testing.expect(!messageStatus(m, sent_ms + 1).checks);
-    try std.testing.expect(!messageStatus(m, sent_ms + 30_000).checks);
+    try std.testing.expectEqual(.sent, messageStatus(m, false, sent_ms + 1).checks);
+    try std.testing.expectEqual(.sent, messageStatus(m, false, sent_ms + 30_000).checks);
+    try std.testing.expectEqual(.group_sent, messageStatus(m, true, sent_ms + 1).checks);
+    try std.testing.expectEqual(.group_sent, messageStatus(m, true, sent_ms + 30_000).checks);
+    try std.testing.expectEqual(.sent, m.observed_status);
     m.observed_status = .delivered;
-    try std.testing.expect(messageStatus(m, sent_ms + 1).checks);
-    try std.testing.expect(messageStatus(m, sent_ms + 30_000).checks);
+    try std.testing.expectEqual(.delivered, messageStatus(m, false, sent_ms + 1).checks);
+    try std.testing.expectEqual(.delivered, messageStatus(m, false, sent_ms + 30_000).checks);
+    try std.testing.expectEqual(.delivered, messageStatus(m, true, sent_ms + 1).checks);
     m.observed_status = .failed;
-    try std.testing.expectEqualStrings("failed", messageStatus(m, sent_ms + 1).label);
+    try std.testing.expectEqualStrings("failed", messageStatus(m, false, sent_ms + 1).label);
+    try std.testing.expectEqualStrings("failed", messageStatus(m, true, sent_ms + 1).label);
     m.observed_status = .unknown;
+    try std.testing.expect(messageStatus(m, true, sent_ms + 1) == .none);
+    try std.testing.expectEqualStrings("unknown", messageStatus(m, true, sent_ms + 30_000).label);
     m.direction = .incoming;
-    try std.testing.expect(messageStatus(m, sent_ms + 30_000) == .none);
+    try std.testing.expect(messageStatus(m, false, sent_ms + 30_000) == .none);
+    try std.testing.expect(messageStatus(m, true, sent_ms + 30_000) == .none);
     m.direction = .outgoing;
     for ([_][]const u8{
         "2025-12-31T23:59:00Z",
@@ -95,7 +109,7 @@ test "unknown delivery status waits thirty seconds while confirmed outcomes appe
         "invalid",
     }) |stamp| {
         m.timestamp = stamp;
-        try std.testing.expectEqualStrings("unknown", messageStatus(m, sent_ms).label);
+        try std.testing.expectEqualStrings("unknown", messageStatus(m, false, sent_ms).label);
     }
 }
 

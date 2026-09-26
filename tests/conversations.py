@@ -35,6 +35,24 @@ def main():
             add_message(db, 'Older SMS', chat=2, date=now-100, service='SMS')
             add_message(db, 'Current iMessage', chat=2, date=now, is_from_me=1)
             add_message(db, 'SMS reaction ignored', chat=2, date=now+100, service='SMS', associated_message_type=2001)
+            group_statuses = {
+                'Group sent without receipt': 'sent',
+                'Group delivery flag': 'sent',
+                'Group delivery timestamp': 'sent',
+                'Group failure beats receipt': 'failed',
+                'Group incoming with delivery fields': 'received',
+                'Group finished without send': 'unknown',
+            }
+            group_rows = {}
+            for text in group_statuses:
+                fields = dict(is_from_me=1, is_sent=1, is_finished=1)
+                if text == 'Group failure beats receipt':
+                    fields.update(error=1, is_delivered=1, date_delivered=now)
+                elif text == 'Group incoming with delivery fields':
+                    fields.update(is_from_me=0, is_delivered=1, date_delivered=now)
+                elif text == 'Group finished without send':
+                    fields.update(is_sent=0)
+                group_rows[text] = add_message(db, text, chat=2, date=now-4*3600*10**9, **fields)
             for row, peer, local, account in [
                     (5, 'self@example.invalid', '+14155550124', 'account-one'),
                     (6, '+14155550124', 'self@example.invalid', 'account-one'),
@@ -119,6 +137,41 @@ def main():
             worker = subprocess.Popen([str(BIN/'client-probe'), '--control', '--data-dir', str(client), *tls.client_args()],
                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0, env=env)
             wait(lambda: view().get('online') and view().get('chats') == 10)
+            command(kind='select', key=ids[2])
+
+            def group_messages():
+                messages = [json.loads(row[0]) for row in rows(
+                    "SELECT record FROM records WHERE kind='message' AND chat=?",
+                    (ids[2],), path=client/'client.db')]
+                return {m['text']: m for m in messages if m.get('text') in group_statuses}
+
+            wait(lambda: {text: m['observed_status'] for text, m in group_messages().items()} == group_statuses)
+            before_delivery = group_messages()
+            # These four-hour-old messages are outside the recent 100-row scan.
+            # Updating only receipt fields must reach the running client through
+            # reconciliation and SSE, without reopening history or changing IDs.
+            assert rows('SELECT count(*) FROM message WHERE ROWID>?',
+                        (max(group_rows.values()),), path=source)[0][0] >= 100
+            wait(lambda: rows('SELECT count(*) FROM reconcile_chats') == [(0,)])
+            with sqlite3.connect(source) as db:
+                db.execute('UPDATE message SET is_delivered=1 WHERE ROWID=?',
+                           (group_rows['Group delivery flag'],))
+                db.execute('UPDATE message SET date_delivered=? WHERE ROWID=?',
+                           (apple_ns(), group_rows['Group delivery timestamp']))
+            expected_statuses = dict(group_statuses)
+            expected_statuses.update({'Group delivery flag': 'delivered',
+                                      'Group delivery timestamp': 'delivered'})
+            wait(lambda: {text: m['observed_status'] for text, m in group_messages().items()} == expected_statuses)
+            after_delivery = group_messages()
+            for text in group_statuses:
+                assert after_delivery[text]['id'] == before_delivery[text]['id']
+                if text in ('Group delivery flag', 'Group delivery timestamp'):
+                    assert int(after_delivery[text]['revision']) > int(before_delivery[text]['revision'])
+                    assert rows("SELECT origin FROM events WHERE type='message.upsert' AND json_extract(record,'$.id')=? ORDER BY sequence DESC LIMIT 1",
+                                (after_delivery[text]['id'],)) == [('reconciliation',)]
+                else:
+                    assert after_delivery[text] == before_delivery[text]
+            assert rows('SELECT count(*) FROM unread', path=client/'client.db') == [(0,)]
             command(kind='select', key=ids[6])
             wait(lambda: view().get('selected') == ids[5] and view().get('messages') == 100)
             command(kind='older')
@@ -154,7 +207,7 @@ def main():
             assert status == 400 and blocked['error_info']['code'] == 'unsupported_target', (status, blocked)
             assert original_ids <= {row[0] for row in rows('SELECT id FROM messages')}
             assert request('/v1/sync')[1]['server_epoch'] == epoch
-            print('Conversation regressions passed: verified self direct sends, service selection, exact group route, self grouping, pagination, worker, and immutable IDs.')
+            print('Conversation regressions passed: verified self direct sends, service selection, exact group route, late group delivery receipts, self grouping, pagination, worker, and immutable IDs.')
         finally:
             if worker is not None:
                 if worker.poll() is None:

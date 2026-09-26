@@ -20,6 +20,8 @@ root unless noted otherwise.
 
 - [API v1](api.md): routes, synchronization, SSE, send outcomes, source resets,
   and limits.
+- [Group delivery status](group-delivery.md): checkmark semantics, available
+  Messages metadata, and delivery-update coverage.
 - [Certificate management contract](certificate-management.md): issuance,
   enrollment, CSR exchange, and credential lifecycle.
 - [Message security](message-security.md): parsing and storage boundaries with

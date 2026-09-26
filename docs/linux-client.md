@@ -90,7 +90,12 @@ conversation list with unread counts.
 Group and direct conversations appear together, ordered by their latest message,
 newest first, beside a charcoal conversation pane. Incoming and outgoing messages
 share a left-aligned feed with square avatars, sender labels, timestamps, and
-outgoing delivery checkmarks: one for sent, two for delivered.
+outgoing delivery checkmarks: one solid check for sent, two solid checks for delivered.
+Sent group messages add a dotted second check because Messages may leave their
+delivery fields unset. Hovering the checks shows “Sent · group delivery receipts
+unavailable.” A delivery confirmation makes the second check solid. Checkmarks
+do not indicate that someone read the message.
+See [group delivery status](group-delivery.md) for the data and API limitations.
 Unknown delivery states and uncertain-send warnings appear only after 30 seconds
 from the send time; pending sends show “Sending…” during this grace period.
 Confirmed failures appear immediately.

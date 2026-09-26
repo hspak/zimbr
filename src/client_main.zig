@@ -2372,8 +2372,10 @@ const App = struct {
         if (hover(clip) and rl.isMouseButtonPressed(.left)) s.message_selection.clear();
         beginClip(clip);
         var participants: []const []const u8 = &.{};
+        var is_group = false;
         for (v.snapshot.chats) |chat| if (u.eq(chat.value.id, s.key)) {
             participants = chat.value.participants;
+            is_group = !chat.value.is_self and participants.len > 1;
             break;
         };
         if (s.scroll < 54 and v.snapshot.more and !std.mem.startsWith(u8, s.key, "new:")) {
@@ -2418,6 +2420,7 @@ const App = struct {
         }
         // Reevaluate on idle redraws too, even when the snapshot is unchanged.
         const status_now = u.now();
+        var delivery_hover: ?rl.Rectangle = null;
         for (rows[visible.start..visible.end]) |row| {
             if (row.pending) continue;
             const m = v.snapshot.messages[row.source_index];
@@ -2452,10 +2455,10 @@ const App = struct {
                     ar,
                     if (outgoing) "You" else v.snapshot.directory.name(m.service, m.sender),
                 );
-                s.drawMessageHeader(
+                if (s.drawMessageHeader(
                     name,
                     localTime(ar, m.timestamp, false),
-                    display.messageStatus(m, status_now),
+                    display.messageStatus(m, is_group, status_now),
                     .{
                         .x = x,
                         .y = y,
@@ -2463,7 +2466,7 @@ const App = struct {
                     },
                     if (outgoing) theme.colors.ink else style.label,
                     bg,
-                );
+                )) |check_bounds| delivery_hover = check_bounds;
                 if (row.blocks.len == 0) {
                     s.drawMessageText(row, m.text orelse text, .{
                         .x = x,
@@ -2493,7 +2496,7 @@ const App = struct {
                     .height = 34,
                 }, "You", .{ .bubble = theme.colors.incoming, .label = theme.colors.muted }, 17);
                 const status = display.pendingStatus(ar, p.state, p.detail, p.sent_at, status_now);
-                s.drawMessageHeader(
+                _ = s.drawMessageHeader(
                     "You",
                     localTime(ar, p.sent_at, false),
                     .{ .label = status },
@@ -2548,6 +2551,7 @@ const App = struct {
             s.new_messages = false;
             s.worker.push(.{ .kind = .viewed, .text = "yes" }) catch {};
         };
+        if (delivery_hover) |bounds| s.drawGroupDeliveryTooltip(bounds, clip);
     }
     fn drawPeerAvatar(
         s: *App,
@@ -3157,6 +3161,7 @@ const App = struct {
         );
         endClip();
     }
+    // Return hovered checkmark bounds so the hint can be drawn after all rows.
     fn drawMessageHeader(
         s: *App,
         name: []const u8,
@@ -3165,7 +3170,7 @@ const App = struct {
         r: struct { x: f32, y: f32, width: f32 },
         foreground: rl.Color,
         background: rl.Color,
-    ) void {
+    ) ?rl.Rectangle {
         const name_width = @min(r.width * 0.55, s.text.lineSize(name, 14, r.width * 0.55).x);
         // Use a common pixel origin and a fixed font reference. Centering each
         // string's ink moves dates when names or months contain descenders/emoji.
@@ -3197,11 +3202,17 @@ const App = struct {
         const status_x = stamp_x + size.x + 8;
         switch (status) {
             .none => {},
-            .checks => |delivered| drawDeliveryChecks(
-                status_x,
-                (top_pixels + @round((cap_center - 6) * s.text.scale)) / s.text.scale,
-                delivered,
-            ),
+            .checks => |checks| {
+                const status_y = (top_pixels + @round((cap_center - 6) * s.text.scale)) / s.text.scale;
+                drawDeliveryChecks(status_x, status_y, checks);
+                const bounds = rl.Rectangle{
+                    .x = status_x - 3,
+                    .y = status_y - 3,
+                    .width = 26,
+                    .height = 18,
+                };
+                if (checks == .group_sent and hover(bounds)) return bounds;
+            },
             .label => |label| {
                 const width = @max(1, r.x + r.width - status_x);
                 const offset = cap_center - s.text.lineCapCenterY(label, 11, width);
@@ -3216,16 +3227,51 @@ const App = struct {
                 );
             },
         }
+        return null;
     }
-    fn drawDeliveryChecks(x: f32, y: f32, delivered: bool) void {
+    fn drawDeliveryChecks(x: f32, y: f32, checks: display.MessageStatus.Checks) void {
         // Neutral checks indicate transport status; the relay has no read receipts.
         const color = theme.colors.muted;
         rl.drawLineEx(.{ .x = x + 1, .y = y + 6 }, .{ .x = x + 5, .y = y + 10 }, 1.5, color);
         rl.drawLineEx(.{ .x = x + 5, .y = y + 10 }, .{ .x = x + 13, .y = y + 2 }, 1.5, color);
-        if (delivered) {
-            rl.drawLineEx(.{ .x = x + 9, .y = y + 8 }, .{ .x = x + 11, .y = y + 10 }, 1.5, color);
-            rl.drawLineEx(.{ .x = x + 11, .y = y + 10 }, .{ .x = x + 19, .y = y + 2 }, 1.5, color);
+        switch (checks) {
+            .sent => {},
+            .group_sent => {
+                const dots = [_]rl.Vector2{
+                    .{ .x = 9, .y = 8 },
+                    .{ .x = 11, .y = 10 },
+                    .{ .x = 13, .y = 8 },
+                    .{ .x = 15, .y = 6 },
+                    .{ .x = 17, .y = 4 },
+                    .{ .x = 19, .y = 2 },
+                };
+                for (dots) |dot| shapes.drawCircle(.{ .x = x + dot.x, .y = y + dot.y }, 0.85, color);
+            },
+            .delivered => {
+                rl.drawLineEx(.{ .x = x + 9, .y = y + 8 }, .{ .x = x + 11, .y = y + 10 }, 1.5, color);
+                rl.drawLineEx(.{ .x = x + 11, .y = y + 10 }, .{ .x = x + 19, .y = y + 2 }, 1.5, color);
+            },
         }
+    }
+    fn drawGroupDeliveryTooltip(s: *App, anchor: rl.Rectangle, viewport: rl.Rectangle) void {
+        const label = "Sent · group delivery receipts unavailable.";
+        const size = s.text.lineSize(label, 12, @max(1, viewport.width - 32));
+        const width = size.x + 20;
+        const height = size.y + 12;
+        const above = anchor.y - height - 6;
+        const bounds = rl.Rectangle{
+            .x = std.math.clamp(anchor.x, viewport.x + 6, viewport.x + viewport.width - width - 6),
+            .y = std.math.clamp(
+                if (above >= viewport.y + 6) above else anchor.y + anchor.height + 6,
+                viewport.y + 6,
+                @max(viewport.y + 6, viewport.y + viewport.height - height - 6),
+            ),
+            .width = width,
+            .height = height,
+        };
+        shapes.drawRectangle(bounds, 0.2, theme.colors.incoming);
+        shapes.drawRectangleLines(bounds, 0.2, 1, theme.colors.line);
+        s.text.drawLineCentered(label, bounds, 12, theme.colors.ink, theme.colors.incoming);
     }
     fn historyTextWidth(r: rl.Rectangle) f32 {
         return @max(80, r.width - 90);
@@ -5075,7 +5121,9 @@ test "message dates keep font alignment across glyphs and fractional row positio
             "민수",
         }) |name| for ([_]display.MessageStatus{
             .none,
-            .{ .checks = true },
+            .{ .checks = .sent },
+            .{ .checks = .group_sent },
+            .{ .checks = .delivered },
             .{ .label = "Sending" },
         }) |status| for ([_][]const u8{
             "Sep 25 · 16:00",
@@ -5096,7 +5144,7 @@ test "message dates keep font alignment across glyphs and fractional row positio
             // Message heights and scrolling can put a row at any subpixel phase.
             for (0..8) |i| {
                 const row: f32 = @floatFromInt(i);
-                app.drawMessageHeader(name, stamp, status, .{
+                _ = app.drawMessageHeader(name, stamp, status, .{
                     .x = 10,
                     .y = (12 + row * 40 + row / 8) / scale,
                     .width = 490,
