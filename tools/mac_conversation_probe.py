@@ -11,6 +11,11 @@ from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
+import sys
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'packaging/macos'))
+from profiles import PROFILES
 
 
 def service(value):
@@ -98,9 +103,12 @@ def inspect(journal_path, messages_path, conversation_ids):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--conversation', action='append', required=True, help='Relay conversation ID; repeat to compare up to eight chats')
-    parser.add_argument('--data-dir', type=Path, default=Path.home()/'Library/Application Support/Zimbr')
+    parser.add_argument('--data-dir', type=Path, default=None)
     parser.add_argument('--messages-db', type=Path, default=Path.home()/'Library/Messages/chat.db')
+    parser.add_argument('--profile', choices=PROFILES, default='dev')
     args = parser.parse_args()
+    profile = PROFILES[args.profile]
+    args.data_dir = args.data_dir or profile.data(Path.home())
     if len(args.conversation) > 8:
         parser.error('Select at most eight conversations')
     try:

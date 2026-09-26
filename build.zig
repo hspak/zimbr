@@ -2,10 +2,30 @@ const std = @import("std");
 const builtin = @import("builtin");
 const manifest = @import("build.zig.zon");
 const log = std.log.scoped(.build);
+const ProfileName = enum { dev, release };
+const RelayProfile = struct {
+    name: []const u8,
+    display_name: []const u8,
+    bundle_id: []const u8,
+    data_directory: []const u8,
+    command: []const u8,
+    default_port: u16,
+};
 
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const profile_name = b.option(ProfileName, "profile", "Relay identity: dev (default) or release") orelse .dev;
+    const profiles = try std.json.parseFromSlice(
+        struct { dev: RelayProfile, release: RelayProfile },
+        b.allocator,
+        @embedFile("packaging/macos/profiles.json"),
+        .{},
+    );
+    const profile = switch (profile_name) {
+        .dev => profiles.value.dev,
+        .release => profiles.value.release,
+    };
     const openssl = b.option(
         []const u8,
         "openssl-prefix",
@@ -26,7 +46,7 @@ pub fn build(b: *std.Build) !void {
         else
             null;
     for ([_]bool{ false, true }) |fake| {
-        const mod = module(b, target, optimize, sdk, openssl, fake);
+        const mod = module(b, target, optimize, sdk, openssl, fake, profile);
         const exe = b.addExecutable(.{ .name = if (fake) "fake-relay" else "relay", .root_module = mod });
         const install = b.addInstallArtifact(exe, .{});
         if (fake or target.result.os.tag == .macos) {
@@ -54,7 +74,7 @@ pub fn build(b: *std.Build) !void {
             ).dependOn(&exe.step);
         }
     }
-    const tests = b.addTest(.{ .root_module = module(b, target, optimize, sdk, openssl, true) });
+    const tests = b.addTest(.{ .root_module = module(b, target, optimize, sdk, openssl, true, profile) });
     b.step("test", "Run relay and protocol tests").dependOn(&b.addRunArtifact(tests).step);
     if (target.result.os.tag == .macos) {
         const native_tests = b.addTest(.{ .root_module = module(
@@ -64,6 +84,7 @@ pub fn build(b: *std.Build) !void {
             sdk,
             openssl,
             false,
+            profile,
         ) });
         b.step(
             "test-macos-enrichment",
@@ -231,6 +252,7 @@ fn module(
     sdk: ?[]const u8,
     openssl: ?[]const u8,
     fake: bool,
+    profile: RelayProfile,
 ) *std.Build.Module {
     const m = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -240,6 +262,8 @@ fn module(
     });
     const opts = b.addOptions();
     opts.addOption(bool, "fake", fake);
+    inline for (std.meta.fields(RelayProfile)) |field|
+        opts.addOption(field.type, "relay_" ++ field.name, @field(profile, field.name));
     m.addOptions("options", opts);
     m.linkSystemLibrary("sqlite3", .{});
     m.addIncludePath(b.path("src"));

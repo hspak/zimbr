@@ -8,11 +8,16 @@ from collections import Counter
 from pathlib import Path
 import plistlib
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
 from urllib.parse import urlencode
 from tls_support import Credentials
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'packaging/macos'))
+from profiles import PROFILES
 
 
 def screen_locked():
@@ -146,12 +151,17 @@ def main():
     parser.add_argument('--confirm-send',action='store_true',help='Authorize two labeled test messages: direct and existing-chat reply')
     parser.add_argument('--enrichment',action='store_true',help='Read aggregate enrichment readiness and counts without sending; optionally inspect --conversation')
     parser.add_argument('--conversation',help='Instead test one explicitly selected existing conversation, including a group')
-    parser.add_argument('--restart',action='store_true',help='Restart only com.hsp.zimbr.relay after the send checks')
+    parser.add_argument('--restart',action='store_true',help='Restart only the selected profile after the send checks')
     parser.add_argument('--wait-for-lock',type=int,metavar='SECONDS',help='Wait for the user to lock the screen, then verify one existing-chat send while locked')
-    parser.add_argument('--data-dir',type=Path,default=Path.home()/'Library/Application Support/Zimbr')
+    parser.add_argument('--data-dir',type=Path,default=None)
     parser.add_argument('--tls-config',type=Path,help='Administrative HTTPS credential config (default: DATA/admin.json)')
     parser.add_argument('--output',type=Path,default=Path('.local/mac-acceptance.json'))
+    parser.add_argument('--profile', choices=PROFILES, default='dev')
     args=parser.parse_args()
+    profile = PROFILES[args.profile]
+    args.data_dir = args.data_dir or profile.data(Path.home())
+    if args.restart and args.data_dir.resolve() != profile.data(Path.home()).resolve():
+        parser.error("--restart requires the selected profile's installed data directory")
     if args.enrichment:
         if args.confirm_send or args.recipient or args.restart or args.wait_for_lock:
             parser.error('--enrichment is a read-only check; send/restart options cannot be combined')
@@ -234,7 +244,7 @@ def main():
     before_restart=request('/v1/sync')
     replay=client.events(baseline['cursor'],before_restart['cursor'],identities=identity_events)
     if args.restart:
-        subprocess.run(['launchctl','kickstart','-k','gui/'+str(os.getuid())+'/com.hsp.zimbr.relay'],check=True)
+        subprocess.run(['launchctl','kickstart','-k',f'gui/{os.getuid()}/{profile.bundle_id}'],check=True)
         deadline=time.monotonic()+45
         while True:
             try:

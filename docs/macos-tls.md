@@ -8,6 +8,10 @@ The Linux provisioning and test handoff corrections are recorded as resolved in
 native relay directly. Installed two-host acceptance remains separate.
 There is no plaintext listener, bearer token, or automatic fallback.
 
+Local examples use the default dev profile (`Zimbr Relay Dev`, port 8732).
+For Homebrew, select the release profile (port 8731) when building, installing,
+or running enrollment/revocation tools. See [profile isolation](macos-profiles.md).
+
 ## Build
 
 Use Zig 0.16.0 and OpenSSL **3.5 LTS**, including current patches. The native
@@ -90,7 +94,7 @@ Relay configuration (`relay.json`):
 ```json
 {
   "listen_address": "192.0.2.10",
-  "port": 8731,
+  "port": 8732,
   "server_name": "relay.example",
   "server_cert_file": "/private/staging/server/server.pem",
   "server_key_file": "/private/staging/server/server-key.pem",
@@ -109,7 +113,7 @@ Mac administrative tools use a separate 0600 `admin.json`:
 
 ```json
 {
-  "relay_url": "https://relay.example:8731",
+  "relay_url": "https://relay.example:8732",
   "ca_file": "/private/staging/admin/ca.pem",
   "client_cert_file": "/private/staging/admin/client.pem",
   "client_key_file": "/private/staging/admin/client-key.pem"
@@ -142,13 +146,15 @@ the same certificate and key. Preserve this directory with secure Mac backups.
 
 The installer reuses this identity by default, unlocking its dedicated Keychain
 only while signing. The designated requirement pins both the certificate and
-`com.hsp.zimbr.relay`, so different builds retain the same code identity. A missing
-identity stops installation rather than silently switching to ad-hoc signing.
+`com.hsp.zimbr.relay.dev` for dev, or `com.hsp.zimbr.relay` for release, so updates
+within a profile retain the same code identity. The profiles do not share privacy
+grants. A missing identity stops installation rather than silently switching to
+ad-hoc signing.
 Use `--identity NAME_OR_SHA1` for a separately managed signing identity;
 `--identity -` explicitly opts into disposable ad-hoc builds.
 
 After the first switch from ad-hoc signing, remove and re-add
-`~/Applications/Zimbr Relay.app` in Full Disk Access and approve Messages
+`~/Applications/Zimbr Relay Dev.app` in Full Disk Access and approve Messages
 Automation if requested. Subsequent updates using the same identity should
 retain those grants. Changing the certificate, deleting the signing state, or
 returning to ad-hoc signing requires new grants. This local identity is for this
@@ -165,7 +171,7 @@ binaries retain the same identity, then install and restart the relay:
 After restoring Full Disk Access for the newly signed app, restart it with:
 
 ```sh
-launchctl kickstart -k "gui/$(id -u)/com.hsp.zimbr.relay"
+launchctl kickstart -k "gui/$(id -u)/com.hsp.zimbr.relay.dev"
 ```
 
 First stage and inspect, then install:
@@ -181,10 +187,10 @@ python3 packaging/macos/install.py --install --start \
 ```
 
 The installer validates before stopping the old service, verifies process exit,
-backs up the journal consistently under `Zimbr/backups/TIMESTAMP/relay.db`, installs
+backs up the journal consistently under `Zimbr Dev/backups/TIMESTAMP/relay.db`, installs
 new private credential directories and configuration, removes the runtime token,
-and starts the same LaunchAgent identity: `com.hsp.zimbr.relay`. The app remains
-`~/Applications/Zimbr Relay.app`. Epoch, cursor, history, and durable request IDs
+and starts the same LaunchAgent identity: `com.hsp.zimbr.relay.dev`. The app remains
+`~/Applications/Zimbr Relay Dev.app`. Epoch, cursor, history, and durable request IDs
 are unchanged. Future upgrades can reuse installed material by omitting
 `--tls-config`/`--admin-config`. There is no database migration.
 
@@ -195,13 +201,13 @@ identity across builds. Check the installed identity, not just
 a terminal/development executable:
 
 ```sh
-"$HOME/Applications/Zimbr Relay.app/Contents/MacOS/relay" doctor --check-automation
+open -n -W -a "$HOME/Applications/Zimbr Relay Dev.app" --args doctor --check-automation
 python3 - <<'PY'
 from pathlib import Path
 import sys
 sys.path.insert(0, 'tools')
 from mac_acceptance import Client
-print(Client(Path.home()/'Library/Application Support/Zimbr').request('/v1/status'))
+print(Client(Path.home()/'Library/Application Support/Zimbr Dev').request('/v1/status'))
 PY
 ```
 

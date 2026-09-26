@@ -18,6 +18,7 @@ import zipfile
 
 from bundle import MINIMUM_MACOS, ROOT, source_version, stage
 from signing import LABEL, default_directory
+from profiles import PROFILES
 
 APP = 'Zimbr Relay.app/Contents'
 REQUIRED = {
@@ -57,6 +58,7 @@ def validate(archive, version, revision):
             'CFBundleIdentifier': LABEL, 'CFBundleExecutable': 'relay',
             'CFBundleVersion': version, 'CFBundleShortVersionString': version,
             'LSMinimumSystemVersion': MINIMUM_MACOS,
+            'ZimbrProfile': 'release', 'ZimbrDataDirectory': PROFILES['release'].data_directory,
         }.items():
             if info.get(field) != value:
                 raise ValueError(f'App {field} does not match this release')
@@ -110,12 +112,13 @@ def build(args):
         subprocess.run([
             zig, 'build', 'relay', 'test', 'test-macos-enrichment',
             '-Doptimize=ReleaseSafe', '-Dtarget=aarch64-macos.27.0', '-Dcpu=apple_m1',
+            '-Dprofile=release',
             f'-Dopenssl-prefix={openssl}', '--prefix', str(prefix),
         ], cwd=ROOT, check=True)
         payload = work / 'payload'
         stage(payload / 'Zimbr Relay.app', prefix / 'bin/relay', prefix / 'bin/image-helper',
               license_path, prefix / 'share/zimbr/licenses/libPhoneNumber-LICENSE',
-              identity=args.identity, signing_directory=args.signing_directory)
+              identity=args.identity, signing_directory=args.signing_directory, profile=PROFILES['release'])
         files = {path.relative_to(payload).as_posix(): digest(path.read_bytes())
                  for path in (payload / 'Zimbr Relay.app').rglob('*') if path.is_file()}
         manifest = {'schema': 1, 'project': 'zimbr', 'version': version, 'revision': revision,

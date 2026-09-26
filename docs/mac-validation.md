@@ -37,7 +37,9 @@ do not establish installed-app acceptance.
 
 ## Real-account validation
 
-Run the helper from the repository root.
+Run the helper from the repository root. It defaults to the dev profile; use
+`--profile release` for Homebrew. [Profile identities](macos-profiles.md) have
+separate permissions and state.
 
 After permissions are granted, use only a deliberately selected recipient:
 

@@ -41,6 +41,43 @@ static int status(void *raw, char *out, size_t capacity) {
     return snprintf(out, capacity, "{\"summary\":\"Disposable restart check\",\"warning\":false}");
 }
 
+static int emptyConfig(void *raw, char *out, size_t capacity) {
+    (void)raw;
+    return snprintf(out, capacity, "{}");
+}
+
+static void checkProfile(const char *name, const char *identifier, unsigned short port,
+                         const char *otherIdentifier) {
+    NSString *config = [NSString stringWithFormat:@"/unused/profile-probe-%d.json", getpid()];
+    NSString *appName = [NSString stringWithUTF8String:name];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        zr_menu_reopen(config.UTF8String, otherIdentifier);
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        ZrMenuController *controller = (ZrMenuController *)NSApp.delegate;
+        if (controller.window != nil) _exit(13);
+        zr_menu_reopen(config.UTF8String, identifier);
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        ZrMenuController *controller = (ZrMenuController *)NSApp.delegate;
+        if (!controller.loaded || !controller.window.visible ||
+            ![controller.window.title isEqualToString:[appName stringByAppendingString:@" Settings"]] ||
+            ![controller.item.menu.itemArray.firstObject.title isEqualToString:appName] ||
+            ![controller.item.button.toolTip hasPrefix:[appName stringByAppendingString:@":"]] ||
+            controller.fields[@"port"].integerValue != port) _exit(14);
+        // Check target selection without dispatching any launchctl operation.
+        setenv("XPC_SERVICE_NAME", identifier, 1);
+        NSString *target = [NSString stringWithFormat:@"gui/%u/%s", getuid(), identifier];
+        if (![[controller serviceTarget] isEqualToString:target]) _exit(15);
+        setenv("XPC_SERVICE_NAME", otherIdentifier, 1);
+        if ([controller serviceTarget] != nil) _exit(16);
+        _exit(0);
+    });
+    ZrMenu menu = { .name = name, .bundle_id = identifier, .default_port = port,
+                   .read_config = emptyConfig, .status = status };
+    zr_menu_run(&menu, config.UTF8String, "/unused", 0);
+}
+
 static int saveConfig(void *raw, const char *expected, size_t expectedLength,
                       const char *bytes, size_t length, char *diagnostic, size_t capacity) {
     (void)raw; (void)diagnostic; (void)capacity;
@@ -100,6 +137,10 @@ static void checkQuit(const char *output, BOOL rejected) {
 }
 
 int main(int argc, char **argv) {
+    if (argc == 6 && strcmp(argv[1], "check-profile") == 0) {
+        @autoreleasepool { checkProfile(argv[2], argv[3], (unsigned short)atoi(argv[4]), argv[5]); }
+        return 3;
+    }
     if (argc == 3 && (strcmp(argv[1], "check-quit") == 0 || strcmp(argv[1], "check-quit-rejected") == 0)) {
         @autoreleasepool { checkQuit(argv[2], strcmp(argv[1], "check-quit-rejected") == 0); }
         return 0;

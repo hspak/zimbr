@@ -8,7 +8,9 @@
 #include <unistd.h>
 #include "menu.h"
 
-static NSString *const reopenNotification = @"com.hsp.zimbr.relay.show-settings";
+static NSString *reopenNotification(NSString *identifier) {
+    return [identifier stringByAppendingString:@".show-settings"];
+}
 extern char **environ;
 
 static int spawnReplacement(NSArray<NSString *> *arguments) {
@@ -34,7 +36,7 @@ static int spawnReplacement(NSArray<NSString *> *arguments) {
     return reason;
 }
 
-static NSString *explanation(NSString *code) {
+static NSString *explanation(NSString *code, NSString *name) {
     NSDictionary *messages = @{
         @"UnsafeOrMissingSecurityFile": @"Settings or credentials are missing or have unsafe permissions. Select provisioned files in private directories.",
         @"InvalidTlsConfiguration": @"Check the server name, port, and required credential paths.",
@@ -51,12 +53,12 @@ static NSString *explanation(NSString *code) {
         @"ConfigurationWriteDenied": @"The settings file could not be safely replaced. Check that its directory is private, writable, and contains no symbolic links.",
         @"AddressInUse": @"The listening address and port are already in use. Choose another port or stop the other listener.",
         @"AddressNotAvailable": @"The listening address is not available on this Mac.",
-        @"database_access_required": @"Allow Zimbr Relay in System Settings → Privacy & Security → Full Disk Access, then restart the relay.",
+        @"database_access_required": [NSString stringWithFormat:@"Allow %@ in System Settings → Privacy & Security → Full Disk Access, then restart the relay.", name],
         @"schema_unsupported": @"This Messages database version is not supported.",
         @"database_busy": @"Messages is busy. The relay will retry automatically.",
         @"persistence_or_source_failure": @"Message history could not be read or saved. Open Logs for details.",
         @"automation_unverified": @"Messages Automation has not been verified yet.",
-        @"automation_permission_required": @"Allow Zimbr Relay to control Messages in System Settings → Privacy & Security → Automation.",
+        @"automation_permission_required": [NSString stringWithFormat:@"Allow %@ to control Messages in System Settings → Privacy & Security → Automation.", name],
         @"messages_unavailable": @"Open Messages and check that the intended account is signed in.",
         @"unsupported_account_configuration": @"Check the signed-in account in Messages.",
         @"automation_launch_failed": @"Messages Automation could not start. Open Logs for details.",
@@ -69,6 +71,8 @@ static NSString *explanation(NSString *code) {
 
 @interface ZrMenuController : NSObject <NSApplicationDelegate, NSWindowDelegate>
 @property(nonatomic) ZrMenu bridge;
+@property(nonatomic, copy) NSString *appName;
+@property(nonatomic, copy) NSString *bundleIdentifier;
 @property(nonatomic, copy) NSString *configPath;
 @property(nonatomic, copy) NSString *dataPath;
 @property(nonatomic) BOOL showOnLaunch;
@@ -127,7 +131,7 @@ static NSString *explanation(NSString *code) {
     NSString *icon = [NSBundle.mainBundle pathForResource:@"statusTemplate" ofType:@"pdf"];
     self.normalImage = icon ? [[NSImage alloc] initWithContentsOfFile:icon] : nil;
     if (!self.normalImage)
-        self.normalImage = [NSImage imageWithSystemSymbolName:@"bubble.left.and.bubble.right" accessibilityDescription:@"Zimbr Relay"];
+        self.normalImage = [NSImage imageWithSystemSymbolName:@"bubble.left.and.bubble.right" accessibilityDescription:self.appName];
     self.normalImage.size = NSMakeSize(18, 18);
     self.normalImage.template = YES;
     NSImage *base = self.normalImage;
@@ -140,9 +144,10 @@ static NSString *explanation(NSString *code) {
     }];
     self.warningImage.template = YES;
     self.item.button.image = self.normalImage;
-    [self.item.button setAccessibilityLabel:@"Zimbr Relay"];
-    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Zimbr Relay"];
+    [self.item.button setAccessibilityLabel:self.appName];
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:self.appName];
     menu.autoenablesItems = NO;
+    [self addItem:self.appName action:NULL menu:menu].enabled = NO;
     self.summary = [self addItem:@"Starting relay…" action:NULL menu:menu];
     self.summary.enabled = NO;
     self.detail = [self addItem:@"" action:NULL menu:menu];
@@ -157,7 +162,7 @@ static NSString *explanation(NSString *code) {
     self.quitItem = [self addItem:@"Quit Relay" action:@selector(quit:) menu:menu];
     self.item.menu = menu;
     [NSDistributedNotificationCenter.defaultCenter addObserver:self selector:@selector(showSettings:)
-        name:reopenNotification object:self.configPath suspensionBehavior:NSNotificationSuspensionBehaviorDeliverImmediately];
+        name:reopenNotification(self.bundleIdentifier) object:self.configPath suspensionBehavior:NSNotificationSuspensionBehaviorDeliverImmediately];
     // Readiness often settles within a second; don't leave the initial snapshot
     // on screen until the slower steady-state timer fires.
     [self scheduleRefresh:0.25];
@@ -208,13 +213,13 @@ static NSString *explanation(NSString *code) {
             self.statusPending = NO;
             self.latestStatus = status;
             self.summary.title = status[@"summary"] ?: @"Status unavailable";
-            NSString *detail = explanation(status[@"detail"] ?: @"Open Logs for details.");
+            NSString *detail = explanation(status[@"detail"] ?: @"Open Logs for details.", self.appName);
             self.detail.title = detail.length > 72 ? [[detail substringToIndex:71] stringByAppendingString:@"…"] : detail;
             self.detail.hidden = detail.length == 0;
             self.detail.toolTip = detail;
             self.item.button.toolTip = detail.length ?
-                [NSString stringWithFormat:@"Zimbr Relay: %@\n%@", self.summary.title, detail] :
-                [NSString stringWithFormat:@"Zimbr Relay: %@", self.summary.title];
+                [NSString stringWithFormat:@"%@: %@\n%@", self.appName, self.summary.title, detail] :
+                [NSString stringWithFormat:@"%@: %@", self.appName, self.summary.title];
             self.item.button.image = !status || [status[@"warning"] boolValue] ? self.warningImage : self.normalImage;
         });
     });
@@ -264,7 +269,7 @@ static NSString *explanation(NSString *code) {
 - (void)buildWindow {
     self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 660, 590)
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
-    self.window.title = @"Zimbr Relay Settings";
+    self.window.title = [self.appName stringByAppendingString:@" Settings"];
     self.window.releasedWhenClosed = NO;
     self.window.delegate = self;
     self.fields = [NSMutableDictionary dictionary];
@@ -345,7 +350,7 @@ static NSString *explanation(NSString *code) {
                 self.fields[key].stringValue = [value isKindOfClass:NSString.class] ? value :
                     ([value isKindOfClass:NSNumber.class] ? [value stringValue] : @"");
             }
-            if (!object[@"port"]) self.fields[@"port"].stringValue = @"8731";
+            if (!object[@"port"]) self.fields[@"port"].stringValue = [NSString stringWithFormat:@"%u", self.bridge.default_port];
             self.notice.stringValue = length == -1 ? @"Settings could not be safely read. Check the file and directory permissions, then Reload." :
                 (!object ? @"Complete the settings using provisioned certificates and a device list. Certificate issuance is managed separately." :
                 @"Credentials are validated before saving. Changing the server name requires a certificate that covers that name.");
@@ -413,7 +418,7 @@ static NSString *explanation(NSString *code) {
         NSString *reason = [NSString stringWithUTF8String:diagnostic] ?: @"Settings could not be saved.";
         dispatch_async(dispatch_get_main_queue(), ^{
             [self setEditingBusy:NO];
-            if (result < 0) { self.notice.stringValue = explanation(reason); return; }
+            if (result < 0) { self.notice.stringValue = explanation(reason, self.appName); return; }
             self.originalBytes = bytes;
             if (result == 1) {
                 self.notice.stringValue = @"Settings were saved, but disk synchronization failed. Check available disk space, then restart the relay.";
@@ -429,7 +434,7 @@ static NSString *explanation(NSString *code) {
     (void)sender;
     if (self.busy) return;
     NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Restart Zimbr Relay?";
+    alert.messageText = [NSString stringWithFormat:@"Restart %@?", self.appName];
     alert.informativeText = @"Clients will briefly disconnect. Unsaved settings will be discarded.";
     [alert addButtonWithTitle:@"Restart"];
     [alert addButtonWithTitle:@"Cancel"];
@@ -439,7 +444,7 @@ static NSString *explanation(NSString *code) {
 
 - (NSString *)serviceTarget {
     const char *service = getenv("XPC_SERVICE_NAME");
-    NSString *identifier = NSBundle.mainBundle.bundleIdentifier;
+    NSString *identifier = self.bundleIdentifier;
     if (!service || !identifier || strcmp(service, identifier.UTF8String) != 0) return nil;
     return [NSString stringWithFormat:@"gui/%u/%@", getuid(), identifier];
 }
@@ -513,7 +518,7 @@ static NSString *explanation(NSString *code) {
         [self.latestStatus[@"contacts_permission"] isEqualToString:@"authorized"]) {
         alert.alertStyle = NSAlertStyleInformational;
         alert.messageText = @"Permissions are all set";
-        alert.informativeText = @"Zimbr Relay can read and send Messages and access Contacts.";
+        alert.informativeText = [NSString stringWithFormat:@"%@ can read and send Messages and access Contacts.", self.appName];
         [alert addButtonWithTitle:@"OK"];
         [NSApp activateIgnoringOtherApps:YES];
         if (self.window.visible) [alert beginSheetModalForWindow:self.window completionHandler:nil];
@@ -531,8 +536,8 @@ static NSString *explanation(NSString *code) {
         ([self.latestStatus[@"sending_available"] boolValue] ? @"Available" : @"Unavailable") : @"Not checked";
     NSString *contacts = permissionNames[self.latestStatus[@"contacts_permission"] ?: @""] ?: @"Not checked";
     alert.informativeText = [NSString stringWithFormat:
-        @"Reading Messages: %@\nSending Messages: %@\nContacts: %@\n\nAllow Zimbr Relay under Privacy & Security → Full Disk Access and Automation (Messages). Contacts access is optional. Restart after changing Full Disk Access.",
-        reading, sending, contacts];
+        @"Reading Messages: %@\nSending Messages: %@\nContacts: %@\n\nAllow %@ under Privacy & Security → Full Disk Access and Automation (Messages). Contacts access is optional. Restart after changing Full Disk Access.",
+        reading, sending, contacts, self.appName];
     [alert addButtonWithTitle:@"Open Privacy Settings"];
     [alert addButtonWithTitle:@"Request Contacts Access"];
     [alert addButtonWithTitle:@"Cancel"];
@@ -562,6 +567,10 @@ void zr_menu_run(const ZrMenu *menu, const char *config, const char *data, int s
         [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
         ZrMenuController *controller = [[ZrMenuController alloc] init];
         controller.bridge = *menu;
+        controller.appName = menu->name ? [NSString stringWithUTF8String:menu->name] :
+            [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleName"];
+        controller.bundleIdentifier = menu->bundle_id ? [NSString stringWithUTF8String:menu->bundle_id] :
+            NSBundle.mainBundle.bundleIdentifier;
         controller.configPath = [NSString stringWithUTF8String:config];
         controller.dataPath = [NSString stringWithUTF8String:data];
         controller.showOnLaunch = show_settings != 0;
@@ -572,9 +581,9 @@ void zr_menu_run(const ZrMenu *menu, const char *config, const char *data, int s
     }
 }
 
-void zr_menu_reopen(const char *config) {
+void zr_menu_reopen(const char *config, const char *bundle_id) {
     @autoreleasepool {
-        [NSDistributedNotificationCenter.defaultCenter postNotificationName:reopenNotification
+        [NSDistributedNotificationCenter.defaultCenter postNotificationName:reopenNotification([NSString stringWithUTF8String:bundle_id])
             object:[NSString stringWithUTF8String:config] userInfo:nil deliverImmediately:YES];
     }
 }

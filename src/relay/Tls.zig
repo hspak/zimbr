@@ -1,4 +1,5 @@
 const std = @import("std");
+const options = @import("options");
 const contacts = @import("adapter/contacts.zig");
 const u = @import("../common.zig");
 pub const c = @cImport({
@@ -12,7 +13,7 @@ enabled_devices: usize,
 
 pub const Config = struct {
     listen_address: []const u8,
-    port: u16 = 8731,
+    port: u16 = options.relay_default_port,
     server_name: []const u8,
     server_cert_file: []const u8,
     server_key_file: []const u8,

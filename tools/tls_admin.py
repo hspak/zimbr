@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import plistlib
 import subprocess
+import sys
 import tempfile
 import time
 from cryptography import x509
@@ -17,7 +18,8 @@ from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, ExtensionOID, NameOID
 from tls_support import private_path, private_directory, read_json
 
-LABEL = 'com.hsp.zimbr.relay'
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'packaging/macos'))
+from profiles import PROFILES
 UTC = dt.timezone.utc
 
 
@@ -133,7 +135,7 @@ def sign(args):
     if not marker.exists(): atomic(marker, b'Zimbr setup-time issuer; never install in system trust.\n')
     for existing in (marker, caroot/'rootCA.pem', caroot/'rootCA-key.pem'):
         if existing.exists(): private_path(existing)
-    if caroot.is_relative_to(Path(__file__).resolve().parents[1]) or caroot.is_relative_to(Path.home()/'Library/Application Support/Zimbr'):
+    if caroot.is_relative_to(Path(__file__).resolve().parents[1]) or any(caroot.is_relative_to(profile.data(Path.home())) for profile in PROFILES.values()):
         raise ValueError('CAROOT must remain outside source and runtime directories')
     csr_bytes = private_path(args.csr).read_bytes()
     csr = x509.load_pem_x509_csr(csr_bytes)
@@ -158,18 +160,18 @@ def sign(args):
     print(json.dumps({'sha256': cert.fingerprint(hashes.SHA256()).hex(), 'expires': cert.not_valid_after_utc.isoformat()}))
 
 
-def pid_of_service():
-    result = subprocess.run(['launchctl', 'print', f'gui/{os.getuid()}/{LABEL}'], capture_output=True, text=True, check=True)
+def pid_of_service(profile):
+    result = subprocess.run(['launchctl', 'print', f'gui/{os.getuid()}/{profile.bundle_id}'], capture_output=True, text=True, check=True)
     match = re.search(r'^\s*pid = (\d+)$', result.stdout, re.M)
     return int(match.group(1)) if match else None
 
 
-def restart(config):
-    old = pid_of_service()
-    subprocess.run(['launchctl', 'kickstart', '-k', f'gui/{os.getuid()}/{LABEL}'], check=True)
+def restart(config, profile):
+    old = pid_of_service(profile)
+    subprocess.run(['launchctl', 'kickstart', '-k', f'gui/{os.getuid()}/{profile.bundle_id}'], check=True)
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
-        new = pid_of_service()
+        new = pid_of_service(profile)
         old_gone = old is None
         if old is not None:
             try: os.kill(old, 0)
@@ -185,9 +187,13 @@ def restart(config):
 
 
 def device(args):
+    profile = PROFILES[args.profile]
+    args.config = args.config or profile.data(Path.home())/'relay.json'
+    args.relay = args.relay or profile.app(Path.home())/'Contents/MacOS/relay'
+    profile.verify_binary(args.relay)
     cfg = read_json(args.config)
     if not args.stage:
-        with (Path.home()/'Library/LaunchAgents'/f'{LABEL}.plist').open('rb') as f:
+        with (Path.home()/'Library/LaunchAgents'/f'{profile.bundle_id}.plist').open('rb') as f:
             installed = plistlib.load(f)['ProgramArguments']
         if '--config' not in installed or Path(installed[installed.index('--config')+1]).resolve() != args.config.resolve() or Path(installed[0]).resolve() != args.relay.resolve():
             raise ValueError('Device changes must target the configuration and executable used by the installed LaunchAgent')
@@ -213,7 +219,7 @@ def device(args):
     if args.stage:
         print(json.dumps({'sha256': fingerprint, 'restart_complete': False, 'notice': 'Staged only; restart required to apply access changes'}))
     else:
-        print(json.dumps({'sha256': fingerprint, **restart(cfg)}))
+        print(json.dumps({'sha256': fingerprint, **restart(cfg, profile)}))
 
 
 def main():
@@ -233,8 +239,9 @@ def main():
     issue.add_argument('--mkcert', default='mkcert')
     for action in ('enroll', 'revoke'):
         d = sub.add_parser(action)
-        d.add_argument('--config', type=Path, default=Path.home()/'Library/Application Support/Zimbr/relay.json')
-        d.add_argument('--relay', type=Path, default=Path.home()/'Applications/Zimbr Relay.app/Contents/MacOS/relay')
+        d.add_argument('--profile', choices=PROFILES, default='dev')
+        d.add_argument('--config', type=Path)
+        d.add_argument('--relay', type=Path)
         d.add_argument('--stage', action='store_true', help='Stage only; explicitly does not complete enrollment/revocation')
         if action == 'enroll':
             d.add_argument('--cert', type=Path, required=True); d.add_argument('--label', required=True)

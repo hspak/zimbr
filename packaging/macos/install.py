@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT/'tools'))
 from tls_support import private_path, read_json
 from signing import default_directory
 from bundle import stage
-LABEL = 'com.hsp.zimbr.relay'
+from profiles import PROFILES
 
 
 def write_json(path, value):
@@ -42,13 +42,13 @@ def service_pid(service):
     return int(match.group(1)) if match else None
 
 
-def launch_agent(app, data, home):
+def launch_agent(app, data, home, profile=PROFILES['dev']):
     # HTTPS requests cannot obtain Adaptive's XPC boosts. Use Standard and let
     # per-thread QoS distinguish user requests from ingestion/enrichment work.
     return {
-        'Label': LABEL,
+        'Label': profile.bundle_id,
         'ProgramArguments': [str(app/'Contents/MacOS/relay'), 'serve', '--menu-bar',
-                             '--config', str(data/'relay.json')],
+                             '--data-dir', str(data), '--config', str(data/'relay.json')],
         # launchd also applies this delay to explicit kickstart requests.
         'RunAtLoad': True, 'KeepAlive': True, 'ThrottleInterval': 1,
         'ProcessType': 'Standard', 'LimitLoadToSessionType': 'Aqua',
@@ -86,6 +86,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--install', action='store_true')
     p.add_argument('--start', action='store_true')
+    p.add_argument('--profile', choices=PROFILES, default='dev', help='Installation identity (default: dev)')
     p.add_argument('--identity', help='Explicit codesign identity override; use - only for disposable ad-hoc builds')
     p.add_argument('--signing-directory', type=Path, default=default_directory(), help='Persistent local signing state (created by signing.py setup)')
     p.add_argument('--binary', type=Path, default=ROOT/'zig-out/bin/relay')
@@ -95,15 +96,17 @@ def main():
     p.add_argument('--openssl-license', type=Path, default=ROOT/'.tools/openssl-build/openssl-3.5.8/LICENSE.txt')
     p.add_argument('--phone-license', type=Path, default=ROOT/'zig-out/share/zimbr/licenses/libPhoneNumber-LICENSE')
     args = p.parse_args()
+    profile = PROFILES[args.profile]
+    profile.verify_binary(args.binary)
     args.image_helper = args.image_helper or args.binary.parent/'image-helper'
     if args.start and not args.install: p.error('--start requires --install')
     os.umask(0o077)
-    home = Path.home(); data = home/'Library/Application Support/Zimbr'
-    destination = home/'Applications/Zimbr Relay.app'
+    home = Path.home(); data = profile.data(home)
+    destination = profile.app(home)
     if destination.is_symlink(): raise RuntimeError('Refusing symlink app destination')
     if destination.exists():
         with (destination/'Contents/Info.plist').open('rb') as f: old = plistlib.load(f)
-        if old.get('CFBundleIdentifier') != LABEL: raise RuntimeError('Refusing to replace unrelated app')
+        if old.get('CFBundleIdentifier') != profile.bundle_id: raise RuntimeError('Refusing to replace unrelated app')
     # Validate everything before touching the running service. Never package issuer keys.
     source_config = args.tls_config or data/'relay.json'
     cfg = read_json(source_config)
@@ -116,17 +119,17 @@ def main():
     if admin:
         from tls_support import Credentials
         Credentials(args.admin_config)  # Check key matching, CA loading and strict origin syntax.
-    staging = ROOT/'zig-out/macos'; staging.mkdir(parents=True, exist_ok=True)
-    bundle = staging/'Zimbr Relay.app'
+    staging = ROOT/'zig-out/macos'/profile.name; staging.mkdir(parents=True, exist_ok=True)
+    bundle = staging/profile.app_name
     stage(bundle, args.binary, args.image_helper, args.openssl_license, args.phone_license,
-          identity=args.identity, signing_directory=args.signing_directory)
-    config = launch_agent(destination, data, home)
-    plist = staging/(LABEL+'.plist')
+          identity=args.identity, signing_directory=args.signing_directory, profile=profile)
+    config = launch_agent(destination, data, home, profile)
+    plist = staging/(profile.bundle_id+'.plist')
     with plist.open('wb') as f: plistlib.dump(config, f)
     subprocess.run(['plutil', '-lint', str(plist)], check=True)
     if not args.install:
         print('Staged signed app and LaunchAgent at', staging); return
-    service = f'gui/{os.getuid()}/{LABEL}'
+    service = f'gui/{os.getuid()}/{profile.bundle_id}'
     previous = service_pid(service)
     stopped = subprocess.run(['launchctl', 'bootout', service], capture_output=True)
     if stopped.returncode and previous: raise RuntimeError('Failed to stop previous LaunchAgent')

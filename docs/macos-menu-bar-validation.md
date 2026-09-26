@@ -9,6 +9,11 @@ returns promptly, and Settings opens afterward. Unchecked cases below
 remain required for full acceptance; synthetic settings tests do not establish
 every Settings interaction.
 
+Local builds now default to the [dev profile](macos-profiles.md). The installed
+results below initially used the legacy release identity; its privacy grants do
+not establish access for the separate dev app. Profile validation is recorded
+separately below.
+
 ## Implemented behavior
 
 - `serve --menu-bar` starts the interface and relay in one process. The packaged
@@ -47,6 +52,9 @@ every Settings interaction.
   preserving the plist and login startup. Manual launches exit. A rejected stop
   leaves the app running with an error and re-enables its controls. Quit is
   disabled during settings I/O or restart.
+- Dev and release use separate app identifiers, LaunchAgents, state directories,
+  default ports, and Settings notifications. The menu header, tooltip, and Settings
+  title identify the profile. Restart and Quit target the current profile.
 
 Certificate issuance, enrollment, editing device-list entries, and a login-startup
 switch are outside this version. An existing headless instance must be stopped
@@ -181,6 +189,41 @@ Private logs, build output, aggregate snapshots, and the validation archive are
 kept outside this public record. Accessibility automation was unavailable and
 the user chose manual UI checks. No screenshot, VoiceOver, appearance matrix,
 permission-revocation, logout/reboot, or two-host delivery result is claimed.
+
+## Profile isolation validation (2026-09-25)
+
+Validated `24f857f` plus the profile changes in this working tree, using the native
+environment and ReleaseSafe target described above. These checks use disposable
+fixtures unless explicitly identified as installed checks.
+
+| Check | Observed result |
+| --- | --- |
+| Dev and release native builds, fixture/native Zig suites | Each profile passed 67 tests with 1 skipped |
+| `tests/mac_profiles.py` | Both compiled identities and signatures verified; mismatched binaries rejected; service helpers target their own jobs; simultaneous listeners use separate journals; dev restart preserves both epochs |
+| `tests/mac_release.py` | 9 passed, including rejection of dev metadata in a public release archive |
+| `tests/mac_signing.py` | Persistent signing identity preserved; a dev signature fails the release designated requirement even with the same signing certificate |
+| `tests/mac_enrichment_packaging.py --profile dev --prefix /absolute/dev-build` | Disposable dev staging and native signatures passed |
+| Native profile menu checks | Both menu/Settings names and missing-port defaults passed; another profile's Settings notification is ignored; service target selection stays within the profile |
+| Native restart and Quit regression after profile changes | Passed for direct, Launch Services, and disposable supervised launches; two restarts each retained AppKit registration and Quit unloaded KeepAlive jobs |
+| Native settings and fixture TLS suites | 20 passed |
+| Acceptance-helper and certificate-management tests | 5 and 4 passed; certificate tests used OpenSSL 3.5 |
+| Installed dev Full Disk Access | Passed through Launch Services after a separate user grant |
+| Installed dev Automation and Contacts | Passed through Launch Services after separate user grants; the check sent no messages |
+| Installed migration to dev port 8732 | Passed; all 23 journal tables matched before startup, cached assets matched, epoch and all prior message IDs, routes, and send-request associations survived startup |
+| Installed dev service after migration | One supervised listener on 8732; reading, sending capability, Contacts, and media ready with no degraded reasons; original service unloaded and its active app/plist/data paths vacated |
+| `tools/update-relay.sh --profile dev --release=safe` | Passed using its native ReleaseSafe target; 67 tests passed/1 skipped; installed UUIDs, signed bytes, and running executable inode matched; readiness and journal preservation passed after reinstall |
+| Installed dev manual menu/Settings recheck | User confirmed one icon, the dev menu name, port 8732, and usable Settings |
+| Installed dev Save and Restart recheck | Passed; user observed the window close and icon return. The configuration timestamp advanced, a fresh supervised PID registered with AppKit, and one healthy listener returned on 8732 with permissions, epoch, history, routes, and request associations preserved |
+
+The migration preserved the stopped journal and asset cache, kept dev credential
+paths independent, and archived the legacy installation outside active app,
+LaunchAgent, and state paths. The private rollback backup includes the original
+app archive, plist, credentials, journal, and earlier backups. See
+[profile migration](macos-profiles.md#permissions-and-existing-installations).
+The synthetic coexistence test does not claim a published Homebrew installation
+or simultaneous real-account delivery. Installed UI checks remain manual.
+The bounded reconnect monitor expired before the confirmed dev restart, so this
+recheck establishes recovery but does not measure restart latency or SSE teardown.
 
 ## Native build and packaging gate
 

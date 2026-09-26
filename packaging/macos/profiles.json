@@ -1,0 +1,18 @@
+{
+  "dev": {
+    "name": "dev",
+    "display_name": "Zimbr Relay Dev",
+    "bundle_id": "com.hsp.zimbr.relay.dev",
+    "data_directory": "Zimbr Dev",
+    "command": "zimbr-relay-dev",
+    "default_port": 8732
+  },
+  "release": {
+    "name": "release",
+    "display_name": "Zimbr Relay",
+    "bundle_id": "com.hsp.zimbr.relay",
+    "data_directory": "Zimbr",
+    "command": "zimbr-relay",
+    "default_port": 8731
+  }
+}

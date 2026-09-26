@@ -29,11 +29,19 @@ fn run(init: std.process.Init) !void {
     if (args.len == 2 and u.eq(args[1], "contacts-permission-status")) contact_directory.permissionProbeExit();
     // Contact reads use bounded private pipes and the same installed identity.
     if (args.len == 2 and u.eq(args[1], "contacts-reader")) contact_directory.readerProbeExit();
+    if (args.len == 2 and u.eq(args[1], "profile")) return printJson(a, .{
+        .name = options.relay_name,
+        .display_name = options.relay_display_name,
+        .bundle_id = options.relay_bundle_id,
+        .data_directory = options.relay_data_directory,
+        .command = options.relay_command,
+        .default_port = options.relay_default_port,
+    });
     const home = init.environ_map.get("HOME") orelse return error.HomeRequired;
     var data: []const u8 = try std.fmt.allocPrint(
         a,
-        "{s}/Library/Application Support/Zimbr",
-        .{home},
+        "{s}/Library/Application Support/{s}",
+        .{ home, options.relay_data_directory },
     );
     var source: []const u8 = try std.fmt.allocPrint(a, "{s}/Library/Messages/chat.db", .{home});
     var source_explicit = false;
@@ -180,7 +188,7 @@ fn run(init: std.process.Init) !void {
         return;
     }
     if (!u.eq(cmd, "serve")) {
-        const help = "Usage: relay setup|check-config|save-config|doctor|probe|serve [--data-dir PATH] [--messages-db PATH] [--config PATH] [--event-limit 100000] [--check-automation] [--request-contacts] [--enrichment] [--read-only] [--menu-bar]\n       save-config --settings-input PATH (--settings-original PATH | --settings-new)\n";
+        const help = "Usage: relay profile|setup|check-config|save-config|doctor|probe|serve [--data-dir PATH] [--messages-db PATH] [--config PATH] [--event-limit 100000] [--check-automation] [--request-contacts] [--enrichment] [--read-only] [--menu-bar]\n       save-config --settings-input PATH (--settings-original PATH | --settings-new)\n";
         _ = u.c.write(1, help.ptr, help.len);
         if (!u.eq(cmd, "help")) return error.InvalidCommand;
         return;

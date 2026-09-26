@@ -135,9 +135,9 @@ void zr_contacts_pump_main(void) {
     }
 }
 
-int zr_contacts_request(void) {
+int zr_contacts_request(const char *bundle_id) {
     @autoreleasepool {
-        if (![[NSBundle mainBundle].bundleIdentifier isEqualToString:@"com.hsp.zimbr.relay"])
+        if (![[NSBundle mainBundle].bundleIdentifier isEqualToString:[NSString stringWithUTF8String:bundle_id]])
             return -2;
         initialize();
         dispatch_semaphore_t done = dispatch_semaphore_create(0);

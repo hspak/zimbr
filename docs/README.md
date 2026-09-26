@@ -13,6 +13,7 @@ root unless noted otherwise.
 | [Linux mTLS setup](linux-mtls.md) | Device enrollment, client configuration, reconnect, and renewal |
 | [macOS TLS operation](macos-tls.md) | CA and server provisioning, code signing, credential installation, renewal, and revocation |
 | [macOS validation](mac-validation.md) | Installed permissions, deliberate test sends, restart recovery, and locked-session checks |
+| [macOS profiles](macos-profiles.md) | Separate development and Homebrew identities, data, ports, and migration |
 | [macOS menu bar validation](macos-menu-bar-validation.md) | Native/installed evidence and remaining icon, Settings, recovery, and lifecycle checks |
 
 ## Protocol and implementation

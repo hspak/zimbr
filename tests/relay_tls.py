@@ -309,7 +309,7 @@ class ProvisioningTests(unittest.TestCase):
     def test_failed_restart_is_not_success(self):
         import tls_admin
         with patch.object(tls_admin, 'pid_of_service', return_value=123), patch.object(tls_admin.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, 'launchctl')):
-            with self.assertRaises(subprocess.CalledProcessError): restart({})
+            with self.assertRaises(subprocess.CalledProcessError): restart({}, tls_admin.PROFILES['dev'])
 
 
 if __name__ == '__main__': unittest.main(verbosity=2)

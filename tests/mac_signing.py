@@ -9,6 +9,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'packaging/macos'))
 from signing import default_directory, load, requirement, setup, sign
+from profiles import PROFILES
 
 
 def main():
@@ -34,6 +35,15 @@ def main():
             originals.append(next(line for line in signature.stdout.splitlines() if 'designated =>' in line))
         assert originals[0] == originals[1], 'Different builds must retain the same designated requirement'
         assert (root/'true').read_bytes() != (root/'false').read_bytes()
+        dev = root/'dev'
+        shutil.copyfile('/usr/bin/true', dev)
+        dev.chmod(0o755)
+        identifier = PROFILES['dev'].bundle_id
+        sign(dev, identifier=identifier)
+        subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '-R',
+                        '='+requirement(before['certificate_sha1'], identifier), str(dev)], check=True)
+        assert subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '-R', '='+expected,
+                               str(dev)], capture_output=True).returncode != 0
         # The bundle identifier alone cannot impersonate the persistent identity.
         impostor = root/'impostor'
         shutil.copyfile('/usr/bin/true', impostor)

@@ -12,9 +12,14 @@ signing identity](macos-tls.md), then [install and grant permissions](#install-a
 For an existing installation, see [Update the running relay](#update-the-running-relay).
 Run the commands below from the repository root unless noted otherwise.
 
+Source builds and local update tools default to **Zimbr Relay Dev**. Homebrew uses
+**Zimbr Relay**. They have separate app identities, LaunchAgents, state directories,
+and default ports; see [development and release profiles](macos-profiles.md).
+Local commands below use dev unless the Homebrew section says otherwise.
+
 ## Menu bar and settings
 
-The installed LaunchAgent starts `serve --menu-bar`. Open **Zimbr Relay.app** to
+The installed LaunchAgent starts `serve --menu-bar`. Open **Zimbr Relay Dev.app** to
 show Settings; closing the window keeps the relay running. The monochrome bridge
 icon uses a template image so macOS supplies its appearance. A monochrome
 exclamation mark indicates a warning. The menu shows reading/sending readiness,
@@ -48,10 +53,10 @@ returning to its two-second cadence. Closing Settings does not stop the service.
 **Quit Relay**, below Restart, stops the app and relay. For an installed service,
 it unloads the current LaunchAgent job so `KeepAlive` does not immediately restart
 it. Login startup remains enabled. Open the app to run it manually again, or use
-`zimbr-relay-service start` to restore service supervision before the next login.
-The command-line equivalent is `zimbr-relay-service stop`. Quitting a manual
-launch simply exits that process. Quit is unavailable while settings are loading
-or saving, or a restart is underway.
+the selected profile’s service helper with `start` to restore service supervision
+before the next login. The command-line equivalent is that helper with `stop`.
+Quitting a manual launch simply exits that process. Quit is unavailable while
+settings are loading or saving, or a restart is underway.
 
 Opening the app manually does not install a LaunchAgent or enable login startup.
 Logs opened from the menu are the installed service's log; command-line launches
@@ -82,19 +87,20 @@ brew install --cask hspak/tap/zimbr-relay
 The cask installs `~/Applications/Zimbr Relay.app` and exposes `zimbr-relay` and
 `zimbr-relay-service`. It preserves the existing application identifier and
 keeps credentials and history in `~/Library/Application Support/Zimbr`.
-An existing manually installed app must be moved aside after stopping its
-LaunchAgent before the first Homebrew install; retain its Application Support
-directory and keep the old app available until the new installation is verified.
+A dev-profile installation can remain installed alongside the cask. A legacy
+source installation using the unsuffixed release identity must first be stopped
+and migrated or archived; see [profile migration](macos-profiles.md#permissions-and-existing-installations).
 
 For first-time setup, use the provisioning tools from the matching source tag
-and follow [macOS TLS setup](macos-tls.md#provisioning). Keep the configuration at
+and follow [macOS TLS setup](macos-tls.md#provisioning), selecting `--profile release`
+for enrollment and administration. Keep the configuration at
 `~/Library/Application Support/Zimbr/relay.json`, mode 0600 in an owner-only
 directory, referencing persistent credential paths. Grant Full Disk Access and
 Messages Automation as described [below](#install-and-permissions), then run:
 
 ```sh
 zimbr-relay check-config
-zimbr-relay doctor --check-automation
+open -n -W -a "$HOME/Applications/Zimbr Relay.app" --args doctor --check-automation
 zimbr-relay-service start
 zimbr-relay-service status
 ```
@@ -189,7 +195,7 @@ without prompting. Request access through Launch Services so the installed app
 owns the permission prompt:
 
 ```sh
-open -n -a "$HOME/Applications/Zimbr Relay.app" --args doctor --request-contacts --read-only
+open -n -a "$HOME/Applications/Zimbr Relay Dev.app" --args doctor --request-contacts --read-only
 ```
 
 Optional `contacts_phone_region` in
@@ -209,15 +215,15 @@ networking, and presentation.
 
 ```sh
 # First provision certificates/configurations: docs/macos-tls.md
-python3 packaging/macos/install.py --tls-config /private/staging/relay.json \
+python3 packaging/macos/install.py --profile dev --tls-config /private/staging/relay.json \
   --admin-config /private/staging/admin.json --openssl-license /openssl-source/LICENSE.txt
-python3 packaging/macos/install.py --install --start \
+python3 packaging/macos/install.py --profile dev --install --start \
   --tls-config /private/staging/relay.json --admin-config /private/staging/admin.json \
   --openssl-license /openssl-source/LICENSE.txt
 ```
 
-This installs `~/Applications/Zimbr Relay.app` and the user LaunchAgent
-`com.hsp.zimbr.relay`. With `--start`, the installer persistently enables the agent
+This installs `~/Applications/Zimbr Relay Dev.app` and the user LaunchAgent
+`com.hsp.zimbr.relay.dev`. With `--start`, the installer persistently enables the agent
 and starts it now. It starts automatically when this user logs in after a reboot,
 restarts if it exits, and continues running with the screen locked. Messages needs
 the user's graphical login session before the relay can operate.
@@ -235,22 +241,23 @@ path and bundle identifier remain stable.
 Complete these steps together in the Mac UI:
 
 1. Confirm Messages is signed into the intended account and sends normally.
-2. Add `~/Applications/Zimbr Relay.app` under **System Settings → Privacy &
+2. Add `~/Applications/Zimbr Relay Dev.app` under **System Settings → Privacy &
    Security → Full Disk Access**.
 3. Run the installed doctor interactively and allow Messages Automation:
 
    ```sh
-   "$HOME/Applications/Zimbr Relay.app/Contents/MacOS/relay" doctor --check-automation
+   open -n -W -a "$HOME/Applications/Zimbr Relay Dev.app" --args doctor --check-automation
    ```
 
 4. Restart the agent if macOS requires a restart after the grant:
 
    ```sh
-   launchctl kickstart -k "gui/$(id -u)/com.hsp.zimbr.relay"
+   launchctl kickstart -k "gui/$(id -u)/com.hsp.zimbr.relay.dev"
    ```
 
 Full Disk Access has no supported `tccutil` grant command; the tool only resets
-existing decisions. Terminal permissions do not establish LaunchAgent access.
+existing decisions. Launch Services attributes the check to the installed app;
+direct terminal execution does not establish LaunchAgent access.
 The service stays reachable with degraded status when integration access fails.
 Automation is probed only after database reads succeed. It does not send a test
 message automatically. Screen locking must be tested separately from logging out.
@@ -262,14 +269,14 @@ Run this on the Mac, in Terminal or over SSH as the user who runs the relay.
 Keep that user logged into the Mac's graphical session. From the checkout, run:
 
 ```sh
-./tools/update-relay.sh --release=safe
+./tools/update-relay.sh --profile dev --release=safe
 ```
 
 The script builds the current checkout, including local edits, in ReleaseSafe
 and runs the relay and native enrichment tests before installing. It uses a fresh
 build output directory and stops if a step fails. It reuses the installed
 credentials and persistent signing identity, preserves existing messages and
-routes, backs up the journal under `~/Library/Application Support/Zimbr/backups/`,
+routes, backs up the journal under `~/Library/Application Support/Zimbr Dev/backups/`,
 and restarts the LaunchAgent. It then checks the build UUIDs, signed binary hashes,
 and the running process's executable path and inode, printing the verified PID
 and relay SHA-256. It does not switch branches or pull changes.
@@ -283,7 +290,7 @@ The installer also checks that the restarted service opens its configured
 listener. For configuration and Messages access diagnostics, run:
 
 ```sh
-"$HOME/Applications/Zimbr Relay.app/Contents/MacOS/relay" doctor
+"$HOME/Applications/Zimbr Relay Dev.app/Contents/MacOS/relay" doctor
 ```
 
 ## Operation
@@ -302,7 +309,7 @@ performs the optional no-send Automation probe. Real sends require API requests.
 
 Options are `--data-dir PATH`, `--messages-db PATH` (always read-only in `relay`),
 `--config PATH`, and `--event-limit COUNT`. The default configuration is
-`~/Library/Application Support/Zimbr/relay.json`. `setup` creates private state
+`~/Library/Application Support/Zimbr Dev/relay.json`. `setup` creates private state
 and initializes the journal; it does not generate credentials. `check-config`
 validates TLS configuration without opening Messages or a listener. `doctor`
 also reports certificate expiry, fingerprint, enabled-device count, and integration
@@ -324,7 +331,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, 'tools')
 from mac_acceptance import Client
-print(Client(Path.home()/'Library/Application Support/Zimbr').request('/v1/status'))
+print(Client(Path.home()/'Library/Application Support/Zimbr Dev').request('/v1/status'))
 PYTLS
 ```
 
@@ -333,8 +340,8 @@ Device changes are local administrative actions applied by a verified restart;
 existing streams and pooled connections close with the old process. Certificate
 expiry closes active sessions as well as rejecting new connections.
 
-Stop/start the agent with `launchctl bootout gui/$(id -u)/com.hsp.zimbr.relay` and
-`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hsp.zimbr.relay.plist`.
+Stop/start the agent with `launchctl bootout gui/$(id -u)/com.hsp.zimbr.relay.dev` and
+`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hsp.zimbr.relay.dev.plist`.
 To uninstall, stop it and remove that plist and app bundle. Keep the Application
 Support directory unless deliberately discarding history and idempotency records.
 

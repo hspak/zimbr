@@ -32,6 +32,9 @@ pub fn run(self: *Menu, show_settings: bool) void {
 
 fn callbacks(self: *Menu) c.ZrMenu {
     return .{
+        .name = options.relay_display_name ++ "\x00",
+        .bundle_id = options.relay_bundle_id ++ "\x00",
+        .default_port = options.relay_default_port,
         .relay = self,
         .read_config = readConfig,
         .save_config = saveConfig,
@@ -41,7 +44,7 @@ fn callbacks(self: *Menu) c.ZrMenu {
 
 /// Asks the existing menu instance to reveal Settings; carries no configuration or commands.
 pub fn reopen(config_path: [:0]const u8) void {
-    if (comptime available) c.zr_menu_reopen(config_path);
+    if (comptime available) c.zr_menu_reopen(config_path, options.relay_bundle_id ++ "\x00");
 }
 
 pub const RelaunchError = error{ InvalidArguments, RestartHandoffFailed };

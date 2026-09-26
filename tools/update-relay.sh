@@ -4,11 +4,12 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: tools/update-relay.sh [--release=safe]
+Usage: tools/update-relay.sh [--profile dev|release] [--release=safe]
 
 Build the relay and run its tests in ReleaseSafe, install the signed app using
 the existing credentials/signing identity, restart it, and verify the running
-executable. Run as the Mac login user, without sudo.
+executable. The default profile is dev; release must be selected explicitly.
+Run as the Mac login user, without sudo.
 
 Defaults use the toolchain under .tools, falling back to zig/python3 on PATH.
 Overrides: ZIMBR_ZIG, ZIMBR_PYTHON, ZIMBR_OPENSSL_PREFIX, ZIMBR_OPENSSL_LICENSE.
@@ -16,11 +17,18 @@ The current checkout is built, including local edits; no git update is performed
 EOF
 }
 
-case "${1:-}" in
-  -h|--help) usage; exit 0 ;;
-  --release=safe) shift ;;
-esac
-if [ "$#" -ne 0 ]; then usage >&2; exit 2; fi
+profile=dev
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --release=safe) shift ;;
+    --profile)
+      [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+      profile=$2; shift 2 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
+case "$profile" in dev|release) ;; *) usage >&2; exit 2 ;; esac
 if [ "$(uname -s)" != Darwin ]; then
   echo 'This script requires macOS.' >&2
   exit 1
@@ -55,18 +63,18 @@ trap 'rm -rf -- "$build_dir"' EXIT
 revision=$(git describe --always --dirty)
 printf 'Building relay %s with --release=safe\n' "$revision"
 "$zig" build relay test test-macos-enrichment --release=safe \
-  "-Dopenssl-prefix=$openssl_prefix" --prefix "$build_dir" \
+  "-Dprofile=$profile" "-Dopenssl-prefix=$openssl_prefix" --prefix "$build_dir" \
   --cache-dir "$repo/.tools/zig-cache" --global-cache-dir "$repo/.tools/cache" \
   --summary all
 
 # install.py signs/validates before stopping the old process, backs up the
 # journal, waits for process exit, then bootstraps and checks the new listener.
-"$python" packaging/macos/install.py --install --start \
+"$python" packaging/macos/install.py --profile "$profile" --install --start \
   --binary "$build_dir/bin/relay" --image-helper "$build_dir/bin/image-helper" \
   --phone-license "$build_dir/share/zimbr/licenses/libPhoneNumber-LICENSE" \
   --openssl-license "$openssl_license"
 
-"$python" - "$repo" "$build_dir" "$revision" <<'PY'
+"$python" - "$repo" "$build_dir" "$revision" "$profile" <<'PY'
 import hashlib
 import os
 from pathlib import Path
@@ -76,11 +84,13 @@ import sys
 
 repo, build = map(Path, sys.argv[1:3])
 sys.path.insert(0, str(repo / 'packaging/macos'))
-from install import LABEL, service_pid
+from install import service_pid
+from profiles import PROFILES
+profile = PROFILES[sys.argv[4]]
 
-installed = Path.home() / 'Applications/Zimbr Relay.app/Contents/MacOS'
-staged = repo / 'zig-out/macos/Zimbr Relay.app/Contents/MacOS'
-service = f'gui/{os.getuid()}/{LABEL}'
+installed = profile.app(Path.home()) / 'Contents/MacOS'
+staged = repo / 'zig-out/macos' / profile.name / profile.app_name / 'Contents/MacOS'
+service = f'gui/{os.getuid()}/{profile.bundle_id}'
 
 def fail(message):
     raise SystemExit('Deployment verification failed: ' + message)

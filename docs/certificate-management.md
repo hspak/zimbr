@@ -1,6 +1,9 @@
 # Certificate management contract
 
 The Mac administrator owns the Zimbr CA, issuance policy, and device allowlist.
+The enrollment/revocation examples target the release (Homebrew) profile; select
+`--profile dev` for local development.
+
 This document and `tools/tls_admin.py` define the certificate contract for all
 clients. Client provisioning must follow it. The relay does not accept online
 enrollment requests; signing and enrollment are separate administrative actions.
@@ -53,7 +56,7 @@ python3 tools/tls_admin.py sign --role client \
   --csr /private/import/linux-desktop/client.csr \
   --cert /private/import/linux-desktop/client.pem \
   --name linux-desktop.zimbr.invalid --mkcert /path/to/mkcert
-python3 tools/tls_admin.py enroll \
+python3 tools/tls_admin.py enroll --profile release \
   --cert /private/import/linux-desktop/client.pem --label 'Linux desktop'
 ```
 
@@ -96,7 +99,7 @@ under the same rules, enroll the new fingerprint, reconnect using the new
 credential, then revoke the old fingerprint:
 
 ```sh
-python3 tools/tls_admin.py revoke --sha256 OLD_LEAF_DER_SHA256
+python3 tools/tls_admin.py revoke --profile release --sha256 OLD_LEAF_DER_SHA256
 ```
 
 Enrollment/revocation restarts the relay and closes existing HTTP and SSE

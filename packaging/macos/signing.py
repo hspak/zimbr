@@ -14,6 +14,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT/'tools'))
 from tls_support import private_directory, private_path, read_json
+from profiles import PROFILES
 
 LABEL = 'com.hsp.zimbr.relay'
 NAME = 'Zimbr Local Signing'
@@ -42,10 +43,12 @@ def write_private(path, content):
         os.fsync(output.fileno())
 
 
-def requirement(fingerprint):
+def requirement(fingerprint, identifier=LABEL):
     if not re.fullmatch(r'[0-9A-F]{40}', fingerprint):
         raise ValueError('Invalid signing certificate fingerprint')
-    return f'identifier "{LABEL}" and certificate leaf = H"{fingerprint}"'
+    if identifier not in {profile.bundle_id for profile in PROFILES.values()}:
+        raise ValueError('Unknown relay signing identifier')
+    return f'identifier "{identifier}" and certificate leaf = H"{fingerprint}"'
 
 
 def load(directory):
@@ -61,10 +64,12 @@ def load(directory):
     return config
 
 
-def sign(bundle, entitlements=None, *, identity=None, directory=None):
+def sign(bundle, entitlements=None, *, identity=None, directory=None, identifier=LABEL):
+    if identifier not in {profile.bundle_id for profile in PROFILES.values()}:
+        raise ValueError('Unknown relay signing identifier')
     command = ['/usr/bin/codesign', '--force', '--sign']
     if identity is not None:
-        command += [identity, '--identifier', LABEL]
+        command += [identity, '--identifier', identifier]
         if entitlements: command += ['--entitlements', entitlements]
         run(command + [bundle])
     else:
@@ -77,13 +82,13 @@ def sign(bundle, entitlements=None, *, identity=None, directory=None):
         run(['/usr/bin/security', 'unlock-keychain', '-p', password, keychain], secret=password)
         try:
             command += [config['certificate_sha1'], '--keychain', keychain,
-                        '--identifier', LABEL, '--timestamp=none',
+                        '--identifier', identifier, '--timestamp=none',
                         # The leading '=' makes this inline requirement text;
                         # otherwise codesign interprets it as a file path.
-                        '--requirements', '=designated => '+requirement(config['certificate_sha1'])]
+                        '--requirements', '=designated => '+requirement(config['certificate_sha1'], identifier)]
             if entitlements: command += ['--entitlements', entitlements]
             run(command + [bundle])
-            run(['/usr/bin/codesign', '--verify', '--strict', '-R', '='+requirement(config['certificate_sha1']), bundle])
+            run(['/usr/bin/codesign', '--verify', '--strict', '-R', '='+requirement(config['certificate_sha1'], identifier), bundle])
         finally:
             run(['/usr/bin/security', 'lock-keychain', keychain])
     run(['/usr/bin/codesign', '--verify', '--strict', bundle])

@@ -16,6 +16,7 @@ from relay_fixture import Fixture
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'packaging/macos'))
 from install import launch_agent
+from profiles import PROFILES
 
 
 def observe(root, name, process=None):
@@ -184,6 +185,12 @@ def main():
             'xcrun', 'clang', '-fobjc-arc', '-fblocks', '-Wall', '-Wextra', '-Werror',
             str(ROOT / 'tests/mac_menu_restart.m'), '-framework', 'AppKit', '-o', str(binary),
         ], check=True)
+        for name, profile in PROFILES.items():
+            other = PROFILES['release' if name == 'dev' else 'dev']
+            subprocess.run([str(binary), 'check-profile', profile.display_name,
+                            profile.bundle_id, str(profile.default_port), other.bundle_id],
+                           check=True, timeout=10)
+        print('PASS: profile menu/Settings identity, default ports, reopen isolation, and service targets', flush=True)
         subprocess.run([str(binary), 'check-startup-refresh'], check=True, timeout=10)
         for name in ('direct', 'launch-services'):
             manual(root, bundle, binary, name)

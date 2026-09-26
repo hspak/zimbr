@@ -6,6 +6,7 @@ import shutil
 import subprocess
 
 from signing import LABEL, sign
+from profiles import PROFILES
 
 ROOT = Path(__file__).resolve().parents[2]
 MINIMUM_MACOS = '27.0'
@@ -20,7 +21,8 @@ def source_version():
 
 
 def stage(bundle, binary, image_helper, openssl_license, phone_license, *,
-          identity=None, signing_directory=None):
+          identity=None, signing_directory=None, profile=PROFILES['dev']):
+    profile.verify_binary(binary)
     for executable in (binary, image_helper):
         links = subprocess.check_output(['otool', '-L', str(executable)], text=True)
         libraries = [line.strip().split(' (', 1)[0] for line in links.splitlines()[1:]]
@@ -44,13 +46,15 @@ def stage(bundle, binary, image_helper, openssl_license, phone_license, *,
         shutil.copy2(source, resources / name)
     # Shell scripts are sealed resources; signing them as nested Mach-O code
     # can rely on extended attributes that a ZIP archive would not preserve.
-    shutil.copy2(ROOT / 'packaging/macos/service.sh', resources / 'zimbr-relay-service')
-    (resources / 'zimbr-relay-service').chmod(0o755)
+    shutil.copy2(ROOT / 'packaging/macos/service.sh', resources / (profile.command + '-service'))
+    (resources / (profile.command + '-service')).chmod(0o755)
     version = source_version()
     info = {
-        'CFBundleIdentifier': LABEL,
-        'CFBundleName': 'Zimbr Relay',
-        'CFBundleDisplayName': 'Zimbr Relay',
+        'CFBundleIdentifier': profile.bundle_id,
+        'CFBundleName': profile.display_name,
+        'CFBundleDisplayName': profile.display_name,
+        'ZimbrProfile': profile.name,
+        'ZimbrDataDirectory': profile.data_directory,
         'CFBundleExecutable': 'relay',
         'CFBundlePackageType': 'APPL',
         'CFBundleVersion': version,
@@ -64,5 +68,5 @@ def stage(bundle, binary, image_helper, openssl_license, phone_license, *,
     (contents / 'Info.plist').write_bytes(plistlib.dumps(info))
     entitlements = bundle.parent / 'entitlements.plist'
     entitlements.write_bytes(plistlib.dumps({'com.apple.security.automation.apple-events': True}))
-    sign(macos / 'image-helper', identity=identity, directory=signing_directory)
-    sign(bundle, entitlements, identity=identity, directory=signing_directory)
+    sign(macos / 'image-helper', identity=identity, directory=signing_directory, identifier=profile.bundle_id)
+    sign(bundle, entitlements, identity=identity, directory=signing_directory, identifier=profile.bundle_id)

@@ -3,20 +3,11 @@
 set -euo pipefail
 
 [[ $# -eq 1 && $1 =~ ^(start|stop|status)$ ]] || {
-  echo 'Usage: zimbr-relay-service {start|stop|status}' >&2; exit 2;
+  echo "Usage: $(basename "$0") {start|stop|status}" >&2; exit 2;
 }
 [[ $(uname -s) == Darwin && $(id -u) -ne 0 ]] || {
   echo 'Run as the Mac login user, without sudo.' >&2; exit 1;
 }
-label=com.hsp.zimbr.relay
-service="gui/$(id -u)/$label"
-agent="$HOME/Library/LaunchAgents/$label.plist"
-case "${1:-}" in
-  stop) launchctl bootout "$service"; exit ;;
-  status) launchctl print "$service"; exit ;;
-  start) ;;
-esac
-
 # Homebrew exposes this helper through a symlink in its bin directory.
 script=${BASH_SOURCE[0]}
 while [[ -L $script ]]; do
@@ -24,10 +15,26 @@ while [[ -L $script ]]; do
   script=$(readlink "$script")
   [[ $script == /* ]] || script=$directory/$script
 done
-binary=$(cd -- "$(dirname -- "$script")/../MacOS" && pwd)/relay
-data="$HOME/Library/Application Support/Zimbr"
+contents=$(cd -- "$(dirname -- "$script")/.." && pwd)
+binary="$contents/MacOS/relay"
+label=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$contents/Info.plist")
+data_name=$(/usr/libexec/PlistBuddy -c 'Print :ZimbrDataDirectory' "$contents/Info.plist")
+[[ $label == com.hsp.zimbr.relay || $label == com.hsp.zimbr.relay.dev ]] || {
+  echo 'Unknown relay app identity.' >&2; exit 1;
+}
+[[ $data_name != */* && -n $data_name && $data_name != . && $data_name != .. ]] || {
+  echo 'Invalid relay data directory.' >&2; exit 1;
+}
+service="gui/$(id -u)/$label"
+agent="$HOME/Library/LaunchAgents/$label.plist"
+data="$HOME/Library/Application Support/$data_name"
+case "${1:-}" in
+  stop) launchctl bootout "$service"; exit ;;
+  status) launchctl print "$service"; exit ;;
+  start) ;;
+esac
 "$binary" check-config --config "$data/relay.json"
-"$binary" setup
+"$binary" setup --data-dir "$data"
 umask 077
 mkdir -p "$HOME/Library/LaunchAgents"
 [[ ! -L $agent ]] || { echo 'Refusing symlink LaunchAgent.' >&2; exit 1; }
@@ -46,7 +53,7 @@ cat >"$temporary" <<EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>$label</string>
-<key>ProgramArguments</key><array><string>$(xml "$binary")</string><string>serve</string><string>--menu-bar</string><string>--config</string><string>$(xml "$data/relay.json")</string></array>
+<key>ProgramArguments</key><array><string>$(xml "$binary")</string><string>serve</string><string>--menu-bar</string><string>--data-dir</string><string>$(xml "$data")</string><string>--config</string><string>$(xml "$data/relay.json")</string></array>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
 <key>ThrottleInterval</key><integer>1</integer>
 <key>ProcessType</key><string>Standard</string>

@@ -17,7 +17,7 @@ extern fn zr_contacts_monitor_status() void;
 extern fn zr_contacts_refresh_status() void;
 extern fn zr_contacts_generation() u64;
 extern fn zr_contacts_pump_main() void;
-extern fn zr_contacts_request() c_int;
+extern fn zr_contacts_request(bundle_id: [*:0]const u8) c_int;
 extern fn zr_contacts_snapshot(region: [*:0]const u8) ?[*:0]u8;
 extern fn zr_contacts_phone_key(
     value: [*:0]const u8,
@@ -240,7 +240,7 @@ fn withPermission(status: Status, observed: Permission) Status {
 }
 pub fn requestPermission() RequestPermissionError!Permission {
     if (comptime !native) return error.UnsupportedPlatform;
-    const code = zr_contacts_request();
+    const code = zr_contacts_request(options.relay_bundle_id ++ "\x00");
     if (code == -2) return error.InstalledAppRequired;
     if (code == -1) return error.ContactsPromptTimedOut;
     return permissionCode(code);

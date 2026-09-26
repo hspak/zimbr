@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'packaging/macos'))
 import bundle
 import release as mac_release
+from profiles import PROFILES
 
 
 def make_archive(path, revision, version='0.1.0', *, extra=None, arch=0x0100000C):
@@ -26,6 +27,7 @@ def make_archive(path, revision, version='0.1.0', *, extra=None, arch=0x0100000C
         'CFBundleIdentifier': bundle.LABEL, 'CFBundleExecutable': 'relay',
         'CFBundleVersion': version, 'CFBundleShortVersionString': version,
         'LSMinimumSystemVersion': bundle.MINIMUM_MACOS,
+        'ZimbrProfile': 'release', 'ZimbrDataDirectory': 'Zimbr',
     })
     manifest = {'schema': 1, 'project': 'zimbr', 'version': version, 'revision': revision,
                 'architecture': 'aarch64', 'minimum_macos': bundle.MINIMUM_MACOS,
@@ -91,10 +93,13 @@ class MacRelease(unittest.TestCase):
         for name in ('relay', 'image-helper', 'openssl-license', 'phone-license'):
             (self.root / name).write_bytes(b'fixture')
         app = self.root / 'Zimbr Relay.app'
-        with mock.patch.object(bundle.subprocess, 'check_output', return_value='binary:\n /usr/lib/libSystem.B.dylib\n'), \
+        with mock.patch.object(bundle.subprocess, 'check_output', side_effect=lambda command, **kw:
+                               json.dumps(PROFILES['release'].__dict__) if command[-1] == 'profile'
+                               else 'binary:\n /usr/lib/libSystem.B.dylib\n'), \
                 mock.patch.object(bundle, 'sign') as sign:
             bundle.stage(app, self.root / 'relay', self.root / 'image-helper',
-                         self.root / 'openssl-license', self.root / 'phone-license', identity='fixture')
+                         self.root / 'openssl-license', self.root / 'phone-license', identity='fixture',
+                         profile=PROFILES['release'])
         info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
         self.assertEqual(info['CFBundleShortVersionString'], bundle.source_version())
         self.assertEqual(info['CFBundleVersion'], bundle.source_version())
@@ -110,13 +115,45 @@ class MacRelease(unittest.TestCase):
         self.assertFalse(list(app.rglob('relay.json')))
 
     def test_non_system_dynamic_dependency_is_rejected_before_signing(self):
-        with mock.patch.object(bundle.subprocess, 'check_output',
-                               return_value='binary:\n /private/build/libsqlite3.dylib (compatibility version 9.0.0)\n'), \
+        with mock.patch.object(bundle.subprocess, 'check_output', side_effect=lambda command, **kw:
+                               json.dumps(PROFILES['dev'].__dict__) if command[-1] == 'profile'
+                               else 'binary:\n /private/build/libsqlite3.dylib (compatibility version 9.0.0)\n'), \
                 mock.patch.object(bundle, 'sign') as sign, self.assertRaisesRegex(RuntimeError, 'system libraries'):
             bundle.stage(self.root / 'Zimbr Relay.app', self.root / 'relay',
                          self.root / 'image-helper', self.root / 'openssl-license',
                          self.root / 'phone-license')
         sign.assert_not_called()
+
+    def test_profile_mismatch_preserves_previous_staging_bundle(self):
+        app = self.root / 'Zimbr Relay.app'
+        app.mkdir()
+        marker = app / 'previous'
+        marker.write_text('keep')
+        with mock.patch.object(bundle.subprocess, 'check_output',
+                               return_value=json.dumps(PROFILES['dev'].__dict__)), \
+                mock.patch.object(bundle, 'sign') as sign, self.assertRaisesRegex(ValueError, 'profile'):
+            bundle.stage(app, self.root/'relay', self.root/'image-helper',
+                         self.root/'openssl-license', self.root/'phone-license',
+                         profile=PROFILES['release'])
+        self.assertEqual(marker.read_text(), 'keep')
+        sign.assert_not_called()
+
+    def test_dev_bundle_cannot_pass_release_validation_with_matching_checksums(self):
+        make_archive(self.archive, 'a' * 40)
+        with zipfile.ZipFile(self.archive) as package:
+            files = {name: package.read(name) for name in package.namelist()}
+        info_path = f'{mac_release.APP}/Info.plist'
+        info = plistlib.loads(files[info_path])
+        info['ZimbrProfile'] = 'dev'
+        files[info_path] = plistlib.dumps(info)
+        manifest = json.loads(files['release.json'])
+        manifest['files'][info_path] = hashlib.sha256(files[info_path]).hexdigest()
+        files['release.json'] = json.dumps(manifest).encode()
+        with zipfile.ZipFile(self.archive, 'w') as package:
+            for name, content in files.items():
+                package.writestr(name, content)
+        with self.assertRaisesRegex(ValueError, 'ZimbrProfile'):
+            mac_release.validate(self.archive, '0.1.0', 'a' * 40)
 
 
 if __name__ == '__main__':

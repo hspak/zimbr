@@ -41,14 +41,15 @@ and direct network access from Linux to the relay.
 Enter sends; Shift+Enter adds a line. Ctrl+N starts a conversation, Ctrl+F searches,
 and Ctrl+D opens connection details and **Reconnect**.
 
-To update an installed relay, run on the Mac from this checkout:
+To update the development relay, run on the Mac from this checkout:
 
 ```sh
-./tools/update-relay.sh --release=safe
+./tools/update-relay.sh --profile dev --release=safe
 ```
 
 See [relay updates](docs/macos-relay.md#update-the-running-relay) for prerequisites
-and verification.
+and verification. [Dev and release profiles](docs/macos-profiles.md) keep local
+builds separate from the Homebrew installation.
 
 ## Limits to know
 
