@@ -214,6 +214,7 @@ fixtures unless explicitly identified as installed checks.
 | `tools/update-relay.sh --profile dev --release=safe` | Passed using its native ReleaseSafe target; 67 tests passed/1 skipped; installed UUIDs, signed bytes, and running executable inode matched; readiness and journal preservation passed after reinstall |
 | Installed dev manual menu/Settings recheck | User confirmed one icon, the dev menu name, port 8732, and usable Settings |
 | Installed dev Save and Restart recheck | Passed; user observed the window close and icon return. The configuration timestamp advanced, a fresh supervised PID registered with AppKit, and one healthy listener returned on 8732 with permissions, epoch, history, routes, and request associations preserved |
+| Retired release privacy grants | Cleared with an explicitly authorized reset scoped to `com.hsp.zimbr.relay`; a fresh dev doctor still passed Full Disk Access, Automation, and Contacts, and the dev service remained healthy without restarting |
 
 The migration preserved the stopped journal and asset cache, kept dev credential
 paths independent, and archived the legacy installation outside active app,
