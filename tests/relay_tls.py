@@ -87,6 +87,29 @@ class RelayTls(unittest.TestCase):
     def allow(self, *names):
         save_json(self.tls.root/'devices.json', [{'label': n, 'sha256': self.tls.fingerprint(n), 'enabled': True} for n in names])
 
+    def test_single_tls13_cipher(self):
+        for cipher in ('TLS_AES_256_GCM_SHA384', 'TLS_AES_128_GCM_SHA256',
+                       'TLS_CHACHA20_POLY1305_SHA256'):
+            with self.subTest(cipher=cipher):
+                result = subprocess.run([
+                    'openssl', 's_client', '-connect', f'127.0.0.1:{self.port}',
+                    '-servername', 'localhost', '-verify_hostname', 'localhost',
+                    '-verify_return_error', '-CAfile', str(self.tls.root/'ca.pem'),
+                    '-cert', str(self.tls.root/'client.pem'),
+                    '-key', str(self.tls.root/'client-key.pem'),
+                    '-tls1_3', '-ciphersuites', cipher, '-alpn', 'h2', '-brief',
+                ], input=b'', capture_output=True, timeout=5)
+                if cipher == 'TLS_AES_256_GCM_SHA384':
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(b'Ciphersuite: TLS_AES_256_GCM_SHA384', result.stderr)
+                else:
+                    self.assertNotEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(b'alert handshake failure', result.stderr)
+        with closing(self.tls.connection()) as conn:
+            conn.request('GET', '/v1/status')
+            self.assertEqual(conn.getresponse().status, 200)
+            self.assertEqual(conn.sock.cipher()[0], 'TLS_AES_256_GCM_SHA384')
+
     def test_authentication_before_http(self):
         now = dt.datetime.now(dt.timezone.utc)
         self.tls.issue('expired', before=now-dt.timedelta(days=2), after=now-dt.timedelta(days=1))

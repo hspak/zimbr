@@ -47,6 +47,7 @@ def main():
                 if not self.path.startswith('/v1/assets/'):
                     return super().do_GET()
                 assert self.connection.version()=='TLSv1.3' and self.connection.getpeercert(binary_form=True)
+                assert self.connection.cipher()[0]=='TLS_AES_256_GCM_SHA384'
                 ident=self.path.split('/')[3]
                 mode=behavior.get(ident,'good')
                 with lock:

@@ -3,6 +3,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tls.h"
 #include "platform.h"
+#include "../tls_policy.h"
 #include <openssl/ssl.h>
 #include <openssl/pem.h>
 #include <openssl/x509v3.h>
@@ -198,6 +199,8 @@ ZrTlsContext *zr_tls_context(const char *cert_path, const char *key_path, const 
     reason = "TLS 1.3 policy unavailable";
     if (!SSL_CTX_set_min_proto_version(ctx->ssl, TLS1_3_VERSION) || !SSL_CTX_set_max_proto_version(ctx->ssl, TLS1_3_VERSION) ||
         !SSL_CTX_set_num_tickets(ctx->ssl, 0) || !SSL_CTX_set_max_early_data(ctx->ssl, 0)) goto fail;
+    reason = "Required TLS 1.3 cipher " ZIMBR_TLS13_CIPHER " unavailable";
+    if (!SSL_CTX_set_ciphersuites(ctx->ssl, ZIMBR_TLS13_CIPHER)) goto fail;
     SSL_CTX_set_session_cache_mode(ctx->ssl, SSL_SESS_CACHE_OFF);
     SSL_CTX_set_options(ctx->ssl, SSL_OP_NO_TICKET | SSL_OP_NO_COMPRESSION | SSL_OP_NO_RENEGOTIATION);
     SSL_CTX_set_verify(ctx->ssl, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, verify_peer);

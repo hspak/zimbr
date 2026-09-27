@@ -70,10 +70,12 @@ with the application stopped before changing deployments.
 
 The client requires libcurl **8.10 or newer with HTTP/2 and the OpenSSL 3 backend**, plus
 OpenSSL development headers. Unsupported TLS backends fail closed. Every curl
-option is checked. Peer/hostname verification, TLS 1.3 only, HTTPS protocols only,
-HTTP/2, disabled redirects/proxies, and disabled TLS session caching apply to
-both API and SSE connections. An OpenSSL callback replaces the entire trust
-store, including default lookup methods, with the configured dedicated CA.
+option is checked. Peer/hostname verification, TLS 1.3 with only
+`TLS_AES_256_GCM_SHA384`, HTTPS protocols only, HTTP/2, disabled redirects/proxies,
+and disabled TLS session caching apply to API, SSE, and media connections. See the
+[cipher choice and tradeoffs](macos-tls.md#cipher-policy). An OpenSSL callback
+replaces the entire trust store, including default lookup methods, with the
+configured dedicated CA.
 Connections are reused only inside one immutable credential configuration.
 Only `h2` is offered through ALPN. A pre-request callback also verifies the
 negotiated protocol before sending any request, including on reused connections.
@@ -100,7 +102,9 @@ zig fmt --check build.zig src
 ```
 
 Python client harnesses require `cryptography` and use ephemeral CAs; no test CA
-is installed in system trust stores. `tests/relay_fixture.py` configures the native
+is installed in system trust stores. The TLS rejection tests also use the
+OpenSSL CLI to constrain peers to individual TLS 1.3 ciphers and verify rejection
+of AES-128-GCM and ChaCha20-Poly1305. `tests/relay_fixture.py` configures the native
 relay and enrolls its test devices. Integration, Details, and performance suites
 connect directly to its HTTPS listener. Transport faults use an authenticated
 TLS intermediary with its own enrolled upstream certificate; both hops verify

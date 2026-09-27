@@ -2,12 +2,43 @@
 
 Start with [first-run setup](setup.md), which builds the relay, generates its
 configuration with mkcert, and enrolls Linux. Every HTTP/SSE connection requires
-TLS 1.3, HTTP/2, and an enabled client certificate. The
+TLS 1.3 with `TLS_AES_256_GCM_SHA384`, HTTP/2, and an enabled client certificate. The
 [certificate contract](certificate-management.md) defines issuance and validation.
 
 Commands default to **dev** (port 8732). Select `--profile release` for Homebrew
 (port 8731), including enrollment/revocation and installation. See
 [profiles](macos-profiles.md).
+
+## Cipher policy
+
+The relay and native Linux client enable exactly one TLS 1.3 cipher suite:
+`TLS_AES_256_GCM_SHA384` (AES-256-GCM authenticated encryption with SHA-384 for
+the TLS key schedule and transcript). The shared policy covers API, SSE, and
+media connections. Configuration fails closed if the cipher is unavailable;
+peers offering only another cipher cannot complete a handshake. Administrative
+Python clients negotiate this same cipher with the relay.
+
+Security margin takes priority over peak throughput: AES-256 provides a larger
+key-search margin than AES-128. ChaCha20-Poly1305 also has a 256-bit key and is a
+strong alternative. AES-GCM benefits from hardware acceleration on Apple Silicon
+and modern x86 CPUs; ChaCha20 can be faster on machines without AES acceleration.
+This choice does not imply 256-bit security for the whole TLS connection:
+authentication and key exchange are negotiated separately, and GCM uses a
+128-bit authentication tag. See [TLS 1.3](https://www.rfc-editor.org/rfc/rfc8446.html)
+and the [ChaCha20 comparison](https://www.rfc-editor.org/rfc/rfc8439.html#section-1).
+
+A local AMD Ryzen AI Max+ 395 / OpenSSL 3.6.4 AEAD microbenchmark measured:
+
+| Payload size | AES-128-GCM | AES-256-GCM | ChaCha20-Poly1305 |
+| --- | --- | --- | --- |
+| 1 KiB | 6.59 GB/s | 6.36 GB/s | 5.95 GB/s |
+| 16 KiB | 25.65 GB/s | 23.09 GB/s | 6.21 GB/s |
+
+These are short bulk-encryption measurements, not end-to-end TLS or macOS
+measurements. AES-256 costs about 4–10% throughput versus AES-128 here; both are
+well above typical network throughput. Reproduce on each target with
+`openssl speed -elapsed -seconds 2 -aead -bytes 16384 -evp aes-256-gcm`, varying
+the cipher and payload size.
 
 ## Build
 
@@ -157,8 +188,10 @@ Run the native build and unit suite, `tests/integration.py`, `tests/relay_tls.py
 certificates and synthetic message data for transport and fault tests.
 
 For an installed deployment, verify the app signature, configured listener,
-TLS 1.3/HTTP/2 negotiation, explicit CA and hostname checks, and rejection of
-plaintext, missing client certificates, and revoked devices. Check both HTTP and
+TLS 1.3/HTTP/2 negotiation with `TLS_AES_256_GCM_SHA384`, explicit CA and hostname
+checks, and rejection of other ciphers, plaintext, missing client certificates,
+and revoked devices. The TLS tests require the OpenSSL CLI to exercise peers
+restricted to AES-128-GCM and ChaCha20-Poly1305. Check both HTTP and
 SSE connections, including closure and reauthentication after renewal/revocation.
 
 Verify permissions under the installed app identity and preserve epoch, message

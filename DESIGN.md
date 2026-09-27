@@ -341,7 +341,9 @@ References:
 ### 1.8. Security and service operation
 
 Bind only the explicit IP in the private relay configuration, with no wildcard
-fallback. Require TLS 1.3 and HTTP/2 on every route. OpenSSL 3.5 is statically
+fallback. Require TLS 1.3 with only `TLS_AES_256_GCM_SHA384` and HTTP/2 on every
+route. The relay and all native client lanes share the cipher policy in
+`src/tls_policy.h`; failure to configure it fails closed. OpenSSL 3.5 is statically
 linked into the Mac app; the fake relay uses the same verification and transport.
 
 A dedicated mkcert CA signs locally generated server/client CSRs after strict

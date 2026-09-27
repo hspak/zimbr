@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #include "bridge.h"
+#include "../tls_policy.h"
 #include <curl/curl.h>
 #include <openssl/ssl.h>
 #include <openssl/pem.h>
@@ -301,6 +302,7 @@ int zc_net_start(ZcNet *n, int stream, const char *path, const char *body, size_
     SET(CURLOPT_PREREQFUNCTION,require_http2); SET(CURLOPT_PREREQDATA,s);
     SET(CURLOPT_SSL_VERIFYPEER,1L); SET(CURLOPT_SSL_VERIFYHOST,2L);
     SET(CURLOPT_SSLVERSION,(long)(CURL_SSLVERSION_TLSv1_3|CURL_SSLVERSION_MAX_TLSv1_3));
+    SET(CURLOPT_TLS13_CIPHERS,ZIMBR_TLS13_CIPHER);
     SET(CURLOPT_SSL_OPTIONS,0L); SET(CURLOPT_SSL_SESSIONID_CACHE,0L);
     SET(CURLOPT_CAINFO,NULL); SET(CURLOPT_CAPATH,NULL); SET(CURLOPT_CA_CACHE_TIMEOUT,0L);
     SET(CURLOPT_CAINFO_BLOB,&ca); SET(CURLOPT_SSLCERTTYPE,"PEM"); SET(CURLOPT_SSLKEYTYPE,"PEM");

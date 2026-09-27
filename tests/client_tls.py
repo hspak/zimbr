@@ -30,6 +30,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args): pass
     def do_GET(self):
         assert self.connection.version() == 'TLSv1.3'
+        assert self.connection.cipher()[0] == 'TLS_AES_256_GCM_SHA384'
         assert self.connection.getpeercert(binary_form=True)
         assert not self.headers.get('Authorization')
         self.server.requests.append((self.path, hashlib.sha256(self.connection.getpeercert(binary_form=True)).hexdigest(), id(self.connection)))
@@ -91,6 +92,42 @@ def failure(probe, kind):
     return probe.latest['diagnostics']
 
 
+def reject_other_ciphers(root, pki, start):
+    # Python's SSLContext.set_ciphers does not restrict TLS 1.3 suites.
+    for cipher in ('TLS_AES_128_GCM_SHA256', 'TLS_CHACHA20_POLY1305_SHA256'):
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            port = listener.getsockname()[1]
+        with (root/'cipher-server.log').open('w+') as log:
+            proc = subprocess.Popen([
+                'openssl', 's_server', '-accept', f'127.0.0.1:{port}',
+                '-cert', str(pki.root/'server.pem'), '-key', str(pki.root/'server-key.pem'),
+                '-CAfile', str(pki.root/'ca.pem'), '-Verify', '1', '-verify_return_error',
+                '-tls1_3', '-ciphersuites', cipher, '-alpn', 'h2', '-www',
+            ], stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+            probe = None
+            try:
+                deadline = time.monotonic()+5
+                while True:
+                    log.seek(0)
+                    detail = log.read()
+                    if 'ACCEPT' in detail:
+                        break
+                    assert proc.poll() is None and time.monotonic() < deadline, detail
+                    time.sleep(.02)
+                probe = start(None, args=pki.client_args(port))
+                probe.until(lambda v: v['diagnostics']['transport']['failure'] == 'tls', timeout=10)
+                assert probe.latest['diagnostics']['transport']['curl_code'] == 35, probe.latest
+                log.seek(0)
+                detail = log.read()
+                assert 'no shared cipher' in detail, (cipher, detail)
+            finally:
+                if probe is not None:
+                    probe.close()
+                proc.terminate()
+                proc.wait(timeout=5)
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix='zimbr-tls-') as temp:
         root = Path(temp)
@@ -117,6 +154,7 @@ def main():
                 probe.close()
                 srv.close()
         with (root/'client.log').open('w+') as log:
+            reject_other_ciphers(root, pki, start)
             # CA, DNS SAN, IP SAN, lifetime, and server-purpose validation.
             d = negative(server(other, client_ca=pki.root/'ca.pem'), 'server_trust')
             assert d['transport']['curl_code'] == 60 and d['transport']['verify_result'] != 0
