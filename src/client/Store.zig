@@ -2,6 +2,7 @@
 //! returned snapshots and any partial allocations share that arena's lifetime.
 const std = @import("std");
 const json_bounds = @import("../protocol.zig").json;
+const Json = @import("../protocol.zig").Json;
 const validation = @import("validation.zig");
 const content = @import("content.zig");
 const u = @import("../common.zig");
@@ -61,6 +62,7 @@ pub const PersistSendError = ReadError || error{
     UnsupportedTarget,
 };
 pub const SavePreviewError = RecordError || error{InvalidRecord};
+pub const SaveDecodedPreviewError = Sqlite.QueryError || error{InvalidRecord};
 pub const EnrichmentPageError = RecordError || error{
     InvalidEnrichmentPage,
     InvalidJson,
@@ -71,8 +73,10 @@ pub const EnrichmentPageError = RecordError || error{
     MissingMessage,
 };
 
+/// Assume the returned store and its statements are used by one thread at a
+/// time. Settings and synchronization use separate connections to this cache.
 pub fn open(path: [:0]const u8) ReadError!Store {
-    const db = try Sqlite.open(path, false);
+    const db = try Sqlite.openConfined(path, false);
     errdefer db.close();
     try db.exec(
         \\PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
@@ -291,15 +295,48 @@ pub fn beginSync(s: Store, epoch: []const u8, cursor: []const u8) BeginSyncError
     try s.set("accepted_extensions", "");
     try s.db.exec("COMMIT");
 }
+pub const Incoming = union(enum) {
+    conversation: json_bounds.Decoded(t.Conversation),
+    message: json_bounds.Decoded(t.Message),
+    request: json_bounds.Decoded(t.SendRequest),
+    identity: json_bounds.Decoded(t.Identity),
+};
+
 pub fn upsert(s: Store, a: u.Allocator, kind: []const u8, raw: []const u8) UpsertError!bool {
     try json_bounds.check(raw, validation.max_record_bytes, 32768);
-    if (u.eq(kind, "identity")) {
-        const v = try std.json.parseFromSliceLeaky(
-            t.Identity,
-            a,
-            raw,
-            .{ .ignore_unknown_fields = true },
-        );
+    inline for (std.meta.fields(Incoming)) |field| {
+        if (u.eq(kind, field.name)) {
+            const decoded = try std.json.parseFromSliceLeaky(
+                field.type,
+                a,
+                raw,
+                .{ .ignore_unknown_fields = true },
+            );
+            return s.writeRecord(a, @unionInit(Incoming, field.name, decoded));
+        }
+    }
+    return error.InvalidRecord;
+}
+
+/// Persist a decoded wire record without parsing it again. Assume value and raw
+/// came from the same Decoded parser result. Record validation and byte bounds
+/// are still checked.
+/// The caller retains ownership; SQLite copies the record before returning.
+pub fn upsertDecoded(s: Store, a: u.Allocator, record: Incoming) UpsertError!bool {
+    const raw = switch (record) {
+        inline else => |v| v.raw,
+    };
+    try json_bounds.check(raw, validation.max_record_bytes, 32768);
+    return s.writeRecord(a, record);
+}
+
+fn writeRecord(s: Store, a: u.Allocator, record: Incoming) UpsertError!bool {
+    const kind = @tagName(record);
+    const raw = switch (record) {
+        inline else => |v| v.raw,
+    };
+    if (record == .identity) {
+        const v = record.identity.value;
         const revision = try std.fmt.parseInt(i64, v.revision, 10);
         if (revision < 0 or v.id.len == 0 or v.service.len == 0 or v.address.len == 0) return error.InvalidRecord;
         try s.exec("INSERT INTO identities VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,record=excluded.record WHERE excluded.revision>identities.revision AND excluded.service=identities.service AND excluded.address=identities.address", &.{
@@ -316,43 +353,33 @@ pub fn upsert(s: Store, a: u.Allocator, kind: []const u8, raw: []const u8) Upser
     var chat: []const u8 = "";
     var sort: []const u8 = "";
     var metadata_deferred = false;
-    if (u.eq(kind, "conversation")) {
-        const v = (try std.json.parseFromSlice(
-            t.Conversation,
-            a,
-            raw,
-            .{ .ignore_unknown_fields = true },
-        )).value;
-        id = v.id;
-        rev = v.revision;
-        sort = v.last_activity orelse "";
-        chat = if (v.is_self and v.thread_id != null and t.uuid(v.thread_id.?)) v.thread_id.? else v.id;
-    } else if (u.eq(kind, "message")) {
-        const v = (try std.json.parseFromSlice(
-            t.Message,
-            a,
-            raw,
-            .{ .ignore_unknown_fields = true },
-        )).value;
-        try validation.message(v);
-        id = v.id;
-        rev = v.revision;
-        chat = v.conversation_id;
-        sort = v.timestamp;
-        metadata_deferred = v.metadata_deferred;
-    } else if (u.eq(kind, "request")) {
-        const v = (try std.json.parseFromSlice(
-            t.SendRequest,
-            a,
-            raw,
-            .{ .ignore_unknown_fields = true },
-        )).value;
-        id = v.request_id;
-        rev = v.revision;
-        chat = v.target.conversation_id orelse "";
-        const epoch = try s.get(a, "epoch");
-        if (!u.eq(epoch, v.server_epoch)) return false;
-    } else return error.InvalidRecord;
+    switch (record) {
+        .conversation => |decoded| {
+            const v = decoded.value;
+            id = v.id;
+            rev = v.revision;
+            sort = v.last_activity orelse "";
+            chat = if (v.is_self and v.thread_id != null and t.uuid(v.thread_id.?)) v.thread_id.? else v.id;
+        },
+        .message => |decoded| {
+            const v = decoded.value;
+            try validation.message(v);
+            id = v.id;
+            rev = v.revision;
+            chat = v.conversation_id;
+            sort = v.timestamp;
+            metadata_deferred = v.metadata_deferred;
+        },
+        .request => |decoded| {
+            const v = decoded.value;
+            id = v.request_id;
+            rev = v.revision;
+            chat = v.target.conversation_id orelse "";
+            const epoch = try s.get(a, "epoch");
+            if (!u.eq(epoch, v.server_epoch)) return false;
+        },
+        .identity => unreachable, // The separate directory write returned above.
+    }
     const revision = try std.fmt.parseInt(i64, rev, 10);
     if (revision < 0 or id.len == 0) return error.InvalidRecord;
     const existing = try s.db.prepare("SELECT revision,record,chat FROM records WHERE kind=? AND id=?");
@@ -369,7 +396,12 @@ pub fn upsert(s: Store, a: u.Allocator, kind: []const u8, raw: []const u8) Upser
             .{ .ignore_unknown_fields = true },
         )).metadata_deferred;
     if (!fresh and existing.int(0) >= revision and !upgrade) {
-        if (u.eq(kind, "request")) try s.requestState(a, existing.bytes(1));
+        if (record == .request) try s.requestState(try std.json.parseFromSliceLeaky(
+            t.SendRequest,
+            a,
+            existing.bytes(1),
+            .{ .ignore_unknown_fields = true },
+        ), existing.bytes(1));
         return false;
     }
     const regrouped = u.eq(kind, "conversation") and (fresh or !u.eq(existing.bytes(2), chat));
@@ -392,7 +424,7 @@ pub fn upsert(s: Store, a: u.Allocator, kind: []const u8, raw: []const u8) Upser
             .{ .text = raw },
         });
     }
-    if (u.eq(kind, "request")) try s.requestState(a, raw);
+    if (record == .request) try s.requestState(record.request.value, raw);
     if (regrouped) {
         try s.exec(
             thread_cte ++ "DELETE FROM pages WHERE chat IN (SELECT id FROM members)",
@@ -402,13 +434,7 @@ pub fn upsert(s: Store, a: u.Allocator, kind: []const u8, raw: []const u8) Upser
     }
     return fresh;
 }
-fn requestState(s: Store, a: u.Allocator, raw: []const u8) !void {
-    const v = (try std.json.parseFromSlice(
-        t.SendRequest,
-        a,
-        raw,
-        .{ .ignore_unknown_fields = true },
-    )).value;
+fn requestState(s: Store, v: t.SendRequest, raw: []const u8) !void {
     try s.exec("UPDATE outbox SET state=?,detail=?,record=? WHERE id=?", &.{
         .{ .text = @tagName(v.state) },
         .{ .text = if (v.error_info) |e| e.message else "" },
@@ -421,7 +447,7 @@ pub const Event = struct {
     sequence: []const u8,
     type: []const u8,
     origin: []const u8,
-    record: std.json.Value,
+    record: Json,
 };
 pub fn event(
     s: Store,
@@ -444,7 +470,7 @@ pub fn eventNotification(
     viewed: []const u8,
 ) EventNotificationError!?t.Message {
     try json_bounds.check(raw, 1024 * 1024, 65536);
-    const e = (try std.json.parseFromSlice(Event, a, raw, .{ .ignore_unknown_fields = true })).value;
+    const e = try std.json.parseFromSliceLeaky(Event, a, raw, .{ .ignore_unknown_fields = true });
     const epoch = try s.get(a, "epoch");
     const seq = try t.parseCursor(e.cursor, epoch);
     if (!u.eq(e.cursor, frame_id) or !u.eq(e.type, frame_type) or seq != try std.fmt.parseInt(
@@ -466,7 +492,7 @@ pub fn eventNotification(
         try s.get(a, "accepted_extensions"),
         "identity-v1",
     )) "identity" else return error.UnknownEvent;
-    const record = try u.json(a, e.record);
+    const record = e.record.bytes;
     // The network worker may own a batch transaction. Standalone callers keep
     // the same atomic record/cursor guarantee for an individual event.
     const owns_transaction = u.c.sqlite3_get_autocommit(s.db.handle) != 0;
@@ -474,26 +500,28 @@ pub fn eventNotification(
     errdefer if (owns_transaction) s.db.exec("ROLLBACK") catch {};
     var notification: ?t.Message = null;
     if (u.eq(kind, "message")) {
-        const m = (try std.json.parseFromSlice(
-            t.Message,
+        try json_bounds.check(record, validation.max_record_bytes, 32768);
+        const decoded = try std.json.parseFromSliceLeaky(
+            json_bounds.Decoded(t.Message),
             a,
             record,
             .{ .ignore_unknown_fields = true },
-        )).value;
-        try validation.message(m);
-        if (u.eq(e.origin, "live") or try s.cacheBackgroundMessage(m)) _ = try s.upsert(
-            a,
-            kind,
-            record,
         );
-        if (!display.resolvedReaction(m)) try s.savePreview(a, try u.json(a, t.ConversationPreview{
-            .conversation_id = m.conversation_id,
-            .message_id = m.id,
-            .revision = m.revision,
-            .timestamp = m.timestamp,
-            .kind = @tagName(m.kind),
-            .text = display.prefix(display.summary(a, m), 1024, 1),
-        }));
+        const m = decoded.value;
+        try validation.message(m);
+        if (u.eq(e.origin, "live") or try s.cacheBackgroundMessage(m))
+            _ = try s.writeRecord(a, .{ .message = decoded });
+        if (!display.resolvedReaction(m)) {
+            const preview = t.ConversationPreview{
+                .conversation_id = m.conversation_id,
+                .message_id = m.id,
+                .revision = m.revision,
+                .timestamp = m.timestamp,
+                .kind = @tagName(m.kind),
+                .text = display.prefix(display.summary(a, m), 1024, 1),
+            };
+            try s.writePreview(preview, try u.json(a, preview));
+        }
         if (m.direction == .incoming and m.kind != .reaction and m.reaction_event == null) {
             try s.exec("INSERT OR IGNORE INTO live_seen VALUES(?)", &.{.{ .text = m.id }});
             const first = u.c.sqlite3_changes(s.db.handle) > 0;
@@ -564,12 +592,25 @@ pub fn page(s: Store, chat: []const u8, cursor: ?[]const u8) Sqlite.QueryError!v
     );
 }
 pub fn savePreview(s: Store, a: u.Allocator, raw: []const u8) SavePreviewError!void {
-    const value = (try std.json.parseFromSlice(
+    const value = try std.json.parseFromSliceLeaky(
         t.ConversationPreview,
         a,
         raw,
         .{ .ignore_unknown_fields = true },
-    )).value;
+    );
+    return s.writePreview(value, raw);
+}
+
+/// Assume value and raw came from the same Decoded parser result. Validate the
+/// preview and copy its original bytes into SQLite; the caller retains ownership.
+pub fn savePreviewDecoded(
+    s: Store,
+    preview: json_bounds.Decoded(t.ConversationPreview),
+) SaveDecodedPreviewError!void {
+    return s.writePreview(preview.value, preview.raw);
+}
+
+fn writePreview(s: Store, value: t.ConversationPreview, raw: []const u8) SaveDecodedPreviewError!void {
     const revision = std.fmt.parseInt(i64, value.revision, 10) catch return error.InvalidRecord;
     if (revision < 0 or value.conversation_id.len == 0 or value.message_id.len == 0 or value.text.len > 1024) return error.InvalidRecord;
     try s.exec(
@@ -817,12 +858,33 @@ pub fn enrichmentPage(
     section: content.Section,
     after: []const u8,
 ) EnrichmentPageError!bool {
+    return switch (section) {
+        inline else => |selected| s.enrichmentSection(selected, a, raw, id, revision, after),
+    };
+}
+
+fn enrichmentSection(
+    s: Store,
+    comptime section: content.Section,
+    a: u.Allocator,
+    raw: []const u8,
+    id: []const u8,
+    revision: []const u8,
+    after: []const u8,
+) EnrichmentPageError!bool {
+    const T = switch (section) {
+        .attachments => t.Attachment,
+        .previews => t.LinkPreview,
+        .reactions => t.Reaction,
+        .parts => t.MessagePart,
+    };
+    const Item = json_bounds.Decoded(T);
     try json_bounds.check(raw, t.max_metadata_page, 8192);
     const Page = struct {
         message_id: []const u8,
         revision: []const u8,
         section: content.Section,
-        items: []const std.json.Value,
+        items: []const Item,
         total: usize,
         next: ?[]const u8,
     };
@@ -857,7 +919,7 @@ pub fn enrichmentPage(
         try s.db.exec("ROLLBACK");
         return false;
     }
-    var items: std.ArrayList(std.json.Value) = .empty;
+    var items: std.ArrayList(Item) = .empty;
     if (after.len > 0) {
         const previous = try s.db.prepare("SELECT items FROM enrichment_pages WHERE message_id=? AND section=? AND revision=?");
         defer previous.close();
@@ -869,42 +931,27 @@ pub fn enrichmentPage(
         if (!try previous.step()) return error.InvalidEnrichmentPage;
         try items.appendSlice(
             a,
-            try std.json.parseFromSliceLeaky([]const std.json.Value, a, previous.bytes(0), .{ .allocate = .alloc_always }),
+            try std.json.parseFromSliceLeaky([]const Item, a, try previous.text(a, 0), .{ .ignore_unknown_fields = true }),
         );
     }
     try items.appendSlice(a, page_value.items);
     if (items.items.len > page_value.total or (page_value.next == null and items.items.len != page_value.total)) return error.InvalidEnrichmentPage;
-    const encoded = try u.json(a, items.items);
     if (m.enrichment == null) return error.InvalidEnrichmentPage;
-    switch (section) {
-        inline else => |selected| {
-            const aggregate = @field(m.enrichment.?, @tagName(selected));
-            if (page_value.total != aggregate.total or (page_value.next != null and items.items.len >= page_value.total)) return error.InvalidEnrichmentPage;
-            const field = comptime if (selected == .previews) "link_previews" else @tagName(selected);
-            const T = comptime switch (selected) {
-                .attachments => t.Attachment,
-                .previews => t.LinkPreview,
-                .reactions => t.Reaction,
-                .parts => t.MessagePart,
-            };
-            const values = try std.json.parseFromSliceLeaky(
-                []const T,
-                a,
-                encoded,
-                .{ .ignore_unknown_fields = true },
-            );
-            var ids: std.StringHashMapUnmanaged(void) = .empty;
-            for (values) |value| {
-                if (value.id.len == 0 or (try ids.getOrPut(a, value.id)).found_existing) return error.InvalidEnrichmentPage;
-            }
-            const current: []const T = if (selected == .attachments) m.attachments else @field(
-                m,
-                field,
-            ) orelse &.{};
-            if (values.len >= current.len or page_value.next == null) @field(m, field) = values;
-            @field(m.enrichment.?, @tagName(selected)) = .{ .total = page_value.total, .complete = page_value.next == null };
-        },
+    const aggregate = @field(m.enrichment.?, @tagName(section));
+    if (page_value.total != aggregate.total or (page_value.next != null and items.items.len >= page_value.total)) return error.InvalidEnrichmentPage;
+    const values = try a.alloc(T, items.items.len);
+    const records = try a.alloc(Json, items.items.len);
+    var ids: std.StringHashMapUnmanaged(void) = .empty;
+    for (items.items, values, records) |item, *value, *record| {
+        value.* = item.value;
+        record.* = .{ .bytes = item.raw };
+        if (value.id.len == 0 or (try ids.getOrPut(a, value.id)).found_existing) return error.InvalidEnrichmentPage;
     }
+    const field = comptime if (section == .previews) "link_previews" else @tagName(section);
+    const current: []const T = if (section == .attachments) m.attachments else @field(m, field) orelse &.{};
+    if (values.len >= current.len or page_value.next == null) @field(m, field) = values;
+    @field(m.enrichment.?, @tagName(section)) = .{ .total = page_value.total, .complete = page_value.next == null };
+    const encoded = try u.json(a, records);
     try validation.message(m);
     const record = try u.json(a, m);
     if (record.len > validation.max_expanded_bytes) return error.InvalidEnrichmentPage;

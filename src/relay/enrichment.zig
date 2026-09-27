@@ -4,6 +4,7 @@
 const std = @import("std");
 const u = @import("../common.zig");
 const t = @import("../protocol.zig").types;
+const Json = @import("../protocol.zig").Json;
 const Journal = @import("Journal.zig");
 pub const Section = enum {
     attachments,
@@ -20,13 +21,13 @@ const max_inline_items = @max(
 pub const Prepared = struct {
     value: t.Message,
     sections: [4]?[]const []const u8,
-    hashes: [4]?[]const u8,
+    hashes: [4]?[32]u8,
     changed: bool,
 };
 
 pub const FullError = Journal.QueryError || std.json.ParseError(std.json.Scanner);
 pub const PrepareError = Journal.QueryError || std.json.ParseError(std.json.Scanner) || error{ MetadataItemTooLarge, WriteFailed };
-pub const PageError = Journal.QueryError || std.json.ParseError(std.json.Scanner) || error{
+pub const PageError = Journal.QueryError || Json.InitError || error{
     EnrichmentRestartRequired,
     InvalidRequest,
     NotFound,
@@ -128,7 +129,7 @@ pub fn prepare(a: u.Allocator, j: Journal, value: t.Message, previous: ?t.Messag
             .parts => v.parts,
         };
         if (list) |items| {
-            var encoded: std.ArrayList([]const u8) = .empty;
+            const encoded = try a.alloc([]const u8, items.len);
             var hash = std.crypto.hash.sha2.Sha256.init(.{});
             for (items, 0..) |item, position| {
                 const json = try u.json(a, item);
@@ -138,15 +139,15 @@ pub fn prepare(a: u.Allocator, j: Journal, value: t.Message, previous: ?t.Messag
                 if (position < max_inline_items) inline_sizes[index][position] = json.len;
                 hash.update(json);
                 hash.update("\n");
-                try encoded.append(a, json);
+                encoded[position] = json;
             }
-            const digest = std.fmt.bytesToHex(hash.finalResult(), .lower);
-            result.hashes[index] = try a.dupe(u8, &digest);
+            result.hashes[index] = hash.finalResult();
+            const digest = std.fmt.bytesToHex(result.hashes[index].?, .lower);
             const find = try j.db.prepare("SELECT content FROM enrichment_sections WHERE message_id=? AND section=?");
             defer find.close();
             try find.bind(&.{ .{ .text = v.id }, .{ .text = @tagName(section) } });
             if (!try find.step() or !u.eq(find.bytes(0), &digest)) {
-                result.sections[index] = try encoded.toOwnedSlice(a);
+                result.sections[index] = encoded;
                 result.changed = true;
             }
         }
@@ -230,10 +231,11 @@ pub fn persist(j: Journal, id: []const u8, prepared: Prepared) Journal.QueryErro
             .{ .int = @intCast(position) },
             .{ .text = item },
         });
+        const digest = std.fmt.bytesToHex(prepared.hashes[index].?, .lower);
         try j.execute("INSERT INTO enrichment_sections VALUES(?,?,?) ON CONFLICT(message_id,section) DO UPDATE SET content=excluded.content", &.{
             .{ .text = id },
             .{ .text = @tagName(section) },
-            .{ .text = prepared.hashes[index].? },
+            .{ .text = &digest },
         });
     };
 }
@@ -242,7 +244,7 @@ pub const Page = struct {
     message_id: []const u8,
     revision: []const u8,
     section: Section,
-    items: []const std.json.Value,
+    items: []const Json,
     total: usize,
     next: ?[]const u8,
 };
@@ -368,7 +370,7 @@ pub fn page(
         .{ .int = position },
         .{ .int = @intCast(limit + 1) },
     });
-    var items: std.ArrayList(std.json.Value) = .empty;
+    var items: std.ArrayList(Json) = .empty;
     var bytes: usize = 1024; // Bounds the fixed envelope and continuation token.
     var next: ?[]const u8 = null;
     while (try q.step()) {
@@ -384,7 +386,7 @@ pub fn page(
         bytes += q.bytes(1).len + 1;
         try items.append(
             a,
-            (try std.json.parseFromSlice(std.json.Value, a, q.bytes(1), .{ .allocate = .alloc_always })).value,
+            try Json.init(a, try q.text(a, 1)),
         );
         position = q.int(0);
     }
@@ -478,7 +480,8 @@ test "overflow is lossless, revision-bound, and preserves captions and independe
         const p = try page(a, j, first.id, .reactions, first.revision, after, 40);
         try std.testing.expect((try u.json(a, p)).len <= t.max_metadata_page);
         for (p.items) |item| {
-            try std.testing.expectEqualStrings(reactions[seen].id, item.object.get("id").?.string);
+            const reaction = try std.json.parseFromSliceLeaky(t.Reaction, a, item.bytes, .{});
+            try std.testing.expectEqualStrings(reactions[seen].id, reaction.id);
             seen += 1;
         }
         after = p.next;

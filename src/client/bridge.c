@@ -266,8 +266,8 @@ ZcNet *zc_net_new(const char *origin, const char *ca, const char *cert, const ch
 oom: failure(error,ZC_CONFIG,"Transport allocation failed.");
 fail: zc_net_free(n); return NULL;
 }
-int zc_net_start(ZcNet *n, int stream, const char *path, const char *body) {
-    if (stream<0 || stream>3 || n->slots[stream].easy || path[0]!='/' || path[1]=='/') return 0;
+int zc_net_start(ZcNet *n, int stream, const char *path, const char *body, size_t body_length) {
+    if (stream<0 || stream>3 || n->slots[stream].easy || path[0]!='/' || path[1]=='/' || body_length>INT64_MAX) return 0;
     struct Slot *s=&n->slots[stream]; s->easy=curl_easy_init(); if (!s->easy) return 0;
     s->owner=n; s->stream=stream==1; s->media=stream>=2; s->last_rx=monotonic_ms();
     char url[ZC_REQUEST_URL_CAPACITY];
@@ -294,7 +294,11 @@ int zc_net_start(ZcNet *n, int stream, const char *path, const char *body) {
     SET(CURLOPT_NOPROGRESS,0L); SET(CURLOPT_XFERINFOFUNCTION,progress); SET(CURLOPT_XFERINFODATA,s);
     SET(CURLOPT_WRITEFUNCTION,receive); SET(CURLOPT_WRITEDATA,s); SET(CURLOPT_PRIVATE,s);
     SET(CURLOPT_HEADERFUNCTION,receive_header); SET(CURLOPT_HEADERDATA,s);
-    if (body) { SET(CURLOPT_POST,1L); SET(CURLOPT_COPYPOSTFIELDS,body); }
+    if (body) {
+        SET(CURLOPT_POST,1L);
+        SET(CURLOPT_POSTFIELDSIZE_LARGE,(curl_off_t)body_length);
+        SET(CURLOPT_COPYPOSTFIELDS,body);
+    }
     if (curl_multi_add_handle(n->multi,s->easy)!=CURLM_OK) { code=CURLE_FAILED_INIT; goto setup_error; }
     return 1;
 setup_error:
@@ -306,7 +310,7 @@ setup_error:
 int zc_net_start_file(ZcNet *n, int lane, const char *path, int fd, size_t expected) {
     if (lane<0 || lane>1 || fd<0 || expected>8*1024*1024) return 0;
     int slot=lane+2;
-    if (!zc_net_start(n,slot,path,NULL)) return 0;
+    if (!zc_net_start(n,slot,path,NULL,0)) return 0;
     n->slots[slot].fd=fd; n->slots[slot].expected=expected;
     return 1;
 }
@@ -370,7 +374,12 @@ long zc_net_status(ZcNet *n, int stream) {
 }
 void zc_net_error(ZcNet *n, int stream, ZcError *error) { *error=n->slots[stream].error; }
 const char *zc_net_extensions(ZcNet *n) { return n->slots[1].extensions; }
-const char *zc_net_body(ZcNet *n, size_t *length) { *length=n->slots[0].len; return n->slots[0].body; }
+char *zc_net_take_body(ZcNet *n, size_t *length) {
+    struct Slot *s=&n->slots[0];
+    char *body=s->body; *length=s->len;
+    s->body=NULL; s->len=0;
+    return body;
+}
 void zc_net_ack(ZcNet *n, int stream) { clear_slot(n,stream); }
 
 int zc_url_host(const char *value, char *output, size_t size) {

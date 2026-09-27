@@ -17,6 +17,39 @@ test {
 }
 const epoch = "12345678-1234-1234-1234-123456789012";
 const message = "{\"id\":\"m1\",\"revision\":\"2\",\"conversation_id\":\"c1\",\"sender\":\"test@example.invalid\",\"direction\":\"incoming\",\"service\":\"imessage\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"kind\":\"text\",\"text\":\"Hello 👋\",\"decoding\":\"plain\",\"observed_status\":\"received\"}";
+
+test "confined client connections preserve WAL readers while another thread writes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrintSentinel(std.testing.allocator, ".zig-cache/tmp/{s}/client.db", .{tmp.sub_path}, 0);
+    defer std.testing.allocator.free(path);
+    const reader = try Store.open(path);
+    defer reader.close();
+    try std.testing.expect(u.c.sqlite3_db_mutex(reader.db.handle) == null);
+    try reader.db.exec("BEGIN");
+    defer reader.db.exec("ROLLBACK") catch {};
+    try std.testing.expectEqual(@as(i64, 0), try reader.db.scalar("SELECT count(*) FROM meta WHERE key='fixture'"));
+    const Writer = struct {
+        fn run(db_path: [:0]const u8, failure: *?Store.ReadError) void {
+            write(db_path) catch |err| {
+                failure.* = err;
+            };
+        }
+        fn write(db_path: [:0]const u8) Store.ReadError!void {
+            const writer = try Store.open(db_path);
+            defer writer.close();
+            try writer.db.exec("INSERT INTO meta VALUES('fixture','committed')");
+        }
+    };
+    var failure: ?Store.ReadError = null;
+    const thread = try std.Thread.spawn(.{}, Writer.run, .{ path, &failure });
+    thread.join();
+    if (failure) |err| return err;
+    try std.testing.expectEqual(@as(i64, 0), try reader.db.scalar("SELECT count(*) FROM meta WHERE key='fixture'"));
+    try reader.db.exec("COMMIT");
+    try std.testing.expectEqual(@as(i64, 1), try reader.db.scalar("SELECT count(*) FROM meta WHERE value='committed'"));
+}
+
 test "hostile messages cannot change records or advance the event cursor" {
     const t = @import("protocol.zig").types;
     const s = try Store.open(":memory:");
@@ -1843,4 +1876,66 @@ test "overflow pages extend immutable presentations and stale pages cannot resto
         @as(i64, 0),
         try s.db.scalar("SELECT count(*) FROM enrichment_cache"),
     );
+}
+
+test "relay event bytes reach the client without numeric conversion or multiline framing loss" {
+    const Journal = @import("relay.zig").Journal;
+    const t = @import("protocol.zig").types;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const journal = try Journal.open(":memory:");
+    defer journal.close();
+    const store = try Store.open(":memory:");
+    defer store.close();
+    const relay_epoch = try journal.epoch(a);
+    try store.beginSync(relay_epoch, try t.cursor(a, relay_epoch, 0));
+    const raw = try std.fmt.allocPrint(a, "{s},\r\n\"future\":1.234567890123456789}}", .{message[0 .. message.len - 1]});
+    try journal.event(1, "message.upsert", raw, "live");
+    const frames = try journal.events(a, 0);
+    try std.testing.expectEqual(@as(usize, 1), frames.len);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, frames[0].frame, "\n\n"));
+    try std.testing.expect(std.mem.indexOf(u8, frames[0].frame, "1.234567890123456789") != null);
+    var stream: Sse = .{};
+    defer stream.deinit();
+    const Receive = struct {
+        fn accept(cache: Store, gpa: u.Allocator, raw_event: []const u8, id: []const u8, kind: []const u8) !void {
+            try cache.event(gpa, raw_event, id, kind, "");
+        }
+    };
+    // Fragmented delivery must retain the same record and cursor semantics.
+    for (frames[0].frame) |byte| try stream.feed(Receive.accept, store, &.{byte});
+    const q = try store.db.prepare("SELECT record FROM records WHERE id='m1'");
+    defer q.close();
+    try std.testing.expect(try q.step());
+    try std.testing.expect(std.mem.indexOf(u8, q.bytes(0), "1.234567890123456789") != null);
+    try std.testing.expectEqualStrings(try t.cursor(a, relay_epoch, 1), try store.get(a, "cursor"));
+    try journal.event(2, "message.upsert", "{\"bad\":\"\\q\"}", "live");
+    try std.testing.expectError(error.SyntaxError, journal.events(a, 1));
+}
+
+test "enrichment continuation preserves unknown item fields while merging typed attachments" {
+    const t = @import("protocol.zig").types;
+    const store = try Store.open(":memory:");
+    defer store.close();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var m = try std.json.parseFromSliceLeaky(t.Message, a, message, .{});
+    m.enrichment = .{ .state = .complete, .attachments = .{ .total = 2, .complete = false } };
+    _ = try store.upsert(a, "message", try u.json(a, m));
+    const first = "{\"id\":\"a\",\"name\":\"first\",\"mime_type\":\"image/png\",\"bytes\":\"10\",\"future\":1.234567890123456789}";
+    const second = "{\"id\":\"b\",\"name\":\"second\",\"mime_type\":\"image/png\",\"bytes\":\"20\",\"future\":2.345678901234567891}";
+    const prefix = "{\"message_id\":\"m1\",\"revision\":\"2\",\"section\":\"attachments\",\"total\":2,\"items\":[";
+    try std.testing.expect(try store.enrichmentPage(a, prefix ++ first ++ "],\"next\":\"more\"}", m.id, m.revision, .attachments, ""));
+    try std.testing.expect(try store.enrichmentPage(a, prefix ++ second ++ "],\"next\":null}", m.id, m.revision, .attachments, "more"));
+    const q = try store.db.prepare("SELECT items FROM enrichment_pages");
+    defer q.close();
+    try std.testing.expect(try q.step());
+    try std.testing.expectEqualStrings("[" ++ first ++ "," ++ second ++ "]", q.bytes(0));
+    const snapshot = try store.snapshot(a, "c1");
+    try std.testing.expectEqual(@as(usize, 2), snapshot.messages[0].attachments.len);
+    try std.testing.expectEqualStrings("first", snapshot.messages[0].attachments[0].name);
+    try std.testing.expectEqualStrings("second", snapshot.messages[0].attachments[1].name);
+    try std.testing.expect(snapshot.messages[0].enrichment.?.attachments.complete);
 }

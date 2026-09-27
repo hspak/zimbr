@@ -1,5 +1,6 @@
 const std = @import("std");
 const json_bounds = @import("../protocol.zig").json;
+const url_format = @import("../protocol.zig").url;
 const content = @import("content.zig");
 const u = @import("../common.zig");
 const t = @import("../protocol.zig").types;
@@ -450,13 +451,18 @@ fn event(s: *Worker, arena: u.Allocator, raw: []const u8, id: []const u8, kind: 
     s.dirty = true;
     s.content_dirty = true;
 }
-fn request(s: *Worker, job: @FieldType(Worker, "job"), path: []const u8, body: ?[]const u8) !void {
+fn request(
+    s: *Worker,
+    job: @FieldType(Worker, "job"),
+    comptime format: []const u8,
+    args: anytype,
+    body: ?[]const u8,
+) !void {
     std.debug.assert(s.job == .idle);
-    const url = std.fmt.bufPrintZ(&s.job_path, "{s}", .{path}) catch
+    const url = std.fmt.bufPrintZ(&s.job_path, format, args) catch
         return error.RequestPathTooLong;
-    const data = if (body) |b| try a.dupeZ(u8, b) else null;
-    defer if (data) |d| a.free(d);
-    if (c.zc_net_start(s.net.?, 0, url, if (data) |d| d.ptr else null) == 0) return error.TransportFailure;
+    if (c.zc_net_start(s.net.?, 0, url, if (body) |b| b.ptr else null, if (body) |b| b.len else 0) == 0)
+        return error.TransportFailure;
     s.job_path_len = url.len;
     s.job = job;
     s.dirty = true;
@@ -504,7 +510,8 @@ fn schedule(s: *Worker) !void {
             try s.requestHistory(ar);
         } else try s.request(
             .identities,
-            try std.fmt.allocPrint(ar, "/v1/identities?limit=200{s}{s}", .{ if (before.len > 0) "&before=" else "", try encode(ar, before) }),
+            "/v1/identities?limit=200{s}{f}",
+            .{ if (before.len > 0) "&before=" else "", url_format.escaped(before) },
             null,
         );
         return;
@@ -513,8 +520,8 @@ fn schedule(s: *Worker) !void {
         if (s.stream_active) return;
         if (s.need_sync) {
             s.need_sync = false;
-            try s.request(.sync, "/v1/sync", null);
-        } else try s.request(.status, "/v1/status", null);
+            try s.request(.sync, "/v1/sync", .{}, null);
+        } else try s.request(.status, "/v1/status", .{}, null);
     } else if (try s.unresolved() and u.now() >= s.recovery_at) {
         const q = try s.store.db.prepare("SELECT id FROM outbox WHERE epoch=(SELECT value FROM meta WHERE key='epoch') AND record IS NULL AND state IN ('sending','unknown') ORDER BY rowid LIMIT 1");
         defer q.close();
@@ -523,11 +530,12 @@ fn schedule(s: *Worker) !void {
             s.recovery_at = u.now() + 5000;
             try s.request(
                 .recover,
-                try std.fmt.allocPrint(ar, "/v1/send-requests/{s}", .{s.job_key}),
+                "/v1/send-requests/{s}",
+                .{s.job_key},
                 null,
             );
         }
-    } else if (u.now() >= s.hydration_at and try s.hydrateSend(ar)) {
+    } else if (u.now() >= s.hydration_at and try s.hydrateSend()) {
         // A linked echo can arrive through reconciliation before its request.
         // Fetch that one message even when its conversation is not cached.
     } else if (s.need_history and s.selected.len > 0 and !std.mem.startsWith(u8, s.selected, "new:")) {
@@ -538,19 +546,19 @@ fn schedule(s: *Worker) !void {
             const next_enrichment_after = try a.dupe(u8, after);
             a.free(s.enrichment_after);
             s.enrichment_after = next_enrichment_after;
-            try s.request(.enrichment, try std.fmt.allocPrint(ar, "/v1/messages/{s}/enrichment?section={s}&revision={s}&limit=200{s}{s}", .{
-                try encode(ar, cmd.key),
-                try encode(ar, cmd.text),
-                try encode(ar, cmd.recipient),
+            try s.request(.enrichment, "/v1/messages/{f}/enrichment?section={f}&revision={f}&limit=200{s}{f}", .{
+                url_format.escaped(cmd.key),
+                url_format.escaped(cmd.text),
+                url_format.escaped(cmd.recipient),
                 if (after.len > 0) "&after=" else "",
-                try encode(ar, after),
-            }), null);
+                url_format.escaped(after),
+            }, null);
         } else {
             freeCommand(cmd);
             s.enrichment_request = null;
         }
     } else if (u.now() >= s.status_at) {
-        try s.request(.status, "/v1/status", null);
+        try s.request(.status, "/v1/status", .{}, null);
     } else if (u.now() >= s.recovery_at) {
         s.recovery_at = u.now() + 5000;
         const q = try s.store.db.prepare("SELECT id,rowid FROM outbox WHERE epoch=? AND state IN ('sending','unknown','queued','dispatching','submitted') AND rowid>? ORDER BY rowid LIMIT 1");
@@ -561,7 +569,8 @@ fn schedule(s: *Worker) !void {
             try s.setJobKey(q.bytes(0));
             try s.request(
                 .recover,
-                try std.fmt.allocPrint(ar, "/v1/send-requests/{s}", .{s.job_key}),
+                "/v1/send-requests/{s}",
+                .{s.job_key},
                 null,
             );
         } else s.recover_row = 0;
@@ -575,7 +584,8 @@ fn schedule(s: *Worker) !void {
             try s.setJobKey(q.bytes(0));
             try s.request(
                 .preview,
-                try std.fmt.allocPrint(ar, "/v1/conversations/{s}/messages?limit=1{s}", .{ s.job_key, if (s.text_first_history) "&content=text" else "" }),
+                "/v1/conversations/{f}/messages?limit=1{s}",
+                .{ url_format.escaped(s.job_key), if (s.text_first_history) "&content=text" else "" },
                 null,
             );
         } else s.preview_at = u.now() + 30000;
@@ -587,15 +597,15 @@ fn requestHistory(s: *Worker, ar: u.Allocator) !void {
     s.job_older = s.older;
     const next = if (s.older) try s.store.nextPage(ar, s.selected) else @as(?[]const u8, "");
     s.older = false;
-    if (next) |cursor| try s.request(.history, try std.fmt.allocPrint(ar, "/v1/conversations/{s}/messages?limit={d}{s}{s}{s}", .{
-        s.selected,
+    if (next) |cursor| try s.request(.history, "/v1/conversations/{f}/messages?limit={d}{s}{f}{s}", .{
+        url_format.escaped(s.selected),
         Store.recent_history_limit,
         if (cursor.len > 0) "&before=" else "",
-        try encode(ar, cursor),
+        url_format.escaped(cursor),
         if (s.text_first_history) "&content=text" else "",
-    }), null);
+    }, null);
 }
-fn hydrateSend(s: *Worker, ar: u.Allocator) !bool {
+fn hydrateSend(s: *Worker) !bool {
     const q = try s.store.db.prepare("SELECT " ++ Store.echo_id_sql ++ " AS id FROM outbox WHERE epoch=(SELECT value FROM meta WHERE key='epoch') AND " ++ Store.echo_id_sql ++ " IS NOT NULL AND NOT EXISTS(SELECT 1 FROM records m WHERE m.kind='message' AND m.id=" ++ Store.echo_id_sql ++ ") ORDER BY rowid DESC LIMIT 1");
     defer q.close();
     if (!try q.step()) return false;
@@ -603,7 +613,8 @@ fn hydrateSend(s: *Worker, ar: u.Allocator) !bool {
     s.hydration_at = u.now() + 5000;
     try s.request(
         .hydrate,
-        try std.fmt.allocPrint(ar, "/v1/messages/{s}", .{try encode(ar, s.job_key)}),
+        "/v1/messages/{f}",
+        .{url_format.escaped(s.job_key)},
         null,
     );
     return true;
@@ -620,7 +631,8 @@ fn hydrate(s: *Worker, ar: u.Allocator) !bool {
         try s.setJobKey(id);
         try s.request(
             .hydrate,
-            try std.fmt.allocPrint(ar, "/v1/messages/{s}", .{try encode(ar, id)}),
+            "/v1/messages/{f}",
+            .{url_format.escaped(id)},
             null,
         );
         return true;
@@ -630,13 +642,13 @@ fn hydrate(s: *Worker, ar: u.Allocator) !bool {
 fn attach(s: *Worker, ar: u.Allocator) !void {
     if (s.stream_active) return;
     const cursor = try s.store.get(ar, "cursor");
-    const path = try std.fmt.allocPrintSentinel(
-        ar,
-        "/v1/events?after={s}{s}",
-        .{ try encode(ar, cursor), if (s.want_identities) "&extensions=identity-v1" else "" },
-        0,
-    );
-    if (c.zc_net_start(s.net.?, 1, path, null) == 0) return error.TransportFailure;
+    var buffer: [c.ZC_REQUEST_URL_CAPACITY]u8 = undefined;
+    const path = std.fmt.bufPrintZ(
+        &buffer,
+        "/v1/events?after={f}{s}",
+        .{ url_format.escaped(cursor), if (s.want_identities) "&extensions=identity-v1" else "" },
+    ) catch return error.RequestPathTooLong;
+    if (c.zc_net_start(s.net.?, 1, path, null, 0) == 0) return error.TransportFailure;
     s.stream_verified = false;
     s.stream_active = true;
     s.status = "Synchronizing live messages…";
@@ -655,11 +667,12 @@ fn complete(s: *Worker) !void {
     s.last_http_status = http_status;
     s.last_response_ms = u.now();
     var len: usize = 0;
-    const ptr = c.zc_net_body(n, &len);
+    const ptr = c.zc_net_take_body(n, &len);
+    defer std.c.free(ptr);
+    const raw = if (ptr == null) "" else ptr[0..len];
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const ar = arena.allocator();
-    const raw = try ar.dupe(u8, if (ptr == null) "" else ptr[0..len]);
     c.zc_net_ack(n, 0);
     const job = s.job;
     if (request_error.curl_code == 0) {
@@ -753,12 +766,12 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
     try json_bounds.check(raw, t.max_history_bytes, 512 * 1024);
     switch (job) {
         .status => {
-            const v = (try std.json.parseFromSlice(
+            const v = try std.json.parseFromSliceLeaky(
                 RelayStatus,
                 ar,
                 raw,
                 .{ .ignore_unknown_fields = true },
-            )).value;
+            );
             // Persist only the documented status fields, never credentials or
             // arbitrary HTTP response headers, for offline diagnostics.
             try s.store.set("relay_status", try u.json(ar, v));
@@ -812,7 +825,7 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
                     s.sse.reset();
                 }
                 s.online = false;
-                try s.request(.sync, "/v1/sync", null);
+                try s.request(.sync, "/v1/sync", .{}, null);
             } else {
                 try s.attach(ar);
                 if (s.online) s.status = if (!v.adapter_ready) "Relay reachable · Messages unavailable; run relay doctor on the Mac" else if (!s.send_direct and !s.reply_existing) "Connected · sending unavailable; check Messages Automation permission" else "Connected";
@@ -821,56 +834,47 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
         .sync => {
             if (s.identities_before) |before| a.free(before);
             s.identities_before = null;
-            const v = (try std.json.parseFromSlice(
+            const v = try std.json.parseFromSliceLeaky(
                 struct { server_epoch: []const u8, cursor: []const u8 },
                 ar,
                 raw,
                 .{ .ignore_unknown_fields = true },
-            )).value;
+            );
             try s.store.beginSync(v.server_epoch, v.cursor);
             s.status = "Downloading conversations…";
-            try s.request(.chats, "/v1/conversations?limit=200&previews=1", null);
+            try s.request(.chats, "/v1/conversations?limit=200&previews=1", .{}, null);
         },
         .chats => {
-            const v = (try std.json.parseFromSlice(
+            const v = try std.json.parseFromSliceLeaky(
                 struct {
-                    conversations: []const std.json.Value,
+                    conversations: []const json_bounds.Decoded(t.Conversation),
                     next: ?[]const u8,
-                    previews: ?[]const std.json.Value = null,
+                    previews: ?[]const json_bounds.Decoded(t.ConversationPreview) = null,
                 },
                 ar,
                 raw,
                 .{ .ignore_unknown_fields = true },
-            )).value;
+            );
             if (v.conversations.len > t.max_page or (if (v.previews) |items| items.len else 0) > t.max_page) return error.InvalidRecord;
             try s.store.db.exec("BEGIN IMMEDIATE");
             errdefer s.store.db.exec("ROLLBACK") catch {};
-            for (v.conversations) |chat| _ = try s.store.upsert(
-                ar,
-                "conversation",
-                try u.json(ar, chat),
-            );
+            for (v.conversations) |chat| _ = try s.store.upsertDecoded(ar, .{ .conversation = chat });
             if (v.previews) |previews| {
-                for (previews) |preview| try s.store.savePreview(ar, try u.json(ar, preview));
+                for (previews) |preview| try s.store.savePreviewDecoded(preview);
                 // An empty chat was also covered by this page. Older relays
                 // omit projections and keep the existing preview fallback.
                 for (v.conversations) |chat| {
-                    const parsed = try std.json.parseFromValue(
-                        t.Conversation,
-                        ar,
-                        chat,
-                        .{ .ignore_unknown_fields = true },
-                    );
                     try s.store.exec(
                         "INSERT OR IGNORE INTO previews(chat) VALUES(?)",
-                        &.{.{ .text = parsed.value.id }},
+                        &.{.{ .text = chat.value.id }},
                     );
                 }
             }
             try s.store.db.exec("COMMIT");
             if (v.next) |next| try s.request(
                 .chats,
-                try std.fmt.allocPrint(ar, "/v1/conversations?limit=200&previews=1&before={s}", .{try encode(ar, next)}),
+                "/v1/conversations?limit=200&previews=1&before={f}",
+                .{url_format.escaped(next)},
                 null,
             ) else {
                 if (s.want_identities) {
@@ -882,7 +886,7 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
         },
         .identities => {
             const v = try std.json.parseFromSliceLeaky(
-                struct { identities: []const std.json.Value, next: ?[]const u8 },
+                struct { identities: []const json_bounds.Decoded(t.Identity), next: ?[]const u8 },
                 ar,
                 raw,
                 .{ .ignore_unknown_fields = true },
@@ -890,11 +894,7 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
             if (v.identities.len > t.max_page) return error.InvalidRecord;
             try s.store.db.exec("BEGIN IMMEDIATE");
             errdefer s.store.db.exec("ROLLBACK") catch {};
-            for (v.identities) |identity| _ = try s.store.upsert(
-                ar,
-                "identity",
-                try u.json(ar, identity),
-            );
+            for (v.identities) |identity| _ = try s.store.upsertDecoded(ar, .{ .identity = identity });
             if (v.next == null) try s.store.set("identity_bootstrapped", "1");
             try s.store.db.exec("COMMIT");
             if (s.identities_before) |before| a.free(before);
@@ -904,20 +904,16 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
             } else try s.finishBootstrap(ar);
         },
         .history, .preview => {
-            const v = (try std.json.parseFromSlice(
-                struct { messages: []const std.json.Value, next: ?[]const u8 },
+            const v = try std.json.parseFromSliceLeaky(
+                struct { messages: []const json_bounds.Decoded(t.Message), next: ?[]const u8 },
                 ar,
                 raw,
                 .{ .ignore_unknown_fields = true },
-            )).value;
+            );
             if (v.messages.len > t.max_page) return error.InvalidRecord;
             try s.store.db.exec("BEGIN IMMEDIATE");
             errdefer s.store.db.exec("ROLLBACK") catch {};
-            for (v.messages) |message| _ = try s.store.upsert(
-                ar,
-                "message",
-                try u.json(ar, message),
-            );
+            for (v.messages) |message| _ = try s.store.upsertDecoded(ar, .{ .message = message });
             if (job == .history) try s.store.page(s.job_key, v.next) else try s.store.exec(
                 "INSERT OR IGNORE INTO previews(chat) VALUES(?)",
                 &.{.{ .text = s.job_key }},
@@ -941,15 +937,15 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
         },
         .hydrate => {
             const message = try std.json.parseFromSliceLeaky(
-                t.Message,
+                json_bounds.Decoded(t.Message),
                 ar,
                 raw,
                 .{ .ignore_unknown_fields = true },
             );
-            if (!u.eq(message.id, s.job_key) or message.metadata_deferred) return error.InvalidRecord;
+            if (!u.eq(message.value.id, s.job_key) or message.value.metadata_deferred) return error.InvalidRecord;
             try s.store.db.exec("BEGIN IMMEDIATE");
             errdefer s.store.db.exec("ROLLBACK") catch {};
-            _ = try s.store.upsert(ar, "message", raw);
+            _ = try s.store.upsertDecoded(ar, .{ .message = message });
             try s.store.db.exec("COMMIT");
         },
         .send, .recover => {
@@ -1147,7 +1143,7 @@ fn drain(s: *Worker) !void {
                         };
                         try s.store.persistSend(ar, cmd.key, input);
                         try s.setJobKey(input.request_id);
-                        try s.request(.send, "/v1/messages", try u.json(ar, input));
+                        try s.request(.send, "/v1/messages", .{}, try u.json(ar, input));
                     }
                 }
                 s.ack += 1;
@@ -1298,21 +1294,6 @@ fn publish(s: *Worker) !void {
     s.last_published = u.now();
     if (s.on_ready) |ready| ready();
 }
-pub fn encode(ar: u.Allocator, raw: []const u8) u.Allocator.Error![]const u8 {
-    var result: std.ArrayList(u8) = .empty;
-    const hex = "0123456789ABCDEF";
-    for (raw) |ch| {
-        if (std.ascii.isAlphanumeric(ch) or std.mem.indexOfScalar(u8, "-_.~", ch) != null) try result.append(
-            ar,
-            ch,
-        ) else try result.appendSlice(ar, &.{
-            '%',
-            hex[ch >> 4],
-            hex[ch & 15],
-        });
-    }
-    return result.items;
-}
 
 test "lazy metadata upgrades a text snapshot without changing its revision or losing newer text" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1395,7 +1376,7 @@ test "worker shuts down before making its first request" {
 test "oversized request paths are rejected before starting transport" {
     var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
     const path = "/" ++ "x" ** (c.ZC_REQUEST_URL_CAPACITY - 1);
-    try std.testing.expectError(error.RequestPathTooLong, worker.request(.history, path, null));
+    try std.testing.expectError(error.RequestPathTooLong, worker.request(.history, "{s}", .{path}, null));
     try std.testing.expectEqual(.idle, worker.job);
     try std.testing.expectEqual(@as(usize, 0), worker.job_path_len);
 }
@@ -1660,4 +1641,33 @@ test "an unresolved submission holds new text until the original ID has an autho
     }));
     try std.testing.expect(!try worker.unresolved());
     try std.testing.expectEqualStrings("Keep this new draft", try worker.store.draft(ar, "chat"));
+}
+
+test "history pages preserve wire records and roll back invalid batches" {
+    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "" } };
+    worker.store = try Store.open(":memory:");
+    defer worker.store.close();
+    defer worker.shutdown();
+    try worker.setJobKey("chat");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    const raw = "{ \"id\":\"first\",\"revision\":\"1\",\"conversation_id\":\"chat\",\"sender\":\"peer\",\"direction\":\"incoming\",\"service\":\"imessage\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"kind\":\"text\",\"text\":\"é\\ntext\",\"decoding\":\"plain\",\"observed_status\":\"received\",\"future\":1.234567890123456789 }";
+    const body = try ar.dupe(u8, "{\"messages\":[" ++ raw ++ "],\"next\":\"more\"}");
+    try worker.handleResponse(ar, .history, body);
+    @memset(body, 'x');
+    const query = try worker.store.db.prepare("SELECT record FROM records WHERE id='first'");
+    defer query.close();
+    try std.testing.expect(try query.step());
+    try std.testing.expectEqualStrings(raw, query.bytes(0));
+    const valid = try std.json.parseFromSliceLeaky(t.Message, ar, raw, .{ .ignore_unknown_fields = true });
+    var second = valid;
+    second.id = "second";
+    var invalid = valid;
+    invalid.id = "invalid";
+    invalid.text = "bad\x00text";
+    const rejected = try u.json(ar, .{ .messages = &.{ second, invalid }, .next = @as(?[]const u8, null) });
+    try std.testing.expectError(error.InvalidRecord, worker.handleResponse(ar, .history, rejected));
+    try std.testing.expectEqual(@as(i64, 1), try worker.store.db.scalar("SELECT count(*) FROM records"));
+    try std.testing.expectEqualStrings("more", (try worker.store.nextPage(ar, "chat")).?);
 }

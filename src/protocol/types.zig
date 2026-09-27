@@ -6,6 +6,7 @@ pub const max_decode = 1024 * 1024;
 pub const max_page = 200;
 pub const default_page = 50;
 pub const api_version = "1";
+pub const uuid_length = 36;
 pub const max_enrichment = 32 * 1024;
 pub const max_metadata_page = 32 * 1024;
 pub const max_history_bytes = 8 * 1024 * 1024;
@@ -261,7 +262,7 @@ pub const NormalizeError = u.Allocator.Error || error{
 };
 
 pub fn uuid(s: []const u8) bool {
-    if (s.len != 36) return false;
+    if (s.len != uuid_length) return false;
     for (s, 0..) |ch, i| {
         if (i == 8 or i == 13 or i == 18 or i == 23) {
             if (ch != '-') return false;

@@ -27,7 +27,8 @@ int zc_origin_valid(const char *origin);
 ZcNet *zc_net_new(const char *origin, const char *ca, const char *cert, const char *key,
                   ZcStreamFn fn, void *context, ZcError *error, ZcIdentity *identity);
 void zc_net_free(ZcNet *net);
-int zc_net_start(ZcNet *net, int stream, const char *path, const char *body);
+/* Copies path and body before returning. A null body starts a GET. */
+int zc_net_start(ZcNet *net, int stream, const char *path, const char *body, size_t body_length);
 void zc_net_cancel_stream(ZcNet *net);
 void zc_net_cancel_request(ZcNet *net);
 int zc_net_wait(ZcNet *net, int wake_fd, int timeout_ms);
@@ -38,7 +39,9 @@ void zc_net_error(ZcNet *net, int stream, ZcError *error);
 const char *zc_net_extensions(ZcNet *net);
 int zc_url_host(const char *url, char *host, size_t size);
 int zc_url_open(const char *url);
-const char *zc_net_body(ZcNet *net, size_t *length);
+/* Transfers the completed response allocation to the caller; release with free().
+   The returned bytes remain valid after ack and subsequent requests. */
+char *zc_net_take_body(ZcNet *net, size_t *length);
 void zc_net_ack(ZcNet *net, int stream);
 /* Two binary lanes (status/done/ack use slot lane+2). Caller owns the fd. */
 int zc_net_start_file(ZcNet *, int lane, const char *path, int fd, size_t expected);
@@ -48,7 +51,10 @@ int zc_cache_open(const char *path);
 int zc_cache_temp(int dir, char *name, size_t size);
 int zc_cache_install(int dir, const char *temporary, const char *key, int fd);
 void zc_cache_remove(int dir, const char *name);
-void zc_cache_prune(int dir, size_t budget);
+typedef struct { size_t bytes, entries; } ZcCacheUsage;
+/* Remove orphan temporaries only at startup, before this owner starts downloads.
+   Returns 0 if scanning or eviction failed; usage is then not authoritative. */
+int zc_cache_prune(int dir, size_t budget, size_t max_entries, int startup, ZcCacheUsage *usage);
 void zc_cache_clear_avatars(int dir);
 int zc_image_read(int dir, const char *name, ZcPixels *pixels);
 void zc_pixels_free(ZcPixels *pixels);

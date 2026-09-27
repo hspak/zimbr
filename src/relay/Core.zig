@@ -7,6 +7,7 @@ const options = @import("options");
 const u = @import("../common.zig");
 const t = @import("../protocol.zig").types;
 const Journal = @import("Journal.zig");
+const MessagesDb = @import("adapter/MessagesDb.zig");
 const reactions = @import("reactions.zig");
 const Signal = @import("../Signal.zig");
 const log = std.log.scoped(.relay_core);
@@ -112,12 +113,13 @@ pub fn ingest(self: *Core, a: u.Allocator) IngestError!void {
     defer source.db.exec("ROLLBACK") catch {};
     var batch = ImportBatch{ .source = source };
     defer batch.scratch.deinit();
+    var row_buffer: [MessagesDb.row_batch_size]i64 = undefined;
     const high = try source.high();
     const j = self.journal;
     try j.begin();
     errdefer j.rollback();
     const stored_identity = try j.progress(a, "identity");
-    var live = try j.position(a, "live");
+    var live = try j.position("live");
     var reset = false;
     if (stored_identity) |identity| {
         const legacy_candidate = !u.eq(identity, source.identity) and live > 0 and source.legacyIdentityCandidate(identity);
@@ -144,8 +146,8 @@ pub fn ingest(self: *Core, a: u.Allocator) IngestError!void {
                     _ = try anchor.step();
                     live = anchor.int(0);
                     batch.rebased = true;
-                    try j.setPosition(a, "live", live);
-                    try j.setPosition(a, "rolling", 0);
+                    try j.setPosition("live", live);
+                    try j.setPosition("rolling", 0);
                 } else reset = true;
             }
         }
@@ -159,54 +161,56 @@ pub fn ingest(self: *Core, a: u.Allocator) IngestError!void {
     if (stored_identity == null or reset) {
         live = high;
         try j.setProgress("identity", source.identity);
-        try j.setPosition(a, "live", live);
-        try j.setPosition(a, "backfill", high);
+        try j.setPosition("live", live);
+        try j.setPosition("backfill", high);
         try j.setProgress("anchor", (try source.guid(a, high)) orelse "");
     }
-    var backfill = try j.position(a, "backfill");
+    var backfill = try j.position("backfill");
     const complete = backfill == 0;
-    const chat_after = try j.position(a, "chats");
-    const chats = try source.chatRows(a, chat_after);
+    const chat_after = try j.position("chats");
+    const chats = try source.chatRows(&row_buffer, chat_after);
     for (chats) |row| {
         _ = try self.importChat(a, &batch, row, "reconciliation", complete);
     }
-    try j.setPosition(a, "chats", if (chats.len == 0) 0 else chats[chats.len - 1]);
-    const live_rows = try source.rowsFor(a, .live, live, 0);
+    try j.setPosition("chats", if (chats.len == 0) 0 else chats[chats.len - 1]);
+    const live_rows = try source.rowsFor(&row_buffer, .live, live, 0);
     for (live_rows) |row| {
         try self.importRow(a, &batch, row, "live", complete);
         live = row;
     }
-    try j.setPosition(a, "live", live);
+    try j.setPosition("live", live);
     try j.setProgress("anchor", (try source.guid(a, live)) orelse "");
     if (backfill > 0) {
-        const old = try source.rowsFor(a, .backfill, backfill, 0);
+        const old = try source.rowsFor(&row_buffer, .backfill, backfill, 0);
         for (old) |row| try self.importRow(a, &batch, row, "historical_import", false);
         backfill = if (old.len == 0) 0 else old[old.len - 1] - 1;
-        try j.setPosition(a, "backfill", backfill);
+        try j.setPosition("backfill", backfill);
     }
     // Retry unresolved source rows independently of insertion progress, fairly.
-    const pending = try j.db.prepare("SELECT source_row FROM pending_source ORDER BY attempt_ms,source_row LIMIT 50");
+    var pending_rows: [50]i64 = undefined;
+    const pending = try j.db.prepare("SELECT source_row FROM pending_source ORDER BY attempt_ms,source_row LIMIT ?");
     defer pending.close();
-    var pending_rows: std.ArrayList(i64) = .empty;
-    while (try pending.step()) try pending_rows.append(a, pending.int(0));
-    for (pending_rows.items) |row| try self.importRow(a, &batch, row, "reconciliation", complete);
-    for (try source.rowsFor(a, .recent, high, 0)) |row| try self.importRow(
+    try pending.bind(&.{.{ .int = pending_rows.len }});
+    var pending_count: usize = 0;
+    while (try pending.step()) : (pending_count += 1) pending_rows[pending_count] = pending.int(0);
+    for (pending_rows[0..pending_count]) |row| try self.importRow(a, &batch, row, "reconciliation", complete);
+    for (try source.rowsFor(&row_buffer, .recent, high, 0)) |row| try self.importRow(
         a,
         &batch,
         row,
         "reconciliation",
         complete,
     );
-    const rolling = try j.position(a, "rolling");
-    const older = try source.rowsFor(a, .rolling, rolling, 0);
+    const rolling = try j.position("rolling");
+    const older = try source.rowsFor(&row_buffer, .rolling, rolling, 0);
     for (older) |row| try self.importRow(a, &batch, row, "reconciliation", complete);
-    try j.setPosition(a, "rolling", if (older.len == 0) 0 else older[older.len - 1]);
+    try j.setPosition("rolling", if (older.len == 0) 0 else older[older.len - 1]);
     // History requests schedule bounded reconciliation, serviced alongside live scans.
     const rq = try j.db.prepare("SELECT r.conversation_id,r.after_row,c.source_row FROM reconcile_chats r JOIN conversations c ON c.id=r.conversation_id ORDER BY r.rowid LIMIT 1");
     defer rq.close();
     if (try rq.step()) {
         const cid = try rq.text(a, 0);
-        const rows = try source.rowsFor(a, .chat, rq.int(1), rq.int(2));
+        const rows = try source.rowsFor(&row_buffer, .chat, rq.int(1), rq.int(2));
         for (rows) |row| try self.importRow(a, &batch, row, "reconciliation", complete);
         if (rows.len == 0) try j.execute(
             "DELETE FROM reconcile_chats WHERE conversation_id=?",
@@ -222,10 +226,9 @@ pub fn ingest(self: *Core, a: u.Allocator) IngestError!void {
     const enrichment_backfill = (try j.progress(a, "enrichment_backfill_v1")) orelse "0";
     if (!u.eq(enrichment_backfill, "complete")) {
         const position = std.fmt.parseInt(i64, enrichment_backfill, 10) catch 0;
-        const rows = try source.rowsFor(a, .rolling, position, 0);
+        const rows = try source.rowsFor(&row_buffer, .rolling, position, 0);
         for (rows) |row| try self.importRow(a, &batch, row, "reconciliation", complete);
         if (rows.len == 0) try j.setProgress("enrichment_backfill_v1", "complete") else try j.setPosition(
-            a,
             "enrichment_backfill_v1",
             rows[rows.len - 1],
         );
@@ -306,10 +309,8 @@ fn importRow(
         // A recent/rolling scan can discover a new row before the bounded live
         // scan reaches it, including rows inserted between queries. Preserve
         // its live origin so an incoming message can still notify clients.
-        var event_origin = remembered orelse if (u.eq(origin, "reconciliation") and row > try j.position(
-            a,
-            "live",
-        )) "live" else origin;
+        var event_origin = remembered orelse if (u.eq(origin, "reconciliation") and
+            row > try j.position("live")) "live" else origin;
         if (batch.rebased and remembered == null) {
             const known = try j.db.prepare("SELECT 1 FROM messages WHERE source=?");
             defer known.close();
@@ -438,7 +439,7 @@ fn prepareSend(self: *Core, a: u.Allocator) !?Work {
         return error.ResyncRequired;
     }
     const high = try source.high();
-    const live = try j.position(a, "live");
+    const live = try j.position("live");
     const anchor = (try source.guid(a, live)) orelse "";
     if (high < live or !u.eq(anchor, (try j.progress(a, "anchor")) orelse "")) {
         self.read_ready = false;

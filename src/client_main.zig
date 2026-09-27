@@ -82,10 +82,10 @@ fn clayError(data: clay.ErrorData) callconv(.c) void {
     log.warn("UI layout limit reached", .{});
 }
 fn run(init: std.process.Init) !void {
-    log.info("Starting Zimbr {s}", .{client_options.version});
     var config = try Config.parse(init);
     const cache_lock = try config.lockCache();
     defer _ = u.c.close(cache_lock);
+    log.info("Starting Zimbr {s}", .{client_options.version});
     try config.load(init.arena.allocator());
     rl.setTraceLogLevel(.warning);
     rl.setConfigFlags(.{

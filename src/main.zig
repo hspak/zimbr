@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const options = @import("options");
 const source_probe = @import("relay.zig").adapter.enrichment_probe;
 const Sqlite = @import("relay.zig").Sqlite;
+const MessagesDb = @import("relay.zig").adapter.MessagesDb;
 const u = @import("common.zig");
 const t = @import("protocol.zig").types;
 const Journal = @import("relay.zig").Journal;
@@ -143,7 +144,8 @@ fn run(init: std.process.Init) !void {
             var decoded: usize = 0;
             var unsupported: usize = 0;
             var pending: usize = 0;
-            for (try adapter.rowsFor(a, .recent, try adapter.high(), 0)) |row| {
+            var rows: [MessagesDb.row_batch_size]i64 = undefined;
+            for (try adapter.rowsFor(&rows, .recent, try adapter.high(), 0)) |row| {
                 if (try adapter.message(a, row)) |m| {
                     if (m.value.decoding == .plain or m.value.decoding == .attributed) decoded += 1 else unsupported += 1;
                     if (m.pending) pending += 1;

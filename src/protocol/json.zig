@@ -3,6 +3,68 @@
 const std = @import("std");
 pub const max_depth = 32;
 
+/// Decode T once while retaining its exact wire representation for persistence.
+/// With alloc_if_needed, raw and unescaped strings borrow the complete input;
+/// alloc_always gives the allocator ownership of both representations.
+pub fn Decoded(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        value: T,
+        raw: []const u8,
+
+        pub fn jsonParse(
+            gpa: std.mem.Allocator,
+            source: anytype,
+            options: std.json.ParseOptions,
+        ) std.json.ParseError(@TypeOf(source.*))!Self {
+            if (comptime @TypeOf(source.*) != std.json.Scanner)
+                @compileError("Decoded requires a complete-input Scanner");
+            std.debug.assert(source.is_end_of_input);
+            _ = try source.peekNextTokenType();
+            const start = source.cursor;
+            const value = try std.json.innerParse(T, gpa, source, options);
+            const raw = source.input[start..source.cursor];
+            return .{
+                .value = value,
+                .raw = if (options.allocate == .alloc_always) try gpa.dupe(u8, raw) else raw,
+            };
+        }
+    };
+}
+
+test "decoded records retain exact wire bytes and use typed field validation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Entry = struct { text: []const u8, count: i64 };
+    const Envelope = struct { records: []const Decoded(Entry), next: ?[]const u8 };
+    const raw = "{ \"text\":\"é\\n\\\"\", \"count\":9223372036854775807,\"future\":1.234567890123456789 }";
+    const envelope = "{\"records\":[" ++ raw ++ "],\"next\":null}";
+    const decoded = try std.json.parseFromSliceLeaky(Envelope, a, envelope, .{ .ignore_unknown_fields = true });
+    try std.testing.expectEqualStrings(raw, decoded.records[0].raw);
+    try std.testing.expectEqualStrings("é\n\"", decoded.records[0].value.text);
+    try std.testing.expectEqual(std.math.maxInt(i64), decoded.records[0].value.count);
+    try std.testing.expectEqual(envelope[12..].ptr, decoded.records[0].raw.ptr);
+    try std.testing.expectEqual(@as(?[]const u8, null), decoded.next);
+    try std.testing.expectError(error.DuplicateField, std.json.parseFromSliceLeaky(
+        Decoded(Entry),
+        a,
+        "{\"text\":\"one\",\"text\":\"two\",\"count\":1}",
+        .{},
+    ));
+    try std.testing.expectError(error.SyntaxError, std.json.parseFromSliceLeaky(
+        Decoded(Entry),
+        a,
+        "{\"text\":\"one\",\"count\":1,\"future\":\"bad\\q\"}",
+        .{ .ignore_unknown_fields = true },
+    ));
+    var mutable = "{\"text\":\"owned\",\"count\":7}".*;
+    const owned = try std.json.parseFromSliceLeaky(Decoded(Entry), a, &mutable, .{ .allocate = .alloc_always });
+    @memset(&mutable, 'x');
+    try std.testing.expectEqualStrings("owned", owned.value.text);
+    try std.testing.expectEqualStrings("{\"text\":\"owned\",\"count\":7}", owned.raw);
+}
+
 pub const CheckError = error{
     InvalidJson,
     JsonTooComplex,

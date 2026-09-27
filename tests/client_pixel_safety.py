@@ -24,14 +24,14 @@ def main():
         root = Path(temporary)
         before = root/'before'
         before.mkdir()
-        for file in ['bridge.c', 'media.c']:
+        for file in ['bridge.c', 'bridge.h', 'media.c']:
             (before/file).write_bytes(subprocess.check_output(['git', 'show', args.baseline+':src/client/'+file], cwd=ROOT))
         outputs = []
         for name, source in [('before', before), ('after', ROOT/'src/client')]:
             binary = root/name if name == 'after' else root/'baseline'
             subprocess.run([os.environ.get('CC', 'clang'), '-O2', '-march=native', '-g', '-std=c11', '-Wall', '-Wextra', '-Werror',
                             '-fsanitize=address,undefined', '-fno-sanitize-recover=all', '-fno-omit-frame-pointer',
-                            '-I', str(ROOT/'src'), '-I', str(ROOT/'src/client'), str(ROOT/'tests/client_pixel_safety.c'),
+                            '-I', str(source), '-I', str(ROOT/'src'), str(ROOT/'tests/client_pixel_safety.c'),
                             str(source/'bridge.c'), str(source/'media.c'), str(ROOT/'src/platform.c'), *flags, '-lm', '-o', str(binary)], check=True)
             output = subprocess.check_output([str(binary)], env=env, text=True, timeout=180).strip()
             outputs.append(output)

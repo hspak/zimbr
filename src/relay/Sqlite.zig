@@ -27,12 +27,22 @@ pub const PrepareError = error{
 };
 
 pub fn open(path: [:0]const u8, readonly: bool) OpenError!Sqlite {
+    return openFlags(path, readonly, c.SQLITE_OPEN_FULLMUTEX);
+}
+
+/// Assume this connection and its statements are used by at most one thread at
+/// a time. Other connections may still access the database concurrently.
+pub fn openConfined(path: [:0]const u8, readonly: bool) OpenError!Sqlite {
+    return openFlags(path, readonly, c.SQLITE_OPEN_NOMUTEX);
+}
+
+fn openFlags(path: [:0]const u8, readonly: bool, threading: c_int) OpenError!Sqlite {
     const cache = try std.heap.c_allocator.create(Cache);
     errdefer std.heap.c_allocator.destroy(cache);
     cache.* = .{};
     var db: ?*c.sqlite3 = null;
     const flags: c_int = if (readonly) c.SQLITE_OPEN_READONLY else c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE;
-    const rc = c.sqlite3_open_v2(path, &db, flags | c.SQLITE_OPEN_FULLMUTEX, null);
+    const rc = c.sqlite3_open_v2(path, &db, flags | threading, null);
     if (rc != c.SQLITE_OK) {
         if (db) |d| _ = c.sqlite3_close(d);
         return error.DatabaseUnavailable;
@@ -58,6 +68,7 @@ pub fn prepare(self: Sqlite, sql: [:0]const u8) PrepareError!Statement {
         std.mem.startsWith(u8, sql, "DELETE ") or std.mem.startsWith(u8, sql, "WITH "));
     const slot = std.hash.Wyhash.hash(0, sql) % self.cache.slots.len;
     // Preserve FULLMUTEX semantics even when callers share copies of this Db.
+    // SQLite treats the null mutex on confined connections as a no-op.
     const mutex = c.sqlite3_db_mutex(self.handle);
     c.sqlite3_mutex_enter(mutex);
     defer c.sqlite3_mutex_leave(mutex);
@@ -177,6 +188,7 @@ pub const Statement = struct {
 test "cached statements release bindings and unfinished cursors and allow nested queries" {
     const db = try open(":memory:", false);
     defer db.close();
+    try std.testing.expect(c.sqlite3_db_mutex(db.handle) != null);
     const query = "SELECT ? UNION ALL SELECT 'second'";
     var first = try db.prepare(query);
     const handle = first.handle;

@@ -53,8 +53,10 @@ pub const OpenError = u.Allocator.Error || error{
 };
 pub const GuidError = Db.QueryError || u.Allocator.Error;
 pub const ChatError = Db.QueryError || u.Allocator.Error || error{InvalidTimestamp};
-pub const ChatRowsError = Db.QueryError || u.Allocator.Error;
-pub const RowsForError = Db.QueryError || u.Allocator.Error;
+pub const ChatRowsError = Db.QueryError;
+pub const RowsForError = Db.QueryError;
+pub const row_batch_size = 100;
+const row_limit = std.fmt.comptimePrint(" LIMIT {d}", .{row_batch_size});
 pub const MessageError = Db.QueryError || u.Allocator.Error || error{
     InvalidTimestamp,
     Malformed,
@@ -189,34 +191,72 @@ fn selfThread(self: MessagesDb, row: i64) !?i64 {
     if (!try service.step() or !u.eq(service.bytes(0), "iMessage")) return null;
     return canonical;
 }
-pub fn chatRows(self: MessagesDb, a: u.Allocator, after: i64) ChatRowsError![]i64 {
-    const s = try self.db.prepare("SELECT ROWID FROM chat WHERE ROWID>? ORDER BY ROWID LIMIT 100");
+/// Returned row IDs borrow buffer until it is reused by the caller.
+pub fn chatRows(self: MessagesDb, buffer: *[row_batch_size]i64, after: i64) ChatRowsError![]const i64 {
+    const s = try self.db.prepare("SELECT ROWID FROM chat WHERE ROWID>? ORDER BY ROWID" ++ row_limit);
     defer s.close();
     try s.bind(&.{.{ .int = after }});
-    return rows(a, s);
+    return rows(buffer, s);
 }
-pub fn rowsFor(self: MessagesDb, a: u.Allocator, mode: enum {
+/// Returned row IDs borrow buffer until it is reused by the caller.
+pub fn rowsFor(self: MessagesDb, buffer: *[row_batch_size]i64, mode: enum {
     live,
     backfill,
     recent,
     rolling,
     chat,
-}, position: i64, chat_row: i64) RowsForError![]i64 {
+}, position: i64, chat_row: i64) RowsForError![]const i64 {
     const s = try self.db.prepare(switch (mode) {
-        .live, .rolling => "SELECT ROWID FROM message WHERE ROWID>? ORDER BY ROWID LIMIT 100",
-        .backfill => "SELECT ROWID FROM message WHERE ROWID<=? ORDER BY ROWID DESC LIMIT 100",
-        .recent => "SELECT ROWID FROM message WHERE ROWID<=? ORDER BY ROWID DESC LIMIT 100",
-        .chat => "SELECT message_id FROM chat_message_join WHERE message_id>? AND chat_id=? ORDER BY message_id LIMIT 100",
+        .live, .rolling => "SELECT ROWID FROM message WHERE ROWID>? ORDER BY ROWID" ++ row_limit,
+        .backfill => "SELECT ROWID FROM message WHERE ROWID<=? ORDER BY ROWID DESC" ++ row_limit,
+        .recent => "SELECT ROWID FROM message WHERE ROWID<=? ORDER BY ROWID DESC" ++ row_limit,
+        .chat => "SELECT message_id FROM chat_message_join WHERE message_id>? AND chat_id=? ORDER BY message_id" ++ row_limit,
     });
     defer s.close();
     if (mode == .chat) try s.bind(&.{ .{ .int = position }, .{ .int = chat_row } }) else try s.bind(&.{.{ .int = position }});
-    return rows(a, s);
+    return rows(buffer, s);
 }
-fn rows(a: u.Allocator, s: Db.Statement) ![]i64 {
-    var out: std.ArrayList(i64) = .empty;
-    while (try s.step()) try out.append(a, s.int(0));
-    return out.toOwnedSlice(a);
+fn rows(buffer: *[row_batch_size]i64, s: Db.Statement) ![]const i64 {
+    var len: usize = 0;
+    while (try s.step()) : (len += 1) buffer[len] = s.int(0);
+    return buffer[0..len];
 }
+
+test "bounded row scans preserve ordering pagination and conversation filters" {
+    const db = try Db.open(":memory:", false);
+    defer db.close();
+    try db.exec(
+        \\CREATE TABLE message(id INTEGER PRIMARY KEY);
+        \\CREATE TABLE chat(id INTEGER PRIMARY KEY);
+        \\CREATE TABLE chat_message_join(message_id INTEGER,chat_id INTEGER);
+        \\WITH RECURSIVE ids(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM ids WHERE id<101)
+        \\INSERT INTO message SELECT id FROM ids;
+        \\INSERT INTO chat SELECT id FROM message;
+        \\INSERT INTO chat_message_join SELECT id,id%2 FROM message;
+    );
+    const source = MessagesDb{ .db = db, .identity = "fixture", .features = .{} };
+    var buffer: [row_batch_size]i64 = undefined;
+    const first = try source.rowsFor(&buffer, .live, 0, 0);
+    try std.testing.expectEqual(buffer[0..].ptr, first.ptr);
+    try std.testing.expectEqual(@as(usize, 100), first.len);
+    try std.testing.expectEqual(@as(i64, 1), first[0]);
+    try std.testing.expectEqual(@as(i64, 100), first[first.len - 1]);
+    const tail = try source.rowsFor(&buffer, .rolling, 100, 0);
+    try std.testing.expectEqualSlices(i64, &.{101}, tail);
+    const backfill = try source.rowsFor(&buffer, .backfill, 101, 0);
+    try std.testing.expectEqual(@as(usize, 100), backfill.len);
+    try std.testing.expectEqual(@as(i64, 101), backfill[0]);
+    try std.testing.expectEqual(@as(i64, 2), backfill[backfill.len - 1]);
+    const recent = try source.rowsFor(&buffer, .recent, 2, 0);
+    try std.testing.expectEqualSlices(i64, &.{ 2, 1 }, recent);
+    const chat_rows = try source.rowsFor(&buffer, .chat, 96, 0);
+    try std.testing.expectEqualSlices(i64, &.{ 98, 100 }, chat_rows);
+    const chats = try source.chatRows(&buffer, 100);
+    try std.testing.expectEqualSlices(i64, &.{101}, chats);
+    const empty = try source.chatRows(&buffer, 101);
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+}
+
 const message_sql =
     "SELECT m.guid,m.date,substr(coalesce(h.id,''),1,254),m.is_from_me,m.service,substr(CAST(m.text AS BLOB),1,65537),CASE WHEN length(CAST(m.attributedBody AS BLOB))<=1048576 THEN m.attributedBody END,length(CAST(m.attributedBody AS BLOB)),m.is_delivered,m.date_delivered,m.error,m.is_sent,m.is_finished,m.associated_message_type,m.item_type,m.is_system_message,m.balloon_bundle_id,(SELECT min(chat_id) FROM chat_message_join WHERE message_id=m.ROWID) FROM message m LEFT JOIN handle h ON h.ROWID=m.handle_id";
 pub fn message(self: MessagesDb, a: u.Allocator, row: i64) MessageError!?SourceMessage {

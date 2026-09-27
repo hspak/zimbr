@@ -1,5 +1,13 @@
 # Messaging performance
 
+The subsequent [bounded storage pass](bounded-data.md) removes temporary URL,
+media, ingestion and pagination allocations across both endpoints, with measured
+improvements in media enqueueing and relay history response construction.
+The [serialization pass](serialization.md) then removes repeated JSON tree,
+text and typed-record conversions in event delivery, history and enrichment.
+The [single-client pass](single-client.md) then amortizes disk-cache maintenance
+using its sole writer and removes per-connection mutexes from client SQLite use.
+
 The September 24 pass below uses the current native mTLS fake relay with temporary
 enrolled credentials. The older September 22 tables describe the pre-mTLS release;
 the old plaintext adapter has been removed. Current Mac

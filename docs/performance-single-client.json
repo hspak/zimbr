@@ -1,0 +1,1241 @@
+{
+  "toolchain": "0.16.0",
+  "optimize": "ReleaseFast",
+  "platform": "Linux-7.2.7-arch1-1-strixhalo-x86_64-with-glibc2.44",
+  "baseline": "Saved worktree after the serialization pass, before the single-client pass; includes uncommitted changes on efb5e6e.",
+  "source_sha256": {
+    "before": {
+      "src/client/Store.zig": "8ac38c507211300d6afc652f0b1592ec4e76ac9c1f77ecc7d0bf0e537a17d778",
+      "src/client/Media.zig": "21bc2b4911783c7e5b5786d01a7baf27a983bd5c16329d18f7c03211fcf82d09",
+      "src/client/media.c": "6081dcd431f0b6f2a0da3798607c3cd54d7c7ed45b8b2d937fa0edeba9cc1d3f",
+      "src/client/bridge.h": "5deaf46d9c2e22c719935ac16f98ffc9a3e420487a71035cd07e3ebcee102bdd",
+      "src/relay/Sqlite.zig": "575ca2d424076563aa0a5a93c1d5f86901d9a0d343243f6f1dcae7f1d3e9122c",
+      "src/hotpath_bench.zig": "12d5f8c8c8fecac1ee6ca4da1e5fe83ba4b3a18ada0249946b12af7a070c5038"
+    },
+    "after": {
+      "src/client/Store.zig": "6b1bcedb61a6624f2ed6a0639552826335227be630afd0d64144f6b2bdfb21f7",
+      "src/client/Media.zig": "cae3d5d80dc6a725e80a073f9951730bc0dbae7e68d7ec378d097598c3ffe29e",
+      "src/client/media.c": "bb4b781ea2e43c01d2d8ba393a5c3aea3b82370f8f501b405481aca0cdcc0e13",
+      "src/client/bridge.h": "543cd3987aab3313d731b8e88ab264ef007063df50eba2daa99f2fa4ab840e33",
+      "src/relay/Sqlite.zig": "2f7c5530c1f5b3dd3f250f71b0fab71b9d21029a173ceff9864a95a11a3001af",
+      "src/hotpath_bench.zig": "12d5f8c8c8fecac1ee6ca4da1e5fe83ba4b3a18ada0249946b12af7a070c5038",
+      "src/client/Media/DiskCache.zig": "4acccd2f36abbd75cdc31231f5cbc83f29c7b155ddd9661c5fa3ce4ee1ab1461",
+      "src/client_main.zig": "d228c09734511744b58195bab19bba697e2ab2c5e2001ac6f1e6517571a30e5f"
+    }
+  },
+  "method": "Three sequential pairs, alternating order, no concurrent builds or tests. CPU: median of 15 warmed batches. Disk: mean maintenance time over 960 downloads after 64 warmup downloads; sparse 64 KiB files, creation and payload I/O excluded. Startup measured separately.",
+  "experiments": [
+    {
+      "description": "Initial candidate also cached the SQLite connection mutex pointer. Removed that extra change after relay and client batch regressions.",
+      "runs": [
+        {
+          "pair": 1,
+          "version": "before",
+          "results": {
+            "samples": 15,
+            "json_bytes": 65536,
+            "sql_lookup": {
+              "p50_us": 0.16625879993438722,
+              "p95_us": 0.17654720001220703
+            },
+            "json_check": {
+              "p50_us": 2.1700219993591308,
+              "p95_us": 2.306840000152588
+            },
+            "opaque_text_raster": {
+              "p50_us": 36.035609998703,
+              "p95_us": 36.49757999420166
+            },
+            "media_enqueue": {
+              "p50_us": 0.2959328615106642,
+              "p95_us": 0.30740209948271513
+            },
+            "media_request_bytes": 232,
+            "relay_history_page": {
+              "p50_us": 506.02870001792905,
+              "p95_us": 526.8057499885559
+            },
+            "event_batch_records": 100,
+            "relay_event_batch": {
+              "p50_us": 262.37620000839235,
+              "p95_us": 289.6420000076294
+            },
+            "client_event_batch": {
+              "p50_us": 1621.3678000450134,
+              "p95_us": 1730.7355999946594
+            },
+            "cache_below_budget": {
+              "initial_entries": 4096,
+              "file_bytes": 65536,
+              "measured_downloads": 960,
+              "startup_us": 2817.1410007476807,
+              "mean_us": 1624.7424874792496,
+              "batch": {
+                "p50_us": 1618.252812474966,
+                "p95_us": 1775.0856717973948
+              }
+            },
+            "cache_near_budget": {
+              "initial_entries": 7936,
+              "file_bytes": 65536,
+              "measured_downloads": 960,
+              "startup_us": 4007.5,
+              "mean_us": 2824.186028137803,
+              "batch": {
+                "p50_us": 2818.4408437609673,
+                "p95_us": 2870.9307813942432
+              }
+            }
+          }
+        },
+        {
+          "pair": 1,
+          "version": "after",
+          "results": {
+            "samples": 15,
+            "json_bytes": 65536,
+            "sql_lookup": {
+              "p50_us": 0.17333910007476808,
+              "p95_us": 0.17616050004959105
+            },
+            "json_check": {
+              "p50_us": 2.001685998916626,
+              "p95_us": 2.1743299999237062
+            },
+            "opaque_text_raster": {
+              "p50_us": 37.18687999725342,
+              "p95_us": 40.57153999328613
+            },
+            "media_enqueue": {
+              "p50_us": 0.3068200685083866,
+              "p95_us": 0.35896411119028926
+            },
+            "media_request_bytes": 232,
+            "relay_history_page": {
+              "p50_us": 591.0160999774932,
+              "p95_us": 613.8410500049591
+            },
+            "event_batch_records": 100,
+            "relay_event_batch": {
+              "p50_us": 325.8241000175476,
+              "p95_us": 335.9972500324249
+            },
+            "client_event_batch": {
+              "p50_us": 1716.7812997817994,
+              "p95_us": 1882.4427000999451
+            },
+            "cache_below_budget": {
+              "initial_entries": 4096,
+              "file_bytes": 65536,
+              "measured_downloads": 960,
+              "startup_us": 1666.4959993362427,
+              "mean_us": 0.022306257486343385,
+              "batch": {
+                "p50_us": 0.022234439849853516,
+                "p95_us": 0.023328065872192383
+              }
+            },
+            "cache_near_budget": {
+              "initial_entries": 7936,
+              "file_bytes": 65536,
+              "measured_downloads": 960,
+              "startup_us": 4674.725999832153,
+              "mean_us": 3.8824520965417224,
+              "batch": {
+                "p50_us": 0.022218778729438782,
+                "p95_us": 57.92524991929531
+              }
+            }
+          }
+        },
+        {
+          "pair": 2,
+          "version": "after",
+          "results": {
+            "samples": 15,
+            "json_bytes": 65536,
+            "sql_lookup": {
+              "p50_us": 0.1616331000328064,
+              "p95_us": 0.19799260005950928
+            },
+            "json_check": {
+              "p50_us": 2.167658000946045,
+              "p95_us": 2.3568540000915528
+            },
+            "opaque_text_raster": {
+              "p50_us": 35.98551000595093,
+              "p95_us": 37.29809000015259
+            },
+            "media_enqueue": {
+              "p50_us": 0.2910603026393801,
+              "p95_us": 0.3619602050166577
+            },
+            "media_request_bytes": 232,
+            "relay_history_page": {
+              "p50_us": 569.7170500278473,
+              "p95_us": 594.9389999866486
+            },
+            "event_batch_records": 100,
+            "relay_event_batch": {
+              "p50_us": 315.86890001296996,
+              "p95_us": 320.07930002212527
+            },
+            "client_event_batch": {
+              "p50_us": 1666.996600341797,
+              "p95_us": 1775.8204000473022
+            },
+            "cache_below_budget": {
+              "initial_entries": 4096,
+              "file_bytes": 65536,
+              "measured_downloads": 960,
+              "startup_us": 1990.204999923706,
+              "mean_us": 0.021389593680699665,
+              "batch": {
+                "p50_us": 0.021406248211860657,
+                "p95_us": 0.022046908736228943
+              }
+            },
+            "cache_near_budget": {
+              "initial_entries": 7936,
+              "file_bytes": 65536,
+              "measured_downloads": 960,
+              "startup_us": 4433.451999664307,
+              "mean_us": 4.307002093394598,
+              "batch": {
+                "p50_us": 0.02164056897163391,
+                "p95_us": 64.23587504029274
+              }
+            }
+          }
+        },
+        {
+          "pair": 2,
+          "version": "before",
+          "results": {
+            "samples": 15,
+            "json_bytes": 65536,
+            "sql_lookup": {
+              "p50_us": 0.16813039999008178,
+              "p95_us": 0.2067630000114441
+            },
+            "json_check": {
+              "p50_us": 2.2598120002746582,
+              "p95_us": 2.506775999069214
+            },
+            "opaque_text_raster": {
+              "p50_us": 35.97348999977112,
+              "p95_us": 37.316820001602174
+            },
+            "media_enqueue": {
+              "p50_us": 0.2922785645350814,
+              "p95_us": 0.31524414056912065
+            },
+            "media_request_bytes": 232,
+            "relay_history_page": {
+              "p50_us": 498.4098499774933,
+              "p95_us": 509.96405000686644
+            },
+            "event_batch_records": 100,
+            "relay_event_batch": {
+              "p50_us": 256.18505001068115,
+              "p95_us": 262.64120001792907
+            },
+            "client_event_batch": {
+              "p50_us": 1587.6184999465943,
+              "p95_us": 1681.5652998924256
+            },
+            "cache_below_budget": {
+              "initial_entries": 4096,
+              "file_bytes": 65536,
+              "measured_downloads": 960,
+              "startup_us": 2419.162000656128,
+              "mean_us": 1636.2886187354723,
+              "batch": {
+                "p50_us": 1627.7055312544107,
+                "p95_us": 1765.7986250668764
+              }
+            },
+            "cache_near_budget": {
+              "initial_entries": 7936,
+              "file_bytes": 65536,
+              "measured_downloads": 960,
+              "startup_us": 4588.805000305176,
+              "mean_us": 2845.8142864525316,
+              "batch": {
+                "p50_us": 2840.0124374628067,
+                "p95_us": 2937.377375021577
+              }
+            }
+          }
+        },
+        {
+          "pair": 3,
+          "version": "before",
+          "results": {
+            "samples": 15,
+            "json_bytes": 65536,
+            "sql_lookup": {
+              "p50_us": 0.16987760000228883,
+              "p95_us": 0.18101259994506835
+            },
+            "json_check": {
+              "p50_us": 2.181423999786377,
+              "p95_us": 2.398434000015259
+            },
+            "opaque_text_raster": {
+              "p50_us": 36.328949995040894,
+              "p95_us": 37.48213000297547
+            },
+            "media_enqueue": {
+              "p50_us": 0.29262084956280887,
+              "p95_us": 0.32506494130939245
+            },
+            "media_request_bytes": 232,
+            "relay_history_page": {
+              "p50_us": 502.6357999801636,
+              "p95_us": 552.9905500411987
+            },
+            "event_batch_records": 100,
+            "relay_event_batch": {
+              "p50_us": 260.28674998283384,
+              "p95_us": 266.70335001945494
+            },
+            "client_event_batch": {
+              "p50_us": 1593.8659999847412,
+              "p95_us": 1629.4300000190735
+            },
+            "cache_below_budget": {
+              "initial_entries": 4096,
+              "file_bytes": 65536,
+              "measured_downloads": 960,
+              "startup_us": 2435.32200050354,
+              "mean_us": 1648.0554405927658,
+              "batch": {
+                "p50_us": 1683.527765572071,
+                "p95_us": 1825.879234328866
+              }
+            },
+            "cache_near_budget": {
+              "initial_entries": 7936,
+              "file_bytes": 65536,
+              "measured_downloads": 960,
+              "startup_us": 6142.066999435425,
+              "mean_us": 2841.127928114931,
+              "batch": {
+                "p50_us": 2842.7234374582767,
+                "p95_us": 2917.808999925852
+              }
+            }
+          }
+        },
+        {
+          "pair": 3,
+          "version": "after",
+          "results": {
+            "samples": 15,
+            "json_bytes": 65536,
+            "sql_lookup": {
+              "p50_us": 0.16304289999008179,
+              "p95_us": 0.1644835000038147
+            },
+            "json_check": {
+              "p50_us": 2.2407600002288817,
+              "p95_us": 2.270336000442505
+            },
+            "opaque_text_raster": {
+              "p50_us": 35.32296999931336,
+              "p95_us": 35.70598000526428
+            },
+            "media_enqueue": {
+              "p50_us": 0.2890917968470603,
+              "p95_us": 0.2922639159951359
+            },
+            "media_request_bytes": 232,
+            "relay_history_page": {
+              "p50_us": 559.0464500427246,
+              "p95_us": 565.3790500164032
+            },
+            "event_batch_records": 100,
+            "relay_event_batch": {
+              "p50_us": 306.89800000190735,
+              "p95_us": 312.7883999824524
+            },
+            "client_event_batch": {
+              "p50_us": 1635.31310005188,
+              "p95_us": 1648.5238999366761
+            },
+            "cache_below_budget": {
+              "initial_entries": 4096,
+              "file_bytes": 65536,
+              "measured_downloads": 960,
+              "startup_us": 2912.2130002975464,
+              "mean_us": 0.021394795179367064,
+              "batch": {
+                "p50_us": 0.02142202854156494,
+                "p95_us": 0.02193756401538849
+              }
+            },
+            "cache_near_budget": {
+              "initial_entries": 7936,
+              "file_bytes": 65536,
+              "measured_downloads": 960,
+              "startup_us": 7457.361999511719,
+              "mean_us": 3.941996885339419,
+              "batch": {
+                "p50_us": 0.02162499725818634,
+                "p95_us": 58.828437462449074
+              }
+            }
+          }
+        }
+      ],
+      "summary": {
+        "client_event_batch": {
+          "before": 1593.8659999847412,
+          "after": 1666.996600341797,
+          "reduction_percent": -4.58825273628749
+        },
+        "sql_lookup": {
+          "before": 0.16813039999008178,
+          "after": 0.16304289999008179,
+          "reduction_percent": 3.025925115446171
+        },
+        "cache_below_budget": {
+          "before": 1636.2886187354723,
+          "after": 0.021394795179367064,
+          "reduction_percent": 99.99869248035253
+        },
+        "cache_near_budget": {
+          "before": 2841.127928114931,
+          "after": 3.941996885339419,
+          "reduction_percent": 99.8612523974605
+        }
+      }
+    },
+    {
+      "description": "Isolated NOMUTEX candidate before adding the dedicated client-query measurement. Shared statement-cache code restored.",
+      "runs": [
+        {
+          "pair": 1,
+          "version": "before",
+          "results": {
+            "samples": 15,
+            "json_bytes": 65536,
+            "sql_lookup": {
+              "p50_us": 0.16836609992980958,
+              "p95_us": 0.17172740001678466
+            },
+            "json_check": {
+              "p50_us": 2.1823819999694822,
+              "p95_us": 2.30285000038147
+            },
+            "opaque_text_raster": {
+              "p50_us": 35.850819997787475,
+              "p95_us": 36.1651100063324
+            },
+            "media_enqueue": {
+              "p50_us": 0.2903212890960276,
+              "p95_us": 0.2975175781175494
+            },
+            "media_request_bytes": 232,
+            "relay_history_page": {
+              "p50_us": 495.1482499599457,
+              "p95_us": 504.0570999622345
+            },
+            "event_batch_records": 100,
+            "relay_event_batch": {
+              "p50_us": 254.43309998512268,
+              "p95_us": 257.7448500156403
+            },
+            "client_event_batch": {
+              "p50_us": 1551.3671998023988,
+              "p95_us": 1577.8161999702454
+            },
+            "cache_below_budget": {
+              "initial_entries": 4096,
+              "file_bytes": 65536,
+              "measured_downloads": 960,
+              "startup_us": 1939.9539995193481,
+              "mean_us": 1687.3361822942893,
+              "batch": {
+                "p50_us": 1667.3650624752045,
+                "p95_us": 1851.9036562889814
+              }
+            },
+            "cache_near_budget": {
+              "initial_entries": 7936,
+              "file_bytes": 65536,
+              "measured_downloads": 960,
+              "startup_us": 4223.928000450134,
+              "mean_us": 2825.4224031279487,
+              "batch": {
+                "p50_us": 2824.254374951124,
+                "p95_us": 2834.3820000588894
+              }
+            }
+          }
+        },
+        {
+          "pair": 1,
+          "version": "after",
+          "results": {
+            "samples": 15,
+            "json_bytes": 65536,
+            "sql_lookup": {
+              "p50_us": 0.1652652000427246,
+              "p95_us": 0.1671757999420166
+            },
+            "json_check": {
+              "p50_us": 2.2508100013732912,
+              "p95_us": 2.3052959995269777
+            },
+            "opaque_text_raster": {
+              "p50_us": 35.34657000541687,
+              "p95_us": 35.88187999725342
+            },
+            "media_enqueue": {
+              "p50_us": 0.28784838877618313,
+              "p95_us": 0.29215576173737645
+            },
+            "media_request_bytes": 232,
+            "relay_history_page": {
+              "p50_us": 494.77305002212523,
+              "p95_us": 516.3503499984741
+            },
+            "event_batch_records": 100,
+            "relay_event_batch": {
+              "p50_us": 257.2799499988556,
+              "p95_us": 271.86949996948243
+            },
+            "client_event_batch": {
+              "p50_us": 1548.801399898529,
+              "p95_us": 1579.1067000389098
+            },
+            "cache_below_budget": {
+              "initial_entries": 4096,
+              "file_bytes": 65536,
+              "measured_downloads": 960,
+              "startup_us": 1770.7839994430542,
+              "mean_us": 0.02139166792233785,
+              "batch": {
+                "p50_us": 0.02134367823600769,
+                "p95_us": 0.022078126668930054
+              }
+            },
+            "cache_near_budget": {
+              "initial_entries": 7936,
+              "file_bytes": 65536,
+              "measured_downloads": 960,
+              "startup_us": 6121.793000221252,
+              "mean_us": 3.7990479091803233,
+              "batch": {
+                "p50_us": 0.02148430049419403,
+                "p95_us": 56.686250030994415
+              }
+            }
+          }
+        },
+        {
+          "pair": 2,
+          "version": "after",
+          "results": {
+            "samples": 15,
+            "json_bytes": 65536,
+            "sql_lookup": {
+              "p50_us": 0.16315419998168945,
+              "p95_us": 0.1668291000366211
+            },
+            "json_check": {
+              "p50_us": 1.9171000003814698,
+              "p95_us": 2.3217639999389648
+            },
+            "opaque_text_raster": {
+              "p50_us": 35.510780000686644,
+              "p95_us": 35.89409999847412
+            },
+            "media_enqueue": {
+              "p50_us": 0.2870803221594542,
+              "p95_us": 0.29132665996439755
+            },
+            "media_request_bytes": 232,
+            "relay_history_page": {
+              "p50_us": 496.35349998474123,
+              "p95_us": 500.7297999858856
+            },
+            "event_batch_records": 100,
+            "relay_event_batch": {
+              "p50_us": 258.56990003585815,
+              "p95_us": 260.6804000377655
+            },
+            "client_event_batch": {
+              "p50_us": 1508.8789999961853,
+              "p95_us": 1540.1127998352051
+            },
+            "cache_below_budget": {
+              "initial_entries": 4096,
+              "file_bytes": 65536,
+              "measured_downloads": 960,
+              "startup_us": 2449.4270000457764,
+              "mean_us": 0.021298970778783163,
+              "batch": {
+                "p50_us": 0.021156221628189087,
+                "p95_us": 0.022218823432922363
+              }
+            },
+            "cache_near_budget": {
+              "initial_entries": 7936,
+              "file_bytes": 65536,
+              "measured_downloads": 960,
+              "startup_us": 4190.164999961853,
+              "mean_us": 3.629944775501887,
+              "batch": {
+                "p50_us": 0.02142183482646942,
+                "p95_us": 54.15023435652256
+              }
+            }
+          }
+        },
+        {
+          "pair": 2,
+          "version": "before",
+          "results": {
+            "samples": 15,
+            "json_bytes": 65536,
+            "sql_lookup": {
+              "p50_us": 0.1658993999481201,
+              "p95_us": 0.16807649993896484
+            },
+            "json_check": {
+              "p50_us": 2.1593600006103517,
+              "p95_us": 2.2568819999694822
+            },
+            "opaque_text_raster": {
+              "p50_us": 35.60013999938965,
+              "p95_us": 39.37206999778748
+            },
+            "media_enqueue": {
+              "p50_us": 0.29074707021936774,
+              "p95_us": 0.2954042968340218
+            },
+            "media_request_bytes": 232,
+            "relay_history_page": {
+              "p50_us": 492.96414999961854,
+              "p95_us": 555.8419000148773
+            },
+            "event_batch_records": 100,
+            "relay_event_batch": {
+              "p50_us": 252.6196499824524,
+              "p95_us": 256.0025500297546
+            },
+            "client_event_batch": {
+              "p50_us": 1567.125099849701,
+              "p95_us": 1664.7213997840881
+            },
+            "cache_below_budget": {
+              "initial_entries": 4096,
+              "file_bytes": 65536,
+              "measured_downloads": 960,
+              "startup_us": 1938.371000289917,
+              "mean_us": 1648.1926895777385,
+              "batch": {
+                "p50_us": 1646.8419530689716,
+                "p95_us": 1770.7979688197374
+              }
+            },
+            "cache_near_budget": {
+              "initial_entries": 7936,
+              "file_bytes": 65536,
+              "measured_downloads": 960,
+              "startup_us": 3990.3470001220703,
+              "mean_us": 2840.3972947905463,
+              "batch": {
+                "p50_us": 2830.256328076124,
+                "p95_us": 2909.7853281646967
+              }
+            }
+          }
+        },
+        {
+          "pair": 3,
+          "version": "before",
+          "results": {
+            "samples": 15,
+            "json_bytes": 65536,
+            "sql_lookup": {
+              "p50_us": 0.16935989999771117,
+              "p95_us": 0.17145590000152588
+            },
+            "json_check": {
+              "p50_us": 1.8937560005187988,
+              "p95_us": 2.175670000076294
+            },
+            "opaque_text_raster": {
+              "p50_us": 35.813440008163454,
+              "p95_us": 36.09727999687195
+            },
+            "media_enqueue": {
+              "p50_us": 0.29358178726397455,
+              "p95_us": 0.29688159190118313
+            },
+            "media_request_bytes": 232,
+            "relay_history_page": {
+              "p50_us": 490.85615000724795,
+              "p95_us": 496.3454999923706
+            },
+            "event_batch_records": 100,
+            "relay_event_batch": {
+              "p50_us": 253.2428499698639,
+              "p95_us": 255.95139999389647
+            },
+            "client_event_batch": {
+              "p50_us": 1561.0356999397277,
+              "p95_us": 1596.227000141144
+            },
+            "cache_below_budget": {
+              "initial_entries": 4096,
+              "file_bytes": 65536,
+              "measured_downloads": 960,
+              "startup_us": 2517.9359998703003,
+              "mean_us": 1638.7708864728609,
+              "batch": {
+                "p50_us": 1635.973687455058,
+                "p95_us": 1796.2253282517195
+              }
+            },
+            "cache_near_budget": {
+              "initial_entries": 7936,
+              "file_bytes": 65536,
+              "measured_downloads": 960,
+              "startup_us": 3452.7620000839233,
+              "mean_us": 2833.100032283862,
+              "batch": {
+                "p50_us": 2831.1535468399525,
+                "p95_us": 2844.892734363675
+              }
+            }
+          }
+        },
+        {
+          "pair": 3,
+          "version": "after",
+          "results": {
+            "samples": 15,
+            "json_bytes": 65536,
+            "sql_lookup": {
+              "p50_us": 0.16188270006179808,
+              "p95_us": 0.16470999994277954
+            },
+            "json_check": {
+              "p50_us": 2.1684559993743897,
+              "p95_us": 2.378171998977661
+            },
+            "opaque_text_raster": {
+              "p50_us": 35.644320001602175,
+              "p95_us": 36.31638999938965
+            },
+            "media_enqueue": {
+              "p50_us": 0.28773339837789536,
+              "p95_us": 0.2958420410286635
+            },
+            "media_request_bytes": 232,
+            "relay_history_page": {
+              "p50_us": 504.2709000110626,
+              "p95_us": 511.0291500091553
+            },
+            "event_batch_records": 100,
+            "relay_event_batch": {
+              "p50_us": 262.9742000102997,
+              "p95_us": 269.34124999046327
+            },
+            "client_event_batch": {
+              "p50_us": 1561.261799812317,
+              "p95_us": 1579.0133999824525
+            },
+            "cache_below_budget": {
+              "initial_entries": 4096,
+              "file_bytes": 65536,
+              "measured_downloads": 960,
+              "startup_us": 1893.4860000610352,
+              "mean_us": 0.02121460735797882,
+              "batch": {
+                "p50_us": 0.021015748381614685,
+                "p95_us": 0.022078141570091248
+              }
+            },
+            "cache_near_budget": {
+              "initial_entries": 7936,
+              "file_bytes": 65536,
+              "measured_downloads": 960,
+              "startup_us": 5793.091000556946,
+              "mean_us": 4.971698943773905,
+              "batch": {
+                "p50_us": 0.02143751084804535,
+                "p95_us": 74.27612489461899
+              }
+            }
+          }
+        }
+      ],
+      "summary": {
+        "client_event_batch": {
+          "before": 1561.0356999397277,
+          "after": 1548.801399898529,
+          "reduction_percent": 0.7837296765007329
+        },
+        "relay_event_batch": {
+          "before": 253.2428499698639,
+          "after": 258.56990003585815,
+          "reduction_percent": -2.1035342425770986
+        },
+        "relay_history_page": {
+          "before": 492.96414999961854,
+          "after": 496.35349998474123,
+          "reduction_percent": -0.6875449229168717
+        },
+        "sql_lookup": {
+          "before": 0.16836609992980958,
+          "after": 0.16315419998168945,
+          "reduction_percent": 3.095575623770419
+        },
+        "cache_below_budget": {
+          "before": 1648.1926895777385,
+          "after": 0.021298970778783163,
+          "reduction_percent": 99.99870773782014
+        },
+        "cache_near_budget": {
+          "before": 2833.100032283862,
+          "after": 3.7990479091803233,
+          "reduction_percent": 99.8659049145498
+        }
+      }
+    }
+  ],
+  "runs": [
+    {
+      "pair": 1,
+      "version": "before",
+      "results": {
+        "samples": 15,
+        "json_bytes": 65536,
+        "sql_lookup": {
+          "p50_us": 0.17603319997787475,
+          "p95_us": 0.1806710000038147
+        },
+        "client_sql_lookup": {
+          "p50_us": 0.17997969999313354,
+          "p95_us": 0.18670830001831054
+        },
+        "json_check": {
+          "p50_us": 2.26325,
+          "p95_us": 2.358611999511719
+        },
+        "opaque_text_raster": {
+          "p50_us": 37.43343999862671,
+          "p95_us": 48.5958099937439
+        },
+        "media_enqueue": {
+          "p50_us": 0.32394653325900435,
+          "p95_us": 0.3428811035118997
+        },
+        "media_request_bytes": 232,
+        "relay_history_page": {
+          "p50_us": 542.9301000118255,
+          "p95_us": 591.2622999668122
+        },
+        "event_batch_records": 100,
+        "relay_event_batch": {
+          "p50_us": 286.4045000076294,
+          "p95_us": 292.36225004196166
+        },
+        "client_event_batch": {
+          "p50_us": 1747.9997999191285,
+          "p95_us": 1804.4674001693725
+        },
+        "cache_below_budget": {
+          "initial_entries": 4096,
+          "file_bytes": 65536,
+          "measured_downloads": 960,
+          "startup_us": 2451.5470008850098,
+          "mean_us": 1708.663622950514,
+          "batch": {
+            "p50_us": 1695.4827812761068,
+            "p95_us": 1884.7669063061476
+          }
+        },
+        "cache_near_budget": {
+          "initial_entries": 7936,
+          "file_bytes": 65536,
+          "measured_downloads": 960,
+          "startup_us": 5741.505000114441,
+          "mean_us": 2993.9447604209186,
+          "batch": {
+            "p50_us": 2968.0536093711853,
+            "p95_us": 3118.0550625026226
+          }
+        }
+      }
+    },
+    {
+      "pair": 1,
+      "version": "after",
+      "results": {
+        "samples": 15,
+        "json_bytes": 65536,
+        "sql_lookup": {
+          "p50_us": 0.16416280002593994,
+          "p95_us": 0.16764140005111694
+        },
+        "client_sql_lookup": {
+          "p50_us": 0.13808459997177125,
+          "p95_us": 0.18023709993362427
+        },
+        "json_check": {
+          "p50_us": 2.2340360012054443,
+          "p95_us": 3.274519998550415
+        },
+        "opaque_text_raster": {
+          "p50_us": 36.11074999809265,
+          "p95_us": 38.30317999839783
+        },
+        "media_enqueue": {
+          "p50_us": 0.28902685549110174,
+          "p95_us": 0.29591992194764316
+        },
+        "media_request_bytes": 232,
+        "relay_history_page": {
+          "p50_us": 512.4415499687195,
+          "p95_us": 608.2984500408172
+        },
+        "event_batch_records": 100,
+        "relay_event_batch": {
+          "p50_us": 262.3090000152588,
+          "p95_us": 306.4182500362396
+        },
+        "client_event_batch": {
+          "p50_us": 1595.7576999664307,
+          "p95_us": 1670.668799972534
+        },
+        "cache_below_budget": {
+          "initial_entries": 4096,
+          "file_bytes": 65536,
+          "measured_downloads": 960,
+          "startup_us": 2219.217999458313,
+          "mean_us": 0.021330191691716512,
+          "batch": {
+            "p50_us": 0.02128128707408905,
+            "p95_us": 0.022359326481819153
+          }
+        },
+        "cache_near_budget": {
+          "initial_entries": 7936,
+          "file_bytes": 65536,
+          "measured_downloads": 960,
+          "startup_us": 5657.967000007629,
+          "mean_us": 4.25169585843881,
+          "batch": {
+            "p50_us": 0.02142186462879181,
+            "p95_us": 63.47589057683945
+          }
+        }
+      }
+    },
+    {
+      "pair": 2,
+      "version": "after",
+      "results": {
+        "samples": 15,
+        "json_bytes": 65536,
+        "sql_lookup": {
+          "p50_us": 0.17175109996795654,
+          "p95_us": 0.22346469993591309
+        },
+        "client_sql_lookup": {
+          "p50_us": 0.13699660005569458,
+          "p95_us": 0.14234370002746582
+        },
+        "json_check": {
+          "p50_us": 2.1630219993591306,
+          "p95_us": 2.3048899993896486
+        },
+        "opaque_text_raster": {
+          "p50_us": 36.422130002975464,
+          "p95_us": 38.59592999458313
+        },
+        "media_enqueue": {
+          "p50_us": 0.29367919941432774,
+          "p95_us": 0.326898681698367
+        },
+        "media_request_bytes": 232,
+        "relay_history_page": {
+          "p50_us": 511.0288499832153,
+          "p95_us": 550.8340000152588
+        },
+        "event_batch_records": 100,
+        "relay_event_batch": {
+          "p50_us": 259.05739998817444,
+          "p95_us": 288.7344000339508
+        },
+        "client_event_batch": {
+          "p50_us": 1646.939000225067,
+          "p95_us": 1712.244400024414
+        },
+        "cache_below_budget": {
+          "initial_entries": 4096,
+          "file_bytes": 65536,
+          "measured_downloads": 960,
+          "startup_us": 1523.876000404358,
+          "mean_us": 0.021456217765808104,
+          "batch": {
+            "p50_us": 0.02143751084804535,
+            "p95_us": 0.022218674421310425
+          }
+        },
+        "cache_near_budget": {
+          "initial_entries": 7936,
+          "file_bytes": 65536,
+          "measured_downloads": 960,
+          "startup_us": 5891.859000205994,
+          "mean_us": 3.762118760744731,
+          "batch": {
+            "p50_us": 0.021296784281730652,
+            "p95_us": 56.13354676961899
+          }
+        }
+      }
+    },
+    {
+      "pair": 2,
+      "version": "before",
+      "results": {
+        "samples": 15,
+        "json_bytes": 65536,
+        "sql_lookup": {
+          "p50_us": 0.17320279998779298,
+          "p95_us": 0.1765842999458313
+        },
+        "client_sql_lookup": {
+          "p50_us": 0.1769539999961853,
+          "p95_us": 0.17866409997940064
+        },
+        "json_check": {
+          "p50_us": 2.255236000061035,
+          "p95_us": 2.282065999984741
+        },
+        "opaque_text_raster": {
+          "p50_us": 37.08508999824524,
+          "p95_us": 37.57400000572205
+        },
+        "media_enqueue": {
+          "p50_us": 0.30440502939745784,
+          "p95_us": 0.3095075683668256
+        },
+        "media_request_bytes": 232,
+        "relay_history_page": {
+          "p50_us": 537.0054000377655,
+          "p95_us": 558.3711999893188
+        },
+        "event_batch_records": 100,
+        "relay_event_batch": {
+          "p50_us": 285.16664996147153,
+          "p95_us": 287.23404998779296
+        },
+        "client_event_batch": {
+          "p50_us": 1683.6040999412537,
+          "p95_us": 1695.2913000106812
+        },
+        "cache_below_budget": {
+          "initial_entries": 4096,
+          "file_bytes": 65536,
+          "measured_downloads": 960,
+          "startup_us": 2582.8140001296997,
+          "mean_us": 1705.1027791748445,
+          "batch": {
+            "p50_us": 1718.555718794465,
+            "p95_us": 1878.9854843616486
+          }
+        },
+        "cache_near_budget": {
+          "initial_entries": 7936,
+          "file_bytes": 65536,
+          "measured_downloads": 960,
+          "startup_us": 5602.743000030518,
+          "mean_us": 3100.716832296054,
+          "batch": {
+            "p50_us": 3044.628000050783,
+            "p95_us": 3680.491218686104
+          }
+        }
+      }
+    },
+    {
+      "pair": 3,
+      "version": "before",
+      "results": {
+        "samples": 15,
+        "json_bytes": 65536,
+        "sql_lookup": {
+          "p50_us": 0.1788284999847412,
+          "p95_us": 0.1855291000366211
+        },
+        "client_sql_lookup": {
+          "p50_us": 0.18043150005340577,
+          "p95_us": 0.18669930000305177
+        },
+        "json_check": {
+          "p50_us": 2.0361219997406006,
+          "p95_us": 2.421789999008179
+        },
+        "opaque_text_raster": {
+          "p50_us": 37.46048999786377,
+          "p95_us": 42.84695000648499
+        },
+        "media_enqueue": {
+          "p50_us": 0.3044956054072827,
+          "p95_us": 0.4029013670515269
+        },
+        "media_request_bytes": 232,
+        "relay_history_page": {
+          "p50_us": 545.5039000034333,
+          "p95_us": 580.9152500152588
+        },
+        "event_batch_records": 100,
+        "relay_event_batch": {
+          "p50_us": 291.04274997711184,
+          "p95_us": 294.66754999160764
+        },
+        "client_event_batch": {
+          "p50_us": 1780.0680998802186,
+          "p95_us": 1909.1808999061584
+        },
+        "cache_below_budget": {
+          "initial_entries": 4096,
+          "file_bytes": 65536,
+          "measured_downloads": 960,
+          "startup_us": 1971.5699996948242,
+          "mean_us": 1669.2568666905165,
+          "batch": {
+            "p50_us": 1671.2610781341791,
+            "p95_us": 1794.8539062589407
+          }
+        },
+        "cache_near_budget": {
+          "initial_entries": 7936,
+          "file_bytes": 65536,
+          "measured_downloads": 960,
+          "startup_us": 4445.178000450134,
+          "mean_us": 2778.9205875148377,
+          "batch": {
+            "p50_us": 2766.784624963999,
+            "p95_us": 2829.4099530875683
+          }
+        }
+      }
+    },
+    {
+      "pair": 3,
+      "version": "after",
+      "results": {
+        "samples": 15,
+        "json_bytes": 65536,
+        "sql_lookup": {
+          "p50_us": 0.16769540004730224,
+          "p95_us": 0.16896180000305175
+        },
+        "client_sql_lookup": {
+          "p50_us": 0.13954340000152587,
+          "p95_us": 0.14748229999542237
+        },
+        "json_check": {
+          "p50_us": 2.159576000213623,
+          "p95_us": 2.2156800003051758
+        },
+        "opaque_text_raster": {
+          "p50_us": 35.42384000778198,
+          "p95_us": 45.58352000236511
+        },
+        "media_enqueue": {
+          "p50_us": 0.28973608394153416,
+          "p95_us": 0.2932756347581744
+        },
+        "media_request_bytes": 232,
+        "relay_history_page": {
+          "p50_us": 492.87310004234314,
+          "p95_us": 529.9595499992371
+        },
+        "event_batch_records": 100,
+        "relay_event_batch": {
+          "p50_us": 255.84175000190734,
+          "p95_us": 266.68375000953677
+        },
+        "client_event_batch": {
+          "p50_us": 1542.5320000648499,
+          "p95_us": 1706.225899887085
+        },
+        "cache_below_budget": {
+          "initial_entries": 4096,
+          "file_bytes": 65536,
+          "measured_downloads": 960,
+          "startup_us": 1987.1299991607666,
+          "mean_us": 0.021473965048789977,
+          "batch": {
+            "p50_us": 0.021312445402145386,
+            "p95_us": 0.022390633821487427
+          }
+        },
+        "cache_near_budget": {
+          "initial_entries": 7936,
+          "file_bytes": 65536,
+          "measured_downloads": 960,
+          "startup_us": 5234.67799949646,
+          "mean_us": 3.965993763009707,
+          "batch": {
+            "p50_us": 0.021734371781349182,
+            "p95_us": 59.188875034451485
+          }
+        }
+      }
+    }
+  ],
+  "summary": {
+    "client_sql_lookup": {
+      "before": 0.17997969999313354,
+      "after": 0.13808459997177125,
+      "reduction_percent": 23.27768077342092
+    },
+    "client_event_batch": {
+      "before": 1747.9997999191285,
+      "after": 1595.7576999664307,
+      "reduction_percent": 8.709503282537067
+    },
+    "relay_event_batch": {
+      "before": 286.4045000076294,
+      "after": 259.05739998817444,
+      "reduction_percent": 9.54841841476879
+    },
+    "relay_history_page": {
+      "before": 542.9301000118255,
+      "after": 511.0288499832153,
+      "reduction_percent": 5.875756387040498
+    },
+    "sql_lookup": {
+      "before": 0.17603319997787475,
+      "after": 0.16769540004730224,
+      "reduction_percent": 4.736492849996743
+    },
+    "cache_below_budget": {
+      "before": 1705.1027791748445,
+      "after": 0.021456217765808104,
+      "reduction_percent": 99.99874164666038
+    },
+    "cache_near_budget": {
+      "before": 2993.9447604209186,
+      "after": 3.965993763009707,
+      "reduction_percent": 99.86753283442503
+    }
+  },
+  "notes": [
+    "Disk timings exclude file creation, payload I/O, decoding and fsync; below-limit accounting is close to timer overhead.",
+    "Whole-event and unchanged relay controls varied between rounds; do not infer an end-to-end speedup from the isolated query result.",
+    "The initial cached-mutex-pointer experiment was removed; only per-client-connection NOMUTEX is retained."
+  ]
+}

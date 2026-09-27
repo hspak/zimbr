@@ -55,35 +55,62 @@ static int oldest(const void *aa, const void *bb) {
     if (a->used.tv_sec!=b->used.tv_sec) return a->used.tv_sec<b->used.tv_sec ? -1 : 1;
     return a->used.tv_nsec<b->used.tv_nsec ? -1 : a->used.tv_nsec>b->used.tv_nsec;
 }
-void zc_cache_prune(int dir, size_t budget) {
-    int copy=openat(dir,".",O_RDONLY|O_DIRECTORY|O_CLOEXEC); if (copy<0) return;
-    DIR *scan=fdopendir(copy); if (!scan) { close(copy); return; }
-    struct Entry *entries=NULL; size_t count=0,bytes=0;
-    struct dirent *entry;
-    while ((entry=readdir(scan))) {
+int zc_cache_prune(int dir, size_t budget, size_t max_entries, int startup, ZcCacheUsage *usage) {
+    int copy=openat(dir,".",O_RDONLY|O_DIRECTORY|O_CLOEXEC); if (copy<0) return 0;
+    DIR *scan=fdopendir(copy); if (!scan) { close(copy); return 0; }
+    struct Entry *entries=NULL; size_t count=0,capacity=0,bytes=0;
+    int ok=1;
+    for (;;) {
+        errno=0;
+        struct dirent *entry=readdir(scan);
+        if (!entry) { if (errno) ok=0; break; }
         if (!cache_name(entry->d_name)) continue;
-        if (strlen(entry->d_name)==36) {
-            struct stat temporary;
-            if (!fstatat(dir,entry->d_name,&temporary,AT_SYMLINK_NOFOLLOW) && S_ISREG(temporary.st_mode)) {
-                if (time(NULL)-temporary.st_mtime>60) unlinkat(dir,entry->d_name,0);
-                else if (temporary.st_size>0) bytes+=(size_t)temporary.st_size;
-            }
+        struct stat st;
+        if (fstatat(dir,entry->d_name,&st,AT_SYMLINK_NOFOLLOW)) {
+            if (errno!=ENOENT) ok=0;
             continue;
         }
-        struct stat st;
-        if (fstatat(dir,entry->d_name,&st,AT_SYMLINK_NOFOLLOW) || !S_ISREG(st.st_mode) || st.st_uid!=getuid() || st.st_size<0) continue;
-        if (count==8192) { unlinkat(dir,entry->d_name,0); continue; }
-        struct Entry *next=realloc(entries,(count+1)*sizeof(*entries)); if (!next) break;
-        entries=next;
+        if (!S_ISREG(st.st_mode) || st.st_uid!=getuid() || st.st_size<0) continue;
+        if (strlen(entry->d_name)==36) {
+            // The sole owner has no active downloads at startup. During later
+            // scans every temporary may belong to one of its two active lanes.
+            if (startup) {
+                if (!unlinkat(dir,entry->d_name,0)) continue;
+                ok=0;
+            }
+            if ((size_t)st.st_size>SIZE_MAX-bytes) { ok=0; break; }
+            bytes+=(size_t)st.st_size;
+            continue;
+        }
+        if (count==8192) {
+            if (unlinkat(dir,entry->d_name,0)) ok=0;
+            continue;
+        }
+        if (count==capacity) {
+            size_t next_capacity=capacity ? capacity*2 : 64;
+            struct Entry *next=realloc(entries,next_capacity*sizeof(*entries));
+            if (!next) { ok=0; break; }
+            entries=next; capacity=next_capacity;
+        }
+        if ((size_t)st.st_size>SIZE_MAX-bytes) { ok=0; break; }
         snprintf(entries[count].name,sizeof(entries[count].name),"%s",entry->d_name);
         entries[count].bytes=st.st_size; entries[count].used=st.st_mtim;
         bytes+=(size_t)st.st_size; count++;
     }
-    closedir(scan); if (count>1) qsort(entries,count,sizeof(*entries),oldest);
-    for (size_t i=0;i<count && bytes>budget;i++) {
-        if (!unlinkat(dir,entries[i].name,0)) bytes-=(size_t)entries[i].bytes;
+    if (closedir(scan)) ok=0;
+    size_t remaining=count;
+    if (bytes>budget || remaining>max_entries) {
+        if (count>1) qsort(entries,count,sizeof(*entries),oldest);
+        for (size_t i=0;i<count && (bytes>budget || remaining>max_entries);i++) {
+            if (!unlinkat(dir,entries[i].name,0)) {
+                bytes-=(size_t)entries[i].bytes; remaining--;
+            } else ok=0;
+        }
     }
     free(entries);
+    if (!ok || bytes>budget || remaining>max_entries) return 0;
+    *usage=(ZcCacheUsage){.bytes=bytes,.entries=remaining};
+    return 1;
 }
 static int dimensions(int w, int h) {
     return w>0 && h>0 && w<=2560 && h<=2560 && (uint64_t)w*h*4<=PIXEL_LIMIT;

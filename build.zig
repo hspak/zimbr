@@ -167,7 +167,7 @@ fn client(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
         optimize,
         "src/hotpath_bench.zig",
     ) });
-    b.step("hotpath-bench", "Build SQL, JSON and text rasterization microbenchmarks").dependOn(&b.addInstallArtifact(
+    b.step("hotpath-bench", "Build client and relay hot-path microbenchmarks").dependOn(&b.addInstallArtifact(
         hotpaths,
         .{},
     ).step);

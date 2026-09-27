@@ -5,6 +5,7 @@ const Signal = @import("../Signal.zig");
 const u = @import("../common.zig");
 const t = @import("../protocol.zig").types;
 const Db = @import("Sqlite.zig");
+const Json = @import("../protocol.zig").Json;
 pub const enrichment = @import("enrichment.zig");
 const Journal = @This();
 
@@ -14,6 +15,7 @@ changed: ?struct { signal: *Signal, io: std.Io } = null,
 pub const QueryError = Db.QueryError;
 pub const ReadError = Db.QueryError || u.Allocator.Error;
 pub const RecordError = Db.QueryError || std.json.ParseError(std.json.Scanner);
+pub const EventsError = Db.QueryError || Json.InitError;
 pub const OpenError = ReadError || error{RandomUnavailable};
 pub const BeginError = error{DatabaseFailure};
 pub const CommitError = error{DatabaseFailure};
@@ -43,11 +45,11 @@ pub const CheckCursorError = ReadError || error{
     InvalidRequest,
     ResyncRequired,
 };
-pub const PageError = RecordError || error{InvalidRequest};
-pub const PageContentError = RecordError || error{InvalidRequest};
+pub const PageError = Db.QueryError || Json.InitError || error{InvalidRequest};
+pub const PageContentError = PageError;
 pub const ObserveIdentityError = ReadError || error{RandomUnavailable};
 pub const UpdateIdentityError = ReadError || error{ InvalidRequest, NotFound };
-pub const IdentityPageError = RecordError || error{InvalidRequest};
+pub const IdentityPageError = PageError;
 pub const BackfillIdentitiesError = RecordError || error{RandomUnavailable};
 
 pub fn open(path: [:0]const u8) OpenError!Journal {
@@ -112,8 +114,13 @@ pub fn progress(self: Journal, a: u.Allocator, key: []const u8) ReadError!?[]con
     try s.bind(&.{.{ .text = key }});
     return if (try s.step()) try s.text(a, 0) else null;
 }
-pub fn position(self: Journal, a: u.Allocator, key: []const u8) ReadError!i64 {
-    return std.fmt.parseInt(i64, (try self.progress(a, key)) orelse "0", 10) catch error.DatabaseFailure;
+/// Missing ingestion positions start at zero. Malformed stored positions return DatabaseFailure.
+pub fn position(self: Journal, key: []const u8) QueryError!i64 {
+    const s = try self.db.prepare("SELECT value FROM ingestion_progress WHERE key=?");
+    defer s.close();
+    try s.bind(&.{.{ .text = key }});
+    if (!try s.step()) return 0;
+    return std.fmt.parseInt(i64, s.bytes(0), 10) catch error.DatabaseFailure;
 }
 pub fn setProgress(self: Journal, key: []const u8, value: []const u8) Db.QueryError!void {
     try self.execute(
@@ -121,9 +128,30 @@ pub fn setProgress(self: Journal, key: []const u8, value: []const u8) Db.QueryEr
         &.{ .{ .text = key }, .{ .text = value } },
     );
 }
-pub fn setPosition(self: Journal, a: u.Allocator, key: []const u8, n: i64) ReadError!void {
-    try self.setProgress(key, try u.decimal(a, n));
+pub fn setPosition(self: Journal, key: []const u8, n: i64) QueryError!void {
+    var buffer: [20]u8 = undefined;
+    const value = std.fmt.bufPrint(&buffer, "{d}", .{n}) catch unreachable;
+    try self.setProgress(key, value);
 }
+
+test "ingestion positions preserve integer bounds and reject corrupt stored text" {
+    const j = try Journal.open(":memory:");
+    defer j.close();
+    try std.testing.expectEqual(@as(i64, 0), try j.position("missing"));
+    for ([_]i64{
+        std.math.minInt(i64),
+        0,
+        std.math.maxInt(i64),
+    }) |position_value| {
+        try j.setPosition("position", position_value);
+        try std.testing.expectEqual(position_value, try j.position("position"));
+    }
+    try j.setProgress("position", "9223372036854775808");
+    try std.testing.expectError(error.DatabaseFailure, j.position("position"));
+    try j.setProgress("position", "not-a-number");
+    try std.testing.expectError(error.DatabaseFailure, j.position("position"));
+}
+
 pub fn event(self: Journal, seq: i64, kind: []const u8, record: []const u8, origin: []const u8) Db.QueryError!void {
     try self.execute("INSERT INTO events(sequence,type,record,origin,created_ms) VALUES(?,?,?,?,?)", &.{
         .{ .int = seq },
@@ -412,7 +440,7 @@ pub fn prune(self: Journal, count_limit: i64) Db.QueryError!void {
     try self.execute("DELETE FROM events WHERE sequence<=?", &.{.{ .int = cut }});
     try self.commit();
 }
-pub const Page = struct { records: []std.json.Value, next: ?[]const u8 };
+pub const Page = struct { records: []Json, next: ?[]const u8 };
 pub const thread_members = "SELECT id FROM conversations WHERE coalesce(json_extract(record,'$.thread_id'),id)=coalesce((SELECT coalesce(json_extract(record,'$.thread_id'),id) FROM conversations WHERE id=?),?)";
 pub fn threadMembers(self: Journal, a: u.Allocator, id: []const u8) ReadError![][]const u8 {
     const q = try self.db.prepare(thread_members);
@@ -440,6 +468,7 @@ pub fn pageContent(
     limit: usize,
     text_only: bool,
 ) PageContentError!Page {
+    if (limit == 0 or limit > t.max_page) return error.InvalidRequest;
     // Strip optional arrays in SQLite, before allocating/parsing the response.
     // Keep reaction_event: it determines whether a source row is displayed.
     const projection = "CASE WHEN coalesce(json_array_length(record,'$.attachments'),0)>0 OR coalesce(json_array_length(record,'$.link_previews'),0)>0 OR coalesce(json_array_length(record,'$.reactions'),0)>0 OR coalesce(json_extract(record,'$.enrichment.attachments.total'),0)>0 OR coalesce(json_extract(record,'$.enrichment.previews.total'),0)>0 OR coalesce(json_extract(record,'$.enrichment.reactions.total'),0)>0 THEN json_set(json_remove(record,'$.attachments','$.link_previews','$.reactions','$.parts','$.enrichment'),'$.metadata_deferred',json('true')) ELSE record END";
@@ -469,30 +498,31 @@ pub fn pageContent(
             .{ .int = @intCast(limit + 1) },
         });
     } else try s.bind(&.{ .{ .text = before orelse "~" }, .{ .int = @intCast(limit + 1) } });
-    var items: std.ArrayList(std.json.Value) = .empty;
+    var items: [t.max_page]Json = undefined;
+    var count: usize = 0;
     var next_key: ?[]const u8 = null;
-    var last: ?[]const u8 = null;
+    var cursor_buffer: [20 + 1 + t.uuid_length]u8 = undefined;
+    var last: []const u8 = "";
     var byte_count: usize = 0;
     while (try s.step()) {
-        if (items.items.len == limit or (items.items.len > 0 and byte_count + s.bytes(0).len > t.max_history_bytes)) {
-            next_key = last;
+        if (count == limit or (count > 0 and byte_count + s.bytes(0).len > t.max_history_bytes)) {
+            next_key = try a.dupe(u8, last);
             break;
         }
-        try items.append(
-            a,
-            (try std.json.parseFromSlice(std.json.Value, a, s.bytes(0), .{ .allocate = .alloc_always })).value,
-        );
+        items[count] = try Json.init(a, try s.text(a, 0));
+        count += 1;
         byte_count += s.bytes(0).len + 1;
-        last = if (conversation_id != null) try std.fmt.allocPrint(
-            a,
+        last = if (conversation_id != null) std.fmt.bufPrint(
+            &cursor_buffer,
             "{d}:{s}",
             .{ s.int(1), s.bytes(2) },
-        ) else try s.text(
-            a,
-            2,
-        );
+        ) catch return error.DatabaseFailure else std.fmt.bufPrint(
+            &cursor_buffer,
+            "{s}",
+            .{s.bytes(2)},
+        ) catch return error.DatabaseFailure;
     }
-    return .{ .records = try items.toOwnedSlice(a), .next = next_key };
+    return .{ .records = try a.dupe(Json, items[0..count]), .next = next_key };
 }
 pub const Frame = struct { sequence: i64, frame: []const u8 };
 pub fn previews(self: Journal, a: u.Allocator, before: ?[]const u8, limit: usize) ReadError![]t.ConversationPreview {
@@ -527,10 +557,10 @@ pub fn previews(self: Journal, a: u.Allocator, before: ?[]const u8, limit: usize
     }
     return result.toOwnedSlice(a);
 }
-pub fn events(self: Journal, a: u.Allocator, after: i64) RecordError![]const Frame {
+pub fn events(self: Journal, a: u.Allocator, after: i64) EventsError![]const Frame {
     return self.eventsWithIdentities(a, after, false);
 }
-pub fn eventsWithIdentities(self: Journal, a: u.Allocator, after: i64, identities: bool) RecordError![]const Frame {
+pub fn eventsWithIdentities(self: Journal, a: u.Allocator, after: i64, identities: bool) EventsError![]const Frame {
     const s = try self.db.prepare("SELECT sequence,type,record,origin FROM events WHERE sequence>? ORDER BY sequence LIMIT 100");
     defer s.close();
     try s.bind(&.{.{ .int = after }});
@@ -548,12 +578,7 @@ pub fn eventsWithIdentities(self: Journal, a: u.Allocator, after: i64, identitie
         if (byte_count + s.bytes(2).len > 512 * 1024 and items.items.len > 0) break;
         byte_count += s.bytes(2).len;
         const cur = try t.cursor(a, e, seq);
-        const record_value = (try std.json.parseFromSlice(
-            std.json.Value,
-            a,
-            s.bytes(2),
-            .{ .allocate = .alloc_always },
-        )).value;
+        const record_value = try Json.init(a, s.bytes(2));
         const data = try u.json(a, .{
             .cursor = cur,
             .sequence = try u.decimal(a, seq),
@@ -626,27 +651,90 @@ pub fn updateIdentity(self: Journal, a: u.Allocator, value: t.Identity) UpdateId
 }
 
 pub fn identityPage(self: Journal, a: u.Allocator, before: ?[]const u8, limit: usize) IdentityPageError!Page {
+    if (limit == 0 or limit > t.max_page) return error.InvalidRequest;
     if (before) |b| if (!t.uuid(b)) return error.InvalidRequest;
     const s = try self.db.prepare("SELECT id,record FROM identities WHERE id<? ORDER BY id DESC LIMIT ?");
     defer s.close();
     try s.bind(&.{ .{ .text = before orelse "~" }, .{ .int = @intCast(limit + 1) } });
-    var records: std.ArrayList(std.json.Value) = .empty;
-    var last: ?[]const u8 = null;
+    var records: [t.max_page]Json = undefined;
+    var count: usize = 0;
+    var cursor_buffer: [t.uuid_length]u8 = undefined;
+    var last: []const u8 = "";
     var next_key: ?[]const u8 = null;
     var bytes: usize = 0;
     while (try s.step()) {
-        if (records.items.len == limit or (records.items.len > 0 and bytes + s.bytes(1).len > t.max_metadata_page)) {
-            next_key = last;
+        if (count == limit or (count > 0 and bytes + s.bytes(1).len > t.max_metadata_page)) {
+            next_key = try a.dupe(u8, last);
             break;
         }
         bytes += s.bytes(1).len + 1;
-        try records.append(
-            a,
-            (try std.json.parseFromSlice(std.json.Value, a, s.bytes(1), .{ .allocate = .alloc_always })).value,
-        );
-        last = try s.text(a, 0);
+        records[count] = try Json.init(a, try s.text(a, 1));
+        count += 1;
+        last = std.fmt.bufPrint(&cursor_buffer, "{s}", .{s.bytes(0)}) catch return error.DatabaseFailure;
     }
-    return .{ .records = try records.toOwnedSlice(a), .next = next_key };
+    return .{ .records = try a.dupe(Json, records[0..count]), .next = next_key };
+}
+
+test "bounded pages own records and cursors across subsequent queries and reject corrupt JSON" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const j = try Journal.open(":memory:");
+    defer j.close();
+    const chat = try j.conversation(a, "chat", 1, "route", .{ .service = "imessage" }, "historical_import");
+    for (0..t.max_page + 1) |i| {
+        var source_buffer: [20]u8 = undefined;
+        const source = try std.fmt.bufPrint(&source_buffer, "{d}", .{i});
+        try j.message(a, source, @intCast(i + 1), std.math.minInt(i64), .{
+            .conversation_id = chat,
+            .sender = "fixture@example.invalid",
+            .direction = .incoming,
+            .service = "imessage",
+            .timestamp = "2026-01-01T00:00:00Z",
+            .kind = .text,
+            .text = "é\nquoted \"text\"",
+            .decoding = .plain,
+            .observed_status = .received,
+        }, "historical_import");
+    }
+    const first = try j.page(a, chat, null, t.max_page);
+    try std.testing.expectEqual(@as(usize, t.max_page), first.records.len);
+    try std.testing.expectEqual(@as(usize, 57), first.next.?.len);
+    const last = try j.page(a, chat, first.next, t.max_page);
+    try std.testing.expectEqual(@as(usize, 1), last.records.len);
+    try std.testing.expectEqual(@as(?[]const u8, null), last.next);
+    const decoded = try std.json.parseFromSliceLeaky(
+        struct { messages: []t.Message },
+        a,
+        try u.json(a, .{ .messages = first.records }),
+        .{},
+    );
+    try std.testing.expectEqual(@as(usize, t.max_page), decoded.messages.len);
+    try std.testing.expectEqualStrings("é\nquoted \"text\"", decoded.messages[0].text.?);
+    try std.testing.expectEqualStrings(decoded.messages[t.max_page - 1].id, first.next.?[21..]);
+    const last_message = try std.json.parseFromSliceLeaky(t.Message, a, last.records[0].bytes, .{});
+    for (decoded.messages) |record| try std.testing.expect(!u.eq(record.id, last_message.id));
+
+    _ = try j.observeIdentity(a, "imessage", "other@example.invalid");
+    const identities = try j.identityPage(a, null, 1);
+    const remaining = try j.identityPage(a, identities.next, 1);
+    const identity = try std.json.parseFromSliceLeaky(t.Identity, a, identities.records[0].bytes, .{});
+    const other = try std.json.parseFromSliceLeaky(t.Identity, a, remaining.records[0].bytes, .{});
+    try std.testing.expectEqualStrings(identity.id, identities.next.?);
+    try std.testing.expect(!u.eq(identity.id, other.id));
+    try std.testing.expectEqual(@as(?[]const u8, null), remaining.next);
+
+    for ([_]usize{ 0, t.max_page + 1, std.math.maxInt(usize) }) |limit| {
+        try std.testing.expectError(error.InvalidRequest, j.page(a, chat, null, limit));
+        try std.testing.expectError(error.InvalidRequest, j.page(a, null, null, limit));
+        try std.testing.expectError(error.InvalidRequest, j.identityPage(a, null, limit));
+    }
+    try j.db.exec("UPDATE messages SET record='{'");
+    try std.testing.expectError(error.SyntaxError, j.page(a, chat, null, 1));
+    try j.db.exec("UPDATE identities SET record='{'");
+    try std.testing.expectError(error.SyntaxError, j.identityPage(a, null, 1));
+    try j.db.exec("UPDATE conversations SET record='{'");
+    try std.testing.expectError(error.SyntaxError, j.page(a, null, null, 1));
 }
 
 // Independent, versioned backfill also covers old senders no longer present in
@@ -703,11 +791,11 @@ test "atomic ingestion rollback preserves progress, records, and event sequence"
         .{ .service = "imessage" },
         "historical_import",
     );
-    try j.setPosition(a, "live", 99);
+    try j.setPosition("live", 99);
     j.rollback();
     try std.testing.expectEqual(@as(i64, 0), try j.sequence());
     try std.testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM conversations"));
-    try std.testing.expectEqual(@as(i64, 0), try j.position(a, "live"));
+    try std.testing.expectEqual(@as(i64, 0), try j.position("live"));
     try j.begin();
     const id = try j.conversation(
         a,
@@ -1013,11 +1101,13 @@ test "directory tombstones preserve identity and legacy streams skip extension e
     v.match_state = .unavailable;
     try j.updateIdentity(a, v);
     const cleared = try j.identityPage(a, null, 10);
-    for (cleared.records) |value| if (u.eq(value.object.get("id").?.string, id)) {
+    for (cleared.records) |record| {
+        const value = try std.json.parseFromSliceLeaky(std.json.Value, a, record.bytes, .{});
+        if (!u.eq(value.object.get("id").?.string, id)) continue;
         try std.testing.expect(value.object.get("display_name").? == .null);
         try std.testing.expect(value.object.get("avatar").? == .null);
         try std.testing.expectEqualStrings("unavailable", value.object.get("match_state").?.string);
-    };
+    }
     const legacy = try j.events(a, 0);
     const rich = try j.eventsWithIdentities(a, 0, true);
     try std.testing.expectEqual(rich.len, legacy.len);

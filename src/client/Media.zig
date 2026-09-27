@@ -1,13 +1,21 @@
 //! Independent authenticated media lane. Only this worker touches downloads and
 //! decoding; the GUI receives at most one bounded decoded image at a time.
 const std = @import("std");
+const builtin = @import("builtin");
 const u = @import("../common.zig");
 const t = @import("../protocol.zig").types;
 const c = @import("c.zig").api;
 const Config = @import("Config.zig");
+pub const DiskCache = @import("Media/DiskCache.zig");
 const Media = @This();
-const a = std.heap.c_allocator;
+const a = if (builtin.is_test) std.testing.allocator else std.heap.c_allocator;
 const log = std.log.scoped(.client_media);
+const asset_path_capacity = capacity: {
+    var variant_length: usize = 0;
+    for (std.meta.fieldNames(@FieldType(t.AssetRef, "variant"))) |name|
+        variant_length = @max(variant_length, name.len);
+    break :capacity "/v1/assets///".len + 2 * t.uuid_length + variant_length + 1;
+};
 pub const disk_budget = 512 * 1024 * 1024;
 pub const texture_budget = 64 * 1024 * 1024;
 
@@ -52,8 +60,11 @@ pub const Result = struct {
     }
 };
 const Request = struct {
-    arena: std.heap.ArenaAllocator,
-    asset: t.AssetRef,
+    id: [t.uuid_length]u8,
+    version: [t.uuid_length]u8,
+    variant: @FieldType(t.AssetRef, "variant"),
+    retired: bool,
+    expected_bytes: usize,
     key: [64:0]u8,
     generation: u64,
     wanted_at: i64,
@@ -62,7 +73,6 @@ const Request = struct {
     fn destroy(r: *Request, dir: c_int) void {
         if (r.fd >= 0) _ = u.c.close(r.fd);
         if (r.temporary[0] != 0) c.zc_cache_remove(dir, &r.temporary);
-        r.arena.deinit();
         a.destroy(r);
     }
 };
@@ -185,10 +195,15 @@ pub fn key(s: *Media, asset: t.AssetRef) [64:0]u8 {
     output[64] = 0;
     return output;
 }
-pub fn request(s: *Media, asset: t.AssetRef) std.json.ParseError(std.json.Scanner)!void {
+pub const RequestError = u.Allocator.Error || error{InvalidAssetReference};
+
+/// Copy the download fields into the bounded queue. Asset IDs and versions must
+/// be protocol UUIDs; the caller retains ownership of all asset strings.
+pub fn request(s: *Media, asset: t.AssetRef) RequestError!void {
     s.mutex.lockUncancelable(s.io);
     defer s.mutex.unlock(s.io);
     if (s.epoch.len == 0 or (!s.avatars and asset.variant == .avatar)) return;
+    if (!t.uuid(asset.id) or !t.uuid(asset.version)) return error.InvalidAssetReference;
     const cache_key = s.key(asset);
     for (s.active) |active| if (active) |r| if (r.generation == s.generation and u.eq(
         &r.key,
@@ -203,19 +218,14 @@ pub fn request(s: *Media, asset: t.AssetRef) std.json.ParseError(std.json.Scanne
     };
     if (s.result) |r| if (r.generation == s.generation and u.eq(&r.key, &cache_key)) return;
     if (s.queue.items.len >= 128) return;
-    var arena = std.heap.ArenaAllocator.init(a);
-    errdefer arena.deinit();
-    const owned = try std.json.parseFromSliceLeaky(
-        t.AssetRef,
-        arena.allocator(),
-        try u.json(arena.allocator(), asset),
-        .{},
-    );
     const r = try a.create(Request);
     errdefer a.destroy(r);
     r.* = .{
-        .arena = arena,
-        .asset = owned,
+        .id = asset.id[0..t.uuid_length].*,
+        .version = asset.version[0..t.uuid_length].*,
+        .variant = asset.variant,
+        .retired = asset.availability == .retired,
+        .expected_bytes = if (asset.bytes) |bytes| std.fmt.parseInt(usize, bytes, 10) catch 0 else 0,
         .key = cache_key,
         .generation = s.generation,
         .wanted_at = u.now(),
@@ -272,7 +282,13 @@ fn work(s: *Media) !void {
         r.destroy(s.dir);
         active.* = null;
     };
-    c.zc_cache_prune(s.dir, disk_budget - 16 * 1024 * 1024);
+    // Leave room for both 8 MiB download lanes and trim in batches near the cap.
+    var disk = DiskCache.init(s.dir, .{
+        .bytes = disk_budget - 16 * 1024 * 1024,
+        .trim_bytes = disk_budget - 64 * 1024 * 1024,
+        .entries = 8192,
+        .trim_entries = 7680,
+    });
     while (!s.stop.load(.acquire)) {
         s.mutex.lockUncancelable(s.io);
         const generation = s.generation;
@@ -324,15 +340,16 @@ fn work(s: *Media) !void {
                         });
                     }
                     if (failure.curl_code == 0 and status == 200) {
-                        if (c.zc_image_read(s.dir, &r.temporary, &result.pixels) == 1 and c.zc_cache_install(
-                            s.dir,
-                            &r.temporary,
-                            &r.key,
-                            r.fd,
-                        ) == 1) {
+                        const installed = if (c.zc_image_read(s.dir, &r.temporary, &result.pixels) == 1) installed: {
+                            const ok = c.zc_cache_install(s.dir, &r.temporary, &r.key, r.fd) == 1;
+                            // The transport verified the declared length, or enforced 8 MiB
+                            // when no length was advertised. Count even a late fsync failure.
+                            disk.downloaded(if (r.expected_bytes != 0) r.expected_bytes else 8 * 1024 * 1024);
+                            break :installed ok;
+                        } else false;
+                        if (installed) {
                             result.state = .ready;
                             log.debug("Image {s}: download saved to disk cache", .{r.key});
-                            c.zc_cache_prune(s.dir, disk_budget - 16 * 1024 * 1024);
                         } else {
                             c.zc_pixels_free(&result.pixels);
                             setReason(result, "Invalid or oversized image · retry");
@@ -393,7 +410,7 @@ fn work(s: *Media) !void {
                 s.mutex.unlock(s.io);
                 const r = queued orelse continue;
                 const result = try resultFor(r, "Image unavailable · retry");
-                if (r.asset.availability == .retired) {
+                if (r.retired) {
                     result.state = .retired;
                     setReason(result, "Photo changed · refreshing message");
                     c.zc_cache_remove(s.dir, &r.key);
@@ -402,7 +419,7 @@ fn work(s: *Media) !void {
                 }
                 const cached = c.zc_image_read(s.dir, &r.key, &result.pixels);
                 if (cached == 1) {
-                    log.debug("Image {s}: disk cache hit ({s})", .{ r.key, @tagName(r.asset.variant) });
+                    log.debug("Image {s}: disk cache hit ({s})", .{ r.key, @tagName(r.variant) });
                     result.state = .ready;
                     s.deliver(r, result, lane);
                     break;
@@ -410,7 +427,7 @@ fn work(s: *Media) !void {
                 if (cached < 0) {
                     log.debug("Image {s}: disk cache file rejected; removing", .{r.key});
                     c.zc_cache_remove(s.dir, &r.key);
-                } else log.debug("Image {s}: disk cache miss ({s})", .{ r.key, @tagName(r.asset.variant) });
+                } else log.debug("Image {s}: disk cache miss ({s})", .{ r.key, @tagName(r.variant) });
                 if (!online) {
                     result.state = .offline;
                     setReason(result, "Photo not cached · reconnect to load");
@@ -438,21 +455,21 @@ fn work(s: *Media) !void {
                     break;
                 }
                 r.fd = c.zc_cache_temp(s.dir, &r.temporary, r.temporary.len);
-                const path = try std.fmt.allocPrintSentinel(r.arena.allocator(), "/v1/assets/{s}/{s}/{s}", .{
-                    try encode(r.arena.allocator(), r.asset.id),
-                    try encode(r.arena.allocator(), r.asset.version),
-                    @tagName(r.asset.variant),
-                }, 0);
-                const expected = if (r.asset.bytes) |bytes| std.fmt.parseInt(usize, bytes, 10) catch 0 else 0;
-                if (r.fd < 0 or c.zc_net_start_file(net.?, @intCast(lane), path, r.fd, expected) == 0) {
+                var path_buffer: [asset_path_capacity]u8 = undefined;
+                const path = std.fmt.bufPrintZ(&path_buffer, "/v1/assets/{s}/{s}/{s}", .{
+                    r.id,
+                    r.version,
+                    @tagName(r.variant),
+                }) catch unreachable; // UUIDs are validated before enqueueing.
+                if (r.fd < 0 or c.zc_net_start_file(net.?, @intCast(lane), path, r.fd, r.expected_bytes) == 0) {
                     s.deliver(r, result, lane);
                     break;
                 }
                 log.debug("Image {s}: downloading {s} version {s} ({s})", .{
                     r.key,
-                    r.asset.id,
-                    r.asset.version,
-                    @tagName(r.asset.variant),
+                    r.id,
+                    r.version,
+                    @tagName(r.variant),
                 });
                 result.destroy();
             }
@@ -465,21 +482,6 @@ fn setReason(result: *Result, reason: []const u8) void {
     const length = @min(reason.len, result.reason.len);
     @memcpy(result.reason[0..length], reason[0..length]);
 }
-fn encode(ar: u.Allocator, raw: []const u8) ![]const u8 {
-    var result: std.ArrayList(u8) = .empty;
-    const hex = "0123456789ABCDEF";
-    for (raw) |byte| if (std.ascii.isAlphanumeric(byte) or byte == '-' or byte == '_') {
-        try result.append(ar, byte);
-    } else {
-        try result.appendSlice(ar, &.{
-            '%',
-            hex[byte >> 4],
-            hex[byte & 15],
-        });
-    };
-    return result.items;
-}
-
 test "media cache validates files and pixels, installs atomically, and evicts private avatars" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -579,7 +581,8 @@ test "media cache validates files and pixels, installs atomically, and evicts pr
     c.zc_cache_clear_avatars(dir);
     try std.testing.expectEqual(@as(c_int, 1), c.zc_image_read(dir, key_value, &pixels));
     c.zc_pixels_free(&pixels);
-    c.zc_cache_prune(dir, 0);
+    var usage: c.ZcCacheUsage = undefined;
+    try std.testing.expectEqual(@as(c_int, 1), c.zc_cache_prune(dir, 0, 8192, 0, &usage));
     try std.testing.expectEqual(@as(c_int, 0), c.zc_image_read(dir, key_value, &pixels));
     // Oversized PNG dimensions fail before a large pixel allocation.
     var huge = png;
@@ -593,6 +596,37 @@ test "media cache validates files and pixels, installs atomically, and evicts pr
     try std.testing.expectEqual(@as(c_int, -1), c.zc_image_read(dir, &temporary, &pixels));
     try std.testing.expect(pixels.data == null);
     c.zc_cache_remove(dir, &temporary);
+}
+
+test "queued media owns only validated download fields and survives caller reuse" {
+    var media = Media{ .io = std.testing.io, .config = .{ .data = "" } };
+    defer media.shutdown();
+    _ = try media.context("epoch", "chat", 0, false, true);
+    var id = "12345678-1234-1234-1234-123456789012".*;
+    var version = "abcdefab-abcd-abcd-abcd-abcdefabcdef".*;
+    var asset = t.AssetRef{
+        .id = &id,
+        .version = &version,
+        .variant = .inline_image,
+        .bytes = "12345",
+        .availability = .retired,
+    };
+    try media.request(asset);
+    try media.request(asset);
+    try std.testing.expectEqual(@as(usize, 1), media.queue.items.len);
+    @memset(&id, 'x');
+    @memset(&version, 'y');
+    const queued = media.queue.items[0];
+    try std.testing.expectEqualStrings("12345678-1234-1234-1234-123456789012", &queued.id);
+    try std.testing.expectEqualStrings("abcdefab-abcd-abcd-abcd-abcdefabcdef", &queued.version);
+    try std.testing.expectEqual(@as(usize, 12345), queued.expected_bytes);
+    try std.testing.expect(queued.retired);
+    try std.testing.expectError(error.InvalidAssetReference, media.request(asset));
+    asset.id = &queued.id;
+    try std.testing.expectError(error.InvalidAssetReference, media.request(asset));
+    try std.testing.expectEqual(@as(usize, 1), media.queue.items.len);
+    _ = try media.context("epoch", "other", 0, false, true);
+    try std.testing.expectEqual(@as(usize, 0), media.queue.items.len);
 }
 
 test "asset keys separate relay identities, epochs, versions and variants" {
@@ -620,4 +654,8 @@ test "asset keys separate relay identities, epochs, versions and variants" {
     second.variant = .avatar;
     try std.testing.expect(!u.eq(&first, &media.key(second)));
     try std.testing.expectEqual(@as(u8, 'a'), media.key(second)[0]);
+}
+
+test {
+    _ = DiskCache;
 }

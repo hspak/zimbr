@@ -1,5 +1,24 @@
-//! Shared HTTP(S) activation policy for stored metadata and the client.
+//! Shared HTTP(S) activation policy and request-component formatting.
 const std = @import("std");
+
+/// Format one raw path segment or query value with RFC 3986 percent encoding.
+/// The formatter borrows raw and writes directly into the destination.
+pub fn escaped(raw: []const u8) std.fmt.Alt(std.Uri.Component, std.Uri.Component.formatEscaped) {
+    return std.fmt.alt(std.Uri.Component{ .raw = raw }, .formatEscaped);
+}
+
+test "escaped components cannot inject path or query delimiters" {
+    var buffer: [128]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&buffer, "/messages/{f}?before={f}", .{
+        escaped("a/b?x=1&y=%"),
+        escaped("é :+\x00"),
+    });
+    try std.testing.expectEqualStrings("/messages/a%2Fb%3Fx%3D1%26y%3D%25?before=%C3%A9%20%3A%2B%00", path);
+    try std.testing.expectEqual(@as(u8, 0), path[path.len]);
+    try std.testing.expectEqualStrings("AZaz09-_.~", try std.fmt.bufPrint(&buffer, "{f}", .{escaped("AZaz09-_.~")}));
+    try std.testing.expectError(error.NoSpaceLeft, std.fmt.bufPrintZ(buffer[0..3], "{f}", .{escaped("/ ")}));
+}
+
 pub fn safe(url: []const u8) bool {
     if (url.len == 0 or url.len > 4096 or !std.unicode.utf8ValidateSlice(url)) return false;
     for (url) |byte| if (byte <= 32 or byte == 127 or byte == '\\') return false;
