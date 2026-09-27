@@ -86,6 +86,11 @@ fn run(init: std.process.Init) !void {
     var config = try Config.parse(init);
     const cache_lock = try config.lockCache();
     defer _ = u.c.close(cache_lock);
+    if (config.reset_cache) {
+        try config.resetCache(init.io);
+        std.debug.print("Local database and media reset. Saved settings and credentials retained when available.\n", .{});
+        return;
+    }
     log.info("Starting Zimbr {s}", .{client_options.version});
     try config.load(init.arena.allocator());
     rl.setTraceLogLevel(.warning);
@@ -108,7 +113,15 @@ fn run(init: std.process.Init) !void {
         .{ .w = 1120, .h = 780 },
         .{ .error_handler_function = clayError },
     );
-    while (true) config = try runSession(init, config) orelse break;
+    while (true) {
+        config = try runSession(init, config) orelse break;
+        if (config.reset_cache) {
+            // runSession's defers have joined both workers and closed SQLite.
+            try config.resetCache(init.io);
+            config.reset_cache = false;
+            try config.load(init.arena.allocator());
+        }
+    }
 }
 
 fn runSession(init: std.process.Init, config: Config) !?Config {
@@ -190,7 +203,7 @@ fn runSession(init: std.process.Init, config: Config) !?Config {
             break;
         }
     }
-    try app.saveDraft();
+    if (app.next_config == null or !app.next_config.?.reset_cache) try app.saveDraft();
     return app.next_config;
 }
 const App = struct {
@@ -1101,6 +1114,13 @@ const App = struct {
         const message = "Could not save settings. Check the state directory is writable and try again.";
         @memcpy(s.settings.failure.message[0..message.len], message);
     }
+    fn resetLocalData(s: *App) void {
+        var next = s.worker.config;
+        next.reset_cache = true;
+        next.settings = false;
+        next.details = false;
+        s.next_config = next;
+    }
     fn drawPaneHeader(s: *App, title: []const u8, subtitle: []const u8, r: rl.Rectangle) void {
         const x = r.x + 32;
         const width = @min(760, r.width - 64);
@@ -1119,10 +1139,16 @@ const App = struct {
         const paths_y = 144 + s.text.height(helper, 14, width) + 20;
         const failure = std.mem.sliceTo(&s.settings.failure.message, 0);
         const failure_y = paths_y + 3 * 66 + 8;
-        const content_height = failure_y + (if (failure.len > 0)
+        const reset_y = failure_y + (if (failure.len > 0)
             s.text.height(failure, 14, width) + 12
         else
-            @as(f32, 0));
+            @as(f32, 0)) + 20;
+        const reset_help = if (s.settings.confirm_reset)
+            "Delete cached messages, media, drafts and pending-send records? Messages on your Mac, saved settings and certificates are kept. This cannot be undone."
+        else
+            "Rebuild local history and media from your relay. This also removes drafts and pending-send records. Saved settings and certificates are kept.";
+        const reset_buttons_y = reset_y + 25 + s.text.height(reset_help, 14, width) + 12;
+        const content_height = reset_buttons_y + 48;
         const viewport = rl.Rectangle{
             .x = x,
             .y = r.y + 98,
@@ -1203,6 +1229,27 @@ const App = struct {
             theme.colors.danger,
             theme.colors.paper,
         );
+        s.text.drawLine("Local data", x, top + reset_y, 16, width, theme.colors.ink, theme.colors.paper);
+        s.text.draw(reset_help, x, top + reset_y + 25, 14, width, theme.colors.muted, theme.colors.paper);
+        const reset_label = if (s.settings.confirm_reset) "Delete and resync" else "Reset local data…";
+        const reset_size = s.buttonSize(reset_label);
+        if (s.button(.{
+            .x = x,
+            .y = top + reset_buttons_y,
+            .width = reset_size.x,
+            .height = reset_size.y,
+        }, reset_label, false)) {
+            if (s.settings.confirm_reset) s.resetLocalData() else s.settings.confirm_reset = true;
+        }
+        if (s.settings.confirm_reset) {
+            const keep_size = s.buttonSize("Keep local data");
+            if (s.button(.{
+                .x = x + reset_size.x + 12,
+                .y = top + reset_buttons_y,
+                .width = keep_size.x,
+                .height = keep_size.y,
+            }, "Keep local data", false)) s.settings.confirm_reset = false;
+        }
         endClip();
         s.settings_bar.draw(viewport, content_height, s.settings_scroll);
 
@@ -6246,6 +6293,66 @@ test "required settings block navigation and invalid saves keep setup open" {
     try std.testing.expectEqual(@as(usize, 0), worker.commands.items.len);
     try std.testing.expect(app.next_config == null);
     try std.testing.expect(!app.canSend());
+}
+
+test "settings reset requires confirmation and defers deletion until the session stops" {
+    const reset_context: *const fn (?*clay.Context) callconv(.c) void = @ptrCast(&clay.setCurrentContext);
+    reset_context(null);
+    defer reset_context(null);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const length = try tmp.dir.realPath(std.testing.io, &path_buffer);
+    const data = try ar.dupeZ(u8, path_buffer[0..length]);
+    const path = try std.fmt.allocPrintSentinel(ar, "{s}/client.db", .{data}, 0);
+    const store = try Store.open(path);
+    defer store.close();
+    try store.saveDraft("chat", "Keep until confirmed and workers stop");
+    var worker = Worker{ .io = std.testing.io, .config = .{ .data = data } };
+    defer worker.shutdown();
+    rl.setTraceLogLevel(.none);
+    rl.setConfigFlags(.{ .window_highdpi = true });
+    rl.initWindow(780, 560, "Zimbr reset checks");
+    defer rl.closeWindow();
+    rl.pollInputEvents();
+    _ = clay.initialize(
+        .init(try ar.alloc(u8, clay.minMemorySize())),
+        .{ .w = 780, .h = 560 },
+        .{ .error_handler_function = clayError },
+    );
+    var app = App{
+        .worker = &worker,
+        .settings = try Settings.init(worker.config),
+        .settings_scroll = std.math.inf(f32),
+    };
+    defer app.deinit();
+    try app.settings.fields[0].set("https://unsaved.example");
+    app.draw(WindowMetrics.current().scale);
+    const x = clay.getElementData(.ID("sidebar")).bounding_box.x + 32;
+    const y = @as(f32, @floatFromInt(rl.getScreenHeight())) - 120;
+    const reset_size = app.buttonSize("Reset local data…");
+    clickTestFrame(&app, x + reset_size.x / 2, y + reset_size.y / 2);
+    try std.testing.expect(app.settings.confirm_reset and app.next_config == null);
+    app.settings_scroll = std.math.inf(f32);
+    app.draw(WindowMetrics.current().scale);
+    const confirm_size = app.buttonSize("Delete and resync");
+    const keep_size = app.buttonSize("Keep local data");
+    clickTestFrame(&app, x + confirm_size.x + 12 + keep_size.x / 2, y + keep_size.y / 2);
+    try std.testing.expect(!app.settings.confirm_reset and app.next_config == null);
+    app.settings_scroll = std.math.inf(f32);
+    app.draw(WindowMetrics.current().scale);
+    clickTestFrame(&app, x + reset_size.x / 2, y + reset_size.y / 2);
+    app.settings_scroll = std.math.inf(f32);
+    app.draw(WindowMetrics.current().scale);
+    clickTestFrame(&app, x + confirm_size.x / 2, y + confirm_size.y / 2);
+    const next = app.next_config.?;
+    try std.testing.expect(next.reset_cache and !next.settings);
+    try std.testing.expectEqualStrings(data, next.data);
+    try std.testing.expectEqualStrings("", next.relay_url);
+    try std.testing.expectEqualStrings("Keep until confirmed and workers stop", try store.draft(ar, "chat"));
 }
 
 fn testKey(key: rl.KeyboardKey, down: bool) void {

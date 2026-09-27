@@ -19,6 +19,7 @@ control: bool = false,
 enter_to_send: bool = true,
 details: bool = false,
 settings: bool = false,
+reset_cache: bool = false,
 legacy_path: ?[:0]const u8 = null,
 overrides: Overrides = .{},
 
@@ -50,6 +51,9 @@ const connection_fields = .{
 pub const LockCacheError = u.Allocator.Error || error{ClientAlreadyRunning};
 pub const ValidateError = error{ InvalidRelayOrigin, CredentialPathsRequired };
 pub const SaveError = Sqlite.QueryError || ValidateError;
+pub const ResetCacheError = Store.ReadError || u.IdError ||
+    std.Io.Dir.OpenError || std.Io.Dir.StatFileError || std.Io.File.OpenError ||
+    std.Io.Dir.DeleteTreeError || std.Io.Dir.DeleteFileError || std.Io.Dir.RenameError;
 pub const ParseError = std.Io.Dir.CreateDirPathError || u.Allocator.Error || error{
     HomeRequired,
     InvalidArguments,
@@ -111,10 +115,13 @@ pub fn parse(init: std.process.Init) ParseError!Config {
         if (u.eq(arg, "--help")) {
             const help =
                 "Usage: zimbr [--data-dir PATH] [--settings] [--details]\n" ++
+                "       zimbr --reset-cache [--data-dir PATH]\n" ++
                 "       zimbr [--relay-url HTTPS_ORIGIN] [--ca-file PATH]\n" ++
                 "             [--client-cert-file PATH] [--client-key-file PATH]\n" ++
                 "       zimbr [--screenshot PATH --frames 90]\n" ++
                 "Settings: edit in the app; saved in client.db. CLI overrides last this launch.\n" ++
+                "Reset: delete local messages, drafts, pending sends and media, then exit.\n" ++
+                "       Retain readable saved settings and credential files.\n" ++
                 "Profile: " ++ @tagName(options.profile) ++ "\n" ++
                 "State: $XDG_STATE_HOME/" ++ directory_name ++
                 ", falling back to $HOME/.local/share/" ++ directory_name ++ ".\n" ++
@@ -132,6 +139,10 @@ pub fn parse(init: std.process.Init) ParseError!Config {
         }
         if (u.eq(arg, "--settings")) {
             config.settings = true;
+            continue;
+        }
+        if (u.eq(arg, "--reset-cache")) {
+            config.reset_cache = true;
             continue;
         }
         if (u.eq(arg, "--control")) {
@@ -226,6 +237,70 @@ pub fn load(s: *Config, a: u.Allocator) Store.ReadError!void {
     }
     inline for (connection_fields) |field| {
         if (@field(s.overrides, field)) |value| @field(s, field) = value;
+    }
+}
+
+/// Assume lockCache is held and all database connections and media workers are
+/// closed. Recreate client.db with only readable saved settings and remove media.
+/// Drafts and outbox identities are discarded; credential files are untouched.
+pub fn resetCache(s: Config, io: std.Io) ResetCacheError!void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const dir = try std.Io.Dir.cwd().openDir(io, s.data, .{ .follow_symlinks = false });
+    defer dir.close(io);
+    const path = try std.fmt.allocPrintSentinel(a, "{s}/client.db", .{s.data}, 0);
+    const saved = saved: {
+        const stat = dir.statFile(io, "client.db", .{ .follow_symlinks = false }) catch |err| switch (err) {
+            error.FileNotFound => break :saved null,
+            else => return err,
+        };
+        if (stat.kind != .file) break :saved null;
+        break :saved readSaved(a, path) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                log.warn("could not recover settings from client.db ({s}); reset will require setup", .{@errorName(err)});
+                break :saved null;
+            },
+        };
+    };
+    const name = try std.fmt.allocPrint(a, ".client-reset-{s}.db", .{try u.id(a)});
+    const temporary = try std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ s.data, name }, 0);
+    const file = try dir.createFile(io, name, .{ .exclusive = true, .permissions = .fromMode(0o600) });
+    file.close(io);
+    defer dir.deleteFile(io, name) catch {};
+    defer removeSidecars(dir, io, name) catch {};
+    {
+        const replacement = try Store.open(temporary);
+        defer replacement.close();
+        // Save before touching the old cache; launch overrides are not preferences.
+        try (saved orelse Config{ .data = "" }).write(replacement);
+        try replacement.db.exec("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;");
+    }
+    try dir.deleteTree(io, "media");
+    try removeSidecars(dir, io, "client.db");
+    try dir.rename(name, dir, "client.db", io);
+}
+
+fn readSaved(a: u.Allocator, path: [:0]const u8) Store.ReadError!?Config {
+    const db = try Sqlite.openConfined(path, true);
+    defer db.close();
+    return read(a, .{ .db = db });
+}
+
+fn removeSidecars(dir: std.Io.Dir, io: std.Io, name: []const u8) std.Io.Dir.DeleteFileError!void {
+    for ([_][]const u8{
+        "-wal",
+        "-shm",
+        "-journal",
+    }) |suffix| {
+        var buffer: [128]u8 = undefined;
+        // Only client.db and the bounded temporary name above are passed here.
+        const path = std.fmt.bufPrint(&buffer, "{s}{s}", .{ name, suffix }) catch unreachable;
+        dir.deleteFile(io, path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
     }
 }
 

@@ -106,6 +106,10 @@ def main():
             run(env, *args, '--client-key-file', 'relative.pem', error='CredentialPathsRequired')
             assert saved(migrated) == expected
             run(env, *args)
+            reset = subprocess.run([str(BIN), '--reset-cache', *args], env=env, capture_output=True, timeout=10)
+            assert reset.returncode == 0, reset.stderr.decode()
+            assert saved(migrated) == expected
+            run(env, *args)
             # Fresh databases can recover from malformed, obsolete and unsafe legacy files.
             for name, raw, mode, reason in (
                 ('malformed', b'{', 0o600, 'UnexpectedEndOfInput'),

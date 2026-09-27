@@ -73,6 +73,28 @@ directories with no symlinks. The GUI never receives Apple account credentials.
 Saving reconnects both messaging and media with the new settings, preserving
 drafts, cached messages and send recovery.
 
+To start with a fresh local cache, open **Settings → Local data → Reset local
+data…**, then **Delete and resync**. The client stops its messaging and media
+workers, recreates `client.db`, deletes cached media, and reconnects. This removes
+local messages, drafts, pending-send records, unread counts and hidden-chat
+preferences. Saved connection settings and credential files are retained;
+messages on the Mac are unaffected. A reset does not cancel sends already
+accepted by the relay.
+
+If the UI will not open, close the client and run:
+
+```sh
+zimbr --reset-cache
+# For an explicitly selected state directory:
+zimbr --reset-cache --data-dir /path/to/client-state
+```
+
+The command works offline without opening a window and exits after resetting.
+It refuses to run while another client holds the selected cache open. A corrupt
+database can also be reset; if its settings cannot be recovered, configure the
+connection again in Settings. This only resets the client: an incompatible
+epoch or IDs still stored by the relay require a separate relay reset.
+
 Provision separate credentials for each profile and enter their paths in Settings.
 
 Optional `--relay-url`, `--ca-file`, `--client-cert-file` and `--client-key-file`
@@ -302,6 +324,7 @@ python3 tests/cert_management.py  # real mkcert required
 python3 tests/client_native_tls.py
 python3 tests/client_tls.py
 python3 tests/client_settings.py
+python3 tests/client_reset.py
 python3 tests/client_integration.py
 python3 tests/conversations.py
 python3 tests/client_transport.py

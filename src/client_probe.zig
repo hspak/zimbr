@@ -10,6 +10,11 @@ pub fn main(init: std.process.Init) !void {
     var config = try Config.parse(init);
     const cache_lock = try config.lockCache();
     defer _ = u.c.close(cache_lock);
+    if (config.reset_cache) {
+        try config.resetCache(init.io);
+        std.debug.print("Local database and media reset. Saved settings and credentials retained when available.\n", .{});
+        return;
+    }
     try config.load(init.arena.allocator());
     try config.validate();
     var worker = Worker{ .io = init.io, .config = config };
