@@ -2,10 +2,14 @@
 #include <stddef.h>
 #include <stdint.h>
 typedef struct ZcNotifications ZcNotifications;
+typedef struct { unsigned char *data; int width, height; size_t bytes; } ZcPixels;
 typedef void (*ZcNotificationAction)(void *, const char *chat, const char *activation_token);
 ZcNotifications *zc_notifications_new(ZcNotificationAction action, void *context);
 void zc_notifications_poll(void);
-void zc_notifications_show(ZcNotifications *, const char *chat, const char *summary, const char *body);
+/* -1 while capabilities are unknown, 0 if unsupported, 1 if supported. */
+int zc_notifications_images(ZcNotifications *);
+/* Copies content and optional RGBA pixels before returning. */
+void zc_notifications_show(ZcNotifications *, const char *chat, const char *summary, const char *body, const ZcPixels *image);
 void zc_notifications_dismiss(ZcNotifications *, const char *chat);
 void zc_notifications_free(ZcNotifications *);
 void zc_activation_init(void);
@@ -46,7 +50,6 @@ void zc_net_ack(ZcNet *net, int stream);
 /* Two binary lanes (status/done/ack use slot lane+2). Caller owns the fd. */
 int zc_net_start_file(ZcNet *, int lane, const char *path, int fd, size_t expected);
 const char *zc_net_media_body(ZcNet *, int lane, size_t *length);
-typedef struct { unsigned char *data; int width, height; size_t bytes; } ZcPixels;
 int zc_cache_open(const char *path);
 int zc_cache_temp(int dir, char *name, size_t size);
 int zc_cache_install(int dir, const char *temporary, const char *key, int fd);

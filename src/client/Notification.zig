@@ -3,6 +3,7 @@ const std = @import("std");
 const t = @import("../protocol.zig").types;
 const display = @import("display.zig");
 const Store = @import("Store.zig");
+pub const Queue = @import("Notification/Queue.zig");
 const Notification = @This();
 const a = std.heap.page_allocator;
 
@@ -10,6 +11,7 @@ arena: std.heap.ArenaAllocator,
 chat: [:0]const u8,
 summary: [:0]const u8,
 body: [:0]const u8,
+avatar: ?t.AssetRef,
 
 pub const CreateError = std.json.ParseError(std.json.Scanner) || error{
     DatabaseBusy,
@@ -48,6 +50,7 @@ pub fn create(store: Store, message: t.Message) CreateError!*Notification {
         .chat = chat,
         .summary = summary,
         .body = body,
+        .avatar = directory.avatar(message.service, message.sender),
     };
     return result;
 }
@@ -148,4 +151,75 @@ test "new notifications resolve names, preserve captions and titles, and respect
     const titled = try create(store, message);
     defer titled.destroy();
     try std.testing.expectEqualStrings("Our title", titled.summary);
+}
+
+test "notification avatars belong to the exact message sender even in titled groups" {
+    const u = @import("../common.zig");
+    const store = try Store.open(":memory:");
+    defer store.close();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    var identity = t.Identity{
+        .id = "sender",
+        .revision = "1",
+        .service = "imessage",
+        .address = "sender@example.invalid",
+        .match_state = .matched,
+        .avatar = .{
+            .id = "11111111-1111-1111-1111-111111111111",
+            .version = "22222222-2222-2222-2222-222222222222",
+            .variant = .avatar,
+            .availability = .ready,
+        },
+    };
+    _ = try store.upsert(ar, "identity", try u.json(ar, identity));
+    _ = try store.upsert(ar, "conversation", try u.json(ar, t.Conversation{
+        .id = "group",
+        .revision = "1",
+        .service = "imessage",
+        .title = "Group title",
+        .participants = &.{ "other@example.invalid", identity.address },
+    }));
+    var message = t.Message{
+        .id = "message",
+        .conversation_id = "group",
+        .sender = identity.address,
+        .direction = .incoming,
+        .service = "imessage",
+        .timestamp = "",
+        .kind = .text,
+        .text = "Hello",
+        .decoding = .plain,
+        .observed_status = .received,
+    };
+    const notice = try create(store, message);
+    defer notice.destroy();
+    try std.testing.expectEqualStrings("Group title", notice.summary);
+    try std.testing.expectEqualStrings(identity.avatar.?.id, notice.avatar.?.id);
+    message.sender = "other@example.invalid";
+    const unknown = try create(store, message);
+    defer unknown.destroy();
+    try std.testing.expect(unknown.avatar == null);
+    message.sender = identity.address;
+    message.service = "sms";
+    const other_service = try create(store, message);
+    defer other_service.destroy();
+    try std.testing.expect(other_service.avatar == null);
+    message.service = identity.service;
+    identity.revision = "2";
+    identity.match_state = .ambiguous;
+    _ = try store.upsert(ar, "identity", try u.json(ar, identity));
+    const ambiguous = try create(store, message);
+    defer ambiguous.destroy();
+    try std.testing.expect(ambiguous.avatar == null);
+    identity.revision = "3";
+    identity.match_state = .matched;
+    _ = try store.upsert(ar, "identity", try u.json(ar, identity));
+    try store.set("contacts_blocked", "1");
+    const denied = try create(store, message);
+    defer denied.destroy();
+    try std.testing.expect(denied.avatar == null);
+    // Queued references remain owned even when the directory is replaced.
+    try std.testing.expectEqualStrings(identity.avatar.?.version, notice.avatar.?.version);
 }

@@ -46,53 +46,52 @@ pub fn contextChanged(s: *ImageCache, avatars: bool) void {
         }
     }
 }
-pub fn nextFrame(s: *ImageCache, media: *Media) void {
+/// Borrows decoded pixels from the current media generation.
+pub fn accept(s: *ImageCache, result: *const Media.Result) void {
+    if (s.entries.getPtr(result.key)) |entry| {
+        const attempts = entry.attempts;
+        if (entry.texture) |texture| {
+            rl.unloadTexture(texture);
+            s.bytes -= entry.bytes;
+        }
+        entry.* = .{
+            .used = s.frame,
+            .state = result.state,
+            .retry_at = result.retry_at,
+            .reason = result.reason,
+            .attempts = attempts +| 1,
+            .refresh_owner = result.state == .retired,
+        };
+        if (result.pixels.data != null and result.state == .ready) {
+            const bytes = result.pixels.bytes;
+            s.makeRoom(bytes);
+            const image = rl.Image{
+                .data = result.pixels.data,
+                .width = result.pixels.width,
+                .height = result.pixels.height,
+                .mipmaps = 1,
+                .format = .uncompressed_r8g8b8a8,
+            };
+            // makeRoom only clears entries; pointers remain valid.
+            const texture = rl.loadTextureFromImage(image) catch return;
+            rl.setTextureFilter(texture, .bilinear);
+            entry.texture = texture;
+            entry.bytes = bytes;
+            entry.attempts = 0;
+            s.bytes += bytes;
+        } else if (entry.retry_at != 0) {
+            const delay = @min(
+                @as(i64, 30000),
+                @as(i64, 2000) << @intCast(@min(entry.attempts -| 1, 4)),
+            );
+            entry.retry_at = @max(entry.retry_at, u.now() + delay);
+        }
+        s.changed = true;
+    }
+}
+pub fn nextFrame(s: *ImageCache) void {
     s.frame +%= 1;
     s.changed = false;
-    if (media.take()) |result| {
-        defer media.release(result);
-        if (result.generation != media.generation) return;
-        if (s.entries.getPtr(result.key)) |entry| {
-            const attempts = entry.attempts;
-            if (entry.texture) |texture| {
-                rl.unloadTexture(texture);
-                s.bytes -= entry.bytes;
-            }
-            entry.* = .{
-                .used = s.frame,
-                .state = result.state,
-                .retry_at = result.retry_at,
-                .reason = result.reason,
-                .attempts = attempts +| 1,
-                .refresh_owner = result.state == .retired,
-            };
-            if (result.pixels.data != null and result.state == .ready) {
-                const bytes = result.pixels.bytes;
-                s.makeRoom(bytes);
-                const image = rl.Image{
-                    .data = result.pixels.data,
-                    .width = result.pixels.width,
-                    .height = result.pixels.height,
-                    .mipmaps = 1,
-                    .format = .uncompressed_r8g8b8a8,
-                };
-                // makeRoom only clears entries; pointers remain valid.
-                const texture = rl.loadTextureFromImage(image) catch return;
-                rl.setTextureFilter(texture, .bilinear);
-                entry.texture = texture;
-                entry.bytes = bytes;
-                entry.attempts = 0;
-                s.bytes += bytes;
-            } else if (entry.retry_at != 0) {
-                const delay = @min(
-                    @as(i64, 30000),
-                    @as(i64, 2000) << @intCast(@min(entry.attempts -| 1, 4)),
-                );
-                entry.retry_at = @max(entry.retry_at, u.now() + delay);
-            }
-            s.changed = true;
-        }
-    }
     // Bound tiny-image textures and failure metadata as well as pixel bytes.
     // This runs before drawing, so no evicted texture is queued in a GL batch.
     while (s.entries.count() > 896) {

@@ -239,9 +239,14 @@ such as mako, dunst, or SwayNotificationCenter. Install the desktop entry and ic
 with the installer above so the desktop can identify Zimbr in notification settings.
 Your desktop controls notification sounds, expiration, and Do Not Disturb.
 
-Alerts contain a conversation/sender name and a short message preview. History
-imports, outgoing messages, repeated events, and messages being read in the focused
-conversation do not alert. Reading the conversation dismisses its current alert.
+Alerts contain a conversation/sender name and a short message preview. When the
+notification daemon supports images, they also show the message sender's contact
+avatar, including in group conversations. Avatars load from the media cache or
+relay; if unavailable or not loaded within a short wait, the alert uses the Zimbr
+icon. Contact permission loss disables avatars.
+
+History imports, outgoing messages, repeated events, and messages being read in
+the focused conversation do not alert. Reading the conversation dismisses its current alert.
 Where the daemon supports actions, clicking an alert opens its conversation and
 uses the supplied Wayland activation token to request focus; the compositor decides
 whether to raise the window. Hidden conversations still notify. Closing Zimbr stops

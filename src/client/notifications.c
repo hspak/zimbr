@@ -7,8 +7,10 @@
 #define SERVICE "org.freedesktop.Notifications"
 #define OBJECT "/org/freedesktop/Notifications"
 #define LIMIT 64
+#define IMAGE_EDGE 128
 typedef struct {
     char *chat, *summary, *body, *token;
+    GVariant *image;
     guint id;
     guint64 serial;
     gboolean pending;
@@ -16,7 +18,7 @@ typedef struct {
 struct ZcNotifications {
     guint refs, watch, subscription;
     guint64 serial, generation;
-    gboolean stopped, ready, actions, markup;
+    gboolean stopped, ready, actions, markup, images;
     GDBusConnection *bus;
     GCancellable *cancel;
     char *owner;
@@ -31,6 +33,7 @@ typedef struct {
 } Call;
 static void clear_notice(Notice *v) {
     g_free(v->chat); g_free(v->summary); g_free(v->body); g_free(v->token);
+    g_clear_pointer(&v->image, g_variant_unref);
     memset(v, 0, sizeof(*v));
 }
 static void release(ZcNotifications *n) {
@@ -82,6 +85,8 @@ static void send_notice(ZcNotifications *n, guint slot) {
     g_variant_builder_add(&hints, "{sv}", "desktop-entry", g_variant_new_string("zimbr"));
     g_variant_builder_add(&hints, "{sv}", "category", g_variant_new_string("im.received"));
     g_variant_builder_add(&hints, "{sv}", "urgency", g_variant_new_byte(1));
+    if (n->images && v->image)
+        g_variant_builder_add(&hints, "{sv}", "image-data", v->image);
     g_variant_builder_init(&actions, G_VARIANT_TYPE_STRING_ARRAY);
     if (n->actions) {
         g_variant_builder_add(&actions, "s", "default");
@@ -94,18 +99,21 @@ static void send_notice(ZcNotifications *n, guint slot) {
         G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, 2000, n->cancel,
         notified, new_call(n, slot));
     g_free(body);
+    g_clear_pointer(&v->image, g_variant_unref);
 }
 static void capabilities(GObject *object, GAsyncResult *result, gpointer data) {
     Call *c = data;
     ZcNotifications *n = c->n;
     GVariant *reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(object), result, NULL);
     if (!n->stopped && c->generation == n->generation) {
-        n->actions = n->markup = FALSE;
+        n->actions = n->markup = n->images = FALSE;
         if (reply) {
             char **caps;
             g_variant_get(reply, "(^as)", &caps);
             n->actions = g_strv_contains((const char *const *)caps, "actions");
             n->markup = g_strv_contains((const char *const *)caps, "body-markup");
+            n->images = g_strv_contains((const char *const *)caps, "icon-static") ||
+                        g_strv_contains((const char *const *)caps, "icon-multi");
             g_strfreev(caps);
         }
         n->ready = TRUE;
@@ -190,7 +198,34 @@ void zc_notifications_dismiss(ZcNotifications *n, const char *chat) {
         }
     }
 }
-void zc_notifications_show(ZcNotifications *n, const char *chat, const char *summary, const char *body) {
+int zc_notifications_images(ZcNotifications *n) {
+    return !n ? 0 : !n->ready ? -1 : n->images;
+}
+static GVariant *image_hint(const ZcPixels *image) {
+    if (!image || !image->data || image->width <= 0 || image->height <= 0 ||
+        image->width > 2560 || image->height > 2560 ||
+        image->bytes != (gsize)image->width * image->height * 4) return NULL;
+    /* Bound each notification to 64 KiB of RGBA, regardless of source size. */
+    int edge = MAX(image->width, image->height);
+    int width = edge <= IMAGE_EDGE ? image->width : MAX(1, image->width * IMAGE_EDGE / edge);
+    int height = edge <= IMAGE_EDGE ? image->height : MAX(1, image->height * IMAGE_EDGE / edge);
+    gsize size = (gsize)width * height * 4;
+    unsigned char *pixels = g_malloc(size);
+    for (int y = 0; y < height; ++y) {
+        int source_y = y * image->height / height;
+        for (int x = 0; x < width; ++x) {
+            int source_x = x * image->width / width;
+            memcpy(pixels + ((gsize)y * width + x) * 4,
+                   image->data + ((gsize)source_y * image->width + source_x) * 4, 4);
+        }
+    }
+    GVariant *bytes = g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, pixels, size, 1);
+    GVariant *hint = g_variant_ref_sink(g_variant_new("(iiibii@ay)", width, height, width * 4,
+                                                    TRUE, 8, 4, bytes));
+    g_free(pixels);
+    return hint;
+}
+void zc_notifications_show(ZcNotifications *n, const char *chat, const char *summary, const char *body, const ZcPixels *image) {
     if (!n || !g_utf8_validate(chat, -1, NULL) || !g_utf8_validate(summary, -1, NULL) || !g_utf8_validate(body, -1, NULL)) return;
     /* Keep at most one current alert per conversation, including queued calls. */
     zc_notifications_dismiss(n, chat);
@@ -203,6 +238,7 @@ void zc_notifications_show(ZcNotifications *n, const char *chat, const char *sum
     close_id(n, v->id);
     clear_notice(v);
     v->chat = g_strdup(chat); v->summary = g_strdup(summary); v->body = g_strdup(body);
+    if (zc_notifications_images(n) != 0) v->image = image_hint(image);
     v->serial = ++n->serial; v->pending = TRUE;
     send_notice(n, slot);
 }

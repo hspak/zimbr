@@ -9,6 +9,7 @@ const Settings = @import("client.zig").Settings;
 const Config = @import("client.zig").Config;
 const Store = @import("client.zig").Store;
 const Worker = @import("client.zig").Worker;
+const Notification = @import("client.zig").Notification;
 const Editor = @import("client.zig").Editor;
 const MessageSelection = @import("client.zig").MessageSelection;
 const MessageHistory = @import("client.zig").MessageHistory;
@@ -140,8 +141,7 @@ fn runSession(init: std.process.Init, config: Config) !?Config {
     defer if (media_ready) media.shutdown();
     if (app.settings.visible) app.focus = .settings_relay;
     if (media_ready) app.media = &media;
-    app.notifications = bridge.zc_notifications_new(App.notificationAction, &app);
-    defer bridge.zc_notifications_free(app.notifications);
+    app.notifications.backend = bridge.zc_notifications_new(App.notificationAction, &app);
     var frames: usize = 0;
     var last_draw: i64 = 0;
     var active_until: f64 = 0;
@@ -198,7 +198,7 @@ const App = struct {
     settings: Settings = .{},
     next_config: ?Config = null,
     config_allocator: u.Allocator = a,
-    notifications: ?*bridge.ZcNotifications = null,
+    notifications: Notification.Queue = .{},
     media: ?*Media = null,
     images: ImageCache = .{},
     viewer_message: []const u8 = "",
@@ -355,6 +355,7 @@ const App = struct {
     }
 
     fn deinit(s: *App) void {
+        s.notifications.deinit();
         s.settings.deinit();
         s.closeContentDetail();
         a.free(s.viewer_message);
@@ -399,15 +400,26 @@ const App = struct {
     }
     fn deliverNotifications(s: *App) void {
         while (s.worker.takeNotification()) |n| {
-            defer n.destroy();
-            if (s.readingConversation() and u.eq(s.key, n.chat)) continue;
-            bridge.zc_notifications_show(s.notifications, n.chat, n.summary, n.body);
+            if (s.readingConversation() and u.eq(s.key, n.chat)) {
+                n.destroy();
+                continue;
+            }
+            s.notifications.submit(n, s.media, u.now());
         }
         if (s.readingConversation()) {
             const key = a.dupeZ(u8, s.key) catch return;
             defer a.free(key);
-            bridge.zc_notifications_dismiss(s.notifications, key);
+            s.notifications.dismiss(key);
         }
+        s.notifications.poll(s.media, u.now());
+        if (s.media) |media| if (media.take()) |result| {
+            defer media.release(result);
+            s.notifications.accept(media, result);
+            if (result.generation == media.generation) {
+                s.images.accept(result);
+                s.layout_pending = true;
+            }
+        };
     }
     fn saveDraft(s: *App) !void {
         if (s.draft_dirty and s.key.len > 0) {
@@ -844,7 +856,7 @@ const App = struct {
         if (s.text.scale != scale) s.text_click = null;
         s.text.nextFrame(scale);
         if (rl.isMouseButtonPressed(.left)) s.word_drag = null;
-        if (s.media) |media| s.images.nextFrame(media);
+        s.images.nextFrame();
         s.rich_count = 0;
         s.rich_consumed = false;
         input_obscured = s.detail_body != null or s.viewer_message.len > 0;
