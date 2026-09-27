@@ -26,6 +26,7 @@ REQUIRED = {
     f'{APP}/Resources/zimbr-relay-service', f'{APP}/Resources/zimbr.icns',
     f'{APP}/Resources/statusTemplate.pdf',
     f'{APP}/Resources/LICENSE', f'{APP}/Resources/OpenSSL-LICENSE.txt',
+    f'{APP}/Resources/nghttp2-LICENSE.txt',
     f'{APP}/Resources/libPhoneNumber-LICENSE.txt', f'{APP}/_CodeSignature/CodeResources',
 }
 

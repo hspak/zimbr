@@ -361,4 +361,5 @@ test {
     _ = contact_directory;
     _ = Assets;
     _ = Menu;
+    _ = Server;
 }

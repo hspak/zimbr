@@ -14,6 +14,7 @@ import time
 from fixture import create
 from tls_fixture import TLSServer
 from relay_fixture import Fixture
+from http2 import Connection as Http2Connection
 from client_integration import wait
 ROOT=Path(__file__).resolve().parents[1]
 BIN=ROOT/'zig-out/bin'
@@ -34,12 +35,11 @@ def main():
         faults={'history':True,'post':True,'posts':0,'lookups':0,'lookup_ids':[],'auth':0,'stream':True}
         slow_history=threading.Event();release_history=threading.Event()
         class Proxy(http.server.BaseHTTPRequestHandler):
-            protocol_version='HTTP/1.1'
             def log_message(self,*args):pass
             def do_GET(self):self.forward()
             def do_POST(self):self.forward()
             def forward(self):
-                conn=http.client.HTTPSConnection('127.0.0.1',port,timeout=20,context=upstream_context)
+                conn=Http2Connection('127.0.0.1',port,timeout=20,context=upstream_context)
                 try:
                     assert not self.headers.get('Authorization')
                     if faults.get('reject'):

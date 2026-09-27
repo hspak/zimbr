@@ -1,5 +1,4 @@
 """Verified administrative HTTPS connections; no local authentication bypass."""
-import http.client
 import json
 import os
 from pathlib import Path
@@ -63,8 +62,9 @@ class Credentials:
         self.context.minimum_version = self.context.maximum_version = ssl.TLSVersion.TLSv1_3
         self.context.load_verify_locations(cafile=cfg['ca_file'])
         self.context.load_cert_chain(cfg['client_cert_file'], cfg['client_key_file'])
-        self.context.set_alpn_protocols(['http/1.1'])
+        self.context.set_alpn_protocols(['h2'])
 
     def connection(self, timeout=20):
-        return http.client.HTTPSConnection(self.endpoint.hostname, self.endpoint.port or 443,
+        from http2 import Connection as Http2Connection
+        return Http2Connection(self.endpoint.hostname, self.endpoint.port or 443,
                                           context=self.context, timeout=timeout)

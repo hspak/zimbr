@@ -18,6 +18,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.x509.oid import ExtendedKeyUsageOID
 from tls_fixture import PKI, TLSServer, private_write
+from relay_fixture import Http2Connection
 from performance import Probe
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,7 +27,6 @@ EPOCH = '12345678-1234-1234-1234-123456789012'
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    protocol_version = 'HTTP/1.1'
     def log_message(self, *args): pass
     def do_GET(self):
         assert self.connection.version() == 'TLSv1.3'
@@ -223,6 +223,16 @@ def main():
                         assert not d['auth_blocked'] and time.monotonic()-started < 6
                     finally:
                         probe.close(); released.set(); thread.join(2)
+            for protocols in ([], ['http/1.1']):
+                context = pki.context()
+                context.set_alpn_protocols(protocols)
+                srv = server(pki, context=context)
+                try:
+                    negative(srv, 'configuration')
+                    assert not srv.requests
+                    assert not any(srv.unnegotiated), 'HTTP request sent without h2 negotiation'
+                finally:
+                    srv.close()
             srv = server(pki, mode='close')
             probe = start(srv)
             try:
@@ -242,7 +252,7 @@ def main():
                 assert len(srv.peers) == 1, 'Sequential API requests and the initial SSE attach should reuse a connection'
                 probe.command(kind='select', key=EPOCH)
                 probe.until(lambda v: any('/messages?' in path for path, _, _ in srv.requests))
-                assert len(srv.peers) == 2, 'An API request concurrent with SSE authenticates a second connection'
+                assert len(srv.peers) == 1, 'HTTP/2 multiplexes API requests alongside SSE on the authenticated connection'
                 new = pki.issue('client', days=20)
                 assert new != old
                 probe.command(kind='check')
@@ -254,7 +264,7 @@ def main():
                 assert 'renew' in probe.latest['status']
                 probe.command(kind='select', key=EPOCH)
                 probe.until(lambda v: any('/messages?' in path and peer == new for path, peer, _ in srv.requests))
-                assert srv.peers.count(new) == 2
+                assert srv.peers.count(new) == 1
                 paths = [path for path, peer, _ in srv.requests if peer == new]
                 assert '/v1/status' in paths and any(p.startswith('/v1/events') for p in paths)
                 assert '/v1/sync' not in paths, 'Credential renewal must preserve the epoch and durable cache'
@@ -286,8 +296,9 @@ def default_trust(root, pki, other, negative):
     srv = server(other, client_ca=pki.root/'ca.pem')
     try:
         ctx = ssl.create_default_context()
+        ctx.set_alpn_protocols(['h2'])
         ctx.load_cert_chain(pki.root/'client.pem', pki.root/'client-key.pem')
-        connection = http.client.HTTPSConnection('localhost', srv.server_port, context=ctx)
+        connection = Http2Connection('localhost', srv.server_port, context=ctx)
         try:
             connection.request('GET', '/v1/status')
             assert connection.getresponse().status == 200
@@ -304,7 +315,7 @@ def default_trust(root, pki, other, negative):
         os.environ['LD_PRELOAD'] = str(shim)
         os.environ['ZIMBR_TEST_DEFAULT_CA_DIR'] = str(trust)
         srv = server(other, client_ca=pki.root/'ca.pem')
-        result = subprocess.run(['curl', '--silent', '--show-error', '--noproxy', '*', '--http1.1', '--tlsv1.3',
+        result = subprocess.run(['curl', '--silent', '--show-error', '--noproxy', '*', '--http2-prior-knowledge', '--tlsv1.3',
                                  '--cacert', str(pki.root/'ca.pem'), '--cert', str(pki.root/'client.pem'),
                                  '--key', str(pki.root/'client-key.pem'), f'https://localhost:{srv.server_port}/v1/status'],
                                 capture_output=True, timeout=10)

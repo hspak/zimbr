@@ -1,6 +1,9 @@
 # API v1
 
-The relay exposes HTTPS and server-sent events (SSE) over TLS 1.3 and HTTP/1.1.
+The relay exposes HTTPS and server-sent events (SSE) over TLS 1.3 and HTTP/2.
+ALPN must select `h2`; HTTP/1 and connections without ALPN are rejected.
+SSE uses HTTP/2 DATA frames and can share a connection with commands and queries.
+Upgrade the client, relay, and administrative tools together.
 Every route requires a clientAuth certificate from the dedicated CA and an enabled
 SHA-256 leaf fingerprint; bearer tokens grant no access. See
 [certificate management](certificate-management.md) and [relay operation](macos-relay.md#operation)

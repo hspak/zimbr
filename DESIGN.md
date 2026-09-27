@@ -29,7 +29,7 @@ as unsupported content rather than silently disappearing.
 The Mac remains the endpoint that communicates with Apple's iMessage service.
 The relay exposes our own API; Linux never receives Apple account credentials.
 Connectivity uses direct HTTPS with mandatory device certificates (TLS 1.3,
-HTTP/1.1). Both transport implementations and the Linux provisioning flow follow the
+HTTP/2). Both transport implementations and the Linux provisioning flow follow the
 shared certificate contract. Linux integration suites use the native relay TLS
 transport directly. The Mac defines [certificate policy](docs/certificate-management.md);
 [Linux setup](docs/linux-mtls.md) documents the client workflow.
@@ -341,7 +341,7 @@ References:
 ### 1.8. Security and service operation
 
 Bind only the explicit IP in the private relay configuration, with no wildcard
-fallback. Require TLS 1.3 and HTTP/1.1 on every route. OpenSSL 3.5 is statically
+fallback. Require TLS 1.3 and HTTP/2 on every route. OpenSSL 3.5 is statically
 linked into the Mac app; the fake relay uses the same verification and transport.
 
 A dedicated mkcert CA signs locally generated server/client CSRs after strict
@@ -355,7 +355,10 @@ An atomic allowlist update followed by a verified LaunchAgent restart applies
 enrollment, renewal, or revocation and closes established sessions. Session
 resumption and early data are disabled. Check leaf validity for each HTTP request
 and throughout SSE. Cap connections at 32 and handshakes at 4, with a 5-second
-handshake deadline and 10-second application read/write deadlines.
+handshake deadline and 10-second application read/write deadlines. Require ALPN
+`h2` with no HTTP/1 fallback. The nghttp2 session layer adapted from zhtps owns
+framing, HPACK, and flow control. Bound each connection to 16 concurrent streams;
+SSE uses independent DATA streams alongside commands and queries.
 
 The Mac and client caches contain plaintext. Apple's iMessage encryption
 terminates at the Mac; TLS protects the separate relay-to-client hop. Operating

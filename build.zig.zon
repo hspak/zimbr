@@ -4,6 +4,11 @@
     .version = "0.1.0",
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
+        .nghttp2 = .{
+            .url = "https://github.com/nghttp2/nghttp2/releases/download/v1.70.0/nghttp2-1.70.0.tar.xz",
+            .hash = "N-V-__8AACay2gDbHrByjNGWvyH8G9Gp30uRgZqobYOF1nhb",
+            .lazy = true,
+        },
         .libphonenumber = .{
             .url = "https://github.com/iziz/libPhoneNumber-iOS/archive/refs/tags/1.7.8.tar.gz",
             .hash = "N-V-__8AADIM0gHF00afnMgkE2orN3Iz2IJyCn4e3Cjeh_I1",
@@ -24,6 +29,8 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "build",
+        "licenses",
         "tests",
         "packaging",
         "tools",

@@ -16,7 +16,7 @@ Linux never receives your Apple account credentials.
 - View inline images, stored link previews, and reactions when the relay supplies them.
 
 The relay reads the Messages database without modifying it and sends through
-Messages Automation. Every API and live-event connection requires TLS 1.3 and an
+Messages Automation. Every API and live-event connection requires HTTP/2 over TLS 1.3 and an
 enrolled device certificate.
 
 ## Get started

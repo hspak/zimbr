@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const nghttp2 = @import("build/nghttp2.zig");
 const manifest = @import("build.zig.zon");
 const log = std.log.scoped(.build);
 const ProfileName = enum { dev, release };
@@ -49,6 +50,11 @@ pub fn build(b: *std.Build) !void {
         const mod = module(b, target, optimize, sdk, openssl, fake, profile);
         const exe = b.addExecutable(.{ .name = if (fake) "fake-relay" else "relay", .root_module = mod });
         const install = b.addInstallArtifact(exe, .{});
+        const http2_license = b.addInstallFile(
+            b.path("licenses/nghttp2.txt"),
+            "share/zimbr/licenses/nghttp2.txt",
+        );
+        install.step.dependOn(&http2_license.step);
         if (fake or target.result.os.tag == .macos) {
             const helper = imageHelper(b, target, optimize, sdk, fake);
             install.step.dependOn(&b.addInstallArtifact(helper, .{}).step);
@@ -277,6 +283,12 @@ fn module(
     inline for (std.meta.fields(RelayProfile)) |field|
         opts.addOption(field.type, "relay_" ++ field.name, @field(profile, field.name));
     m.addOptions("options", opts);
+    const h2 = nghttp2.addLibrary(b, .{
+        .target = target,
+        .optimize = optimize,
+        .sdk = sdk,
+    }) orelse return m;
+    m.linkLibrary(h2);
     m.linkSystemLibrary("sqlite3", .{});
     m.addIncludePath(b.path("src"));
     m.addCSourceFile(.{ .file = b.path("src/platform.c"), .flags = &.{

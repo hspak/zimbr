@@ -68,13 +68,17 @@ with the application stopped before changing deployments.
 
 ## Linux verification and server handoff
 
-The client requires libcurl **7.88 or newer with the OpenSSL 3 backend**, plus
+The client requires libcurl **8.10 or newer with HTTP/2 and the OpenSSL 3 backend**, plus
 OpenSSL development headers. Unsupported TLS backends fail closed. Every curl
 option is checked. Peer/hostname verification, TLS 1.3 only, HTTPS protocols only,
-HTTP/1.1, disabled redirects/proxies, and disabled TLS session caching apply to
+HTTP/2, disabled redirects/proxies, and disabled TLS session caching apply to
 both API and SSE connections. An OpenSSL callback replaces the entire trust
 store, including default lookup methods, with the configured dedicated CA.
 Connections are reused only inside one immutable credential configuration.
+Only `h2` is offered through ALPN. A pre-request callback also verifies the
+negotiated protocol before sending any request, including on reused connections.
+SSE and commands can share one connection. Upgrade both ends together; an old
+HTTP/1 relay is rejected.
 
 The native `fake-relay` and relay unit tests require OpenSSL **3.5 LTS** headers
 and libraries, matching the server wrapper. If the Linux system libraries use a
@@ -112,7 +116,7 @@ checks use the same relay TLS transport as the Mac, with synthetic message data.
 Installed-server verification is described in [macOS TLS operation](macos-tls.md).
 
 The server contract is unchanged API v1 payloads/cursors/request IDs behind a
-TLS 1.3, HTTP/1.1 origin. Both API and event connections present the device leaf;
+TLS 1.3, HTTP/2 origin. Both API and event connections present the device leaf;
 there is no Authorization header. Validate the installed pair, relay restart,
 missed-event replay, and revocation when validating a deployment. Real sends
 still require an explicitly selected and authorized recipient.

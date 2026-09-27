@@ -2,7 +2,7 @@
 
 Start with [first-run setup](setup.md), which builds the relay, generates its
 configuration with mkcert, and enrolls Linux. Every HTTP/SSE connection requires
-TLS 1.3, HTTP/1.1, and an enabled client certificate. The
+TLS 1.3, HTTP/2, and an enabled client certificate. The
 [certificate contract](certificate-management.md) defines issuance and validation.
 
 Commands default to **dev** (port 8732). Select `--profile release` for Homebrew
@@ -30,7 +30,8 @@ OpenSSL statically and uses system libraries and frameworks; it has no Homebrew
 runtime path. Ship OpenSSL's license with the app, and rebuild/re-sign for
 security updates.
 
-Provisioning uses Python with `cryptography` (`tools/requirements-tls.txt`) and
+Provisioning uses Python with `cryptography` and administrative API calls use `h2`
+(`tools/requirements-tls.txt`), plus
 mkcert 1.4.4. Network tests and Mac API tools require a Python `ssl` module with
 TLS 1.3; the Apple system Python/LibreSSL is insufficient.
 Provisioning tools are not relay runtime dependencies.
@@ -156,7 +157,7 @@ Run the native build and unit suite, `tests/integration.py`, `tests/relay_tls.py
 certificates and synthetic message data for transport and fault tests.
 
 For an installed deployment, verify the app signature, configured listener,
-TLS 1.3/HTTP/1.1 negotiation, explicit CA and hostname checks, and rejection of
+TLS 1.3/HTTP/2 negotiation, explicit CA and hostname checks, and rejection of
 plaintext, missing client certificates, and revoked devices. Check both HTTP and
 SSE connections, including closure and reauthentication after renewal/revocation.
 
@@ -164,3 +165,29 @@ Verify permissions under the installed app identity and preserve epoch, message
 IDs, durable send records, and cursor replay across upgrades and restarts.
 Keep backups, endpoint configuration, certificate inventories, and acceptance
 evidence in private administrative storage outside the public repository.
+
+## HTTP/2 transport
+
+The relay requires ALPN `h2` and rejects HTTP/1 and missing ALPN. The session
+adapter is adapted from [zhtps](https://github.com/hspak/zhtps) at commit
+`621bb2e70a4810a8ac0ed46f203ec8013559d3a5`; Zig fetches and statically builds pinned
+nghttp2 1.70.0 sources. No system nghttp2 installation is required by the relay.
+The signed app includes its license.
+
+Each authenticated connection owns at most 16 streams and accepts at most 64
+requests before graceful shutdown. Decoded headers are capped at 16 KiB per
+block, request bodies at 64 KiB, and nghttp2 allocations at 1 MiB per connection.
+Application response storage remains separately bounded by the API's page, image,
+and SSE batch limits. The existing global limits of eight SSE streams and four
+image responses include streams waiting for HTTP/2 window credit. A stalled
+response expires after ten seconds; resetting one stream releases its resources
+without terminating other streams. A connection owner checks pending events at
+most every 50 ms and produces another journal batch only after the prior batch
+has drained.
+
+Install `tools/requirements-tls.txt` for the administrative HTTP/2 client and wire
+tests. After building `fake-relay`, run `python3 tests/relay_http2.py` alongside the
+existing relay and client integration suites. Wire-specific tests cover ALPN
+rejection, simultaneous SSE and commands, flow control, oversized headers,
+request deadlines, graceful connection rotation, and body limits without
+Content-Length.

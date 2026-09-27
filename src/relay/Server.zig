@@ -6,7 +6,10 @@ const reactions = @import("reactions.zig");
 const u = @import("../common.zig");
 const t = @import("../protocol.zig").types;
 const Core = @import("Core.zig");
-const transport = @import("transport.zig");
+const Journal = @import("Journal.zig");
+const Connection = @import("Server/Connection.zig");
+const http2 = @import("http2.zig");
+const Request = Connection.Request;
 const Tls = @import("Tls.zig");
 const Assets = @import("Assets.zig");
 const Server = @This();
@@ -19,6 +22,20 @@ asset_responses: std.atomic.Value(usize) = .init(0),
 
 pub const RunError = std.Io.net.Ip6Address.ParseError || std.Io.net.IpAddress.ListenError ||
     std.Io.net.Server.AcceptError;
+
+pub const HandleError = http2.Error || Journal.AcceptError || Journal.CheckCursorError ||
+    Assets.LookupError || Assets.EvictedError || enrichment.PageError || std.fmt.ParseIntError || error{
+    BodyTooLarge,
+    CertificateExpired,
+    AssetResponseLimit,
+    AssetServiceUnavailable,
+    ContactsUnavailable,
+    InvalidAsset,
+    UnsupportedExtension,
+    TooManyStreams,
+};
+pub const PollEventsError = http2.Error || Journal.EventsError || Journal.CheckCursorError ||
+    std.Io.Writer.Error;
 
 fn readiness(supported: bool, ready: bool, reason: []const u8) struct { ready: bool, reason: []const u8 } {
     if (!supported) return .{ .ready = false, .reason = "native_acceptance_pending" };
@@ -34,7 +51,7 @@ pub fn run(self: *Server) RunError!void {
     if (self.listening) |ready| ready.store(true, .release);
     defer if (self.listening) |ready| ready.store(false, .release);
     std.debug.print(
-        "relay: HTTPS mTLS listening on {s}:{d}\n",
+        "relay: HTTP/2 mTLS listening on {s}:{d}\n",
         .{ self.tls.config.listen_address, self.tls.config.port },
     );
     while (!self.core.stop.load(.acquire)) {
@@ -67,42 +84,25 @@ fn connection(self: *Server, stream: std.Io.net.Stream) void {
     _ = self.handshakes.fetchSub(1, .acq_rel);
     const peer = connection_tls orelse return;
     defer Tls.c.zr_tls_free(peer);
-    var read_buf: [16384]u8 = undefined;
-    var write_buf: [8192]u8 = undefined;
-    var reader = transport.Reader.init(peer, &read_buf);
-    var writer = transport.Writer.init(peer, &write_buf);
-    var server = std.http.Server.init(&reader.interface, &writer.interface);
-    // Reuse authenticated HTTP connections across bounded requests. Each
-    // request still gets fresh authorization, a deadline, and its own arena.
-    for (0..64) |request_index| {
-        reader.deadline = u.c.zr_monotonic_ms() + 10000;
-        if (Tls.c.zr_tls_valid(peer) == 0) return;
-        var req = server.receiveHead() catch return;
-        if (Tls.c.zr_tls_valid(peer) == 0) return;
-        if (request_index == 63) req.head.keep_alive = false;
-        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        defer arena.deinit();
-        self.handle(arena.allocator(), &req, peer, &writer) catch |err| {
-            if (err == error.WriteFailed or err == error.ReadFailed or err == error.EndOfStream or err == error.CertificateExpired) return;
-            const mapping = mapError(err);
-            const body = u.json(
-                arena.allocator(),
-                .{ .error_info = t.SafeError{ .code = mapping.code, .message = mapping.message } },
-            ) catch return;
-            req.head.keep_alive = false;
-            respond(&req, body, mapping.status) catch {};
-            return;
-        };
-        if (!req.head.keep_alive or server.reader.state != .ready) return;
-    }
+    var session: Connection = .{
+        .server = self,
+        .peer = peer,
+        .idle_deadline = u.c.zr_monotonic_ms() + 10000,
+    };
+    session.run() catch {};
 }
-fn handle(
-    self: *Server,
-    a: u.Allocator,
-    req: *std.http.Server.Request,
-    peer: *Tls.c.ZrTls,
-    writer: *transport.Writer,
-) !void {
+/// Queues a safe API error, or resets a stream whose response has already begun.
+pub fn respondError(self: *Server, req: *Request, err: anytype) http2.Error!void {
+    _ = self;
+    if (req.responded) return req.connection.engine.reset(req.id);
+    const mapping = mapError(err);
+    const body = try u.json(req.arena.allocator(), .{
+        .error_info = t.SafeError{ .code = mapping.code, .message = mapping.message },
+    });
+    try respond(req, body, mapping.status);
+}
+/// Dispatches a complete bounded request on its connection owner.
+pub fn handle(self: *Server, a: u.Allocator, req: *Request, peer: *Tls.c.ZrTls) HandleError!void {
     var last: ?[]const u8 = null;
     var headers = req.iterateHeaders();
     while (headers.next()) |h| {
@@ -111,10 +111,10 @@ fn handle(
             last = try a.dupe(u8, h.value);
         }
     }
-    if (req.head.version != .@"HTTP/1.1") return error.InvalidRequest;
-    if (req.head.transfer_compression != .identity) return error.InvalidRequest;
+    if (req.rejected) |err| return err;
+    if (Tls.c.zr_tls_valid(peer) == 0) return error.CertificateExpired;
     if ((req.head.content_length orelse 0) > t.max_body) return error.BodyTooLarge;
-    if (req.head.method == .GET and ((req.head.content_length orelse 0) != 0 or req.head.transfer_encoding == .chunked)) return error.InvalidRequest;
+    if (req.head.method == .GET and ((req.head.content_length orelse 0) != 0 or req.body.items.len != 0)) return error.InvalidRequest;
     const target = try a.dupe(u8, req.head.target);
     const split = std.mem.indexOfScalar(u8, target, '?') orelse target.len;
     const path = target[0..split];
@@ -125,9 +125,7 @@ fn handle(
             _ = self.asset_responses.fetchSub(1, .acq_rel);
             return error.AssetResponseLimit;
         }
-        defer _ = self.asset_responses.fetchSub(1, .acq_rel);
-        req.head.keep_alive = false;
-        writer.deadline = u.c.zr_monotonic_ms() + 15000;
+        req.asset_permit = true;
         try self.asset(a, req, path[11..], peer);
         return;
     }
@@ -136,7 +134,7 @@ fn handle(
         if (after != null and last != null and !u.eq(after.?, last.?)) return error.InvalidRequest;
         const cursor = after orelse last orelse return error.InvalidRequest;
         const identities = try identityExtension(try param(a, query, "extensions"));
-        try self.events(req, cursor, peer, identities);
+        try self.events(req, cursor, identities);
         return;
     }
     var input: ?t.SendInput = null;
@@ -147,9 +145,7 @@ fn handle(
             std.mem.trim(u8, media_type.first(), " \t"),
             "application/json",
         )) return error.InvalidRequest;
-        var body_buf: [8192]u8 = undefined;
-        const body_reader = try req.readerExpectContinue(&body_buf);
-        const body = body_reader.allocRemaining(a, .limited(t.max_body)) catch |err| return if (err == error.StreamTooLong) error.BodyTooLarge else error.InvalidRequest;
+        const body = req.body.items;
         json_bounds.check(body, t.max_body, 8192) catch return error.InvalidRequest;
         input = (std.json.parseFromSlice(
             t.SendInput,
@@ -325,7 +321,7 @@ fn handle(
 fn asset(
     self: *Server,
     a: u.Allocator,
-    req: *std.http.Server.Request,
+    req: *Request,
     path: []const u8,
     peer: *Tls.c.ZrTls,
 ) !void {
@@ -403,11 +399,10 @@ fn asset(
     const unchanged = if (if_none_match) |tag| u.eq(tag, etag) or u.eq(tag, "*") else false;
     try req.respond(if (unchanged) "" else bytes.?, .{
         .status = if (unchanged) .not_modified else .ok,
-        .keep_alive = false,
         .extra_headers = &extra,
     });
 }
-fn assetPending(a: u.Allocator, req: *std.http.Server.Request, ref: t.AssetRef) !void {
+fn assetPending(a: u.Allocator, req: *Request, ref: t.AssetRef) !void {
     const can_retry = Assets.retryable(ref);
     const body = try u.json(a, .{
         .error_info = t.SafeError{ .code = ref.reason orelse "asset_unavailable", .message = "The image representation is not currently available." },
@@ -422,77 +417,72 @@ fn assetPending(a: u.Allocator, req: *std.http.Server.Request, ref: t.AssetRef) 
     };
     try req.respond(body, .{
         .status = .conflict,
-        .keep_alive = false,
         .extra_headers = headers[0..if (can_retry) @as(usize, 3) else 2],
     });
 }
-fn events(
-    self: *Server,
-    req: *std.http.Server.Request,
-    start: []const u8,
-    peer: *Tls.c.ZrTls,
-    identities: bool,
-) !void {
+fn events(self: *Server, req: *Request, start: []const u8, identities: bool) !void {
     if (self.core.streams.fetchAdd(1, .acq_rel) >= 8) {
         _ = self.core.streams.fetchSub(1, .acq_rel);
         return error.TooManyStreams;
     }
-    defer _ = self.core.streams.fetchSub(1, .acq_rel);
-    var seq: i64 = undefined;
-    {
-        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        defer arena.deinit();
+    errdefer {
+        req.events = null;
+        _ = self.core.streams.fetchSub(1, .acq_rel);
+    }
+    const seq = seq: {
         self.core.lock();
         defer self.core.unlock();
-        seq = try self.core.journal.checkCursor(arena.allocator(), start);
-    }
-    var buffer: [8192]u8 = undefined;
-    var stream = try req.respondStreaming(&buffer, .{ .respond_options = .{
-        .keep_alive = false,
-        .transfer_encoding = .none,
-        .extra_headers = &.{
-            .{ .name = "content-type", .value = "text/event-stream" },
-            .{ .name = "cache-control", .value = "no-cache" },
-            .{ .name = "x-accel-buffering", .value = "no" },
-            .{ .name = "zimbr-event-extensions", .value = if (identities) "identity-v1" else "" },
-        },
+        break :seq try self.core.journal.checkCursor(req.arena.allocator(), start);
+    };
+    req.events = .{
+        .start = start,
+        .sequence = seq,
+        .identities = identities,
+        .heartbeat = u.now(),
+    };
+    try req.respond(": connected\n\n", .{ .extra_headers = &.{
+        .{ .name = "content-type", .value = "text/event-stream" },
+        .{ .name = "cache-control", .value = "no-cache" },
+        .{ .name = "x-accel-buffering", .value = "no" },
+        .{ .name = "zimbr-event-extensions", .value = if (identities) "identity-v1" else "" },
     } });
-    // Once headers are sent, close on errors; do not write a second HTTP response.
-    stream.writer.writeAll(": connected\n\n") catch return;
-    stream.writer.flush() catch return;
-    stream.flush() catch return;
-    var heartbeat = u.now();
-    while (!self.core.stop.load(.acquire)) {
-        const observed = self.core.changed.observe();
-        if (Tls.c.zr_tls_closed(peer) != 0 or Tls.c.zr_tls_valid(peer) == 0) return;
-        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        defer arena.deinit();
-        const a = arena.allocator();
-        const frames = frames: {
-            self.core.lock();
-            defer self.core.unlock();
-            const j = self.core.journal;
-            const epoch = j.epoch(a) catch return;
-            if (!std.mem.startsWith(u8, start, epoch)) return;
-            const current = t.cursor(a, epoch, seq) catch return;
-            _ = j.checkCursor(a, current) catch return;
-            break :frames j.eventsWithIdentities(a, seq, identities) catch return;
-        };
-        for (frames) |frame| {
-            stream.writer.writeAll(frame.frame) catch return;
-            seq = frame.sequence;
-        }
-        if (frames.len > 0) {
-            stream.writer.flush() catch return;
-            stream.flush() catch return;
-        }
-        if (u.now() - heartbeat >= 15000) {
-            stream.writer.writeAll(": heartbeat\n\n") catch return;
-            stream.writer.flush() catch return;
-            stream.flush() catch return;
-            heartbeat = u.now();
-        }
-        if (frames.len == 0) self.core.changed.wait(self.core.io, observed, 1000);
+}
+
+/// Produces one journal batch after the previous batch has drained through flow control.
+pub fn pollEvents(self: *Server, req: *Request) PollEventsError!void {
+    const events_stream = &req.events.?;
+    const now = u.now();
+    const observed = self.core.changed.observe();
+    if (events_stream.observed == observed and now < events_stream.check_at) return;
+    _ = req.batch.reset(.free_all);
+    req.response = "";
+    req.offset = 0;
+    const a = req.batch.allocator();
+    const frames = frames: {
+        self.core.lock();
+        defer self.core.unlock();
+        const j = self.core.journal;
+        const epoch = try j.epoch(a);
+        if (!std.mem.startsWith(u8, events_stream.start, epoch)) return error.InvalidRequest;
+        const current = try t.cursor(a, epoch, events_stream.sequence);
+        _ = try j.checkCursor(a, current);
+        break :frames try j.eventsWithIdentities(a, events_stream.sequence, events_stream.identities);
+    };
+    var bytes: std.Io.Writer.Allocating = .init(a);
+    for (frames) |frame| {
+        try bytes.writer.writeAll(frame.frame);
+        events_stream.sequence = frame.sequence;
+    }
+    if (now - events_stream.heartbeat >= 15000) {
+        try bytes.writer.writeAll(": heartbeat\n\n");
+        events_stream.heartbeat = now;
+    }
+    events_stream.observed = if (frames.len == 0) observed else null;
+    events_stream.check_at = now + 1000;
+    req.response = bytes.written();
+    if (req.response.len > 0) {
+        req.deadline = u.c.zr_monotonic_ms() + 10000;
+        try req.connection.engine.resumeBody(req.id);
     }
 }
 fn identityExtension(value: ?[]const u8) !bool {
@@ -501,7 +491,7 @@ fn identityExtension(value: ?[]const u8) !bool {
     if (u.eq(raw, "identity-v1")) return true;
     return error.UnsupportedExtension;
 }
-fn respond(req: *std.http.Server.Request, body: []const u8, status: std.http.Status) !void {
+fn respond(req: *Request, body: []const u8, status: std.http.Status) !void {
     const headers = [_]std.http.Header{
         .{ .name = "content-type", .value = "application/json" },
         .{ .name = "cache-control", .value = "no-store" },
@@ -509,7 +499,6 @@ fn respond(req: *std.http.Server.Request, body: []const u8, status: std.http.Sta
     };
     try req.respond(body, .{
         .status = status,
-        .keep_alive = req.head.keep_alive,
         .extra_headers = headers[0..if (status == .service_unavailable) @as(usize, 3) else 2],
     });
 }
@@ -625,4 +614,8 @@ fn mapError(err: anytype) ErrorMapping {
             .message = "The relay is temporarily unavailable. Check relay doctor.",
         },
     };
+}
+
+test {
+    _ = @import("http2.zig");
 }

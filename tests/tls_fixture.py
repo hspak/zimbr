@@ -5,7 +5,8 @@ No test CA is installed in a system trust store.
 """
 from datetime import datetime, timedelta, timezone
 import hashlib
-import http.server
+import socketserver
+from http2_server import Session
 import ipaddress
 from pathlib import Path
 import socket
@@ -74,23 +75,27 @@ class PKI:
         ctx.load_verify_locations(client_ca or self.root/'ca.pem')
         ctx.verify_mode = ssl.CERT_REQUIRED
         ctx.num_tickets = 0
-        ctx.set_alpn_protocols(['http/1.1'])
+        ctx.set_alpn_protocols(['h2'])
         return ctx
 
 
-class TLSServer(http.server.ThreadingHTTPServer):
+class TLSServer(socketserver.ThreadingTCPServer):
     daemon_threads = True
     def __init__(self, handler, context, port=0):
         self.context = context
+        self.server_port = 0
         self.peers = []
+        self.unnegotiated = []
         self.sockets = []
         super().__init__(('127.0.0.1', port), handler)
+        self.server_port = self.server_address[1]
         self.thread = threading.Thread(target=self.serve_forever, daemon=True)
         self.thread.start()
 
     def get_request(self):
         sock, addr = super().get_request()
         sock.settimeout(8)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         tls = self.context.wrap_socket(sock, server_side=True, do_handshake_on_connect=False)
         self.sockets.append(tls)
         return tls, addr
@@ -98,7 +103,10 @@ class TLSServer(http.server.ThreadingHTTPServer):
     def finish_request(self, request, client_address):
         request.do_handshake()
         self.peers.append(hashlib.sha256(request.getpeercert(binary_form=True)).hexdigest())
-        super().finish_request(request, client_address)
+        if request.selected_alpn_protocol() != 'h2':
+            self.unnegotiated.append(request.recv(65536))
+            return
+        Session(self, request, client_address).run()
 
     def handle_error(self, request, client_address):
         pass  # Expected peer aborts/negative handshakes.

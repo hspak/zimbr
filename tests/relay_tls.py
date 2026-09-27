@@ -21,6 +21,8 @@ from fixture import create, add_message
 from relay_fixture import Fixture, save_json
 from tls_admin import create_key, validate_extensions, restart
 from tls_support import Credentials, origin
+from h2.connection import H2Connection
+from h2.events import ResponseReceived
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT/'zig-out/bin/fake-relay'
@@ -168,13 +170,16 @@ class RelayTls(unittest.TestCase):
         self.assertLess(time.monotonic()-start, 6)
         persistent.close()
         peer = self.tls.context().wrap_socket(socket.create_connection(('127.0.0.1', self.port)), server_hostname='localhost')
-        peer.settimeout(12); peer.sendall(b'GET /v1/status HTTP/1.1\r\nHost:')
-        start = time.monotonic(); self.assertEqual(peer.recv(1), b'')
+        peer.settimeout(12); peer.sendall(b'PRI * HTTP/2.0\r\n')
+        start = time.monotonic()
+        while peer.recv(4096): pass
         self.assertLess(time.monotonic()-start, 11); peer.close()
         # Clean and abrupt TLS closure release slots; neither crashes the relay.
         for clean in [True, False]*20:
             peer = self.tls.context().wrap_socket(socket.create_connection(('127.0.0.1', self.port)), server_hostname='localhost')
-            if clean: peer.unwrap().close()
+            if clean:
+                peer.recv(4096)  # Consume the server SETTINGS before TLS close_notify.
+                peer.unwrap().close()
             else: os.close(peer.detach())
         self.assertTrue(self.get('/v1/status')['adapter_ready'])
 
@@ -216,7 +221,7 @@ class RelayTls(unittest.TestCase):
         baseline = self.get('/v1/sync')
         pooled = self.tls.connection(); pooled.request('GET', '/v1/status'); pooled.getresponse().read()
         old_socket = pooled.sock
-        old_session, old_context = old_socket.session, pooled._context
+        old_session, old_context = old_socket.session, pooled.context
         stream = self.tls.connection(); stream.request('GET', '/v1/events?after='+baseline['cursor'])
         response = stream.getresponse(); self.assertEqual(response.status, 200)
         self.assertEqual(response.readline(), b': connected\n'); self.assertEqual(response.readline(), b'\n')
@@ -245,15 +250,28 @@ class RelayTls(unittest.TestCase):
     def test_expiry_during_send_body_and_http_version(self):
         peer = self.tls.context().wrap_socket(socket.create_connection(('127.0.0.1', self.port)), server_hostname='localhost')
         peer.sendall(b'GET /v1/status HTTP/1.0\r\nHost: localhost\r\n\r\n')
-        self.assertTrue(peer.recv(4096).startswith(b'HTTP/1.1 400')); peer.close()
+        received = bytearray()
+        while chunk := peer.recv(4096): received.extend(chunk)
+        # HTTP/1 receives no HTTP response, even after negotiating h2.
+        self.assertNotIn(b'HTTP/1.', received); peer.close()
         self.tls.issue('brief-body', after=dt.datetime.now(dt.timezone.utc)+dt.timedelta(seconds=3))
         self.allow('client', 'brief-body'); self.stop(); self.start()
         body = json.dumps({'request_id': str(uuid.uuid4()), 'server_epoch': self.get('/v1/sync')['server_epoch'],
             'target': {'recipient': {'address': 'synthetic@example.invalid', 'service': 'imessage'}}, 'text': 'never dispatch'}).encode()
         peer = self.tls.context('brief-body').wrap_socket(socket.create_connection(('127.0.0.1', self.port)), server_hostname='localhost')
         peer.settimeout(5)
-        peer.sendall(f'POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n'.encode()+body[:1])
-        time.sleep(3.1); peer.sendall(body[1:]); self.assertEqual(peer.recv(4096), b''); peer.close()
+        h2 = H2Connection(); h2.initiate_connection()
+        h2.send_headers(1, [(':method', 'POST'), (':scheme', 'https'), (':authority', 'localhost'),
+                           (':path', '/v1/messages'), ('content-type', 'application/json'),
+                           ('content-length', str(len(body)))])
+        h2.send_data(1, body[:1]); peer.sendall(h2.data_to_send())
+        time.sleep(3.1)
+        h2.send_data(1, body[1:], end_stream=True)
+        try: peer.sendall(h2.data_to_send())
+        except OSError: pass
+        while chunk := peer.recv(4096):
+            self.assertFalse(any(isinstance(event, ResponseReceived) for event in h2.receive_data(chunk)))
+        peer.close()
         with closing(sqlite3.connect(self.root/'data/relay.db')) as db:
             self.assertEqual(db.execute('SELECT count(*) FROM send_requests').fetchone()[0], 0)
 
@@ -276,11 +294,10 @@ class RelayTls(unittest.TestCase):
         baseline = self.get('/v1/sync')
         streams = []
         for _ in range(8):
-            raw = socket.socket(); raw.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
-            raw.settimeout(3); raw.connect(('127.0.0.1', self.port))
-            peer = self.tls.context().wrap_socket(raw, server_hostname='localhost')
-            peer.sendall(f'GET /v1/events?after={baseline["cursor"]} HTTP/1.1\r\nHost: localhost\r\n\r\n'.encode())
-            peer.recv(4096); streams.append(peer)
+            peer = self.tls.connection()
+            peer.request('GET', '/v1/events?after='+baseline['cursor'])
+            self.assertEqual(peer.getresponse().status, 200)
+            streams.append(peer)
         # Fill the synthetic journal through the real importer, beyond socket buffers.
         with closing(sqlite3.connect(self.source)) as db:
             for _ in range(250): add_message(db, 'x'*60000)

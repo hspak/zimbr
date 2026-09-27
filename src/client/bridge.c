@@ -225,6 +225,19 @@ static CURLcode tls_context(CURL *easy, void *context, void *user) {
     SSL_CTX_set_session_cache_mode(ctx,SSL_SESS_CACHE_OFF);
     return CURLE_OK;
 }
+/* Check negotiated ALPN before sending any request, including on reused connections. */
+static int require_http2(void *user, char *remote, char *local, int remote_port, int local_port) {
+    (void)remote; (void)local; (void)remote_port; (void)local_port;
+    struct Slot *s=user;
+    struct curl_tlssessioninfo *info=NULL;
+    const unsigned char *protocol=NULL; unsigned int length=0;
+    if (curl_easy_getinfo(s->easy,CURLINFO_TLS_SSL_PTR,&info)==CURLE_OK && info &&
+        info->backend==CURLSSLBACKEND_OPENSSL && info->internals)
+        SSL_get0_alpn_selected(info->internals,&protocol,&length);
+    if (length==2 && !memcmp(protocol,"h2",2)) return CURL_PREREQFUNC_OK;
+    failure(&s->error,ZC_CONFIG,"The relay must negotiate HTTP/2 (h2). Upgrade the relay, then Reconnect.");
+    return CURL_PREREQFUNC_ABORT;
+}
 static void clear_slot(ZcNet *n, int index) {
     struct Slot *s=&n->slots[index];
     if (s->easy) { curl_multi_remove_handle(n->multi,s->easy); curl_easy_cleanup(s->easy); }
@@ -246,6 +259,9 @@ ZcNet *zc_net_new(const char *origin, const char *ca, const char *cert, const ch
     ZcNet *n=calloc(1,sizeof(*n));
     if (!n) { curl_global_cleanup(); failure(error,ZC_CONFIG,"Transport allocation failed."); return NULL; }
     const curl_version_info_data *version=curl_version_info(CURLVERSION_NOW);
+    if (version->version_num < 0x080a00 || !(version->features & CURL_VERSION_HTTP2)) {
+        failure(error,ZC_CONFIG,"Zimbr requires libcurl 8.10 or newer with HTTP/2 support. Install a supported build."); goto fail;
+    }
     if (!version->ssl_version || strncmp(version->ssl_version,"OpenSSL/3.",10) || OpenSSL_version_num()<0x30000000L) {
         failure(error,ZC_CONFIG,"Zimbr requires libcurl with the OpenSSL 3 TLS backend. Install a supported build."); goto fail;
     }
@@ -281,7 +297,8 @@ int zc_net_start(ZcNet *n, int stream, const char *path, const char *body, size_
     SET(CURLOPT_PROXY,""); SET(CURLOPT_NOPROXY,"*");
     SET(CURLOPT_PROTOCOLS_STR,"https"); SET(CURLOPT_REDIR_PROTOCOLS_STR,"https");
     SET(CURLOPT_FOLLOWLOCATION,0L); SET(CURLOPT_MAXREDIRS,0L);
-    SET(CURLOPT_HTTP_VERSION,(long)CURL_HTTP_VERSION_1_1);
+    SET(CURLOPT_HTTP_VERSION,(long)CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE);
+    SET(CURLOPT_PREREQFUNCTION,require_http2); SET(CURLOPT_PREREQDATA,s);
     SET(CURLOPT_SSL_VERIFYPEER,1L); SET(CURLOPT_SSL_VERIFYHOST,2L);
     SET(CURLOPT_SSLVERSION,(long)(CURL_SSLVERSION_TLSv1_3|CURL_SSLVERSION_MAX_TLSv1_3));
     SET(CURLOPT_SSL_OPTIONS,0L); SET(CURLOPT_SSL_SESSIONID_CACHE,0L);
@@ -341,7 +358,9 @@ int zc_net_poll(ZcNet *n) {
         CURLcode code=m->data.result; s->error.curl_code=code;
         if (code!=CURLE_OK) {
             if (!s->error.message[0]) snprintf(s->error.message,sizeof(s->error.message),"%s",curl_easy_strerror(code));
-            if (code==CURLE_PEER_FAILED_VERIFICATION || code==CURLE_SSL_ISSUER_ERROR) s->error.kind=ZC_SERVER_TRUST;
+            if (s->error.kind==ZC_CONFIG)
+                snprintf(s->error.message,sizeof(s->error.message),"The relay must negotiate HTTP/2 (h2). Upgrade the relay, then Reconnect.");
+            else if (code==CURLE_PEER_FAILED_VERIFICATION || code==CURLE_SSL_ISSUER_ERROR) s->error.kind=ZC_SERVER_TRUST;
             else if (code==CURLE_SSL_CERTPROBLEM || code==CURLE_SSL_CACERT_BADFILE) s->error.kind=ZC_CREDENTIALS;
             else if ((s->alert>=42 && s->alert<=46) || s->alert==48 || s->alert==116) s->error.kind=ZC_CLIENT_REJECTED;
             else if (code==CURLE_SSL_CONNECT_ERROR || s->alert) s->error.kind=ZC_TLS;

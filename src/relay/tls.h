@@ -17,8 +17,9 @@ void zr_tls_context_free(ZrTlsContext *ctx);
 int zr_tls_info(ZrTlsContext *ctx, char *fingerprint, size_t capacity, int64_t *expires, int64_t *ca_expires);
 ZrTls *zr_tls_accept(ZrTlsContext *ctx, int fd);
 int zr_tls_valid(ZrTls *tls);
-int zr_tls_closed(ZrTls *tls);
-ptrdiff_t zr_tls_read(ZrTls *tls, void *bytes, size_t length, int64_t deadline);
+/* Nonblocking plaintext read: -2 means retry, -1 failure, 0 EOF. */
+ptrdiff_t zr_tls_receive(ZrTls *tls, void *bytes, size_t length);
+int zr_tls_poll(ZrTls *tls, int timeout_ms);
 int zr_tls_write(ZrTls *tls, const void *bytes, size_t length);
 int zr_tls_write_deadline(ZrTls *tls, const void *bytes, size_t length, int64_t deadline);
 void zr_tls_free(ZrTls *tls);

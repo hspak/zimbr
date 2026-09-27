@@ -126,6 +126,7 @@ Install Zig **0.16.0**, Apple's Command Line Tools, and a target build of
 **OpenSSL 3.5 LTS** with static archives. The packaged build uses 3.5.8; use current
 3.5 security patches and rebuild/re-sign the app when updating OpenSSL. The relay
 uses system SQLite and native AppKit, with no Homebrew runtime dependency.
+Zig fetches and statically builds the pinned nghttp2 HTTP/2 engine.
 
 For an Apple M1 target, an optional optimized build selects its CPU features:
 
@@ -151,6 +152,7 @@ python3 tests/links.py
 python3 tests/reactions.py
 python3 tests/native_images.py
 python3 tests/relay_tls.py
+python3 tests/relay_http2.py
 python3 tests/relay_settings.py
 python3 tests/mac_menu_restart.py
 python3 tests/mac_acceptance_test.py
@@ -311,7 +313,7 @@ readiness. `serve --read-only` disables automation/sending while retaining mTLS.
 
 Every route requires a valid clientAuth leaf from the dedicated CA and an enabled
 SHA-256 leaf fingerprint. Configuration explicitly selects an IP to bind; failed
-binds and invalid/missing configuration are errors. TLS 1.3 and HTTP/1.1 are required,
+binds and invalid/missing configuration are errors. TLS 1.3 and HTTP/2 are required,
 with session resumption and early data disabled. Bearer tokens grant no access.
 Certificates, keys, and configuration must be owner-only files in 0700 directories,
 with no symlinks. The journal retains plaintext normalized history under the Mac

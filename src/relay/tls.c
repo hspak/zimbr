@@ -179,7 +179,7 @@ static int verify_peer(int verified, X509_STORE_CTX *store) {
 static int alpn(SSL *ssl, const unsigned char **out, unsigned char *outlen,
                 const unsigned char *in, unsigned int len, void *arg) {
     (void)ssl; (void)arg;
-    static const unsigned char http[] = "\x08http/1.1";
+    static const unsigned char http[] = "\x02h2";
     if (SSL_select_next_proto((unsigned char **)out, outlen, http, sizeof(http)-1, in, len) != OPENSSL_NPN_NEGOTIATED)
         return SSL_TLSEXT_ERR_ALERT_FATAL;
     return SSL_TLSEXT_ERR_OK;
@@ -280,6 +280,9 @@ ZrTls *zr_tls_accept(ZrTlsContext *ctx, int fd) {
         if (rc == 1) break;
         if (wait_for(tls, SSL_get_error(tls->ssl, rc), deadline)) goto fail;
     }
+    const unsigned char *protocol = NULL; unsigned int protocol_length = 0;
+    SSL_get0_alpn_selected(tls->ssl, &protocol, &protocol_length);
+    if (protocol_length != 2 || memcmp(protocol, "h2", 2)) goto fail;
     tls->peer = SSL_get1_peer_certificate(tls->ssl);
     if (SSL_get_verify_result(tls->ssl) != X509_V_OK || !zr_tls_valid(tls) || !enrolled(ctx, tls->peer)) goto fail;
     return tls;
@@ -289,16 +292,6 @@ fail:
 int zr_tls_valid(ZrTls *tls) {
     ZrTlsContext *ctx = SSL_CTX_get_app_data(SSL_get_SSL_CTX(tls->ssl));
     return valid_time(tls->peer) && valid_time(ctx->ca) && valid_time(SSL_get_certificate(tls->ssl));
-}
-ptrdiff_t zr_tls_read(ZrTls *tls, void *bytes, size_t length, int64_t deadline) {
-    for (;;) {
-        if (zr_monotonic_ms() >= deadline) return -1;
-        size_t n = 0; ERR_clear_error(); int rc = SSL_read_ex(tls->ssl, bytes, length, &n);
-        if (rc == 1) return (ptrdiff_t)n;
-        int error = SSL_get_error(tls->ssl, rc);
-        if (error == SSL_ERROR_ZERO_RETURN) return 0;
-        if (wait_for(tls, error, deadline)) return -1;
-    }
 }
 int zr_tls_write(ZrTls *tls, const void *bytes, size_t length) {
     return zr_tls_write_deadline(tls, bytes, length, zr_monotonic_ms() + 10000);
@@ -313,11 +306,21 @@ int zr_tls_write_deadline(ZrTls *tls, const void *bytes, size_t length, int64_t 
     }
     return 0;
 }
-int zr_tls_closed(ZrTls *tls) {
-    char byte; size_t n; ERR_clear_error(); int rc = SSL_peek_ex(tls->ssl, &byte, 1, &n);
-    if (rc == 1) return 1; /* No inbound application data is valid after an SSE request. */
+ptrdiff_t zr_tls_receive(ZrTls *tls, void *bytes, size_t length) {
+    size_t n = 0;
+    ERR_clear_error();
+    int rc = SSL_read_ex(tls->ssl, bytes, length, &n);
+    if (rc == 1) return (ptrdiff_t)n;
     int error = SSL_get_error(tls->ssl, rc);
-    return error != SSL_ERROR_WANT_READ && error != SSL_ERROR_WANT_WRITE;
+    if (error == SSL_ERROR_WANT_READ || error == SSL_ERROR_WANT_WRITE) return -2;
+    return error == SSL_ERROR_ZERO_RETURN ? 0 : -1;
+}
+int zr_tls_poll(ZrTls *tls, int timeout_ms) {
+    if (SSL_pending(tls->ssl)) return 1;
+    struct pollfd p = { .fd = tls->fd, .events = POLLIN };
+    int rc;
+    do { rc = poll(&p, 1, timeout_ms); } while (rc < 0 && errno == EINTR);
+    return rc;
 }
 void zr_tls_free(ZrTls *tls) {
     if (!tls) return;

@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'tools'))
 from tls_admin import atomic, save_json
+from http2 import Connection as Http2Connection
 
 UTC = dt.timezone.utc
 
@@ -75,11 +76,11 @@ class Fixture:
         ctx.minimum_version = ctx.maximum_version = ssl.TLSVersion.TLSv1_3
         ctx.load_verify_locations(cafile=str(ca or self.root/'ca.pem'))
         if name: ctx.load_cert_chain(str(self.root/(name+'.pem')), str(self.root/(name+'-key.pem')))
-        ctx.set_alpn_protocols(['http/1.1'])
+        ctx.set_alpn_protocols(['h2'])
         return ctx
 
     def connection(self, auth=True, timeout=4, name='client'):
-        return http.client.HTTPSConnection('127.0.0.1', self.port, timeout=timeout, context=self.context(name if auth else None))
+        return Http2Connection('127.0.0.1', self.port, timeout=timeout, context=self.context(name if auth else None))
 
     def client_args(self, port=None, name='client'):
         return ['--relay-url', f'https://localhost:{self.port if port is None else port}',
@@ -94,7 +95,7 @@ class Fixture:
         ctx.load_verify_locations(self.root/'ca.pem')
         ctx.verify_mode = ssl.CERT_REQUIRED
         ctx.num_tickets = 0
-        ctx.set_alpn_protocols(['http/1.1'])
+        ctx.set_alpn_protocols(['h2'])
         return ctx
 
     def enroll(self, name):

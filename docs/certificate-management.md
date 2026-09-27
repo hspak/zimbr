@@ -86,7 +86,7 @@ expected SANs, and match to its local private key before replacing runtime
 certificates. Store runtime credentials and configuration in owned 0700
 directories with 0600 files; reject symlinks, hardlinks, and unsafe ancestors.
 Use the explicit CA exclusively for TLS, verify the server's endpoint SAN, and
-present the device leaf on every TLS 1.3 HTTP/1.1 connection, including SSE.
+present the device leaf on every TLS 1.3 HTTP/2 connection, including SSE.
 
 The dedicated signing `CAROOT` stays outside the repository, app bundle, and
 runtime directories. Its `rootCA-key.pem` remains on the administrator's Mac.

@@ -16,7 +16,7 @@ Run the commands below from the repository root.
 ## Build and install
 
 Use Zig **0.16.0**, `pkg-config`, and development headers/libraries for SQLite,
-libcurl (7.88+ with the OpenSSL 3 backend), OpenSSL 3, Pango/Cairo (Pango 1.48+), Fontconfig, GLib/GIO,
+libcurl (8.10+ with HTTP/2 and the OpenSSL 3 backend), OpenSSL 3, Pango/Cairo (Pango 1.48+), Fontconfig, GLib/GIO,
 libpng, libjpeg, OpenGL, Wayland, and xkbcommon, plus `wayland-scanner`. Clay
 and raylib are pinned in [`build.zig.zon`](../build.zig.zon); install a system
 sans-serif font and an emoji font for the scripts you use.
