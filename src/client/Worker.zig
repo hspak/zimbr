@@ -53,6 +53,9 @@ job: enum {
     enrichment,
     hydrate,
 } = .idle,
+// The complete URL must fit this capacity, so any accepted path fits too.
+job_path: [c.ZC_REQUEST_URL_CAPACITY]u8 = undefined,
+job_path_len: usize = 0,
 job_key: []const u8 = "",
 enrichment_request: ?Command = null,
 enrichment_after: []const u8 = "",
@@ -448,11 +451,13 @@ fn event(s: *Worker, arena: u.Allocator, raw: []const u8, id: []const u8, kind: 
     s.content_dirty = true;
 }
 fn request(s: *Worker, job: @FieldType(Worker, "job"), path: []const u8, body: ?[]const u8) !void {
-    const url = try a.dupeZ(u8, path);
-    defer a.free(url);
+    std.debug.assert(s.job == .idle);
+    const url = std.fmt.bufPrintZ(&s.job_path, "{s}", .{path}) catch
+        return error.RequestPathTooLong;
     const data = if (body) |b| try a.dupeZ(u8, b) else null;
     defer if (data) |d| a.free(d);
     if (c.zc_net_start(s.net.?, 0, url, if (data) |d| d.ptr else null) == 0) return error.TransportFailure;
+    s.job_path_len = url.len;
     s.job = job;
     s.dirty = true;
 }
@@ -659,13 +664,13 @@ fn complete(s: *Worker) !void {
     const job = s.job;
     if (request_error.curl_code == 0) {
         log.info("{s} response: HTTP {d}, {d} bytes", .{
-            @tagName(job),
+            s.job_path[0..s.job_path_len],
             http_status,
             len,
         });
     } else {
         log.info("{s} response: HTTP {d}, curl {d}, {d} bytes", .{
-            @tagName(job),
+            s.job_path[0..s.job_path_len],
             http_status,
             request_error.curl_code,
             len,
@@ -1364,6 +1369,35 @@ test "lazy metadata upgrades a text snapshot without changing its revision or lo
     defer edited.release();
     try std.testing.expectEqualStrings("Edited caption", edited.messages[0].text.?);
     try std.testing.expect(edited.messages[0].metadata_deferred);
+}
+
+test "worker shuts down before making its first request" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data = try std.fmt.allocPrintSentinel(
+        std.testing.allocator,
+        ".zig-cache/tmp/{s}",
+        .{tmp.sub_path},
+        0,
+    );
+    defer std.testing.allocator.free(data);
+    var worker = Worker{
+        .io = std.testing.io,
+        .config = .{ .data = data },
+        .auth_blocked = true,
+    };
+    try worker.start();
+    worker.shutdown();
+    try std.testing.expectEqual(@as(u64, 1), worker.generation);
+    try std.testing.expectEqual(.idle, worker.job);
+}
+
+test "oversized request paths are rejected before starting transport" {
+    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
+    const path = "/" ++ "x" ** (c.ZC_REQUEST_URL_CAPACITY - 1);
+    try std.testing.expectError(error.RequestPathTooLong, worker.request(.history, path, null));
+    try std.testing.expectEqual(.idle, worker.job);
+    try std.testing.expectEqual(@as(usize, 0), worker.job_path_len);
 }
 
 test "metadata views share immutable history while edited records replace it" {

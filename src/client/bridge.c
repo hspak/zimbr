@@ -270,7 +270,7 @@ int zc_net_start(ZcNet *n, int stream, const char *path, const char *body) {
     if (stream<0 || stream>3 || n->slots[stream].easy || path[0]!='/' || path[1]=='/') return 0;
     struct Slot *s=&n->slots[stream]; s->easy=curl_easy_init(); if (!s->easy) return 0;
     s->owner=n; s->stream=stream==1; s->media=stream>=2; s->last_rx=monotonic_ms();
-    char url[8192];
+    char url[ZC_REQUEST_URL_CAPACITY];
     if (snprintf(url,sizeof(url),"%s%s",n->origin,path)>=(int)sizeof(url)) { clear_slot(n,stream); return 0; }
     CURLcode code;
 #define SET(option,value) do { code=curl_easy_setopt(s->easy,option,value); if (code!=CURLE_OK) goto setup_error; } while (0)
@@ -509,7 +509,11 @@ ZcText *zc_text_new_weighted(const char *text, int length, double size, int widt
         pango_layout_set_ellipsize(t->layout, PANGO_ELLIPSIZE_END);
     }
     pango_layout_set_spacing(t->layout, 3 * PANGO_SCALE);
-    pango_layout_get_pixel_size(t->layout, &t->width, NULL);
+    PangoRectangle bounds;
+    pango_layout_get_pixel_extents(t->layout, NULL, &bounds);
+    // Right-aligned RTL paragraphs may start well past x=0. Their logical
+    // width alone would crop both the glyphs and selection out of the surface.
+    t->width = bounds.x + bounds.width;
     const int logical_height = text_measure_lines(t, font);
     pango_font_description_free(font);
     // A single unbreakable grapheme can exceed the requested width. Clip it;
@@ -591,7 +595,12 @@ unsigned char *zc_text_pixels_with_selection(ZcText *t, unsigned color, int star
         // LCD filtering can extend glyph coverage beyond the reported ink box.
         if (bottom + 2 < top || line_top - 2 > top + height) continue;
         PangoLayoutLine *line = t->lines[i].layout;
-        if (start != end) {
+        // Pango extends out-of-line ranges into the margins, even when no text
+        // on this line is selected. Include a line's terminating newline in its
+        // span so selections crossing explicit breaks still fill the margin.
+        const int line_end = i + 1 < t->line_count ? t->lines[i + 1].layout->start_index :
+            line->start_index + line->length;
+        if (start < end && start < line_end && end > line->start_index) {
             int *ranges, n;
             pango_layout_line_get_x_ranges(line, start, end, &ranges, &n);
             if (selection) cairo_set_source_rgba(cr, ((selection>>24)&255)/255., ((selection>>16)&255)/255., ((selection>>8)&255)/255., (selection&255)/255.);
@@ -642,7 +651,7 @@ void zc_text_caret(ZcText *t, int index, int *x, int *y, int *height) {
     const PangoRectangle logical = t->lines[line].logical;
     *x=r.x/PANGO_SCALE; *y=logical.y/PANGO_SCALE; *height=logical.height/PANGO_SCALE;
 }
-int zc_text_hit(ZcText *t, int x, int y) {
+static int text_hit(ZcText *t, int x, int y, int *trailing) {
     // Locate the displayed line, including half the gap on either side. Let
     // Pango resolve clusters and bidi within it using its unchanged shaping.
     const int64_t py = (int64_t)y * PANGO_SCALE;
@@ -655,11 +664,80 @@ int zc_text_hit(ZcText *t, int x, int y) {
         else lo = mid + 1;
     }
     const struct TextLine *line = &t->lines[lo];
-    int index, trailing;
-    pango_layout_line_x_to_index(line->layout,(int)CLAMP((int64_t)x*PANGO_SCALE-line->logical.x,INT_MIN,INT_MAX),&index,&trailing);
+    int index;
+    pango_layout_line_x_to_index(line->layout,(int)CLAMP((int64_t)x*PANGO_SCALE-line->logical.x,INT_MIN,INT_MAX),&index,trailing);
+    return index;
+}
+int zc_text_hit(ZcText *t, int x, int y) {
+    int trailing;
+    const int index = text_hit(t, x, y, &trailing);
     const char *text = pango_layout_get_text(t->layout); const char *p = text+index;
     while (trailing-- > 0 && *p) p=g_utf8_next_char(p);
     return (int)(p-text);
+}
+static int word_character(gunichar ch) {
+    return g_unichar_isalnum(ch) || g_unichar_ismark(ch) || ch == '_';
+}
+static int selection_class(const char *text, const char *p) {
+    const gunichar ch = g_utf8_get_char(p);
+    if (word_character(ch)) return 1;
+    // Chat prose commonly contains contractions and hyphenated words. Keep
+    // their internal joiners, but leave quotes and standalone dashes outside.
+    if (ch == '\'' || ch == 0x2019 || ch == '-' || ch == 0x2010 || ch == 0x2011) {
+        const char *previous = g_utf8_find_prev_char(text, p);
+        const char *next = g_utf8_next_char(p);
+        if (previous && *next && word_character(g_utf8_get_char(previous)) &&
+            word_character(g_utf8_get_char(next))) return 1;
+    }
+    if (g_unichar_isspace(ch) && ch != '\r' && ch != '\n' &&
+        ch != 0x2028 && ch != 0x2029) return 2;
+    return 0;
+}
+void zc_text_word_hit(ZcText *t, int x, int y, int *start, int *end) {
+    const char *text = pango_layout_get_text(t->layout);
+    *start = *end = 0;
+    if (!*text) return;
+    int trailing;
+    // A caret hit rounds the right half of a glyph forward. Word selection
+    // must instead use the cluster actually under the pointer, even in bidi.
+    const char *first = text + text_hit(t, x, y, &trailing);
+    if (!*first) first = g_utf8_prev_char(first);
+    int count;
+    const PangoLogAttr *attrs = pango_layout_get_log_attrs_readonly(t->layout, &count);
+    int left = (int)g_utf8_pointer_to_offset(text, first);
+    while (left > 0 && !attrs[left].is_cursor_position) {
+        first = g_utf8_prev_char(first);
+        --left;
+    }
+    const char *last = first;
+    int right = left;
+    do {
+        last = g_utf8_next_char(last);
+        ++right;
+    } while (right < count - 1 && !attrs[right].is_cursor_position);
+
+    const int kind = selection_class(text, first);
+    if (kind) {
+        while (left > 0) {
+            const char *previous = first;
+            int at = left;
+            do {
+                previous = g_utf8_prev_char(previous);
+                --at;
+            } while (at > 0 && !attrs[at].is_cursor_position);
+            if (selection_class(text, previous) != kind) break;
+            first = previous;
+            left = at;
+        }
+        while (right < count - 1 && selection_class(text, last) == kind) {
+            do {
+                last = g_utf8_next_char(last);
+                ++right;
+            } while (right < count - 1 && !attrs[right].is_cursor_position);
+        }
+    }
+    *start = (int)(first - text);
+    *end = (int)(last - text);
 }
 size_t zc_text_boundary(const char *text, size_t length, size_t position, int direction) {
     if (!g_utf8_validate(text, (gssize)length, NULL)) return position;

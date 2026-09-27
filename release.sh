@@ -2,8 +2,9 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 <version> [--check] [--macos-archive PATH]" >&2
-  echo "  Publishing requires a relay archive built from the same version and commit." >&2
+  echo "Usage: $0 <version> [--check] [--macos-host HOST] [--macos-archive PATH]" >&2
+  echo "  Builds the relay over SSH, or reuses its existing GitHub release asset." >&2
+  echo "  ZIMBR_MACOS_HOST selects the Mac; ZIMBR_MACOS_REPO defaults to code/zimbr on it." >&2
   echo "  --check builds the Arch package and checks any supplied relay archive without publishing." >&2
 }
 
@@ -18,16 +19,20 @@ shift
 [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "version must use the X.Y.Z format"
 check_only=false
 macos_archive=
+macos_host=${ZIMBR_MACOS_HOST:-}
+macos_repo=${ZIMBR_MACOS_REPO:-code/zimbr}
 while [[ $# -gt 0 ]]; do
   case $1 in
     --check) check_only=true; shift ;;
     --macos-archive)
       [[ $# -ge 2 ]] || { usage; exit 2; }
       macos_archive=$2; shift 2 ;;
+    --macos-host)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      macos_host=$2; shift 2 ;;
     *) usage; exit 2 ;;
   esac
 done
-$check_only || [[ -n $macos_archive ]] || die "build the relay on macOS with packaging/macos/release.py build and pass --macos-archive PATH"
 
 for command in git makepkg python3 sha256sum mktemp install zig; do
   command -v "$command" >/dev/null || die "required command not found: $command"
@@ -60,14 +65,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [[ -n $macos_archive ]]; then
+relay_name=zimbr-relay-$version-aarch64-macos.zip
+relay_archive=$release_dir/$relay_name
+validate_relay() {
   command -v ruby >/dev/null || die "required command not found: ruby"
-  relay_archive=$release_dir/zimbr-relay-$version-aarch64-macos.zip
-  install -m644 "$macos_archive" "$relay_archive"
   python3 "$repo_dir/packaging/macos/release.py" validate "$relay_archive" \
     --version "$version" --revision "$(git -C "$repo_dir" rev-parse HEAD)" \
     --cask-output "$release_dir/zimbr-relay.rb"
   ruby -c "$release_dir/zimbr-relay.rb"
+}
+
+if [[ -n $macos_archive ]]; then
+  install -m644 "$macos_archive" "$relay_archive"
+  validate_relay
 fi
 
 stage_recipe() {
@@ -149,7 +159,7 @@ PY
   exit 0
 fi
 
-for command in curl gh; do
+for command in curl gh ruby; do
   command -v "$command" >/dev/null || die "required command not found: $command"
 done
 [[ -z $(git -C "$repo_dir" status --porcelain) ]] ||
@@ -187,10 +197,23 @@ gh auth status --hostname github.com >/dev/null 2>&1 || die "run gh auth login f
 github_repo=$(cd -- "$repo_dir" && gh repo view --json nameWithOwner --jq .nameWithOwner)
 [[ $github_repo == hspak/zimbr ]] || die "the PKGBUILD targets hspak/zimbr, not $github_repo"
 draft=$(gh release view "$version" --repo "$github_repo" --json isDraft --jq .isDraft 2>/dev/null || true)
-[[ $draft != false ]] || die "GitHub release $version is already published"
+remote_archive=
+if [[ -n $draft ]]; then
+  remote_archive=$(gh release view "$version" --repo "$github_repo" --json assets \
+    --jq ".assets[] | select(.name == \"$relay_name\") | .name")
+fi
+if [[ -z $remote_archive ]]; then
+  [[ $draft != false ]] || die "published release $version is missing $relay_name"
+  if [[ -z $macos_archive ]]; then
+    [[ -n $macos_host ]] || die "set ZIMBR_MACOS_HOST or pass --macos-host to build the relay (or supply --macos-archive PATH)"
+    [[ $macos_host != -* ]] || die "invalid macOS SSH host"
+    command -v ssh >/dev/null || die "required command not found: ssh"
+  fi
+fi
 
-# Existing matching tags/drafts are reusable after an interrupted release.
+# Matching tags and releases are reusable after an interrupted publication.
 remote_tag=$(git -C "$repo_dir" ls-remote origin "refs/tags/$version")
+[[ $draft != false || -n $remote_tag ]] || die "published release $version has no source tag"
 if [[ -n $remote_tag ]]; then
   git -C "$repo_dir" fetch origin "refs/tags/$version:refs/tags/$version"
 fi
@@ -212,7 +235,7 @@ fi
 git -C "$repo_dir" push origin "refs/tags/$version"
 if [[ $draft == true ]]; then
   gh release edit "$version" --repo "$github_repo" --notes-file "$release_dir/notes.md"
-else
+elif [[ $draft != false ]]; then
   gh release create "$version" --repo "$github_repo" --draft --verify-tag \
     --title "Zimbr $version" --notes-file "$release_dir/notes.md"
 fi
@@ -223,13 +246,37 @@ curl --fail --location --silent --show-error --retry 5 --retry-delay 2 --retry-a
 stage_recipe "$archive"
 build_package "$archive"
 
-# Both artifacts must pass before either package repository is updated.
-(
-  cd -- "$release_dir"
-  sha256sum "${relay_archive##*/}" >SHA256SUMS
-)
-gh release upload "$version" "$relay_archive" "$release_dir/SHA256SUMS" \
-  --repo "$github_repo" --clobber
+if [[ -n $remote_archive ]]; then
+  mkdir -p "$release_dir/download"
+  gh release download "$version" --repo "$github_repo" --pattern "$relay_name" \
+    --dir "$release_dir/download"
+  if [[ -n $macos_archive ]]; then
+    cmp -s "$relay_archive" "$release_dir/download/$relay_name" ||
+      die "the supplied relay archive differs from the existing GitHub asset"
+  fi
+  install -m644 "$release_dir/download/$relay_name" "$relay_archive"
+elif [[ -z $macos_archive ]]; then
+  echo "Building the relay at $revision on $macos_host..."
+  remote_command=$(python3 - "$macos_repo" "$version" "$revision" <<'PY'
+import shlex
+import sys
+print(shlex.join(['python3', '-', *sys.argv[1:]]))
+PY
+  )
+  ssh -o BatchMode=yes -- "$macos_host" "$remote_command" \
+    <"$repo_dir/packaging/macos/remote.py" >"$relay_archive"
+fi
+validate_relay
+
+# Reuse uploaded bytes on retries; a published asset must never be replaced.
+if [[ $draft != false ]]; then
+  (cd -- "$release_dir" && sha256sum "$relay_name" >SHA256SUMS)
+  assets=("$release_dir/SHA256SUMS")
+  if [[ -z $remote_archive ]]; then
+    assets=("$relay_archive" "${assets[@]}")
+  fi
+  gh release upload "$version" "${assets[@]}" --repo "$github_repo" --clobber
+fi
 
 install -m644 "$stage/PKGBUILD" "$aur_dir/PKGBUILD"
 install -m644 "$stage/.SRCINFO" "$aur_dir/.SRCINFO"
@@ -242,6 +289,15 @@ install -m644 "$stage/.SRCINFO" "$aur_dir/.SRCINFO"
   fi
   git push --set-upstream origin HEAD:master
 )
+if [[ $draft != false ]]; then
+  gh release edit "$version" --repo "$github_repo" --draft=false
+fi
+# Homebrew uses this unauthenticated URL, so check it before exposing the cask.
+curl --fail --location --silent --show-error --retry 5 --retry-delay 2 --retry-all-errors \
+  --output "$release_dir/published.zip" \
+  "https://github.com/$github_repo/releases/download/$version/$relay_name"
+cmp -s "$relay_archive" "$release_dir/published.zip" ||
+  die "the public relay download differs from the validated archive"
 install -Dm644 "$release_dir/zimbr-relay.rb" "$tap_dir/Casks/zimbr-relay.rb"
 (
   cd -- "$tap_dir"
@@ -252,5 +308,4 @@ install -Dm644 "$release_dir/zimbr-relay.rb" "$tap_dir/Casks/zimbr-relay.rb"
   fi
   git push origin "HEAD:$tap_branch"
 )
-gh release edit "$version" --repo "$github_repo" --draft=false
 echo "Published Zimbr $version: Linux client on the AUR and macOS relay on Homebrew."

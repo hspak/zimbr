@@ -14,6 +14,8 @@ int zc_activation_wait(int timeout_ms);
 int zc_activation_activate(void *surface, const char *token);
 void zc_activation_free(void);
 typedef struct ZcNet ZcNet;
+/* Complete request URL capacity, including the null terminator. */
+#define ZC_REQUEST_URL_CAPACITY 8192
 typedef int (*ZcStreamFn)(void *, const char *, size_t);
 enum ZcFailure { ZC_OK, ZC_NETWORK, ZC_SERVER_TRUST, ZC_CREDENTIALS, ZC_CLIENT_REJECTED, ZC_TLS, ZC_HTTP, ZC_CONFIG };
 typedef struct { int kind, curl_code; long verify_result; char message[256]; } ZcError;
@@ -71,4 +73,6 @@ int zc_local_time(const char *timestamp, char *output, size_t size, int compact)
 int zc_timestamp_ms(const char *timestamp, size_t length, int64_t *output);
 void zc_text_caret(ZcText *text, int index, int *x, int *y, int *height);
 int zc_text_hit(ZcText *text, int x, int y);
+// Returns UTF-8 byte bounds for the word, whitespace run, or grapheme under the pointer.
+void zc_text_word_hit(ZcText *text, int x, int y, int *start, int *end);
 size_t zc_text_boundary(const char *text, size_t length, size_t position, int direction);

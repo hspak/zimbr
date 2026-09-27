@@ -44,16 +44,43 @@ package in `zig-out/release/`. It does not alter the AUR checkout or publish
 anything. Install the dependencies listed in the PKGBUILD before running it;
 the script does not install packages automatically.
 
-Run `python3 tests/release.py` and `python3 tests/mac_release.py` to check release
-ordering, failure handling, and archive validation using temporary local Git
-remotes and simulated build and hosting services.
+Run `python3 tests/release.py`, `python3 tests/mac_release.py`, and
+`python3 tests/mac_remote.py` to check release ordering, failure handling,
+archive validation, and isolated Mac builds using temporary local Git remotes
+and simulated build and hosting services.
 
-## Build the relay archive
+## Configure the Mac builder
 
-Commit and push all source changes, then check out that exact commit on an
-Apple Silicon Mac running macOS 27 or newer. Install the Zig version in
-`.zigversion`, Apple's Command Line Tools, and static OpenSSL 3.5 archives as
-described in [macOS TLS setup](macos-tls.md#build).
+Use an Apple Silicon Mac running macOS 27 or newer, reachable with noninteractive
+SSH authentication. Keep a source checkout there with the Zig version in
+`.zigversion`, Apple's Command Line Tools, static OpenSSL 3.5 archives, and a
+persistent signing identity as described in [macOS TLS setup](macos-tls.md#build).
+The existing `.tools` layout used by `tools/update-relay.sh` is supported; the
+builder also respects `ZIMBR_ZIG`, `ZIMBR_OPENSSL_PREFIX`, and
+`ZIMBR_OPENSSL_LICENSE` in the remote environment.
+
+Configure the release host once:
+
+```sh
+export ZIMBR_MACOS_HOST=builder@mac.example
+export ZIMBR_MACOS_REPO=code/zimbr
+```
+
+The checkout path defaults to `code/zimbr` relative to the Mac user's home;
+absolute paths are also accepted. `--macos-host HOST` overrides the host.
+The script clones an isolated temporary checkout, fetches the exact source
+commit from GitHub, and borrows the existing checkout's toolchain. It leaves
+the original checkout and installed relay untouched. The Mac must be able to
+download the source commit and Zig dependencies.
+
+No manual build or ZIP transfer is needed. On the first run, `release.sh` builds,
+tests, and signs the relay over SSH, transfers the ZIP, validates it, and uploads
+it to GitHub. Retries reuse the existing GitHub asset without contacting the Mac.
+
+## Optional local relay archive
+
+To supply an archive yourself, commit and push all source changes and check out
+that exact commit on the Mac, then run:
 
 ```sh
 export ZIMBR_OPENSSL_PREFIX=/absolute/openssl-3.5
@@ -66,7 +93,7 @@ credential-free app, verifies its signature after a ZIP round trip, and writes
 `zig-out/release/zimbr-relay-0.1.0-aarch64-macos.zip`. It requires a clean checkout
 and records the source commit, version, architecture, and payload checksums.
 It does not read TLS configuration, install the app, or restart the relay.
-Copy the archive to the Arch release host.
+Copy the archive to the Arch release host and pass `--macos-archive PATH`.
 
 The default signing identity is the persistent identity created by
 `packaging/macos/signing.py setup`. Use `--identity NAME_OR_SHA1` for a separately
@@ -83,7 +110,8 @@ To rehearse both packages without publishing:
 
 This checks that the relay was built from the current commit, renders the cask,
 and builds the Linux package. Omitting the archive with `--check` retains the
-Linux-only local check; publishing always requires the matching relay archive.
+Linux-only local check, even if a Mac host is configured. Check mode never
+invokes the remote builder or publishes anything.
 
 ## Publish a release
 
@@ -103,28 +131,34 @@ in the cask and the exact source archive SHA-256 in the PKGBUILD and `.SRCINFO`;
 `:no_check` and `SKIP` are rejected before publishing package metadata.
 
 ```sh
-./release.sh 0.1.0 --macos-archive /path/to/zimbr-relay-0.1.0-aarch64-macos.zip
+./release.sh 0.1.0
 ```
 
 The script:
 
-1. Validates the relay archive and cask, source version, checkouts, remotes, and
-   GitHub authentication.
+1. Validates the source version, checkouts, remotes, GitHub authentication, and
+   any explicitly supplied relay archive.
 2. Builds the Linux client and runs its headless unit tests.
 3. Pushes the version tag and creates a draft GitHub release with commit notes.
 4. Downloads that tag's source archive, computes its checksum, and builds and
    tests the updated PKGBUILD in a temporary directory.
-5. Uploads the relay archive and `SHA256SUMS` to the draft release.
+5. Reuses the existing GitHub ZIP or builds the relay on the configured Mac.
+   Validates its version, commit, and payload, then uploads the new ZIP and
+   `SHA256SUMS` to the draft release.
 6. Updates and commits `PKGBUILD` and generated `.SRCINFO`, then pushes the AUR.
-7. Updates and commits the Homebrew cask with the same version and the uploaded
+7. Publishes the GitHub release and checks that its public ZIP download matches
+   the validated archive byte for byte.
+8. Updates and commits the Homebrew cask with the same version and the uploaded
    archive's SHA-256, then pushes the tap.
-8. Publishes the GitHub release.
 
 The recipe is updated only after the tagged-source package passes. Matching
-tags and draft releases can be reused if a release is interrupted. A failure
-prints the temporary directory for inspection. Resolve any local tracked
+tags and draft or published releases can be reused if a release is interrupted.
+A failure prints the temporary directory for inspection. Resolve any local tracked
 changes before retrying; if an AUR or tap commit succeeded but its push failed,
-push that commit before rerunning the script with the same relay archive. The
-repository pushes are sequential; a late failure may leave one repository
-updated while GitHub remains a draft. A failed publish never
-automatically removes a tag or a draft release.
+push that commit before rerunning the script. Uploaded ZIPs are reused without
+rebuilding or replacing them; supplying a different local ZIP for an existing
+asset is rejected. A missing ZIP on a published release is also rejected.
+The repository pushes are sequential: an AUR update can precede a failed GitHub
+publish, and a failed tap push leaves GitHub published so its download remains
+available. A failed GitHub publish or public download check leaves the tap
+unchanged. A failed run never automatically removes a tag or release.

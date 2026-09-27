@@ -20,6 +20,10 @@ pub const Style = struct {
     size: i32,
     weight: Weight = .normal,
 };
+pub const Range = struct {
+    start: usize,
+    end: usize,
+};
 const Entry = struct {
     hash: u64,
     text: []const u8,
@@ -417,4 +421,15 @@ pub fn hit(s: *Text, text: []const u8, width: f32, x: f32, y: f32) usize {
     const e = s.get(text, 16, width, false, true) catch return 0;
     if (e.fallback) return 0;
     return @intCast(@max(0, c.zc_text_hit(e.layout, @intFromFloat(x), @intFromFloat(y))));
+}
+
+/// Returns byte bounds without splitting a grapheme. Internal apostrophes and
+/// hyphens belong to words; other punctuation is selected on its own.
+pub fn wordHit(s: *Text, text: []const u8, width: f32, x: f32, y: f32) Range {
+    const e = s.get(text, 16, width, false, true) catch return .{ .start = 0, .end = 0 };
+    if (e.fallback) return .{ .start = 0, .end = 0 };
+    var start: c_int = 0;
+    var end: c_int = 0;
+    c.zc_text_word_hit(e.layout, @intFromFloat(x), @intFromFloat(y), &start, &end);
+    return .{ .start = @intCast(start), .end = @intCast(end) };
 }

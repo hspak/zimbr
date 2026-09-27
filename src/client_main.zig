@@ -231,16 +231,7 @@ const App = struct {
     composer: Editor = .{},
     recipient: Editor = .{},
     search: Editor = .{},
-    focus: enum {
-        composer,
-        recipient,
-        search,
-        settings_relay,
-        settings_ca,
-        settings_cert,
-        settings_key,
-        none,
-    } = .composer,
+    focus: Focus = .composer,
     key: []const u8 = "",
     // Own the requested key while the displayed key and view stay together.
     pending_key: ?[]const u8 = null,
@@ -277,6 +268,8 @@ const App = struct {
     notice: []const u8 = "",
     notice_until: i64 = 0,
     message_selection: MessageSelection = .{},
+    text_click: ?TextClick = null,
+    word_drag: ?Text.Range = null,
     dragging: bool = false,
     was_reading: ?bool = null,
     show_details: bool = false,
@@ -293,6 +286,74 @@ const App = struct {
     logs_anchor_offset: f32 = 0,
     capture_frame: bool = false,
     captured: ?rl.Image = null,
+
+    const Focus = enum {
+        composer,
+        recipient,
+        search,
+        settings_relay,
+        settings_ca,
+        settings_cert,
+        settings_key,
+        none,
+    };
+
+    const TextClick = struct {
+        target: Target,
+        position: rl.Vector2,
+        time: f64,
+        frame: u64,
+
+        const Target = union(enum) {
+            field: struct { focus: Focus, revision: u64 },
+            message: struct { id: u64, text: u64, pending: bool },
+        };
+
+        fn near(click: TextClick, position: rl.Vector2) bool {
+            const dx = position.x - click.position.x;
+            const dy = position.y - click.position.y;
+            return dx * dx + dy * dy <= 25;
+        }
+
+        fn follows(click: TextClick, previous: TextClick) bool {
+            const interval = click.time - previous.time;
+            return interval >= 0 and interval <= 0.4 and previous.near(click.position) and
+                std.meta.eql(click.target, previous.target);
+        }
+    };
+
+    fn doubleTextClick(s: *App, target: TextClick.Target) bool {
+        const click = TextClick{
+            .target = target,
+            .position = rl.getMousePosition(),
+            .time = rl.getTime(),
+            .frame = s.text.frame,
+        };
+        const double = if (s.text_click) |previous| click.follows(previous) else false;
+        s.text_click = if (double) null else click;
+        return double;
+    }
+
+    fn dragTextSelection(
+        s: *App,
+        text: []const u8,
+        width: f32,
+        position: rl.Vector2,
+        anchor: *usize,
+        caret: *usize,
+    ) void {
+        if (s.word_drag) |origin| {
+            const word = s.text.wordHit(text, width, position.x, position.y);
+            if (word.start < origin.start) {
+                anchor.* = origin.end;
+                caret.* = word.start;
+            } else {
+                anchor.* = origin.start;
+                caret.* = @max(origin.end, word.end);
+            }
+        } else caret.* = s.text.hit(text, width, position.x, position.y);
+    }
+
     fn deinit(s: *App) void {
         s.settings.deinit();
         s.closeContentDetail();
@@ -780,7 +841,9 @@ const App = struct {
     fn draw(s: *App, scale: f32) void {
         defer _ = s.frame_arena.reset(.{ .retain_with_limit = 1024 * 1024 });
         const ar = s.frame_arena.allocator();
+        if (s.text.scale != scale) s.text_click = null;
         s.text.nextFrame(scale);
+        if (rl.isMouseButtonPressed(.left)) s.word_drag = null;
         if (s.media) |media| s.images.nextFrame(media);
         s.rich_count = 0;
         s.rich_consumed = false;
@@ -794,6 +857,13 @@ const App = struct {
         std.debug.assert(clip_depth == 0);
         rl.beginDrawing();
         defer rl.endDrawing();
+        // A drag or a click outside text breaks the sequence. Check before
+        // EndDrawing polls input and clears this frame's pressed/released flags.
+        defer if (s.text_click) |click| {
+            if ((rl.isMouseButtonPressed(.left) and click.frame != s.text.frame) or
+                ((rl.isMouseButtonDown(.left) or rl.isMouseButtonReleased(.left)) and
+                    !click.near(rl.getMousePosition()))) s.text_click = null;
+        };
         rl.clearBackground(theme.colors.paper);
         rl.setMouseCursor(.default);
         s.drawRail(areas.rail);
@@ -896,7 +966,12 @@ const App = struct {
                 theme.colors.line,
             );
             const online = s.view != null and s.view.?.online;
-            const status = if (online) "Connected to your Mac" else "Offline · drafts saved locally";
+            const status = if (online) status: {
+                const endpoint = std.Uri.parse(s.worker.config.relay_url) catch break :status "Connected";
+                const host = endpoint.host orelse break :status "Connected";
+                break :status std.fmt.allocPrint(ar, "Connected to {s}", .{host.percent_encoded}) catch
+                    "Connected";
+            } else "Offline · drafts saved locally";
             const status_x = footer.x + sidebar_padding + sidebar_text_inset;
             const status_width = footer.x + footer.width - sidebar_padding - status_x;
             const status_size = s.text.lineSize(status, 11, status_width);
@@ -3289,29 +3364,34 @@ const App = struct {
         const width = bounds.width;
         const hot = hover(bounds);
         const selection = &s.message_selection;
+        const position = rl.Vector2{
+            .x = rl.getMousePosition().x - x,
+            .y = rl.getMousePosition().y - y,
+        };
         if (hot) rl.setMouseCursor(.ibeam);
         if (hot and rl.isMouseButtonPressed(.left)) {
-            const at = s.text.hit(
-                row.text,
-                width,
-                rl.getMousePosition().x - x,
-                rl.getMousePosition().y - y,
-            );
+            const at = s.text.hit(row.text, width, position.x, position.y);
             selection.begin(row.id, row.pending, row.text, full, at) catch {
                 s.info("Could not select message text.");
                 return;
             };
             s.focus = .none;
             s.dragging = false;
-            s.info("Drag to select text · Ctrl+C to copy · Ctrl+A for the whole message");
+            if (s.doubleTextClick(.{ .message = .{
+                .id = std.hash.Wyhash.hash(0, row.id),
+                .text = std.hash.Wyhash.hash(0, row.text),
+                .pending = row.pending,
+            } })) s.word_drag = s.text.wordHit(row.text, width, position.x, position.y);
+            s.info("Double-click a word or drag to select · Ctrl+C to copy · Ctrl+A for the whole message");
         }
         const active = s.focus == .none and selection.matches(row.id, row.pending, row.text);
         if (active and selection.dragging and (rl.isMouseButtonDown(.left) or rl.isMouseButtonReleased(.left))) {
-            selection.caret = s.text.hit(
+            s.dragTextSelection(
                 row.text,
                 width,
-                rl.getMousePosition().x - x,
-                rl.getMousePosition().y - y,
+                position,
+                &selection.anchor,
+                &selection.caret,
             );
             selection.whole = false;
         }
@@ -3538,24 +3618,27 @@ const App = struct {
         } else false;
         var offset = if (multiline) s.composer_scroll else if (settings_field) @max(0, caret.y + caret.height - inner.height) else 0;
         const previous_caret = e.caret;
+        const position = rl.Vector2{
+            .x = rl.getMousePosition().x - inner.x,
+            .y = rl.getMousePosition().y - inner.y + offset,
+        };
         if (hover(if (multiline) inner else r) and rl.isMouseButtonPressed(.left)) {
             s.message_selection.clear();
             s.focus = focus;
-            const at = s.text.hit(
-                e.text.items,
-                width,
-                @as(f32, @floatFromInt(rl.getMouseX())) - inner.x,
-                @as(f32, @floatFromInt(rl.getMouseY())) - inner.y + offset,
-            );
+            const at = s.text.hit(e.text.items, width, position.x, position.y);
             e.caret = at;
             if (!rl.isKeyDown(.left_shift)) e.anchor = at;
             s.dragging = true;
+            if (s.doubleTextClick(.{ .field = .{ .focus = focus, .revision = e.revision } }))
+                s.word_drag = s.text.wordHit(e.text.items, width, position.x, position.y);
         }
-        if (s.dragging and s.focus == focus and rl.isMouseButtonDown(.left)) e.caret = s.text.hit(
+        if (s.dragging and s.focus == focus and
+            (rl.isMouseButtonDown(.left) or rl.isMouseButtonReleased(.left))) s.dragTextSelection(
             e.text.items,
             width,
-            @as(f32, @floatFromInt(rl.getMouseX())) - inner.x,
-            @as(f32, @floatFromInt(rl.getMouseY())) - inner.y + offset,
+            position,
+            &e.anchor,
+            &e.caret,
         );
         if (rl.isMouseButtonReleased(.left)) s.dragging = false;
         if (!input_obscured and s.focus == focus and (pressed(.up) or pressed(.down))) {
@@ -3905,6 +3988,30 @@ test "hidden conversations stay out of search and selection until restored" {
     try std.testing.expectEqualStrings("spam", app.key);
 }
 
+test "double text clicks require a nearby matching target within the time limit" {
+    const first = App.TextClick{
+        .target = .{ .field = .{ .focus = .composer, .revision = 1 } },
+        .position = .{ .x = 100, .y = 200 },
+        .time = 10,
+        .frame = 1,
+    };
+    var second = first;
+    second.time += 0.2;
+    second.position.x += 2;
+    try std.testing.expect(second.follows(first));
+    second.time = 10.5;
+    try std.testing.expect(!second.follows(first));
+    second.time = 10.2;
+    second.position.x = 110;
+    try std.testing.expect(!second.follows(first));
+    second.position = first.position;
+    second.target.field.focus = .search;
+    try std.testing.expect(!second.follows(first));
+    second.target.field.focus = .composer;
+    second.target.field.revision = 2;
+    try std.testing.expect(!second.follows(first));
+}
+
 test "workspace navigation, compact lists, message selection, and scrollbars render correctly" {
     // Raylib logs to stdout, which Zig's test runner reserves for its protocol.
     rl.setTraceLogLevel(.none);
@@ -4195,6 +4302,25 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     try std.testing.expect(!app.message_selection.dragging);
     try std.testing.expectEqualStrings("message", app.message_selection.selected());
 
+    // Both clicks land in the right half of the word's final letter.
+    const last_letter = app.text.caret(row.text, text_width, "A messag".len);
+    const word_x = text_x + last_letter.x + (end.x - last_letter.x) * 0.75;
+    const word_y = text_y + end.y + end.height / 2;
+    clickTestFrame(&app, word_x, word_y);
+    clickTestFrame(&app, word_x, word_y);
+    try std.testing.expectEqualStrings("message", app.message_selection.selected());
+    app.draw(scale);
+    try std.testing.expectEqualStrings("message", app.message_selection.selected());
+
+    clickTestFrame(&app, text_x + 1, text_y + 1);
+    try std.testing.expectEqualStrings(row.text, app.message_selection.selected());
+    clickTestFrame(&app, text_x - 1, text_y + 1);
+    clickTestFrame(&app, text_x + 1, text_y + 1);
+    try std.testing.expectEqualStrings(row.text, app.message_selection.selected());
+    clickTestFrame(&app, word_x, word_y);
+    clickTestFrame(&app, word_x, word_y);
+    try std.testing.expectEqualStrings("message", app.message_selection.selected());
+
     // An uncertain send stays before a newer reply and retains its recovery action.
     group_messages[group_messages.len - 1].timestamp = "2026-01-01T00:02:00Z";
     var pending = [_]Store.Pending{.{
@@ -4226,6 +4352,62 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     );
     try std.testing.expectEqualStrings(pending[0].input.text, app.composer.text.items);
     try std.testing.expect(app.duplicate_risk);
+
+    try app.composer.set("A follow-up, don’t stop.");
+    app.draw(scale);
+    const composer_box = App.composerEditor(App.composerBox(areas.composer));
+    const composer_width = composer_box.width - 22 - Scrollbar.gutter;
+    const hyphen = app.text.caret(app.composer.text.items, composer_width, "A follow".len);
+    const composer_x = composer_box.x + 11;
+    const composer_y = composer_box.y + 10;
+    const hyphen_x = composer_x + hyphen.x + 1;
+    const hyphen_y = composer_y + hyphen.y + hyphen.height / 2;
+    clickTestFrame(&app, hyphen_x, hyphen_y);
+    try std.testing.expectEqualStrings("", app.composer.selected());
+    pressTestFrame(&app, hyphen_x, hyphen_y);
+    try std.testing.expectEqualStrings("follow-up", app.composer.selected());
+    const contraction = app.text.caret(app.composer.text.items, composer_width, "A follow-up, do".len);
+    rl.playAutomationEvent(.{
+        .frame = 0,
+        .type = 7,
+        .params = .{
+            @intFromFloat(composer_x + contraction.x + 1),
+            @intFromFloat(hyphen_y),
+            0,
+            0,
+        },
+    });
+    app.draw(scale);
+    try std.testing.expectEqualStrings("follow-up, don’t", app.composer.selected());
+    rl.playAutomationEvent(.{
+        .frame = 0,
+        .type = 7,
+        .params = .{
+            @intFromFloat(composer_x + 1),
+            @intFromFloat(hyphen_y),
+            0,
+            0,
+        },
+    });
+    app.draw(scale);
+    try std.testing.expectEqualStrings("A follow-up", app.composer.selected());
+    rl.playAutomationEvent(.{
+        .frame = 0,
+        .type = 5,
+        .params = .{
+            0,
+            0,
+            0,
+            0,
+        },
+    });
+    app.draw(scale);
+    try std.testing.expectEqualStrings("A follow-up", app.composer.selected());
+    try app.composer.insert("One");
+    try std.testing.expectEqualStrings("One, don’t stop.", app.composer.text.items);
+    try app.composer.history(false);
+    try std.testing.expectEqualStrings("A follow-up, don’t stop.", app.composer.text.items);
+    try std.testing.expectEqualStrings("A follow-up", app.composer.selected());
 
     // Successful sends can pass through each of these states before their echo
     // arrives. The recovery action must neither render nor accept clicks yet.
@@ -5027,7 +5209,7 @@ test "offscreen measurements match drawing metrics without evicting layouts" {
     }
 }
 
-fn clickTestFrame(app: *App, x: f32, y: f32) void {
+fn pressTestFrame(app: *App, x: f32, y: f32) void {
     rl.playAutomationEvent(.{
         .frame = 0,
         .type = 7,
@@ -5049,6 +5231,10 @@ fn clickTestFrame(app: *App, x: f32, y: f32) void {
         },
     });
     app.draw(WindowMetrics.current().scale);
+}
+
+fn clickTestFrame(app: *App, x: f32, y: f32) void {
+    pressTestFrame(app, x, y);
     rl.playAutomationEvent(.{
         .frame = 0,
         .type = 5,

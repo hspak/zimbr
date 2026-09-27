@@ -127,7 +127,10 @@ remain on the Mac and can be fetched again by scrolling back.
 Enter sends; Shift+Enter inserts a newline. Ctrl+A/C/X/V, Ctrl+Z, Ctrl+Shift+Z,
 Ctrl+Y, Home/End, arrows, mouse selection, and clipboard are supported. Ctrl+N
 starts a direct conversation; Ctrl+F searches the sidebar. Drag over message text
-and press Ctrl+C to copy the highlighted portion. Click a message then Ctrl+C to
+and press Ctrl+C to copy the highlighted portion. Double-click a word in a message
+or text field to select it; keep dragging to extend the selection by whole words.
+Words stop at whitespace and punctuation, keeping internal hyphens and apostrophes
+as in `follow-up` and `don’t`. Click a message then Ctrl+C to
 copy it in full; Ctrl+A selects the whole message. New recipients must be an
 international number or email.
 Unsupported services remain readable with sending disabled.

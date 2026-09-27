@@ -1097,6 +1097,179 @@ test "incremental snapshots preserve versions through prepends, reordering, fail
     try std.testing.expectEqual(@as(usize, 0), selected.snapshot.messages.len);
 }
 
+test "word hits select chat words and delimiters without splitting Unicode graphemes" {
+    const c = @import("client.zig").c.api;
+    const cases = [_]struct { text: []const u8, hit: []const u8, selected: []const u8 }{
+        .{
+            .text = "(hello), world!",
+            .hit = "o",
+            .selected = "hello",
+        },
+        .{
+            .text = "(hello), world!",
+            .hit = ",",
+            .selected = ",",
+        },
+        .{
+            .text = "\"follow-up\"",
+            .hit = "-",
+            .selected = "follow-up",
+        },
+        .{
+            .text = "'don't'",
+            .hit = "n",
+            .selected = "don't",
+        },
+        .{
+            .text = "'don't'",
+            .hit = "'",
+            .selected = "'",
+        },
+        .{
+            .text = "“don’t”",
+            .hit = "’",
+            .selected = "don’t",
+        },
+        .{
+            .text = "non‑breaking",
+            .hit = "‑",
+            .selected = "non‑breaking",
+        },
+        .{
+            .text = "one--two",
+            .hit = "-",
+            .selected = "-",
+        },
+        .{
+            .text = "foo_bar",
+            .hit = "_",
+            .selected = "foo_bar",
+        },
+        .{
+            .text = "alpha/beta.txt@example",
+            .hit = "b",
+            .selected = "beta",
+        },
+        .{
+            .text = "alpha—beta",
+            .hit = "b",
+            .selected = "beta",
+        },
+        .{
+            .text = "hello\u{a0}world",
+            .hit = "w",
+            .selected = "world",
+        },
+        .{
+            .text = "hello\u{a0}world",
+            .hit = "\u{a0}",
+            .selected = "\u{a0}",
+        },
+        .{
+            .text = "a \t  b",
+            .hit = "\t",
+            .selected = " \t  ",
+        },
+        .{
+            .text = "Café!",
+            .hit = "é",
+            .selected = "Café",
+        },
+        .{
+            .text = "Café!",
+            .hit = "é",
+            .selected = "Café",
+        },
+        .{
+            .text = "中文，消息。",
+            .hit = "息",
+            .selected = "消息",
+        },
+        .{
+            .text = "שלום עולם",
+            .hit = "ל",
+            .selected = "שלום",
+        },
+        .{
+            .text = "مرحبا، عالم",
+            .hit = "ح",
+            .selected = "مرحبا",
+        },
+        .{
+            .text = "hi👩‍💻there",
+            .hit = "👩‍💻",
+            .selected = "👩‍💻",
+        },
+        .{
+            .text = "hi👩‍💻there",
+            .hit = "t",
+            .selected = "there",
+        },
+        .{
+            .text = "👍🏽🎉",
+            .hit = "👍🏽",
+            .selected = "👍🏽",
+        },
+        .{
+            .text = "first\nsecond",
+            .hit = "c",
+            .selected = "second",
+        },
+    };
+    for (cases) |case| {
+        const shaped = c.zc_text_new(case.text.ptr, @intCast(case.text.len), 16, 400, 1) orelse
+            return error.NoLayout;
+        defer c.zc_text_free(shaped);
+        const at = std.mem.indexOf(u8, case.text, case.hit).?;
+        var x: c_int = 0;
+        var y: c_int = 0;
+        var height: c_int = 0;
+        var next_x: c_int = 0;
+        var next_y: c_int = 0;
+        var next_height: c_int = 0;
+        c.zc_text_caret(shaped, @intCast(at), &x, &y, &height);
+        c.zc_text_caret(shaped, @intCast(at + case.hit.len), &next_x, &next_y, &next_height);
+        for ([_]c_int{ 1, 3 }) |quarter| {
+            var start: c_int = 0;
+            var end: c_int = 0;
+            c.zc_text_word_hit(
+                shaped,
+                x + @divTrunc((next_x - x) * quarter, 4),
+                y + @divTrunc(height, 2),
+                &start,
+                &end,
+            );
+            try std.testing.expectEqualStrings(case.selected, case.text[@intCast(start)..@intCast(end)]);
+        }
+    }
+}
+
+test "word hits handle empty text line endings and words across visual wraps" {
+    const c = @import("client.zig").c.api;
+    const empty = c.zc_text_new("", 0, 16, 40, 1) orelse return error.NoLayout;
+    defer c.zc_text_free(empty);
+    var start: c_int = -1;
+    var end: c_int = -1;
+    c.zc_text_word_hit(empty, 100, 100, &start, &end);
+    try std.testing.expectEqual(@as(c_int, 0), start);
+    try std.testing.expectEqual(@as(c_int, 0), end);
+
+    const text = "follow-up\n\nend";
+    const shaped = c.zc_text_new(text.ptr, text.len, 16, 40, 1.5) orelse return error.NoLayout;
+    defer c.zc_text_free(shaped);
+    var x: c_int = 0;
+    var y: c_int = 0;
+    var height: c_int = 0;
+    c.zc_text_caret(shaped, "follow-".len, &x, &y, &height);
+    c.zc_text_word_hit(shaped, x + 1, y + @divTrunc(height, 2), &start, &end);
+    try std.testing.expectEqualStrings("follow-up", text[@intCast(start)..@intCast(end)]);
+    c.zc_text_caret(shaped, "follow-up\n".len, &x, &y, &height);
+    c.zc_text_word_hit(shaped, x, y + @divTrunc(height, 2), &start, &end);
+    try std.testing.expectEqualStrings("\n", text[@intCast(start)..@intCast(end)]);
+    c.zc_text_word_hit(shaped, 500, 500, &start, &end);
+    try std.testing.expectEqualStrings("end", text[@intCast(start)..@intCast(end)]);
+}
+
 test "long Unicode text measures, wraps, and renders a bounded tile" {
     const c = @import("client.zig").c.api;
     const text = try std.testing.allocator.alloc(u8, 16384);
@@ -1252,6 +1425,87 @@ test "Korean fallback keeps English aligned in labels and multiline text" {
     };
 }
 
+test "selecting the second text row leaves other rows and their whitespace unchanged" {
+    const c = @import("client.zig").c.api;
+    const cases = [_]struct { text: []const u8, selected: []const u8, width: c_int }{
+        .{
+            .text = "First\nSecond\nLast",
+            .selected = "Second",
+            .width = 200,
+        },
+        .{
+            .text = "First Second Last",
+            .selected = "Second",
+            .width = 68,
+        },
+        .{
+            .text = "ראשון\nثاني\nאחרון",
+            .selected = "ثاني",
+            .width = 200,
+        },
+    };
+    for (cases) |case| for ([_]f64{
+        1,
+        1.25,
+        1.5,
+        2,
+    }) |scale| for ([_]bool{ false, true }) |subpixel| {
+        const shaped = c.zc_text_new_with_options(
+            case.text.ptr,
+            @intCast(case.text.len),
+            16,
+            case.width,
+            scale,
+            0,
+            @intFromBool(subpixel),
+        ) orelse return error.NoLayout;
+        defer c.zc_text_free(shaped);
+        const start = std.mem.indexOf(u8, case.text, case.selected).?;
+        const end = start + case.selected.len;
+        var x: c_int = 0;
+        var y: c_int = 0;
+        var line_height: c_int = 0;
+        c.zc_text_caret(shaped, @intCast(start), &x, &y, &line_height);
+        const top: usize = @intFromFloat(@floor(@as(f64, @floatFromInt(y)) * scale));
+        const bottom: usize = @intFromFloat(@ceil(@as(f64, @floatFromInt(y + line_height)) * scale));
+        const height = c.zc_text_height(shaped);
+        try std.testing.expect(top > 0 and bottom < height);
+        const stride = @as(usize, @intCast(c.zc_text_width(shaped))) * 4;
+        const background: u32 = if (subpixel) 0xf0e8d8ff else 0;
+        const plain = c.zc_text_pixels_on(shaped, 0x112233ff, 0, 0, 0, height, background);
+        try std.testing.expect(plain != null);
+        const before = try std.testing.allocator.dupe(u8, plain[0 .. stride * @as(usize, @intCast(height))]);
+        defer std.testing.allocator.free(before);
+        const selected = c.zc_text_pixels_on(
+            shaped,
+            0x112233ff,
+            @intCast(start),
+            @intCast(end),
+            0,
+            height,
+            background,
+        );
+        try std.testing.expect(selected != null);
+        var highlighted = false;
+        for (0..@intCast(height)) |row| {
+            const unchanged = std.mem.eql(
+                u8,
+                before[row * stride ..][0..stride],
+                selected[row * stride ..][0..stride],
+            );
+            if (row < top or row >= bottom) {
+                try std.testing.expect(unchanged);
+            } else highlighted = highlighted or !unchanged;
+        }
+        if (!highlighted) std.debug.print("No selection pixels for {s}, scale {d}, subpixel {}\n", .{
+            case.text,
+            scale,
+            subpixel,
+        });
+        try std.testing.expect(highlighted);
+    };
+}
+
 test "fractional scale tiles match full text rendering including selection and bidi" {
     const c = @import("client.zig").c.api;
     const texts = [_][]const u8{
@@ -1314,6 +1568,111 @@ test "fractional scale tiles match full text rendering including selection and b
             );
         }
     };
+}
+
+test "selection highlights only the included line breaks and blank rows" {
+    const c = @import("client.zig").c.api;
+    const text = "First\n\nSecond";
+    const shaped = c.zc_text_new(text.ptr, text.len, 16, 200, 1) orelse return error.NoLayout;
+    defer c.zc_text_free(shaped);
+    const height = c.zc_text_height(shaped);
+    const stride = @as(usize, @intCast(c.zc_text_width(shaped))) * 4;
+    const plain = c.zc_text_pixels(shaped, 0x112233ff, 0, 0, 0, height);
+    try std.testing.expect(plain != null);
+    const before = try std.testing.allocator.dupe(u8, plain[0 .. stride * @as(usize, @intCast(height))]);
+    defer std.testing.allocator.free(before);
+    const cases = [_]struct { start: c_int, end: c_int, rows: [3]bool }{
+        .{
+            .start = "First".len,
+            .end = "First\n".len,
+            .rows = .{
+                true,
+                false,
+                false,
+            },
+        },
+        .{
+            .start = "First".len,
+            .end = "First\n\n".len,
+            .rows = .{
+                true,
+                true,
+                false,
+            },
+        },
+        .{
+            .start = "First\n".len,
+            .end = "First\n\n".len,
+            .rows = .{
+                false,
+                true,
+                false,
+            },
+        },
+        .{
+            .start = "Fi".len,
+            .end = "First\n\nS".len,
+            .rows = .{
+                true,
+                true,
+                true,
+            },
+        },
+    };
+    for (cases) |case| {
+        const selected = c.zc_text_pixels(shaped, 0x112233ff, case.start, case.end, 0, height);
+        try std.testing.expect(selected != null);
+        for ([_]c_int{
+            0,
+            "First\n".len,
+            "First\n\n".len,
+        }, case.rows) |at, highlighted| {
+            var x: c_int = 0;
+            var y: c_int = 0;
+            var line_height: c_int = 0;
+            c.zc_text_caret(shaped, at, &x, &y, &line_height);
+            const offset = @as(usize, @intCast(y + @divTrunc(line_height, 2))) * stride;
+            try std.testing.expectEqual(highlighted, !std.mem.eql(
+                u8,
+                before[offset..][0..stride],
+                selected[offset..][0..stride],
+            ));
+        }
+    }
+}
+
+test "right aligned paragraph glyphs and carets fit inside the text surface" {
+    const c = @import("client.zig").c.api;
+    const text = "שלום\nمرحبا";
+    for ([_]f64{
+        1,
+        1.25,
+        1.5,
+        2,
+    }) |scale| {
+        const shaped = c.zc_text_new(text.ptr, text.len, 16, 200, scale) orelse return error.NoLayout;
+        defer c.zc_text_free(shaped);
+        const width = c.zc_text_width(shaped);
+        const height = c.zc_text_height(shaped);
+        const pixels = c.zc_text_pixels(shaped, 0x112233ff, 0, 0, 0, height);
+        try std.testing.expect(pixels != null);
+        for ([_]c_int{ 0, "שלום\n".len }) |at| {
+            var x: c_int = 0;
+            var y: c_int = 0;
+            var line_height: c_int = 0;
+            c.zc_text_caret(shaped, at, &x, &y, &line_height);
+            try std.testing.expect(@as(f64, @floatFromInt(x)) * scale < @as(f64, @floatFromInt(width)));
+            const top: usize = @intFromFloat(@ceil(@as(f64, @floatFromInt(y)) * scale));
+            const bottom: usize = @intFromFloat(@floor(@as(f64, @floatFromInt(y + line_height)) * scale));
+            const stride = @as(usize, @intCast(width)) * 4;
+            var ink: usize = 0;
+            var byte = top * stride + 3;
+            while (byte < bottom * stride) : (byte += 4) {
+                if (pixels[byte] != 0) ink += 1;
+            }
+            try std.testing.expect(ink > 20);
+        }
+    }
 }
 
 test "tall combining marks still expand the text line and caret" {
