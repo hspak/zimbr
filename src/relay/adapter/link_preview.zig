@@ -278,9 +278,7 @@ pub fn bindLocalArtwork(
         // that exact attachment to be joined to this message. Never interpret
         // the index as SQL row order or as an attributed-body part index.
         const guid = try std.fmt.allocPrint(a, "at_{d}_{s}", .{ index, source_guid });
-        var digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(guid, &digest, .{});
-        const id = std.fmt.bytesToHex(digest, .lower);
+        const id = u.hashId(guid);
         for (attachments) |attachment| if (u.eq(attachment.id, &id)) {
             item.attachment_guid = guid;
             break;

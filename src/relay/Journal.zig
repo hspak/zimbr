@@ -319,8 +319,8 @@ pub fn getRoute(self: Journal, a: u.Allocator, target: t.Target) GetRouteError!R
     if (!try s.step() or !u.eq(s.bytes(1), "imessage")) return error.UnsupportedTarget;
     return .{ .mode = "chat", .destination = try s.text(a, 0) };
 }
-pub fn accept(self: Journal, a: u.Allocator, raw_input: t.SendInput, ready: bool) AcceptError!struct { record: []const u8, fresh: bool } {
-    const input = try t.normalize(a, raw_input);
+pub fn accept(self: Journal, a: u.Allocator, input: t.SendInput, ready: bool) AcceptError!struct { record: []const u8, fresh: bool } {
+    try t.validate(input);
     try self.begin();
     errdefer self.rollback();
     if (!u.eq(input.server_epoch, try self.epoch(a))) return error.ResyncRequired;
@@ -487,7 +487,7 @@ pub fn pageContent(
             const split = std.mem.indexOfScalar(u8, b, ':') orelse return error.InvalidRequest;
             date = std.fmt.parseInt(i64, b[0..split], 10) catch return error.InvalidRequest;
             key = b[split + 1 ..];
-            if (!t.uuid(key)) return error.InvalidRequest;
+            if (!t.validId(key)) return error.InvalidRequest;
         }
         try s.bind(&.{
             .{ .text = id },
@@ -501,7 +501,7 @@ pub fn pageContent(
     var items: [t.max_page]Json = undefined;
     var count: usize = 0;
     var next_key: ?[]const u8 = null;
-    var cursor_buffer: [20 + 1 + t.uuid_length]u8 = undefined;
+    var cursor_buffer: [20 + 1 + t.id_length]u8 = undefined;
     var last: []const u8 = "";
     var byte_count: usize = 0;
     while (try s.step()) {
@@ -652,13 +652,13 @@ pub fn updateIdentity(self: Journal, a: u.Allocator, value: t.Identity) UpdateId
 
 pub fn identityPage(self: Journal, a: u.Allocator, before: ?[]const u8, limit: usize) IdentityPageError!Page {
     if (limit == 0 or limit > t.max_page) return error.InvalidRequest;
-    if (before) |b| if (!t.uuid(b)) return error.InvalidRequest;
+    if (before) |b| if (!t.validId(b)) return error.InvalidRequest;
     const s = try self.db.prepare("SELECT id,record FROM identities WHERE id<? ORDER BY id DESC LIMIT ?");
     defer s.close();
     try s.bind(&.{ .{ .text = before orelse "~" }, .{ .int = @intCast(limit + 1) } });
     var records: [t.max_page]Json = undefined;
     var count: usize = 0;
-    var cursor_buffer: [t.uuid_length]u8 = undefined;
+    var cursor_buffer: [t.id_length]u8 = undefined;
     var last: []const u8 = "";
     var next_key: ?[]const u8 = null;
     var bytes: usize = 0;
@@ -699,7 +699,7 @@ test "bounded pages own records and cursors across subsequent queries and reject
     }
     const first = try j.page(a, chat, null, t.max_page);
     try std.testing.expectEqual(@as(usize, t.max_page), first.records.len);
-    try std.testing.expectEqual(@as(usize, 57), first.next.?.len);
+    try std.testing.expectEqual(@as(usize, 43), first.next.?.len);
     const last = try j.page(a, chat, first.next, t.max_page);
     try std.testing.expectEqual(@as(usize, 1), last.records.len);
     try std.testing.expectEqual(@as(?[]const u8, null), last.next);

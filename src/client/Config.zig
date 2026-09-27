@@ -360,7 +360,7 @@ test "settings save replaces all preferences atomically and survives synchroniza
     try std.testing.expect(!unchanged.enter_to_send);
     try store.db.exec("DROP TRIGGER reject_settings");
     try replacement.save(store);
-    const epoch = "12345678-1234-1234-1234-123456789012";
+    const epoch = "EjRWeBI0EjQSNBI0VniQEg";
     try store.beginSync(epoch, epoch ++ ":0");
     const saved = (try read(a, store)).?;
     try std.testing.expectEqualStrings(replacement.relay_url, saved.relay_url);

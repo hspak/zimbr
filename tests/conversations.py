@@ -11,9 +11,8 @@ import socket
 import sqlite3
 import subprocess
 import tempfile
-import uuid
 
-from fixture import create, add_message, apple_ns
+from fixture import new_id, create, add_message, apple_ns
 from relay_fixture import Fixture
 from client_integration import wait
 
@@ -188,7 +187,7 @@ def main():
             assert rows("SELECT mode FROM send_requests WHERE json_extract(payload,'$.text')='Fixture self reply'") == [('direct',)]
             assert rows("SELECT j.chat_id FROM message m JOIN chat_message_join j ON m.ROWID=j.message_id WHERE m.text='Fixture self reply'", path=source) == [(6,)]
             # Synthetic dispatch must use the existing any route, never create a chat.
-            send = {'request_id': str(uuid.uuid4()), 'server_epoch': epoch,
+            send = {'request_id': new_id(), 'server_epoch': epoch,
                     'target': {'conversation_id': ids[2]}, 'text': 'Fixture group reply'}
             assert request('/v1/messages', send)[0] in (200, 202)
             wait(lambda: request('/v1/send-requests/'+send['request_id'])[1].get('state') == 'delivered')
@@ -202,7 +201,7 @@ def main():
                 add_message(db, 'Reaction', chat=2, date=later+1, associated_message_type=2001)
                 add_message(db, 'Late old history', chat=2, date=now-200)
             wait(lambda: not next(c for c in chats() if c['id'] == ids[2])['sendable'])
-            send['request_id'] = str(uuid.uuid4())
+            send['request_id'] = new_id()
             status, blocked = request('/v1/messages', send)
             assert status == 400 and blocked['error_info']['code'] == 'unsupported_target', (status, blocked)
             assert original_ids <= {row[0] for row in rows('SELECT id FROM messages')}

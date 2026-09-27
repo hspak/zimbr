@@ -128,9 +128,11 @@ pub fn main(init: std.process.Init) !void {
     var client_events: [samples]f64 = undefined;
     var media = Media{ .io = init.io, .config = .{ .data = "" } };
     defer media.shutdown();
-    var asset_ids: [128][36]u8 = undefined;
+    var asset_ids: [128][t.id_length]u8 = undefined;
     for (&asset_ids, 0..) |*id, i| {
-        _ = try std.fmt.bufPrint(id, "12345678-1234-1234-1234-{d:0>12}", .{i});
+        var id_bytes: [16]u8 = undefined;
+        std.mem.writeInt(u128, &id_bytes, i, .big);
+        id.* = u.encodeId(id_bytes);
     }
     const journal = try Journal.open(":memory:");
     defer journal.close();
@@ -190,7 +192,7 @@ pub fn main(init: std.process.Init) !void {
             _ = try media.context("epoch", if (batch % 2 == 0) "one" else "two", 0, false, true);
             for (&asset_ids) |*id| try media.request(.{
                 .id = id,
-                .version = "12345678-1234-1234-1234-123456789012",
+                .version = "EjRWeBI0EjQSNBI0VniQEg",
                 .variant = .inline_image,
                 .availability = .ready,
                 .mime_type = "image/png",

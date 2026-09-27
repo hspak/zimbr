@@ -1462,7 +1462,7 @@ test "metadata views share immutable history while edited records replace it" {
 }
 
 test "an invalid frame rolls back the complete network batch for safe replay" {
-    const epoch = "12345678-1234-1234-1234-123456789012";
+    const epoch = "EjRWeBI0EjQSNBI0VniQEg";
     var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
     worker.store = try Store.open(":memory:");
     defer worker.store.close();
@@ -1509,7 +1509,7 @@ test "an invalid frame rolls back the complete network batch for safe replay" {
 }
 
 test "notifications follow committed live events, never replay, history, outgoing or viewed messages" {
-    const epoch = "12345678-1234-1234-1234-123456789012";
+    const epoch = "EjRWeBI0EjQSNBI0VniQEg";
     var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
     worker.store = try Store.open(":memory:");
     defer worker.store.close();
@@ -1610,7 +1610,7 @@ fn notificationFrame(
 }
 
 test "an unresolved submission holds new text until the original ID has an authoritative outcome" {
-    const epoch = "12345678-1234-1234-1234-123456789012";
+    const epoch = "EjRWeBI0EjQSNBI0VniQEg";
     var worker = Worker{
         .io = std.testing.io,
         .config = .{ .data = "/tmp/unused" },

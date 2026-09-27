@@ -269,9 +269,7 @@ pub fn decode(
         const id = try std.fmt.allocPrint(a, "source:{d}", .{part_index});
         if (transfer) |guid| {
             if (!u.eq(text[start..end], "\xef\xbf\xbc")) return error.Unsupported;
-            var digest: [32]u8 = undefined;
-            std.crypto.hash.sha2.Sha256.hash(guid, &digest, .{});
-            const attachment_id = std.fmt.bytesToHex(digest, .lower);
+            const attachment_id = u.hashId(guid);
             var matched: ?[]const u8 = null;
             for (attachments) |attachment| if (u.eq(attachment.id, &attachment_id)) {
                 matched = attachment.id;
@@ -307,10 +305,8 @@ test "Foundation ranges locate image GUIDs independently of SQL order and preser
     const a = arena.allocator();
     var attachments: [2]t.Attachment = undefined;
     for ([_][]const u8{ "22222222-2222-2222-2222-222222222222", "11111111-1111-1111-1111-111111111111" }, 0..) |guid, i| {
-        var digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(guid, &digest, .{});
         attachments[i] = .{
-            .id = try a.dupe(u8, &std.fmt.bytesToHex(digest, .lower)),
+            .id = try a.dupe(u8, &u.hashId(guid)),
             .name = "fixture",
             .mime_type = "image/png",
             .bytes = "0",

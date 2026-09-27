@@ -82,13 +82,23 @@ pub fn decode(
         value.bubble = true;
         guid = target[3..];
     }
-    if (!t.uuid(guid)) {
+    if (!validGuid(guid)) {
         value.event.resolution = .malformed;
         return value;
     }
     value.target_guid = try a.dupe(u8, guid);
     if (!actor.is_self and (actor.address == null or actor.address.?.len == 0)) value.event.resolution = .unavailable;
     return value;
+}
+
+fn validGuid(guid: []const u8) bool {
+    if (guid.len != 36) return false;
+    for (guid, 0..) |ch, i| {
+        if (i == 8 or i == 13 or i == 18 or i == 23) {
+            if (ch != '-') return false;
+        } else if (!std.ascii.isHex(ch)) return false;
+    }
+    return true;
 }
 
 test "reaction mapping preserves emoji sequences and rejects replies, stickers, and malformed targets" {

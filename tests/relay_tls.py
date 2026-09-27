@@ -12,12 +12,11 @@ import subprocess
 import tempfile
 import time
 import unittest
-import uuid
 from unittest.mock import patch
 from cryptography import x509
 from cryptography.x509.oid import ExtendedKeyUsageOID
 from contextlib import closing
-from fixture import create, add_message
+from fixture import new_id, create, add_message
 from relay_fixture import Fixture, save_json
 from tls_admin import create_key, validate_extensions, restart
 from tls_support import Credentials, origin
@@ -279,7 +278,7 @@ class RelayTls(unittest.TestCase):
         self.assertNotIn(b'HTTP/1.', received); peer.close()
         self.tls.issue('brief-body', after=dt.datetime.now(dt.timezone.utc)+dt.timedelta(seconds=3))
         self.allow('client', 'brief-body'); self.stop(); self.start()
-        body = json.dumps({'request_id': str(uuid.uuid4()), 'server_epoch': self.get('/v1/sync')['server_epoch'],
+        body = json.dumps({'request_id': new_id(), 'server_epoch': self.get('/v1/sync')['server_epoch'],
             'target': {'recipient': {'address': 'synthetic@example.invalid', 'service': 'imessage'}}, 'text': 'never dispatch'}).encode()
         peer = self.tls.context('brief-body').wrap_socket(socket.create_connection(('127.0.0.1', self.port)), server_hostname='localhost')
         peer.settimeout(5)

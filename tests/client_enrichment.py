@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 
-from fixture import create, add_message
+from fixture import new_id, create, add_message
 from relay_fixture import Fixture
 from client_integration import wait
 
@@ -115,7 +115,7 @@ def main():
             assert (client/'media').stat().st_mode & 0o777 == 0o700
             offline=fetch(asset, online=False)
             assert offline['state']=='ready', offline
-            missing=dict(asset, id=str(uuid.uuid4()))
+            missing=dict(asset, id=new_id())
             assert fetch(missing, online=False)['state']=='offline'
             avatar_ref=wait(lambda:directory().get('avatar'))
             avatar=fetch(avatar_ref)

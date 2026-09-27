@@ -298,8 +298,8 @@ pub fn previews(
             );
             ref = try reference(a, j, id, .inline_image);
         } else if (item.attachment_guid) |guid| {
-            const attachment_id = try digest(a, guid);
-            for (attachments) |*attachment| if (u.eq(attachment.id, attachment_id)) {
+            const attachment_id = u.hashId(guid);
+            for (attachments) |*attachment| if (u.eq(attachment.id, &attachment_id)) {
                 ref = attachment.image;
                 if (ref != null) attachment.preview_artwork = true;
                 break;
@@ -885,9 +885,13 @@ fn sweepOrphans(self: *Assets, core: *Core) !void {
         const n = c.zr_media_scan_next(scan, &name, name.len);
         if (n <= 0) break;
         const key = name[0..@intCast(n)];
-        if (key.len < 75 or key[36] != '-' or key[73] != '-' or !t.uuid(key[0..36]) or !t.uuid(key[37..73]) or std.meta.stringToEnum(
+        const version_start = t.id_length + 1;
+        const variant_start = 2 * version_start;
+        if (key.len <= variant_start or key[version_start - 1] != '-' or
+            key[variant_start - 1] != '-' or !t.validId(key[0..t.id_length]) or
+            !t.validId(key[version_start .. variant_start - 1]) or std.meta.stringToEnum(
             Variant,
-            key[74..],
+            key[variant_start..],
         ) == null) continue;
         core.lock();
         const referenced = referenced: {

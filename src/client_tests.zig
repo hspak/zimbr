@@ -15,7 +15,7 @@ test {
     _ = @import("client.zig").display;
     _ = @import("client.zig").MessageSelection;
 }
-const epoch = "12345678-1234-1234-1234-123456789012";
+const epoch = "EjRWeBI0EjQSNBI0VniQEg";
 const message = "{\"id\":\"m1\",\"revision\":\"2\",\"conversation_id\":\"c1\",\"sender\":\"test@example.invalid\",\"direction\":\"incoming\",\"service\":\"imessage\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"kind\":\"text\",\"text\":\"Hello 👋\",\"decoding\":\"plain\",\"observed_status\":\"received\"}";
 
 test "confined client connections preserve WAL readers while another thread writes" {
@@ -168,7 +168,7 @@ test "self thread upgrade preserves both histories drafts unread and immutable s
     defer arena.deinit();
     const a = arena.allocator();
     const root = epoch;
-    const alias = "22345678-1234-1234-1234-123456789012";
+    const alias = "IjRWeBI0EjQSNBI0VniQEg";
     try s.beginSync(epoch, epoch ++ ":0");
     for ([_][]const u8{
         root,
@@ -266,7 +266,7 @@ test "You sends to a verified self address while other conversations keep their 
     defer arena.deinit();
     const ar = arena.allocator();
     const root = epoch;
-    const alias = "22345678-1234-1234-1234-123456789012";
+    const alias = "IjRWeBI0EjQSNBI0VniQEg";
     try s.beginSync(epoch, epoch ++ ":0");
     const older = t.Conversation{
         .id = root,
@@ -418,7 +418,7 @@ test "historical imports do not create unread markers; epoch reset preserves dra
         .target = .{ .recipient = .{ .address = "test@example.invalid", .service = "imessage" } },
         .text = "Hello",
     });
-    const changed = "22345678-1234-1234-1234-123456789012";
+    const changed = "IjRWeBI0EjQSNBI0VniQEg";
     try s.beginSync(changed, changed ++ ":0");
     try std.testing.expectEqualStrings("Draft 👩‍💻\nCafé", try s.draft(a, "c1"));
     try std.testing.expectEqual(
@@ -514,7 +514,7 @@ test "legacy history cache trims once per thread while preserving drafts sends a
         0,
     );
     const root = epoch;
-    const alias = "22345678-1234-1234-1234-123456789012";
+    const alias = "IjRWeBI0EjQSNBI0VniQEg";
     const input = t.SendInput{
         .request_id = epoch,
         .server_epoch = epoch,
@@ -816,8 +816,8 @@ test "outbox send times survive status updates, restart, and epoch reset" {
         (try reopened.snapshot(ar, "c1")).pending[0].sent_at,
     );
     try reopened.beginSync(
-        "22345678-1234-1234-1234-123456789012",
-        "22345678-1234-1234-1234-123456789012:0",
+        "IjRWeBI0EjQSNBI0VniQEg",
+        "IjRWeBI0EjQSNBI0VniQEg:0",
     );
     try std.testing.expectEqualStrings(
         sent_at,
@@ -970,8 +970,8 @@ test "provisional outgoing echoes replace uncertainty without confirming or disc
     request.candidate_message_id = echo.id;
     _ = try s.upsert(ar, "request", try u.json(ar, request));
     try s.beginSync(
-        "22345678-1234-1234-1234-123456789012",
-        "22345678-1234-1234-1234-123456789012:0",
+        "IjRWeBI0EjQSNBI0VniQEg",
+        "IjRWeBI0EjQSNBI0VniQEg:0",
     );
     _ = try s.upsert(ar, "message", try u.json(ar, echo));
     const reset = try s.snapshot(ar, "new:test@example.invalid");
@@ -1020,8 +1020,8 @@ test "indexed history keeps linked echoes ordered and deduplicated across conver
     }
     for ([_][]const u8{
         epoch,
-        "22345678-1234-1234-1234-123456789012",
-        "32345678-1234-1234-1234-123456789012",
+        "IjRWeBI0EjQSNBI0VniQEg",
+        "MjRWeBI0EjQSNBI0VniQEg",
     }, [_][]const u8{
         "m0",
         "m1",
@@ -1115,7 +1115,7 @@ test "incremental snapshots preserve versions through prepends, reordering, fail
     try std.testing.expectError(error.SyntaxError, SharedSnapshot.create(store, "c1", 5, reordered));
     try std.testing.expectEqualStrings("Hello 👋", reordered.snapshot.messages[2].text.?);
     // Identical IDs/revisions in a new epoch never reuse old message content.
-    const next_epoch = "22345678-1234-1234-1234-123456789012";
+    const next_epoch = "IjRWeBI0EjQSNBI0VniQEg";
     try store.beginSync(next_epoch, next_epoch ++ ":0");
     m.id = "m1";
     m.revision = "2";

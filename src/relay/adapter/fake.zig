@@ -52,7 +52,7 @@ pub fn dispatch(a: u.Allocator, path: [:0]const u8, route: Journal.Route, text: 
     const m = try db.prepare("INSERT INTO message(guid,date,is_from_me,service,text,is_sent,is_finished,is_delivered) VALUES(?,?,1,'iMessage',?,1,1,1)");
     defer m.close();
     try m.bind(&.{
-        .{ .text = try u.id(a) },
+        .{ .text = try sourceGuid(a) },
         .{ .int = (u.now() - 978307200000) * 1000000 },
         .{ .text = text },
     });
@@ -63,4 +63,19 @@ pub fn dispatch(a: u.Allocator, path: [:0]const u8, route: Journal.Route, text: 
     try join.bind(&.{ .{ .int = chat }, .{ .int = mid } });
     _ = try join.step();
     try db.exec("COMMIT");
+}
+
+fn sourceGuid(a: u.Allocator) u.IdError![]const u8 {
+    var bytes: [16]u8 = undefined;
+    if (u.c.zr_random(&bytes, bytes.len) != 0) return error.RandomUnavailable;
+    bytes[6] = (bytes[6] & 15) | 64;
+    bytes[8] = (bytes[8] & 63) | 128;
+    const hex = std.fmt.bytesToHex(bytes, .lower);
+    return std.fmt.allocPrint(a, "{s}-{s}-{s}-{s}-{s}", .{
+        hex[0..8],
+        hex[8..12],
+        hex[12..16],
+        hex[16..20],
+        hex[20..32],
+    });
 }

@@ -304,11 +304,8 @@ pub fn message(self: MessagesDb, a: u.Allocator, row: i64) MessageError!?SourceM
             break;
         }
         // Attachment IDs are hashes of private GUIDs, never file paths.
-        var digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(att.bytes(0), &digest, .{});
-        const hex = std.fmt.bytesToHex(digest, .lower);
         try attachments.append(a, .{
-            .id = try a.dupe(u8, &hex),
+            .id = try a.dupe(u8, &u.hashId(att.bytes(0))),
             .name = try att.text(a, 1),
             .mime_type = try att.text(a, 2),
             .bytes = try u.decimal(a, att.int(3)),

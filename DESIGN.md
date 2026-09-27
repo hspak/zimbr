@@ -248,9 +248,10 @@ never both. New recipients use an explicit international phone number or an
 iMessage email address. Avoid guessing a country code or resolving ambiguous
 contact names.
 
-The client generates a UUID request ID before submitting and persists it with
-the outgoing draft and expected server epoch. The relay rejects a mismatched
-epoch before accepting a send, then records the request and its normalized payload
+The client generates a UUID request ID, encodes its 16 bytes as 22 unpadded
+Base64url characters, and persists it with the outgoing draft and expected
+server epoch before submitting. The relay rejects a mismatched
+epoch before accepting a send, then records the request and its validated payload
 before dispatching. Reusing the same ID and payload returns the existing request;
 reusing the ID with a different payload returns a conflict.
 
@@ -472,8 +473,11 @@ The shared contract should define:
 | Event | Cursor, sequence, type, full updated record, origin |
 | Status | API version, server epoch, adapter readiness, capabilities, degraded reasons |
 
-Represent public IDs as opaque strings. Encode 64-bit sequences as decimal
-strings in JSON so future JavaScript clients do not lose precision. Normalize
+Represent public IDs as opaque, case-sensitive strings. Generated UUIDs use
+canonical unpadded Base64url (22 characters); attachment IDs encode the full
+SHA-256 of the private Apple GUID with the same alphabet (43 characters).
+Encode 64-bit sequences as decimal strings in JSON so future JavaScript clients
+do not lose precision. Normalize
 timestamps to UTC strings, retain source precision internally, and use event
 sequences rather than wall clocks for synchronization.
 
@@ -498,10 +502,10 @@ A proposed send body is:
 
 ```json
 {
-  "request_id": "a-client-generated-uuid",
-  "server_epoch": "the-epoch-observed-during-synchronization",
+  "request_id": "ABEiM0RVRneImaq7zN3u_w",
+  "server_epoch": "EjRWeBI0EjQSNBI0VniQEg",
   "target": {
-    "conversation_id": "an-opaque-conversation-id"
+    "conversation_id": "IjRWeBI0EjQSNBI0VniQEg"
   },
   "text": "On my way."
 }

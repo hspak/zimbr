@@ -278,7 +278,7 @@ pub fn setHidden(s: Store, key: []const u8, hidden: bool) SetHiddenError!void {
     );
 }
 pub fn beginSync(s: Store, epoch: []const u8, cursor: []const u8) BeginSyncError!void {
-    if (!t.uuid(epoch)) return error.InvalidEpoch;
+    if (!t.validId(epoch)) return error.InvalidEpoch;
     _ = try t.parseCursor(cursor, epoch);
     try s.db.exec("BEGIN IMMEDIATE");
     errdefer s.db.exec("ROLLBACK") catch {};
@@ -360,7 +360,7 @@ fn writeRecord(s: Store, a: u.Allocator, record: Incoming) UpsertError!bool {
             id = v.id;
             rev = v.revision;
             sort = v.last_activity orelse "";
-            chat = if (v.is_self and v.thread_id != null and t.uuid(v.thread_id.?)) v.thread_id.? else v.id;
+            chat = if (v.is_self and v.thread_id != null and t.validId(v.thread_id.?)) v.thread_id.? else v.id;
         },
         .message => |decoded| {
             const v = decoded.value;
@@ -1001,7 +1001,7 @@ test "unknown sends expire at five minutes without dropping other states or retu
     const ar = arena.allocator();
     const store = try Store.open(":memory:");
     defer store.close();
-    const epoch = "12345678-1234-1234-1234-123456789012";
+    const epoch = "EjRWeBI0EjQSNBI0VniQEg";
     try store.beginSync(epoch, epoch ++ ":0");
     const states = [_][]const u8{
         "unknown",
@@ -1019,7 +1019,9 @@ test "unknown sends expire at five minutes without dropping other states or retu
         .service = "imessage",
     } };
     for (states, 0..) |state, i| {
-        const id = try std.fmt.allocPrint(ar, "00000000-0000-0000-0000-{d:0>12}", .{i});
+        var bytes: [16]u8 = undefined;
+        std.mem.writeInt(u128, &bytes, i, .big);
+        const id = try ar.dupe(u8, &u.encodeId(bytes));
         try store.persistSend(ar, "chat", .{
             .request_id = id,
             .server_epoch = epoch,
@@ -1038,7 +1040,7 @@ test "unknown sends expire at five minutes without dropping other states or retu
     try testing.expect(try store.expireUnknown(deadline_ms));
     const boundary = try store.snapshot(ar, "chat");
     try testing.expectEqual(@as(usize, 8), boundary.pending.len);
-    try testing.expectEqualStrings("00000000-0000-0000-0000-000000000001", boundary.pending[0].input.request_id);
+    try testing.expectEqualStrings("AAAAAAAAAAAAAAAAAAAAAQ", boundary.pending[0].input.request_id);
     try testing.expect(!try store.expireUnknown(deadline_ms));
     try testing.expect(try store.expireUnknown(deadline_ms + 1));
     const remaining = try store.snapshot(ar, "chat");
@@ -1046,7 +1048,7 @@ test "unknown sends expire at five minutes without dropping other states or retu
     for (remaining.pending, states[2..]) |pending, state| try testing.expectEqualStrings(state, pending.state);
 
     var late = t.SendRequest{
-        .request_id = "00000000-0000-0000-0000-000000000000",
+        .request_id = "AAAAAAAAAAAAAAAAAAAAAA",
         .server_epoch = epoch,
         .revision = "1",
         .target = target,

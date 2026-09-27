@@ -167,8 +167,8 @@ test "notification avatars belong to the exact message sender even in titled gro
         .address = "sender@example.invalid",
         .match_state = .matched,
         .avatar = .{
-            .id = "11111111-1111-1111-1111-111111111111",
-            .version = "22222222-2222-2222-2222-222222222222",
+            .id = "EREREREREREREREREREREQ",
+            .version = "IiIiIiIiIiIiIiIiIiIiIg",
             .variant = .avatar,
             .availability = .ready,
         },

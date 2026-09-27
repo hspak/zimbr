@@ -11,14 +11,15 @@ source layout. Keep account-specific acceptance records outside the repository.
 
 ## Directory and transport contract
 
-`Identity.id` is an opaque UUID, unique by service plus the exact observed address
-within one relay epoch. Revisions are decimal strings from the global journal
+`Identity.id` is an opaque UUID encoded as 22 unpadded Base64url characters,
+unique by service plus the exact observed address within one relay epoch.
+Revisions are decimal strings from the global journal
 sequence. `display_name` and `avatar` are nullable. Match states are `pending`,
 `matched`, `unmatched`, `ambiguous`, and `unavailable`; freshness is `fresh` or
 `stale`. Unmatched/ambiguous/unavailable upserts clear presentation values. Source
 contact IDs are confined to `contact_mappings`, never identities or events.
 
-`GET /v1/identities?before=UUID&limit=N` returns `identities` and `next`, with
+`GET /v1/identities?before=ID&limit=N` returns `identities` and `next`, with
 descending immutable-ID keysets, at most 200 records, and a 32 KiB record budget.
 Capture `/v1/sync` before the bootstrap pages, then replay after that cursor.
 `GET /v1/events?...&extensions=identity-v1` includes identity events and returns
@@ -110,6 +111,10 @@ uses those layouts.
 ## Image and overflow contract
 
 `GET /v1/assets/:id/:version/:variant` uses the existing mTLS/device authorization.
+Asset IDs and versions are relay-generated UUIDs encoded as 22 unpadded
+Base64url characters. Attachment metadata IDs encode the full SHA-256 of
+Apple's source GUID as 43 unpadded Base64url characters. These public IDs are
+case-sensitive; Apple's source GUID spelling remains unchanged.
 Unknown IDs return 404, retired versions 410, unavailable/pending images structured
 409, and a saturated worker/response lane 503 with a retry hint. Ready responses
 carry actual JPEG/PNG MIME/length, a quoted SHA-256 ETag, private immutable caching,

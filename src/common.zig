@@ -9,6 +9,8 @@ pub const c = @cImport({
 
 pub const IdError = Allocator.Error || error{RandomUnavailable};
 pub const TimestampError = Allocator.Error || error{InvalidTimestamp};
+pub const id_length = std.base64.url_safe_no_pad.Encoder.calcSize(16);
+pub const hash_id_length = std.base64.url_safe_no_pad.Encoder.calcSize(32);
 
 pub fn json(a: Allocator, v: anytype) Allocator.Error![]const u8 {
     return std.json.Stringify.valueAlloc(a, v, .{});
@@ -18,14 +20,21 @@ pub fn id(a: Allocator) IdError![]const u8 {
     if (c.zr_random(&b, b.len) != 0) return error.RandomUnavailable;
     b[6] = (b[6] & 15) | 64;
     b[8] = (b[8] & 63) | 128;
-    const h = std.fmt.bytesToHex(b, .lower);
-    return std.fmt.allocPrint(a, "{s}-{s}-{s}-{s}-{s}", .{
-        h[0..8],
-        h[8..12],
-        h[12..16],
-        h[16..20],
-        h[20..32],
-    });
+    return a.dupe(u8, &encodeId(b));
+}
+/// Encode all UUID bytes as canonical, case-sensitive, unpadded Base64url.
+pub fn encodeId(bytes: [16]u8) [id_length]u8 {
+    var result: [id_length]u8 = undefined;
+    _ = std.base64.url_safe_no_pad.Encoder.encode(&result, &bytes);
+    return result;
+}
+/// Hash an opaque source identifier and encode the complete SHA-256 digest.
+pub fn hashId(bytes: []const u8) [hash_id_length]u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    var result: [hash_id_length]u8 = undefined;
+    _ = std.base64.url_safe_no_pad.Encoder.encode(&result, &digest);
+    return result;
 }
 pub fn decimal(a: Allocator, n: i64) Allocator.Error![]const u8 {
     return std.fmt.allocPrint(a, "{d}", .{n});
@@ -41,4 +50,24 @@ pub fn now() i64 {
 }
 pub fn eq(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
+}
+
+test "compact IDs preserve UUID bytes and the complete source hash" {
+    var bytes: [16]u8 = undefined;
+    std.mem.writeInt(u128, &bytes, 0x00112233445566778899aabbccddeeff, .big);
+    try std.testing.expectEqualStrings("ABEiM0RVZneImaq7zN3u_w", &encodeId(bytes));
+    try std.testing.expectEqualStrings(
+        "ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0",
+        &hashId("abc"),
+    );
+}
+
+test "generated compact IDs retain UUID version and variant bits" {
+    const encoded = try id(std.testing.allocator);
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectEqual(@as(usize, 22), encoded.len);
+    var bytes: [16]u8 = undefined;
+    try std.base64.url_safe_no_pad.Decoder.decode(&bytes, encoded);
+    try std.testing.expectEqual(@as(u8, 4), bytes[6] >> 4);
+    try std.testing.expectEqual(@as(u8, 2), bytes[8] >> 6);
 }

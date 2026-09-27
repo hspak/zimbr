@@ -255,7 +255,7 @@ pub fn handle(self: *Server, a: u.Allocator, req: *Request, peer: *Tls.c.ZrTls) 
             "/enrichment",
         )) {
             const id = path[13 .. path.len - 11];
-            if (!t.uuid(id)) return error.InvalidRequest;
+            if (!t.validId(id)) return error.InvalidRequest;
             const name = (try param(a, query, "section")) orelse return error.InvalidRequest;
             const section = std.meta.stringToEnum(enrichment.Section, name) orelse return error.InvalidRequest;
             const revision = (try param(a, query, "revision")) orelse return error.InvalidRequest;
@@ -269,7 +269,7 @@ pub fn handle(self: *Server, a: u.Allocator, req: *Request, peer: *Tls.c.ZrTls) 
             "/messages",
         )) {
             const id = path[18 .. path.len - 9];
-            if (!t.uuid(id)) return error.InvalidRequest;
+            if (!t.validId(id)) return error.InvalidRequest;
             if (try j.getRecord(a, .conversation, id) == null) return error.NotFound;
             const text_only = u.eq((try param(a, query, "content")) orelse "", "text");
             for (try j.threadMembers(a, id)) |member| {
@@ -295,7 +295,7 @@ pub fn handle(self: *Server, a: u.Allocator, req: *Request, peer: *Tls.c.ZrTls) 
             response = try u.json(a, .{ .messages = p.records, .next = p.next });
         } else if (std.mem.startsWith(u8, path, "/v1/messages/")) {
             const id = path[13..];
-            if (!t.uuid(id)) return error.InvalidRequest;
+            if (!t.validId(id)) return error.InvalidRequest;
             const message = try j.db.prepare("SELECT record,source FROM messages WHERE id=?");
             defer message.close();
             try message.bind(&.{.{ .text = id }});
@@ -312,7 +312,7 @@ pub fn handle(self: *Server, a: u.Allocator, req: *Request, peer: *Tls.c.ZrTls) 
             );
         } else if (std.mem.startsWith(u8, path, "/v1/send-requests/")) {
             const id = path[18..];
-            if (!t.uuid(id)) return error.InvalidRequest;
+            if (!t.validId(id)) return error.InvalidRequest;
             response = (try j.getRecord(a, .request, id)) orelse return error.NotFound;
         } else return error.NotFound;
     }
@@ -330,7 +330,7 @@ fn asset(
     const id = components.next() orelse return error.InvalidRequest;
     const version = components.next() orelse return error.InvalidRequest;
     const variant_name = components.next() orelse return error.InvalidRequest;
-    if (!t.uuid(id) or !t.uuid(version) or components.next() != null) return error.InvalidRequest;
+    if (!t.validId(id) or !t.validId(version) or components.next() != null) return error.InvalidRequest;
     const variant = std.meta.stringToEnum(Assets.Variant, variant_name) orelse return error.InvalidRequest;
     var if_none_match: ?[]const u8 = null;
     var headers = req.iterateHeaders();

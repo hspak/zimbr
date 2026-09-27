@@ -1,4 +1,5 @@
 """Synthetic Messages schema; never opens a user's real database."""
+import base64
 import sqlite3
 import time
 import uuid
@@ -20,6 +21,15 @@ INSERT INTO chat_handle_join VALUES(1,1),(2,1),(2,2),(3,3);
 
 def apple_ns():
     return int((time.time()-978307200)*1_000_000_000)
+
+def new_id():
+    return base64.urlsafe_b64encode(uuid.uuid4().bytes).rstrip(b'=').decode('ascii')
+
+def assert_id(value, byte_length=16):
+    assert len(value) == (byte_length * 8 + 5) // 6
+    raw = base64.b64decode(value + '=' * (-len(value) % 4), altchars=b'-_', validate=True)
+    assert len(raw) == byte_length
+    assert base64.urlsafe_b64encode(raw).rstrip(b'=').decode('ascii') == value
 
 def add_message(db, text='hello', chat=1, date=None, **fields):
     values = dict(guid=str(uuid.uuid4()), date=apple_ns() if date is None else date, text=text)

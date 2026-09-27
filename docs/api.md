@@ -27,16 +27,21 @@ for enrollment and an authenticated status example.
 
 ## Sending messages
 
-Send bodies follow the [design specification](../DESIGN.md): UUID `request_id`,
+Send bodies follow the [design specification](../DESIGN.md): Base64url UUID `request_id`,
 expected `server_epoch`, `text`, and exactly one target: `conversation_id` or
 `recipient: {address, service: "imessage"}`. Use an international phone number or
 unambiguous email. The adapter requires one enabled iMessage account and checks
 existing chats against that account. It never chooses SMS/RCS or creates a group.
-Unknown optional JSON fields are accepted. UUID casing is normalized.
+Unknown optional JSON fields are accepted. IDs are case-sensitive and must use
+canonical unpadded Base64url; hyphenated UUIDs and nonzero pad bits are rejected.
 
 ## Pagination and synchronization
 
-Public IDs are opaque; revisions and event sequences are decimal strings.
+Public IDs are opaque. Generated UUIDs (including request IDs, epochs, identity
+IDs, asset IDs, and asset versions) encode their 16 bytes as 22 Base64url
+characters. Attachment IDs encode the full SHA-256 of the private source GUID
+as 43 Base64url characters. Both encodings omit `=` padding and preserve case.
+Revisions and event sequences are decimal strings.
 Timestamps are UTC with source nanosecond precision. Conversation pages descend
 by immutable relay ID; history pages descend by `(source timestamp, relay ID)`.
 Treat `next` and event cursors as opaque strings and URL-encode them. Fetch a sync

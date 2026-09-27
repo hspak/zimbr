@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Explicit real-account acceptance checks. Sends only with --confirm-send."""
 import argparse
+import base64
 import http.client
 import json
 import os
@@ -194,7 +195,7 @@ def main():
     target={'conversation_id':args.conversation} if args.conversation else {'recipient':{'address':args.recipient,'service':'imessage'}}
     stayed_locked=bool(args.wait_for_lock)
     for index in range(1 if args.conversation else 2):
-        identity=str(uuid.uuid4())
+        identity=base64.urlsafe_b64encode(uuid.uuid4().bytes).rstrip(b'=').decode('ascii')
         text='Zimbr relay acceptance '+str(index+1)+' '+identity+'\nMultiline and emoji: 👩‍💻 e\u0301'
         payload={'request_id':identity,'server_epoch':baseline['server_epoch'],'target':target,'text':text}
         item={'request_id':identity,'state':'submission_unresolved','unicode_preserved':False}

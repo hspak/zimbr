@@ -10,9 +10,8 @@ import subprocess
 import sys
 import tempfile
 import time
-import uuid
 from contextlib import contextmanager
-from fixture import create, add_message
+from fixture import new_id, assert_id, create, add_message
 from relay_fixture import Fixture
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -57,11 +56,12 @@ def main():
         def snapshot():return request('/v1/sync')[1]
         def ready():return request('/v1/status')[1].get('capabilities',{}).get('send_direct')
         def send(text, target=None):
-            return {'request_id':str(uuid.uuid4()),'server_epoch':snapshot()['server_epoch'],'target':target or {'recipient':{'address':'alice@example.invalid','service':'imessage'}},'text':text}
+            return {'request_id':new_id(),'server_epoch':snapshot()['server_epoch'],'target':target or {'recipient':{'address':'alice@example.invalid','service':'imessage'}},'text':text}
         def sql(statement,args=()):
             with database(data/'relay.db') as db:return db.execute(statement,args).fetchall()
         try:
             proc=start();wait_for(ready)
+            assert_id(snapshot()['server_epoch'])
             # A pooled HTTPS connection retains the authenticated device identity.
             persistent=tls.connection()
             persistent.request('GET','/v1/status',headers={})
@@ -91,9 +91,11 @@ def main():
                 if not page['next']:break
                 page=request('/v1/conversations?limit=2&before='+page['next'])[1]
             assert len(ids)==len(set(ids))==4
+            for ident in ids: assert_id(ident)
             cid=sql("SELECT id FROM conversations WHERE route='iMessage;-;alice@example.invalid'")[0][0]
             page=request('/v1/conversations/'+cid+'/messages?limit=10')[1]
             assert len(page['messages'])==10 and page['next']
+            for message in page['messages']: assert_id(message['id'])
             kinds={json.loads(r[0])['kind'] for r in sql('SELECT record FROM messages')}
             assert {'text','unsupported','attachment','reaction','system'}<=kinds
             assert all('source' not in m and 'date_ns' not in m for m in page['messages'])
@@ -156,15 +158,23 @@ def main():
             assert request('/v1/messages',lost_result)[0]==200
             assert source_count(lost_result['text'])==1
             v=send('Queued Unicode\n👩‍💻 e\u0301')
+            v['request_id']='ABEiM0RVRneImaq7zN3u_w'
             assert request('/v1/messages',v)[0]==202
             assert request('/v1/messages',v)[0]==200
-            assert request('/v1/messages',{**v,'request_id':v['request_id'].upper(),'server_epoch':v['server_epoch'].upper()})[0]==200
+            # Base64url case distinguishes identities; exact retries still deduplicate.
+            case_variant={**v,'request_id':'a'+v['request_id'][1:],'text':'Distinct case-sensitive request'}
+            assert request('/v1/messages',case_variant)[0]==202
+            assert request('/v1/messages',case_variant)[0]==200
+            assert request('/v1/send-requests/'+case_variant['request_id'])[1]['request_id']==case_variant['request_id']
+            for invalid in ('00112233-4455-4677-8899-aabbccddeeff', v['request_id']+'==', v['request_id'][:-1]+'x', v['request_id'].replace('_','/')):
+                assert request('/v1/messages',{**v,'request_id':invalid})[0]==400
             assert request('/v1/messages',{**v,'text':'different'})[0]==409
             assert request('/v1/send-requests/'+v['request_id'])[0]==200
+            assert request('/v1/send-requests/'+v['request_id'])[1]['request_id']==v['request_id']
             wait_for(lambda:sql("SELECT count(*) FROM messages WHERE text=?",(v['text'],))[0][0]==1)
             bad=send('no SMS',{'recipient':{'address':'+14155550123','service':'sms'}})
             assert request('/v1/messages',bad)[0]==400
-            mismatch={**send('wrong epoch'),'server_epoch':str(uuid.uuid4())}
+            mismatch={**send('wrong epoch'),'server_epoch':new_id()}
             assert request('/v1/messages',mismatch)[0]==409
             new_direct=send('A previously unseen recipient',{'recipient':{'address':'new@example.invalid','service':'imessage'}})
             assert request('/v1/messages',new_direct)[0]==202

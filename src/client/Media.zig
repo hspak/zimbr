@@ -14,7 +14,7 @@ const asset_path_capacity = capacity: {
     var variant_length: usize = 0;
     for (std.meta.fieldNames(@FieldType(t.AssetRef, "variant"))) |name|
         variant_length = @max(variant_length, name.len);
-    break :capacity "/v1/assets///".len + 2 * t.uuid_length + variant_length + 1;
+    break :capacity "/v1/assets///".len + 2 * t.id_length + variant_length + 1;
 };
 pub const disk_budget = 512 * 1024 * 1024;
 pub const texture_budget = 64 * 1024 * 1024;
@@ -60,8 +60,8 @@ pub const Result = struct {
     }
 };
 const Request = struct {
-    id: [t.uuid_length]u8,
-    version: [t.uuid_length]u8,
+    id: [t.id_length]u8,
+    version: [t.id_length]u8,
     variant: @FieldType(t.AssetRef, "variant"),
     retired: bool,
     expected_bytes: usize,
@@ -198,12 +198,12 @@ pub fn key(s: *Media, asset: t.AssetRef) [64:0]u8 {
 pub const RequestError = u.Allocator.Error || error{InvalidAssetReference};
 
 /// Copy the download fields into the bounded queue. Asset IDs and versions must
-/// be protocol UUIDs; the caller retains ownership of all asset strings.
+/// be canonical Base64url UUIDs; the caller retains ownership of all asset strings.
 pub fn request(s: *Media, asset: t.AssetRef) RequestError!void {
     s.mutex.lockUncancelable(s.io);
     defer s.mutex.unlock(s.io);
     if (s.epoch.len == 0 or (!s.avatars and asset.variant == .avatar)) return;
-    if (!t.uuid(asset.id) or !t.uuid(asset.version)) return error.InvalidAssetReference;
+    if (!t.validId(asset.id) or !t.validId(asset.version)) return error.InvalidAssetReference;
     const cache_key = s.key(asset);
     for (s.active) |active| if (active) |r| if (r.generation == s.generation and u.eq(
         &r.key,
@@ -221,8 +221,8 @@ pub fn request(s: *Media, asset: t.AssetRef) RequestError!void {
     const r = try a.create(Request);
     errdefer a.destroy(r);
     r.* = .{
-        .id = asset.id[0..t.uuid_length].*,
-        .version = asset.version[0..t.uuid_length].*,
+        .id = asset.id[0..t.id_length].*,
+        .version = asset.version[0..t.id_length].*,
         .variant = asset.variant,
         .retired = asset.availability == .retired,
         .expected_bytes = if (asset.bytes) |bytes| std.fmt.parseInt(usize, bytes, 10) catch 0 else 0,
@@ -602,8 +602,8 @@ test "queued media owns only validated download fields and survives caller reuse
     var media = Media{ .io = std.testing.io, .config = .{ .data = "" } };
     defer media.shutdown();
     _ = try media.context("epoch", "chat", 0, false, true);
-    var id = "12345678-1234-1234-1234-123456789012".*;
-    var version = "abcdefab-abcd-abcd-abcd-abcdefabcdef".*;
+    var id = "EjRWeBI0EjQSNBI0VniQEg".*;
+    var version = "q83vq6vNq82rzavN76vN7w".*;
     var asset = t.AssetRef{
         .id = &id,
         .version = &version,
@@ -617,8 +617,8 @@ test "queued media owns only validated download fields and survives caller reuse
     @memset(&id, 'x');
     @memset(&version, 'y');
     const queued = media.queue.items[0];
-    try std.testing.expectEqualStrings("12345678-1234-1234-1234-123456789012", &queued.id);
-    try std.testing.expectEqualStrings("abcdefab-abcd-abcd-abcd-abcdefabcdef", &queued.version);
+    try std.testing.expectEqualStrings("EjRWeBI0EjQSNBI0VniQEg", &queued.id);
+    try std.testing.expectEqualStrings("q83vq6vNq82rzavN76vN7w", &queued.version);
     try std.testing.expectEqual(@as(usize, 12345), queued.expected_bytes);
     try std.testing.expect(queued.retired);
     try std.testing.expectError(error.InvalidAssetReference, media.request(asset));

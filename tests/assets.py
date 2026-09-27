@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real asset/journal/HTTP service with synthetic sources and a fake converter."""
 from contextlib import closing
+import base64
 import hashlib
 import http.client
 import json
@@ -11,10 +12,9 @@ import sqlite3
 import subprocess
 import tempfile
 import time
-import uuid
 from urllib.parse import urlencode
 
-from fixture import create, add_message
+from fixture import new_id, assert_id, create, add_message
 from integration import database, wait_for
 from relay_fixture import Fixture
 
@@ -102,6 +102,14 @@ def main():
                 params['after'] = page['next']
             assert len(all_items) == 40
             assert [item['name'] for item in all_items] == [f'photo-{i}.heic' for i in range(40)]
+            for i, item in enumerate(all_items):
+                assert_id(item['id'], 32)
+                expected = base64.urlsafe_b64encode(hashlib.sha256(f'private-attachment-{i}'.encode()).digest()).rstrip(b'=').decode('ascii')
+                assert item['id'] == expected
+                for variant in ('image', 'viewer'):
+                    assert_id(item[variant]['id'])
+                    assert_id(item[variant]['version'])
+            assert all(part['attachment_id'] in {item['id'] for item in all_items} for part in message['parts'] if part['kind'] == 'attachment')
             ref = message['attachments'][0]['image']
             first_status, first_headers, first = request(path(ref))
             assert first_status == 409 and first['retryable']
@@ -114,8 +122,8 @@ def main():
             assert headers['cache-control'].startswith('private')
             assert headers['etag'] == '"' + hashlib.sha256(image).hexdigest() + '"'
             assert request(path(ref), {'If-None-Match': headers['etag']})[0] == 304
-            assert request('/v1/assets/' + str(uuid.uuid4()) + '/' + ref['version'] + '/inline_image')[0] == 404
-            assert request('/v1/assets/' + ref['id'] + '/' + str(uuid.uuid4()) + '/inline_image')[0] == 410
+            assert request('/v1/assets/' + new_id() + '/' + ref['version'] + '/inline_image')[0] == 404
+            assert request('/v1/assets/' + ref['id'] + '/' + new_id() + '/inline_image')[0] == 410
             assert request('/v1/assets/../../etc/passwd')[0] == 400
             try:
                 request(path(ref), auth=False)
@@ -206,7 +214,7 @@ def main():
                 started = time.monotonic()
                 code, _, sync = request('/v1/sync'); assert code == 200
                 assert request('/v1/conversations')[0] == 200
-                outgoing = dict(request_id=str(uuid.uuid4()), server_epoch=sync['server_epoch'], target={'recipient': {'address': 'alice@example.invalid', 'service': 'imessage'}}, text='Send during slow image transfer')
+                outgoing = dict(request_id=new_id(), server_epoch=sync['server_epoch'], target={'recipient': {'address': 'alice@example.invalid', 'service': 'imessage'}}, text='Send during slow image transfer')
                 assert request('/v1/messages', body=outgoing)[0] == 202
                 with closing(tls.connection(timeout=5)) as events:
                     events.request('GET', '/v1/events?after=' + sync['cursor'])
@@ -222,7 +230,7 @@ def main():
                 for conn, response in slow: response.close(); conn.close()
             # Managed orphan derivatives from a crash/reset are swept, while
             # current referenced files survive the same pass.
-            orphan = data / 'assets' / f'{uuid.uuid4()}-{uuid.uuid4()}-inline_image'
+            orphan = data / 'assets' / '---------------------w-_____________________w-inline_image'
             orphan.write_bytes(b'orphan fixture')
             wait_for(lambda: not orphan.exists(), timeout=15)
             epoch = request('/v1/sync')[2]['server_epoch']

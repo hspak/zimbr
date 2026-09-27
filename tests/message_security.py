@@ -7,9 +7,8 @@ import socket
 import sqlite3
 import subprocess
 import tempfile
-import uuid
 
-from fixture import create, add_message
+from fixture import new_id, create, add_message
 from integration import database, wait_for
 from relay_fixture import Fixture
 
@@ -70,7 +69,7 @@ def main():
                 assert value['enrichment']['state'] == 'oversized'
                 assert value['attachments'] == [] and value['text'].startswith('Caption survives')
                 epoch = request('/v1/sync')[1]['server_epoch']
-                send = dict(request_id=str(uuid.uuid4()), server_epoch=epoch,
+                send = dict(request_id=new_id(), server_epoch=epoch,
                             target=dict(recipient=dict(address='alice@example.invalid', service='imessage')),
                             text='Accepted Unicode 👩‍💻\nMultiline')
                 encoded = json.dumps(send).encode()

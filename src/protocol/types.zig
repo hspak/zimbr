@@ -6,7 +6,7 @@ pub const max_decode = 1024 * 1024;
 pub const max_page = 200;
 pub const default_page = 50;
 pub const api_version = "1";
-pub const uuid_length = 36;
+pub const id_length = u.id_length;
 pub const max_enrichment = 32 * 1024;
 pub const max_metadata_page = 32 * 1024;
 pub const max_history_bytes = 8 * 1024 * 1024;
@@ -255,19 +255,12 @@ pub const ValidateError = error{
     UnsupportedTarget,
 };
 pub const ParseCursorError = error{ InvalidRequest, ResyncRequired };
-pub const NormalizeError = u.Allocator.Error || error{
-    InvalidRequest,
-    TextTooLarge,
-    UnsupportedTarget,
-};
 
-pub fn uuid(s: []const u8) bool {
-    if (s.len != uuid_length) return false;
-    for (s, 0..) |ch, i| {
-        if (i == 8 or i == 13 or i == 18 or i == 23) {
-            if (ch != '-') return false;
-        } else if (!std.ascii.isHex(ch)) return false;
-    }
+/// Accept only canonical Base64url encodings of 16-byte IDs, including zero pad bits.
+pub fn validId(s: []const u8) bool {
+    if (s.len != id_length) return false;
+    var bytes: [16]u8 = undefined;
+    std.base64.url_safe_no_pad.Decoder.decode(&bytes, s) catch return false;
     return true;
 }
 pub fn validAddress(s: []const u8) bool {
@@ -284,7 +277,7 @@ pub fn validAddress(s: []const u8) bool {
     return true;
 }
 pub fn validate(v: SendInput) ValidateError!void {
-    if (!uuid(v.request_id) or !uuid(v.server_epoch)) return error.InvalidRequest;
+    if (!validId(v.request_id) or !validId(v.server_epoch)) return error.InvalidRequest;
     if (v.text.len > max_text) return error.TextTooLarge;
     if (v.text.len == 0 or !std.unicode.utf8ValidateSlice(v.text) or std.mem.indexOfScalar(
         u8,
@@ -293,7 +286,7 @@ pub fn validate(v: SendInput) ValidateError!void {
     ) != null) return error.InvalidRequest;
     if ((v.target.conversation_id != null) == (v.target.recipient != null)) return error.InvalidRequest;
     if (v.target.conversation_id) |id| {
-        if (!uuid(id)) return error.InvalidRequest;
+        if (!validId(id)) return error.InvalidRequest;
     }
     if (v.target.recipient) |r| {
         if (!u.eq(r.service, "imessage")) return error.UnsupportedTarget;
@@ -304,8 +297,9 @@ pub fn cursor(a: u.Allocator, epoch: []const u8, seq: i64) u.Allocator.Error![]c
     return std.fmt.allocPrint(a, "{s}:{d}", .{ epoch, seq });
 }
 pub fn parseCursor(s: []const u8, epoch: []const u8) ParseCursorError!i64 {
-    if (s.len < 38 or s[36] != ':' or !u.eq(s[0..36], epoch)) return error.ResyncRequired;
-    const seq = std.fmt.parseInt(i64, s[37..], 10) catch return error.InvalidRequest;
+    if (s.len < id_length + 2 or s[id_length] != ':' or
+        !validId(s[0..id_length]) or !u.eq(s[0..id_length], epoch)) return error.ResyncRequired;
+    const seq = std.fmt.parseInt(i64, s[id_length + 1 ..], 10) catch return error.InvalidRequest;
     if (seq < 0) return error.InvalidRequest;
     return seq;
 }
@@ -317,24 +311,29 @@ test "send input validation never guesses a service or address" {
     try std.testing.expect(!validAddress("+00012345678"));
 }
 test "cursor binds sequence to epoch without floating point" {
-    const e = "12345678-1234-1234-1234-123456789012";
+    const e = "EjRWeBI0EjQSNBI0VniQEg";
     try std.testing.expectEqual(
         @as(i64, 9007199254740993),
         try parseCursor(e ++ ":9007199254740993", e),
     );
     try std.testing.expectError(error.ResyncRequired, parseCursor(e ++ ":1", "other"));
+    try std.testing.expectError(error.ResyncRequired, parseCursor(e ++ ":1", "ejRWeBI0EjQSNBI0VniQEg"));
+    try std.testing.expectError(error.InvalidRequest, parseCursor(e ++ ":-1", e));
 }
 
-/// UUID spelling is normalized before idempotency lookup; changing letter case
-/// cannot turn the same client identity into another dispatch.
-pub fn normalize(a: u.Allocator, value: SendInput) NormalizeError!SendInput {
-    try validate(value);
-    var v = value;
-    v.request_id = try std.ascii.allocLowerString(a, v.request_id);
-    v.server_epoch = try std.ascii.allocLowerString(a, v.server_epoch);
-    if (v.target.conversation_id) |id| v.target.conversation_id = try std.ascii.allocLowerString(
-        a,
-        id,
-    );
-    return v;
+test "public IDs require canonical unpadded Base64url" {
+    try std.testing.expect(validId("ABEiM0RVZneImaq7zN3u_w"));
+    try std.testing.expect(validId("aBEiM0RVZneImaq7zN3u_w"));
+    try std.testing.expect(validId("---------------------w"));
+    for ([_][]const u8{
+        "00112233-4455-6677-8899-aabbccddeeff",
+        "ABEiM0RVZneImaq7zN3u_w==",
+        "ABEiM0RVZneImaq7zN3u_w=",
+        "ABEiM0RVZneImaq7zN3u_wA",
+        "ABEiM0RVZneImaq7zN3u_",
+        "ABEiM0RVZneImaq7zN3u_x",
+        "ABEiM0RVZneImaq7zN3u/w",
+        "ABEiM0RVZneImaq7zN3u+w",
+        "ABEiM0RVZneImaq7zN3u w",
+    }) |invalid| try std.testing.expect(!validId(invalid));
 }

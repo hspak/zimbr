@@ -11,8 +11,8 @@ import struct
 import tempfile
 import threading
 import time
-import uuid
 import zlib
+from fixture import new_id
 from client_tls import Handler, EPOCH
 from tls_fixture import PKI, TLSServer
 from performance import Probe
@@ -81,8 +81,8 @@ def main():
         log=open(root/'client.log','w+')
         probe=Probe([str(BIN),'--control','--data-dir',str(root/'client'),*pki.client_args(server.server_port)],log)
         def asset(mode='good'):
-            ident=str(uuid.uuid4()); behavior[ident]=mode
-            return dict(id=ident,version=str(uuid.uuid4()),variant='inline_image',availability='ready')
+            ident=new_id(); behavior[ident]=mode
+            return dict(id=ident,version=new_id(),variant='inline_image',availability='ready')
         def fetch(ref):
             probe.command(kind='media',asset=ref)
             probe.until(lambda v:'media' in v, timeout=10)
@@ -118,7 +118,7 @@ def main():
             assert current['state']=='ready' and current['generation']==2,current
             assert counts.get(slow[2]['id'],0)==0
             # Namespace invalidation prevents cached bytes from crossing epochs.
-            probe.command(kind='media_context',epoch=str(uuid.uuid4()),chat='two',online=False)
+            probe.command(kind='media_context',epoch=new_id(),chat='two',online=False)
             assert fetch(good)['state']=='offline'
             probe.command(kind='media_context',epoch=EPOCH,chat='two',online=False)
             assert fetch(good)['state']=='ready'

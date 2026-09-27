@@ -23,7 +23,7 @@ from performance import Probe
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT/'zig-out/bin/client-probe'
-EPOCH = '12345678-1234-1234-1234-123456789012'
+EPOCH = 'EjRWeBI0EjQSNBI0VniQEg'
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -278,7 +278,7 @@ def main():
                 assert d['last_http_status'] == 200 and not d['auth_blocked']
                 srv.mode = 'ok'
                 probe.until(lambda v: v['online'])
-                assert all(path.endswith(EPOCH+':0') or path.endswith('123456789012%3A0') for path, _, _ in srv.requests if path.startswith('/v1/events'))
+                assert all(path.endswith(EPOCH+':0') or path.endswith(EPOCH+'%3A0') for path, _, _ in srv.requests if path.startswith('/v1/events'))
             finally:
                 probe.close(); srv.close()
             # Live credentials are immutable until Reconnect destroys both pools.

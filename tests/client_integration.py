@@ -172,7 +172,7 @@ def main():
             # Expiry must work before reconnecting and continue while offline.
             server.terminate(); server.wait(timeout=5)
             expired_id = rows("SELECT id FROM outbox WHERE state='unknown'")[0][0]
-            recent_id = 'aaaaaaaa-1234-1234-1234-123456789012'
+            recent_id = 'qqqqqhI0EjQSNBI0VniQEg'
             with sqlite3.connect(client/'client.db') as db:
                 db.execute("UPDATE outbox SET sent_at='2000-01-01T00:00:00Z' WHERE id=?", (expired_id,))
                 db.execute("""INSERT INTO outbox(id,epoch,draft_key,payload,state,sent_at)

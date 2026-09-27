@@ -4,11 +4,11 @@ import json
 import sqlite3
 import time
 import unittest
-import uuid
 from contextlib import closing
 
 from h2.events import ResponseReceived, StreamReset
 from h2.settings import SettingCodes
+from fixture import new_id
 from relay_tls import RelayTls
 
 
@@ -35,7 +35,7 @@ class Http2(RelayTls):
             self.assertEqual(events.readline(), b': connected\n')
             self.assertEqual(events.readline(), b'\n')
             sock = connection.sock
-            outgoing = dict(request_id=str(uuid.uuid4()), server_epoch=baseline['server_epoch'],
+            outgoing = dict(request_id=new_id(), server_epoch=baseline['server_epoch'],
                             target={'recipient': {'address': 'alice@example.invalid', 'service': 'imessage'}},
                             text='Multiplexed send while SSE remains open')
             connection.request('POST', '/v1/messages', json.dumps(outgoing), {'content-type': 'application/json'})
@@ -98,7 +98,7 @@ class Http2(RelayTls):
 
     def test_unfinished_body_expires_without_dispatch(self):
         baseline = self.get('/v1/sync')
-        outgoing = dict(request_id=str(uuid.uuid4()), server_epoch=baseline['server_epoch'],
+        outgoing = dict(request_id=new_id(), server_epoch=baseline['server_epoch'],
                         target={'recipient': {'address': 'alice@example.invalid', 'service': 'imessage'}},
                         text='Expired incomplete request must never dispatch')
         body = json.dumps(outgoing).encode()
