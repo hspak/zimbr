@@ -4,11 +4,8 @@ Repeat these checks on the installed build after changes to AppKit, settings,
 packaging, or restart behavior. See [relay operation](macos-relay.md) for the
 current UI contract and [setup](setup.md) for installation.
 
-Earlier native checks established basic menu/settings operation and found restart
-and LaunchAgent throttle bugs now covered by `tests/mac_menu_restart.py`.
-Historical results do not certify a new build. Use the checklist below as a
-fresh validation template; keep results, screenshots, signing identities and
-deployment details in private records.
+Use the checklist below for each build; keep results, screenshots, signing
+identities and deployment details in private records.
 
 ## Native build and packaging gate
 

@@ -27,19 +27,6 @@ authentication and key exchange are negotiated separately, and GCM uses a
 128-bit authentication tag. See [TLS 1.3](https://www.rfc-editor.org/rfc/rfc8446.html)
 and the [ChaCha20 comparison](https://www.rfc-editor.org/rfc/rfc8439.html#section-1).
 
-A local AMD Ryzen AI Max+ 395 / OpenSSL 3.6.4 AEAD microbenchmark measured:
-
-| Payload size | AES-128-GCM | AES-256-GCM | ChaCha20-Poly1305 |
-| --- | --- | --- | --- |
-| 1 KiB | 6.59 GB/s | 6.36 GB/s | 5.95 GB/s |
-| 16 KiB | 25.65 GB/s | 23.09 GB/s | 6.21 GB/s |
-
-These are short bulk-encryption measurements, not end-to-end TLS or macOS
-measurements. AES-256 costs about 4–10% throughput versus AES-128 here; both are
-well above typical network throughput. Reproduce on each target with
-`openssl speed -elapsed -seconds 2 -aead -bytes 16384 -evp aes-256-gcm`, varying
-the cipher and payload size.
-
 ## Build
 
 Use Zig 0.16.0 and OpenSSL **3.5 LTS**, including current patches. The repository

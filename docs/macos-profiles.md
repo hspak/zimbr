@@ -62,7 +62,7 @@ python3 tools/mac_acceptance.py --profile dev --enrichment --output /private/evi
 python3 tools/mac_conversation_probe.py --profile dev --conversation CONVERSATION_ID
 ```
 
-## Permissions and existing installations
+## Permissions
 
 The same persistent local signing certificate can sign both profiles. Their
 designated requirements contain different bundle identifiers. Grant Full Disk
@@ -73,41 +73,12 @@ dev access, or vice versa.
 Installing through Homebrew does not itself transfer privacy grants. macOS uses
 the app's signed identity, not just its display name. The release builder defaults
 to the persistent local signing identity; a release using that same certificate
-and bundle identifier can retain the legacy release grants. Switching to a
-Developer ID identity does not satisfy the legacy requirement, which pins the
-local certificate, so plan to grant permissions again. See Apple's
+and bundle identifier can retain its privacy grants. Switching to a Developer ID
+identity changes the signed identity, so plan to grant permissions again. See Apple's
 [code-signing identity guidance](https://developer.apple.com/library/archive/technotes/tn2206/).
 
-Pre-profile source installs used the release app, data directory, and service
-label. A normal dev install deliberately does not import or stop that installation.
-For an intentional migration:
-
-1. Back up the old app, LaunchAgent, configuration, credentials, and journal.
-   Install the dev app with separately copied credentials and the desired port.
-2. Grant permissions to the dev app while the old relay remains available.
-3. Stop the old relay and hold its journal lock. Copy its stopped journal and
-   asset cache into the dev directory, preserving epoch and durable request IDs.
-   Keep dev configuration and credentials pointing into the dev directory.
-4. Archive the old app, LaunchAgent plist, and data outside their active paths so
-   login or a future Homebrew installation cannot start the old send queue again.
-5. Start only the dev LaunchAgent and verify its listener, permissions, epoch,
-   and history. Update clients if the endpoint changed.
-
-Keep the backup for rollback. Never run two copied journals with pending sends.
-Provision a future release installation independently instead of pointing both
-profiles at the same data directory or credential files.
-
-To deliberately clear the retired release app's privacy decisions, use Apple's
-[per-app reset](https://developer.apple.com/documentation/xcode/resetting-access-to-protected-resources-in-macos):
-
-```sh
-tccutil reset All com.hsp.zimbr.relay
-```
-
-Run this as the login user while the old app is still present, before archiving
-it, so Launch Services can resolve the bundle identifier. This targets the release
-identity; the dev identity is `com.hsp.zimbr.relay.dev`. A subsequent release install
-will need fresh permission setup after this reset.
+Provision each profile independently with its own data directory and credential
+files. Never run two copied journals with pending sends.
 
 ## Validation
 

@@ -58,11 +58,8 @@ Opening the app manually does not install a LaunchAgent or enable login startup.
 Logs opened from the menu are the installed service's log; command-line launches
 write to their inherited output.
 
-Plain `serve` remains headless. After upgrading an older installation, reinstall
-or regenerate its LaunchAgent with the current installer/service helper to add
-`--menu-bar` and apply the shorter restart interval. Replacing only the app bundle
-leaves the previous LaunchAgent settings in place. An already-running headless
-process cannot reveal Settings.
+Plain `serve` is headless and cannot reveal Settings. Use `serve --menu-bar` to
+include the native interface.
 
 Use the [menu validation checklist](macos-menu-bar-validation.md) after changes
 to native UI, settings, or lifecycle behavior.
@@ -77,11 +74,9 @@ brew install --cask hspak/tap/zimbr-relay
 ```
 
 The cask installs `~/Applications/Zimbr Relay.app` and exposes `zimbr-relay` and
-`zimbr-relay-service`. It preserves the existing application identifier and
-keeps credentials and history in `~/Library/Application Support/Zimbr`.
-A dev-profile installation can remain installed alongside the cask. A legacy
-source installation using the unsuffixed release identity must first be stopped
-and migrated or archived; see [profile migration](macos-profiles.md#permissions-and-existing-installations).
+`zimbr-relay-service`. Credentials and history live in
+`~/Library/Application Support/Zimbr`.
+A dev-profile installation can remain installed alongside the cask.
 
 Use a matching source checkout for the setup tools. Install mkcert and the Python
 dependencies as in [setup](setup.md), then generate the release configuration:
@@ -135,11 +130,9 @@ zig build relay -Doptimize=ReleaseFast -Dtarget=aarch64-macos -Dcpu=apple_m1 \
   -Dopenssl-prefix=/absolute/openssl-3.5
 ```
 
-Use matching arm64 OpenSSL archives. Rebuild and run the existing signing/install
-procedure to apply the new launch agent's scheduling settings. The relay gives
-user requests and send dispatch higher QoS than ingestion and enrichment; macOS
-chooses the cores. [Performance notes](performance.md) distinguish Linux
-measurements from native M1 validation. Omit `-Doptimize` for a Debug build.
+Use matching arm64 OpenSSL archives. The relay gives user requests and send
+dispatch higher QoS than ingestion and enrichment; macOS chooses the cores.
+Omit `-Doptimize` for a Debug build.
 
 ```sh
 zig build relay fake-relay test -Dopenssl-prefix=/absolute/openssl-3.5
@@ -177,15 +170,13 @@ idempotency, interrupted dispatch, and journal persistence.
 
 ## Contacts and media
 
-The shared protocol and relay now include Contacts identities/avatars, authenticated
+The shared protocol and relay include Contacts identities/avatars, authenticated
 image assets, stored URL metadata, stable source parts, and reaction projection.
-See the [Mac enrichment acceptance record](mac-enrichment-acceptance.md) for
-verified fixtures and remaining installed/source-format gates. The native and
-fake relays advertise all six enrichment capabilities: identities, contact avatars,
+See the [Mac enrichment guide](macos-message-enrichment.md) for the source/transport
+contract and verification procedures. The native and fake relays advertise all
+six enrichment capabilities: identities, contact avatars,
 image assets, image attachments, stored link previews, and reactions.
-Permission and source availability determine readiness separately. Installed
-Contacts and image checks are recorded in the acceptance record; native reaction
-verification covers add/replacement, with extended cases still unverified.
+Permission and source availability determine readiness separately.
 The native relay pins and statically compiles its phone-number parser during the
 build; fake/Linux builds have no Contacts or
 Foundation dependency. Native normalization tests do not read the address book.
@@ -225,8 +216,8 @@ restarts if it exits, and continues running with the screen locked. Messages nee
 the user's graphical login session before the relay can operate.
 The installer validates credentials and signs the app before stopping the old
 process, takes a consistent journal backup, and preserves its epoch and send IDs.
-It installs TLS material in owner-only directories outside the app and deletes
-the obsolete token. The CA signing key is never installed. Subsequent upgrades
+It installs TLS material in owner-only directories outside the app.
+The CA signing key is never installed. Subsequent upgrades
 may omit `--tls-config` to retain the installed credentials. Startup failures
 leave the relay stopped for repair.
 It uses the persistent local signing identity by default; pass
@@ -314,7 +305,7 @@ readiness. `serve --read-only` disables automation/sending while retaining mTLS.
 Every route requires a valid clientAuth leaf from the dedicated CA and an enabled
 SHA-256 leaf fingerprint. Configuration explicitly selects an IP to bind; failed
 binds and invalid/missing configuration are errors. TLS 1.3 and HTTP/2 are required,
-with session resumption and early data disabled. Bearer tokens grant no access.
+with session resumption and early data disabled.
 Certificates, keys, and configuration must be owner-only files in 0700 directories,
 with no symlinks. The journal retains plaintext normalized history under the Mac
 account's filesystem protections.

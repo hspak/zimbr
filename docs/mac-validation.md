@@ -3,7 +3,6 @@
 Validate the relay under its installed app identity. A development executable or
 terminal permission grant does not establish LaunchAgent access.
 
-The source schema is documented in [macos-27-schema.json](macos-27-schema.json).
 Keep account data and deployment records outside public documentation.
 
 ## Automated checks

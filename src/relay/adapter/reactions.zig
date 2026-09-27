@@ -1,5 +1,4 @@
-//! Bounded source mappings have fixture coverage and installed add/replacement
-//! checks. The acceptance record distinguishes observed and deferred Mac cases.
+//! Bounded mappings from source reaction codes and target references.
 //! Unknown types never acquire an invented reaction value.
 const std = @import("std");
 const u = @import("../../common.zig");

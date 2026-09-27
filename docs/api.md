@@ -5,7 +5,7 @@ ALPN must select `h2`; HTTP/1 and connections without ALPN are rejected.
 SSE uses HTTP/2 DATA frames and can share a connection with commands and queries.
 Upgrade the client, relay, and administrative tools together.
 Every route requires a clientAuth certificate from the dedicated CA and an enabled
-SHA-256 leaf fingerprint; bearer tokens grant no access. See
+SHA-256 leaf fingerprint. See
 [certificate management](certificate-management.md) and [relay operation](macos-relay.md#operation)
 for enrollment and an authenticated status example.
 
@@ -67,9 +67,9 @@ Enrichment fields are additive. Complete empty arrays clear older aggregates;
 totals/completion flags; overflow pages never silently drop attachments, captions,
 previews, parts, or reactions. A changed revision requires restarting those pages.
 Identity events require `extensions=identity-v1` and an echoed
-`Zimbr-Event-Extensions` response header. Legacy streams keep their existing event
-types and skip identity sequences. Bootstrap identities after capturing a sync
-cursor, then replay and merge by revision. Capability support and readiness are
+`Zimbr-Event-Extensions` response header. Streams without that extension skip
+identity events. Bootstrap identities after capturing a sync cursor, then replay
+and merge by revision. Capability support and readiness are
 separate, so permission loss can still synchronize clearing records.
 
 The relay updates observed identities automatically when Contacts changes on the
@@ -134,7 +134,7 @@ It does not instantiate archived classes or scrape printable bytes. A restricted
 Foundation attribute grammar also maps verified text/image parts using source
 indices and file-transfer GUIDs; unknown layouts retain full text and attachment
 fallbacks. Stored URL payloads use a bounded primitive plist/archive reader.
-Reactions retain legacy source rows and publish complete target aggregates using
+Reactions retain their source rows and publish complete target aggregates using
 durable source ordering/removal state. Resolved reaction rows are skipped by the
 relay sidebar projection. General message deletion, reaction/attachment sending,
 group administration, read receipts, video/audio playback, and animated stickers

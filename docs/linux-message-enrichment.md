@@ -2,7 +2,7 @@
 
 The Linux client consumes the relay's additive enrichment API. All six native
 capabilities are implemented; readiness depends on permissions and source data.
-See the [Mac contract and validation limits](mac-enrichment-acceptance.md).
+See the [Mac contract and verification procedures](macos-message-enrichment.md).
 
 ## Implementation and recovery
 
@@ -68,8 +68,8 @@ failures. No test reads a real address book or Messages database.
 | Requirement | Evidence |
 | --- | --- |
 | Names, explicit titles, exact handles, Unicode, ambiguity, self | `IdentityDirectory` tests; GUI reaction details; notification tests |
-| Rename/removal, denied/restricted/unavailable permission, same-generation recovery, offline cache, first upgrade and restart | `client_enrichment.py`, `client_enrichment_protocol.py` |
-| Extension echo, legacy relay, interrupted multi-page bootstrap, expired H | `client_enrichment_protocol.py`; existing TLS suites |
+| Rename/removal, denied/restricted/unavailable permission, same-generation recovery, offline cache and restart | `client_enrichment.py`, `client_enrichment_protocol.py` |
+| Extension negotiation, interrupted multi-page bootstrap, expired cursor | `client_enrichment_protocol.py`; existing TLS suites |
 | Revision merging, cursor rollback, clearing aggregates, overflow | `client_tests.zig`, Worker tests, `client_enrichment.py` |
 | Real asset delivery, pending conversion, avatar clearing, offline bytes | `client_enrichment.py` through the actual fake relay/image helper |
 | PNG alpha, JPEG, corruption, excessive dimensions/bytes, MIME, truncation | `Media` tests and `client_media_transport.py` |

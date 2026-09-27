@@ -53,11 +53,9 @@ uses a separate directory:
 | State | `$XDG_STATE_HOME/zimbr-dev` | `$XDG_STATE_HOME/zimbr` |
 | State fallback | `~/.local/share/zimbr-dev` | `~/.local/share/zimbr` |
 | Suggested certificates | `~/.config/zimbr-dev/tls` | `~/.config/zimbr/tls` |
-| Legacy config | `$XDG_CONFIG_HOME/zimbr-dev/config.json` | `$XDG_CONFIG_HOME/zimbr/config.json` |
 
 The state fallback applies when `XDG_STATE_HOME` is unset, empty or relative.
-`XDG_CONFIG_HOME` defaults to `~/.config` when unset. `--data-dir PATH` overrides that
-location, including when `HOME` is unset. `XDG_DATA_HOME` is no longer used.
+`--data-dir PATH` overrides the state location, including when `HOME` is unset.
 To keep an existing cache in another location, launch with `--data-dir` pointing
 to that directory. The database and media cache contain plaintext.
 
@@ -75,20 +73,12 @@ directories with no symlinks. The GUI never receives Apple account credentials.
 Saving reconnects both messaging and media with the new settings, preserving
 drafts, cached messages and send recovery.
 
-On the first launch for a database without settings, Zimbr imports its profile's
-legacy config file if it is safe and readable. A dev build does not import the
-release profile's database or certificate settings. Certificate paths remain
-explicit: provision separate dev credentials and enter their paths in Settings.
-The JSON file is ignored thereafter and may be removed
-after checking the imported settings. Invalid or obsolete JSON opens setup for
-repair. Legacy `theme` and `data_dir` fields are ignored; use `--data-dir` to
-select an existing database outside the default location.
+Provision separate credentials for each profile and enter their paths in Settings.
 
 Optional `--relay-url`, `--ca-file`, `--client-cert-file` and `--client-key-file`
 flags override saved values for one launch. **Save and connect** explicitly saves
 the values displayed in Settings, including any overrides. `--settings` opens
-Settings at launch; `--details` opens diagnostics when setup is valid. Old
-`--port` and `--token-file` options fail with migration guidance.
+Settings at launch; `--details` opens diagnostics when setup is valid.
 
 After replacing credentials at their existing paths, **Reconnect** in Details
 reloads them and discards old TLS connections. Certificate errors wait for
@@ -135,10 +125,6 @@ Opening a conversation loads its latest 100 messages. Older history loads when
 you scroll back and remains available offline. Background relay imports and
 reconciliation update sidebar previews and cached messages without copying the
 full archive into the local cache. Live messages continue to arrive normally.
-When upgrading a cache that predates lazy history loading, its history is trimmed
-once to the latest 100 messages per conversation, including merged self chats;
-drafts, send records, and their linked message echoes are preserved. Older messages
-remain on the Mac and can be fetched again by scrolling back.
 
 ## Keyboard and text input
 
@@ -224,10 +210,10 @@ again on demand. Reconnect reloads media credentials too. Missing, unsupported,
 corrupt, or oversized images keep a descriptive placeholder. HEIC conversion and
 animated images' still frames come from the Mac; Linux decodes bounded PNG/JPEG.
 
-See [Linux enrichment acceptance](linux-message-enrichment.md) for the client
+See [Linux message enrichment](linux-message-enrichment.md) for the client
 contract, recovery coverage, and verification commands. Availability remains tied
 to each relay capability and its readiness shown in Details; installed Mac
-validation is tracked in the [Mac enrichment acceptance record](mac-enrichment-acceptance.md).
+checks are described in the [Mac enrichment guide](macos-message-enrichment.md#verification).
 
 ## Notifications
 
@@ -285,7 +271,7 @@ and uses `zimbr` as its application ID. Movement, scrolling, and navigation targ
 background worker continues to receive messages while rendering sleeps.
 Idle input and worker results wake rendering immediately. Settled histories reuse
 their geometry when scrolling or typing; offscreen history does not need a full
-layout pass each frame. See [performance measurements](performance.md).
+layout pass each frame.
 
 The bottom-right FPS counter is disabled by default. Enable it with
 `zig build client -Dfps-counter=true` or `zig build run -Dfps-counter=true`.
@@ -305,8 +291,7 @@ durable event batches, reusable HTTP connections, and shared history snapshots.
 Changed histories reuse immutable message records and prepared previews, while
 ingestion batches resolve each conversation once and skip unchanged writes.
 Conversation pages can include small sidebar previews, avoiding a request per
-conversation. See [performance measurements and architecture](performance.md)
-for benchmarks, reliability constraints, and remaining platform validation.
+conversation.
 
 ## Verification
 
@@ -336,7 +321,7 @@ zig fmt --check build.zig src
 zig-out/bin/client-probe --data-dir /path/to/client-data
 ```
 
-Check the official profile's paths and settings migration separately:
+Check the release profile's paths and settings separately:
 
 ```sh
 zig build client-probe test-client -Dprofile=release --prefix zig-out/client-release

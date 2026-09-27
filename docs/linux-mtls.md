@@ -31,7 +31,7 @@ Dev uses `~/.config/zimbr-dev/tls` in the setup guide and stores its database in
 `$XDG_STATE_HOME/zimbr-dev` or `~/.local/share/zimbr-dev`. Release uses `zimbr`.
 `--tls-dir` is explicit; provision the profiles independently. See
 [client configuration](linux-client.md#provisioning-and-configuration) for launch
-overrides, state paths, and legacy settings import.
+overrides and state paths.
 
 ## Operation and renewal
 
@@ -60,9 +60,9 @@ while disconnected and click Reconnect. Remove the old enrollment
 after verifying the new fingerprint. Server renewal retains its hostname and CA;
 CA replacement requires a coordinated trust update.
 
-The existing client database format is unchanged. An interrupted POST remains
-uncertain until lookup by its original UUID; a new send is kept as a draft while
-that lookup is outstanding. An authoritative not-found result is shown as
+An interrupted POST remains uncertain until lookup by its original UUID; a new
+send is kept as a draft while that lookup is outstanding. An authoritative
+not-found result is shown as
 unconfirmed and is never automatically resubmitted. Back up the client database
 with the application stopped before changing deployments.
 
@@ -79,8 +79,7 @@ configured dedicated CA.
 Connections are reused only inside one immutable credential configuration.
 Only `h2` is offered through ALPN. A pre-request callback also verifies the
 negotiated protocol before sending any request, including on reused connections.
-SSE and commands can share one connection. Upgrade both ends together; an old
-HTTP/1 relay is rejected.
+SSE and commands can share one connection.
 
 The native `fake-relay` and relay unit tests require OpenSSL **3.5 LTS** headers
 and libraries, matching the server wrapper. If the Linux system libraries use a
@@ -108,7 +107,7 @@ of AES-128-GCM and ChaCha20-Poly1305. `tests/relay_fixture.py` configures the na
 relay and enrolls its test devices. Integration, Details, and performance suites
 connect directly to its HTTPS listener. Transport faults use an authenticated
 TLS intermediary with its own enrolled upstream certificate; both hops verify
-TLS and no bearer token is sent. `tests/tls_fixture.py` retains standalone TLS
+TLS. `tests/tls_fixture.py` retains standalone TLS
 endpoints for malformed HTTP/SSE and server-identity negative tests.
 
 `tests/cert_management.py` exercises Linux request → Mac signer/real mkcert →

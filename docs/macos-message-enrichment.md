@@ -1,17 +1,13 @@
-# Mac enrichment contract and validation
+# macOS message enrichment
 
 The native and fake relays advertise `identity_directory_v1`, `contact_avatars_v1`,
 `image_assets_v1`, `image_attachments_v1`, `stored_link_previews_v1`, and
 `reactions_v1`. Permission and source availability affect readiness separately.
 Linux behavior is documented in [client enrichment](linux-message-enrichment.md).
 
-Recorded native checks covered Contacts attribution and live changes,
-JPEG/PNG/HEIC previews, stored link artwork, and heart-to-thumbs-up replacement.
-Other standard reactions, custom/removal/deletion cases, and removal across
-restart have synthetic coverage but remain unverified natively. Native
-compilation does not establish installed permissions or every source layout.
-Recheck the current build using the verification commands below and keep
-account-specific acceptance records outside the repository.
+Validate the installed build using the verification procedures below. Native
+compilation and synthetic fixtures do not establish installed permissions or every
+source layout. Keep account-specific acceptance records outside the repository.
 
 ## Directory and transport contract
 
@@ -27,16 +23,15 @@ descending immutable-ID keysets, at most 200 records, and a 32 KiB record budget
 Capture `/v1/sync` before the bootstrap pages, then replay after that cursor.
 `GET /v1/events?...&extensions=identity-v1` includes identity events and returns
 `Zimbr-Event-Extensions: identity-v1`. Unknown/duplicate requested extensions fail
-with HTTP 400. Legacy streams return an empty extension header and only the
-existing event types; skipped identity sequences still advance the internal scan.
+with HTTP 400. Streams without the extension return an empty extension header and
+omit identity events; skipped identity sequences still advance the internal scan.
 Names update through identity events without rewriting messages or changing chat
 participants, titles, routing, or message timestamps.
 
-Schema version 6 adds directory/private mapping/work, canonical enrichment items,
+The journal stores directory/private mappings/work, canonical enrichment items,
 asset sources/owners/representations/work/private blobs, reaction observations/work,
-and independent ordinary-message anchors in an atomic migration.
-It preserves epoch, messages, requests, and cursor sequence. A resumable
-`identity_backfill_v1` keyset pass observes historical incoming senders, and
+and independent ordinary-message anchors. A resumable `identity_backfill_v1`
+keyset pass observes historical incoming senders, and
 `enrichment_backfill_v1` drains a bounded, resumable source pass. Chat scans
 observe participants, and message ingestion observes senders/reaction actors.
 Worker completions check epoch and job generation inside their commit transaction.
@@ -110,7 +105,7 @@ ordinary history. Doctor and status expose only the following booleans:
 
 These prove query availability only. The parsers accept the explicitly bounded
 layouts below; fixture acceptance does not establish that a particular Messages version
-uses those layouts. Source-format evidence and its limits are recorded below.
+uses those layouts.
 
 ## Image and overflow contract
 
@@ -156,7 +151,7 @@ it does not repeatedly allocate encodings of shrinking prefixes. A regression
 with large escaped strings, 32 attachments, four cards, 128 reactions and 128
 parts preserves every canonical item within an 8 MiB preparation arena.
 
-## Accepted source-format candidates
+## Supported source formats
 
 `adapter/plist.zig` handles primitive binary/XML property lists with a 1 MiB input,
 8,192-object and depth-32 limits. UID resolution has independent visit/depth/cycle
@@ -183,13 +178,6 @@ independently with Python `plistlib`. The linked
 [reference parser](https://github.com/ReagentX/imessage-exporter/blob/develop/imessage-database/src/message_types/url.rs)
 provides format leads, not Mac acceptance evidence.
 
-Native source-format checks observed binary plists containing `RichLink`,
-`LPLinkMetadata`, `NSURL`, arrays, image/icon metadata and
-`RichLinkImageAttachmentSubstitute` objects. Exact joined attachment GUIDs can
-resolve indexed artwork; unsupported layouts retain fallback. Synthetic fixtures
-independently reproduce wrappers, outer placeholder fields, null artwork and
-deliberately misleading attachment order without copying account payloads.
-
 `body_parts.zig` accepts a restricted primitive Foundation typedstream grammar.
 `tools/generate-decoder-fixtures.m` generates its synthetic archive using Apple's
 encoder, including Unicode text and `__kIMMessagePartAttributeName` /
@@ -204,18 +192,13 @@ Reaction candidates map 2000–2005 to heart/like/dislike/laugh/emphasize/questi
 1000, 2007/3007 and unknown values remain unsupported placeholders. Accepted target
 forms are an exact UUID, `p:<decimal index>/<UUID>`, or `bp:<UUID>`; malformed or
 cross-chat targets never project a chip. Ordinary replies are excluded by type.
-Native samples confirm standard/custom codes and `p:`/`bp:` target forms, but
-do not establish removal/deletion precedence or every standard value.
-These are candidates derived from the
-[reference mapping](https://github.com/ReagentX/imessage-exporter/blob/develop/imessage-database/src/tables/messages/message.rs),
-with the controlled native evidence and deferred cases described below.
+The [reference mapping](https://github.com/ReagentX/imessage-exporter/blob/develop/imessage-database/src/tables/messages/message.rs)
+provides format leads; verify reaction codes and removal/deletion semantics
+against the installed source.
 
 A self-conversation can place the reaction and target in different source chats
 without a shared link. Such a reaction remains an unresolved placeholder; the
 adapter does not infer account ownership or merge routes from this observation.
-The recorded ordinary-conversation heart/replacement check preserved target
-status, timestamp and epoch, including after restart. It did not verify all
-reaction codes or deletion semantics on a native source.
 
 The private ledger folds by target/source-part/actor in `(source timestamp, source
 row, source GUID)` order. Adds replace that actor's value; removes clear only the

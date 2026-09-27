@@ -78,7 +78,3 @@ attachment floods, aliased plist offsets, shared artwork expansion, deep/wide
 JSON, rejected sends, valid Unicode/idempotency, client transaction rollback,
 duplicate/invalid metadata pagination, and large reaction groups. Native macOS
 Messages and ImageIO acceptance still require validation on a Mac.
-
-The [performance hardening audit](performance-hardening.md) compares both
-September 24 performance commits with the security-pass baseline and records
-additional boundary, statement-lifetime, and sanitized pixel regressions.

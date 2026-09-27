@@ -29,18 +29,7 @@ the setup environment is active (`. .tools/python/bin/activate`).
 - [Group delivery](group-delivery.md): checkmark semantics and source limitations.
 - [Linux enrichment](linux-message-enrichment.md): contacts, media, links, reactions,
   and client recovery.
-- [Mac enrichment](mac-enrichment-acceptance.md): current source/transport contract
-  and native validation limits.
-- [Observed macOS 27 schema](macos-27-schema.json): a schema snapshot, not a promise
-  about every Messages version.
+- [Mac enrichment](macos-message-enrichment.md): source/transport contract and
+  native verification procedures.
 - [System design](../DESIGN.md): architectural background; use the API and guides
   above for operational commands.
-
-## Performance
-
-[Performance](performance.md) describes the architecture and dated measurements.
-Related reports cover [bounded storage](bounded-data.md),
-[serialization](serialization.md), [single-client ownership](single-client.md),
-[SIMD trials](client-simd.md), and [hardening](performance-hardening.md).
-The linked JSON files preserve synthetic benchmark evidence; their timings and
-historical test counts are not results from the current checkout.

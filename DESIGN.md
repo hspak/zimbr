@@ -1,18 +1,17 @@
 # iMessage relay design
 
 Status: design specification, with relay and Linux client implementations available.
-Current macOS TLS evidence is tracked in [docs/macos-tls.md](docs/macos-tls.md);
-the earlier Messages acceptance record is [docs/mac-validation.md](docs/mac-validation.md).
+macOS TLS operation is documented in [docs/macos-tls.md](docs/macos-tls.md);
+installed verification is described in [docs/mac-validation.md](docs/mac-validation.md).
 Linux build, verification, and text-backend limitations are documented in the
 [Linux client guide](docs/linux-client.md).
-The [Mac enrichment contract](docs/mac-enrichment-acceptance.md) and
+The [Mac enrichment contract](docs/macos-message-enrichment.md) and
 [Linux enrichment guide](docs/linux-message-enrichment.md) describe implemented
 Contacts names/photos, images, stored link previews, and reactions.
 
 Build a small, self-hosted system that uses an always-on Mac mini, signed into
 Messages, to send and receive iMessages from a graphical Linux application.
-Implement the relay and client in Zig. Use the sibling `../flamez` project as a
-reference for Zig 0.16, Clay layout, raylib rendering, and platform build setup.
+Implement the relay and client in Zig, with Clay layout and raylib rendering.
 
 The first version serves one person and one Apple account. It supports listing
 conversations, reading text history, receiving new messages, starting a direct
@@ -20,11 +19,12 @@ conversation, and replying to existing conversations. Existing group conversatio
 should support reading and text replies once their routing is validated on the
 Mac. Creating or administering groups is outside the first version.
 
-Attachments appear as descriptive placeholders initially. Attachment transfer,
-reactions, editing, unsending, typing indicators, Apple read-receipt control,
-and contact-name lookup are later features. Linux desktop notifications are
-supported while the client is running. Unknown message kinds must remain visible
-as unsupported content rather than silently disappearing.
+The client displays image attachments, stored link previews, reactions, and
+contact names/photos supplied by the relay. Attachment/reaction sending, editing,
+unsending, typing indicators, and Apple read-receipt control remain outside the
+current scope. Linux desktop notifications are supported while the client is
+running. Unknown message kinds must remain visible as unsupported content rather
+than silently disappearing.
 
 The Mac remains the endpoint that communicates with Apple's iMessage service.
 The relay exposes our own API; Linux never receives Apple account credentials.
@@ -181,9 +181,8 @@ whether a message is new.
 
 On macOS, identify the source file by its persistent volume UUID, inode, and
 birth time. Device numbers can change at reboot and must not cause a source
-reset. Upgrade a legacy device/inode identity only when the inode and saved
-nonempty row/GUID anchor match. A new modern identity, a regressed high-water
-mark, or a missing/changed anchor still requires a new epoch.
+reset. A changed source identity, a regressed high-water mark, or a
+missing/changed anchor requires a new epoch.
 
 Scanning must also account for existing rows that become complete later:
 
