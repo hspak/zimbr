@@ -7,8 +7,11 @@ export ZIMBR_AUR_DIR=/path/to/aur/zimbr
 export ZIMBR_TAP_DIR=/path/to/homebrew-tap
 ```
 
-The package builds the native Wayland client with Zig 0.16, `ReleaseSafe`, and
-baseline CPU features. It includes `zimbr`, `zimbr-provision`, the desktop
+The package builds the native Wayland client with Zig 0.16, `ReleaseSafe`,
+`-Dprofile=release`, and baseline CPU features. Source builds default to dev,
+so package recipes must select release explicitly in their `zig build` commands.
+`release.sh` adds this selection to the staged recipe before building or publishing it.
+It includes `zimbr`, `zimbr-provision`, the desktop
 launcher, the scalable SVG, PNG icons from 16 to 512 px, setup documentation,
 and license notices. Provisioning uses Python cryptography and OpenSSL.
 The macOS relay is distributed as the `zimbr-relay` Homebrew cask. Every release

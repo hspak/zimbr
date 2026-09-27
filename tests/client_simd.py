@@ -21,7 +21,7 @@ def main():
     parser.add_argument('--case', choices=['raster', 'jpeg', 'layout'], required=True)
     parser.add_argument('--output', required=True, type=Path)
     args = parser.parse_args()
-    packages = ['libcurl', 'openssl', 'pangocairo', 'gio-2.0', 'libpng', 'libjpeg']
+    packages = ['libcurl', 'openssl', 'pangocairo', 'pangoft2', 'fontconfig', 'gio-2.0', 'libpng', 'libjpeg']
     flags = shlex.split(subprocess.check_output(['pkg-config', '--cflags', '--libs', *packages], text=True))
     versions = subprocess.check_output(['pkg-config', '--modversion', *packages], text=True).splitlines()
     env = os.environ.copy()

@@ -32,6 +32,7 @@ args = sys.argv[1:]
 with (root / 'events').open('a') as events:
     events.write(json.dumps([tool, *args]) + '\n')
 if tool == 'zig':
+    assert '-Dprofile=release' in args
     sys.exit(1 if os.environ.get('FAIL_ZIG') else 0)
 if tool == 'curl':
     destination = args[args.index('--output') + 1]
@@ -68,6 +69,11 @@ elif tool == 'makepkg':
     else:
         if os.environ.get('FAIL_PACKAGE'):
             sys.exit(1)
+        recipe = Path('PKGBUILD').read_text()
+        builds = [line for line in recipe.splitlines() if 'zig build' in line]
+        assert len(builds) == 3, recipe
+        assert all(line.count('-Dprofile=release') == 1 and '-Dprofile=dev' not in line
+                   for line in builds), recipe
         with tarfile.open('zimbr-0.1.0.tar.gz') as archive:
             (root / 'snapshot.json').write_text(json.dumps(archive.getnames()))
             if 'zimbr-0.1.0/dirty.txt' in archive.getnames():
@@ -185,7 +191,14 @@ with (root / 'events').open('a') as events:
             'git', '-C', str(self.source), 'archive', '--format=tar.gz',
             '--prefix=zimbr-0.1.0/', f'--output={self.root / "release.tar.gz"}', 'HEAD',
         ], check=True, env=self.env)
-        self.initial_recipe = 'pkgver=0.0.0\npkgrel=3\n_ref=old\nsha256sums=("old")\n'
+        self.initial_recipe = '''pkgver=0.0.0
+pkgrel=3
+_ref=old
+sha256sums=("old")
+prepare() { zig build client --fetch=all; }
+build() { zig build client -Dprofile=dev -Doptimize=ReleaseSafe; }
+check() { zig build test-client -Dprofile=release; }
+'''
         (self.aur / 'PKGBUILD').write_text(self.initial_recipe)
         commands = self.root / 'bin'
         commands.mkdir()

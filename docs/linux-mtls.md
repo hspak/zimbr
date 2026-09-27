@@ -23,12 +23,19 @@ The helper requires Python 3, `cryptography` (43 or newer), and the OpenSSL comm
 line tool. The installed name is `zimbr-provision`; from the checkout use
 `python3 packaging/linux/provision.py`.
 
+Source builds use the `dev` profile by default. The examples below keep its
+credentials in `~/.config/zimbr-dev/tls`. For an official build or a source build
+with `-Dprofile=release`, use `~/.config/zimbr/tls` instead. `--tls-dir` is explicit;
+use the same directory for request and import, then enter those paths in the
+matching client's Settings. Provision each profile separately to keep its key
+and certificates independent.
+
 ```sh
 umask 077
-mkdir -p "$HOME/.config/zimbr"
-chmod 700 "$HOME/.config/zimbr"
+mkdir -p "$HOME/.config/zimbr-dev"
+chmod 700 "$HOME/.config/zimbr-dev"
 python3 packaging/linux/provision.py request \
-  --tls-dir "$HOME/.config/zimbr/tls" \
+  --tls-dir "$HOME/.config/zimbr-dev/tls" \
   --name linux-desktop.zimbr.invalid --label 'Linux desktop'
 ```
 
@@ -59,7 +66,7 @@ Then on Linux, using that verified fingerprint:
 
 ```sh
 python3 packaging/linux/provision.py import \
-  --tls-dir "$HOME/.config/zimbr/tls" \
+  --tls-dir "$HOME/.config/zimbr-dev/tls" \
   --ca /absolute/path/to/returned/rootCA.pem \
   --cert /absolute/path/to/returned/linux-client.pem \
   --ca-sha256 VERIFIED_CA_DER_SHA256
@@ -85,8 +92,9 @@ files, unsafe writable ancestors, missing material and key mismatches are
 rejected. Shared system ancestors such as `/home` may be root-owned; they need
 not be 0700. The root-owned sticky `/tmp` ancestor is allowed for temporary tests.
 
-State lives in `$XDG_STATE_HOME/zimbr` or `$HOME/.local/share/zimbr`. `--data-dir`
-selects another directory. Connection flags `--relay-url`, `--ca-file`,
+Dev state lives in `$XDG_STATE_HOME/zimbr-dev` or `$HOME/.local/share/zimbr-dev`.
+Release builds use `zimbr` in those locations. `--data-dir` selects another
+directory. Connection flags `--relay-url`, `--ca-file`,
 `--client-cert-file` and `--client-key-file` override saved settings for one
 launch. An origin may include a port and a trailing `/`, but no userinfo, query,
 fragment or application path. Old `--port`/`--token-file` options fail with

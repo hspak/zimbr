@@ -15,7 +15,7 @@ const RelayProfile = struct {
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const profile_name = b.option(ProfileName, "profile", "Relay identity: dev (default) or release") orelse .dev;
+    const profile_name = b.option(ProfileName, "profile", "Application profile: dev (default) or release") orelse .dev;
     const profiles = try std.json.parseFromSlice(
         struct { dev: RelayProfile, release: RelayProfile },
         b.allocator,
@@ -91,7 +91,7 @@ pub fn build(b: *std.Build) !void {
             "Test native Contacts normalization without reading the address book",
         ).dependOn(&b.addRunArtifact(native_tests).step);
     }
-    if (target.result.os.tag == .linux) client(b, target, optimize);
+    if (target.result.os.tag == .linux) client(b, target, optimize, profile_name);
 }
 
 fn clientModule(
@@ -99,6 +99,7 @@ fn clientModule(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     root: []const u8,
+    options: *std.Build.Step.Options,
 ) *std.Build.Module {
     const m = b.createModule(.{
         .root_source_file = b.path(root),
@@ -106,6 +107,7 @@ fn clientModule(
         .optimize = optimize,
         .link_libc = true,
     });
+    m.addOptions("client_options", options);
     m.addIncludePath(b.path("src"));
     m.addIncludePath(b.path("src/client"));
     m.addCSourceFiles(.{ .files = &.{
@@ -124,19 +126,30 @@ fn clientModule(
         "libcurl",
         "openssl",
         "pangocairo",
+        "pangoft2",
+        "fontconfig",
         "gio-2.0",
         "libpng",
         "libjpeg",
     }) |lib| m.linkSystemLibrary(lib, .{});
     return m;
 }
-fn client(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+fn client(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    profile: ProfileName,
+) void {
     const fps_counter = b.option(
         bool,
         "fps-counter",
         "Show the FPS counter in the bottom-right corner",
     ) orelse false;
-    const core = clientModule(b, target, optimize, "src/client_tests.zig");
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", manifest.version);
+    options.addOption(bool, "fps_counter", fps_counter);
+    options.addOption(ProfileName, "profile", profile);
+    const core = clientModule(b, target, optimize, "src/client_tests.zig", options);
     const tests = b.addTest(.{ .root_module = core });
     const test_run = b.addRunArtifact(tests);
     b.step("test-client", "Test client persistence, synchronization, and Unicode editing").dependOn(&test_run.step);
@@ -146,6 +159,7 @@ fn client(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
         target,
         optimize,
         "src/client_probe.zig",
+        options,
     ) });
     b.step("client-probe", "Build headless client integration driver").dependOn(&b.addInstallArtifact(
         probe,
@@ -156,6 +170,7 @@ fn client(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
         target,
         optimize,
         "src/client_bench.zig",
+        options,
     ) });
     b.step("client-bench", "Build synthetic cached-history benchmark").dependOn(&b.addInstallArtifact(
         bench,
@@ -166,6 +181,7 @@ fn client(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
         target,
         optimize,
         "src/hotpath_bench.zig",
+        options,
     ) });
     b.step("hotpath-bench", "Build client and relay hot-path microbenchmarks").dependOn(&b.addInstallArtifact(
         hotpaths,
@@ -199,7 +215,7 @@ fn client(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
         },
     };
     artifact.root_module.link_objects.items.len = retained;
-    const m = clientModule(b, target, optimize, "src/client_main.zig");
+    const m = clientModule(b, target, optimize, "src/client_main.zig", options);
     // Use the protocol XML already pinned with raylib/GLFW.
     const activation_xml = artifact.root_module.owner.path("src/external/glfw/deps/wayland/xdg-activation-v1.xml");
     const activation_header = b.addSystemCommand(&.{ "wayland-scanner", "client-header" });
@@ -215,10 +231,6 @@ fn client(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
         "-Werror",
     } });
     m.linkSystemLibrary("wayland-client", .{});
-    const client_options = b.addOptions();
-    client_options.addOption([]const u8, "version", manifest.version);
-    client_options.addOption(bool, "fps_counter", fps_counter);
-    m.addOptions("client_options", client_options);
     m.addImport("raylib", ray_module);
     m.addImport("zclay", clay.module("zclay"));
     const gui_tests = b.addTest(.{ .root_module = m });

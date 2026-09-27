@@ -325,7 +325,7 @@ def configuration(root, pki):
     for flag in ('--port', '--token-file'):
         result = subprocess.run([*args, flag, '8731'], capture_output=True, timeout=5)
         assert b'ObsoleteTransportConfiguration' in result.stderr
-    conf = root/'config/zimbr'
+    conf = root/'config/zimbr-dev'
     conf.mkdir(parents=True, mode=0o700)
     # Legacy import failures now allow interactive repair instead of preventing
     # launch. Each fresh database attempts import once and reports the problem.
@@ -354,7 +354,7 @@ def configuration(root, pki):
     probe = Probe([str(BIN), '--control', '--relay-url', f'https://localhost:{srv.server_port}'], None)
     try:
         probe.until(lambda v: v['online'])
-        assert (root/'state/zimbr/client.db').exists()
+        assert (root/'state/zimbr-dev/client.db').exists()
         assert not (root/'configured-cache').exists()
     finally:
         probe.close(); srv.close(); (conf/'config.json').unlink()

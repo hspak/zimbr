@@ -1,5 +1,6 @@
 //! Client settings persisted in client.db, with optional launch overrides.
 const std = @import("std");
+const options = @import("client_options");
 const u = @import("../common.zig");
 const c = @import("c.zig").api;
 const Store = @import("Store.zig");
@@ -20,6 +21,11 @@ details: bool = false,
 settings: bool = false,
 legacy_path: ?[:0]const u8 = null,
 overrides: Overrides = .{},
+
+const directory_name = switch (options.profile) {
+    .dev => "zimbr-dev",
+    .release => "zimbr",
+};
 
 const Overrides = struct {
     relay_url: ?[:0]const u8 = null,
@@ -85,11 +91,11 @@ fn dataDirectory(a: u.Allocator, explicit: ?[]const u8, state: ?[]const u8, home
         return try a.dupeZ(u8, path);
     }
     if (state) |base| if (std.fs.path.isAbsolute(base)) {
-        return try std.fmt.allocPrintSentinel(a, "{s}/zimbr", .{base}, 0);
+        return try std.fmt.allocPrintSentinel(a, "{s}/" ++ directory_name, .{base}, 0);
     };
     const base = home orelse return error.HomeRequired;
     if (base.len == 0) return error.HomeRequired;
-    return try std.fmt.allocPrintSentinel(a, "{s}/.local/share/zimbr", .{base}, 0);
+    return try std.fmt.allocPrintSentinel(a, "{s}/.local/share/" ++ directory_name, .{base}, 0);
 }
 
 /// Resolve launch options and prepare the state directory. Missing settings are
@@ -109,7 +115,9 @@ pub fn parse(init: std.process.Init) ParseError!Config {
                 "             [--client-cert-file PATH] [--client-key-file PATH]\n" ++
                 "       zimbr [--screenshot PATH --frames 90]\n" ++
                 "Settings: edit in the app; saved in client.db. CLI overrides last this launch.\n" ++
-                "State: $XDG_STATE_HOME/zimbr, falling back to $HOME/.local/share/zimbr.\n" ++
+                "Profile: " ++ @tagName(options.profile) ++ "\n" ++
+                "State: $XDG_STATE_HOME/" ++ directory_name ++
+                ", falling back to $HOME/.local/share/" ++ directory_name ++ ".\n" ++
                 "Credentials: absolute paths, owned 0600 files in 0700 directories; no symlinks.\n";
             _ = u.c.write(1, help.ptr, help.len);
             std.process.exit(0);
@@ -154,7 +162,7 @@ pub fn parse(init: std.process.Init) ParseError!Config {
     const confbase = init.environ_map.get("XDG_CONFIG_HOME") orelse
         if (home) |base| try std.fmt.allocPrint(a, "{s}/.config", .{base}) else null;
     if (confbase) |base| if (std.fs.path.isAbsolute(base)) {
-        config.legacy_path = try std.fmt.allocPrintSentinel(a, "{s}/zimbr/config.json", .{base}, 0);
+        config.legacy_path = try std.fmt.allocPrintSentinel(a, "{s}/" ++ directory_name ++ "/config.json", .{base}, 0);
     };
     _ = u.c.umask(0o077);
     try std.Io.Dir.cwd().createDirPath(init.io, config.data);
@@ -303,13 +311,21 @@ test "state directory honors explicit overrides then absolute XDG state and home
     defer arena.deinit();
     const a = arena.allocator();
     try std.testing.expectEqualStrings("relative-state", try dataDirectory(a, "relative-state", "/xdg", null));
-    try std.testing.expectEqualStrings("/xdg/zimbr", try dataDirectory(a, null, "/xdg", null));
+    const expected = switch (options.profile) {
+        .dev => "/xdg/zimbr-dev",
+        .release => "/xdg/zimbr",
+    };
+    try std.testing.expectEqualStrings(expected, try dataDirectory(a, null, "/xdg", null));
+    const fallback = switch (options.profile) {
+        .dev => "/home/example/.local/share/zimbr-dev",
+        .release => "/home/example/.local/share/zimbr",
+    };
     for ([_]?[]const u8{
         null,
         "",
         "relative",
     }) |state| {
-        try std.testing.expectEqualStrings("/home/example/.local/share/zimbr", try dataDirectory(a, null, state, "/home/example"));
+        try std.testing.expectEqualStrings(fallback, try dataDirectory(a, null, state, "/home/example"));
     }
     try std.testing.expectError(error.HomeRequired, dataDirectory(a, null, "", null));
     try std.testing.expectError(error.InvalidArguments, dataDirectory(a, "", "/xdg", "/home/example"));

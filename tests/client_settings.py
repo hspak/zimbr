@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Client settings migration, restart persistence, overrides and state paths."""
+import argparse
 import json
 import os
 from pathlib import Path
@@ -31,19 +32,37 @@ def saved(path):
 
 
 def main():
+    global BIN
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--binary', type=Path, default=BIN)
+    parser.add_argument('--profile', choices=('dev', 'release'), default='dev')
+    options = parser.parse_args()
+    BIN = options.binary.resolve()
+    directory = 'zimbr-dev' if options.profile == 'dev' else 'zimbr'
+    other_directory = 'zimbr' if options.profile == 'dev' else 'zimbr-dev'
     with tempfile.TemporaryDirectory(prefix='zimbr-settings-') as temp:
         root = Path(temp)
         env = dict(os.environ, HOME=str(root / 'home'), XDG_CONFIG_HOME=str(root / 'config'),
                    XDG_STATE_HOME=str(root / 'state'), XDG_DATA_HOME=str(root / 'unused'))
+        other_db = root / 'state' / other_directory / 'client.db'
+        other_db.parent.mkdir(parents=True, mode=0o700)
+        private_write(other_db, b'Other profile database must not be opened')
+        other_config = root / 'config' / other_directory / 'config.json'
+        other_config.parent.mkdir(parents=True, mode=0o700)
+        private_write(other_config, json.dumps(dict(
+            relay_url='https://other.example', ca_file='/other/ca.pem',
+            client_cert_file='/other/client.pem', client_key_file='/other/client-key.pem',
+        )).encode())
+        other_files = {path: path.read_bytes() for path in (other_db, other_config)}
         run(env, error='InvalidRelayOrigin')
-        default = root / 'state/zimbr'
+        default = root / 'state' / directory
         assert saved(default) == ('', '', '', '', 1)
         assert stat.S_IMODE(default.stat().st_mode) == 0o700
         assert stat.S_IMODE((default / 'client.db').stat().st_mode) == 0o600
         assert not (root / 'unused').exists()
         for state in ('', 'relative/path'):
             run(dict(env, XDG_STATE_HOME=state), error='InvalidRelayOrigin')
-            assert (root / 'home/.local/share/zimbr/client.db').exists()
+            assert (root / 'home/.local/share' / directory / 'client.db').exists()
         no_state = dict(env)
         no_state.pop('XDG_STATE_HOME')
         run(no_state, error='InvalidRelayOrigin')
@@ -59,7 +78,7 @@ def main():
         pki = PKI(root / 'tls')
         srv = server(pki)
         try:
-            conf = root / 'config/zimbr'
+            conf = root / 'config' / directory
             conf.mkdir(parents=True, mode=0o700)
             legacy = conf / 'config.json'
             preferences = dict(relay_url=f'https://localhost:{srv.server_port}',
@@ -105,7 +124,10 @@ def main():
             legacy.unlink()
         finally:
             srv.close()
-    print('PASS: settings migration, persistence, temporary overrides and state directory precedence')
+        for path, original in other_files.items():
+            assert path.read_bytes() == original, f'Changed the other profile: {path}'
+    print(f'PASS ({options.profile}): isolated database and credential settings, migration, '
+          'persistence, temporary overrides and state directory precedence')
 
 
 if __name__ == '__main__':

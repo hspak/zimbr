@@ -6,6 +6,7 @@
 #include <openssl/pem.h>
 #include <openssl/x509v3.h>
 #include <pango/pangocairo.h>
+#include <pango/pangofc-fontmap.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -417,6 +418,23 @@ struct ZcText {
     int line_count, width, height, subpixel;
     double scale;
 };
+static void text_font_substitute(FcPattern *pattern, gpointer data) {
+    (void)data;
+    // The light LCD filter keeps antialiased coverage but narrows its spread
+    // across neighboring subpixels, making small lettering less soft.
+    FcPatternDel(pattern, FC_LCD_FILTER);
+    FcPatternAddInteger(pattern, FC_LCD_FILTER, FC_LCD_LIGHT);
+}
+static PangoLayout *text_layout(cairo_t *cr) {
+    // Pango owns a default font map per thread. Configure it once so cached
+    // glyphs survive subsequent layouts, without changing system font settings.
+    PangoFontMap *map = pango_cairo_font_map_get_default();
+    if (PANGO_IS_FC_FONT_MAP(map) && !g_object_get_data(G_OBJECT(map), "zimbr-lcd-filter")) {
+        pango_fc_font_map_set_default_substitute(PANGO_FC_FONT_MAP(map), text_font_substitute, NULL, NULL);
+        g_object_set_data(G_OBJECT(map), "zimbr-lcd-filter", GINT_TO_POINTER(1));
+    }
+    return pango_cairo_create_layout(cr);
+}
 static cairo_t *text_context(cairo_surface_t *surface, double scale, int top, int subpixel) {
     cairo_t *cr = cairo_create(surface);
     // Keep glyph coordinates unchanged across tiles, including color emoji.
@@ -503,7 +521,7 @@ ZcText *zc_text_new_weighted(const char *text, int length, double size, int widt
     cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
     // Shape and hint at the same device scale used for rasterization. Creating
     // the layout at 1x then drawing it at fractional scale softens small text.
-    cairo_t *cr = text_context(surface, scale, 0, subpixel); t->layout = pango_cairo_create_layout(cr);
+    cairo_t *cr = text_context(surface, scale, 0, subpixel); t->layout = text_layout(cr);
     PangoFontDescription *font = pango_font_description_new();
     pango_font_description_set_family(font, "sans-serif");
     pango_font_description_set_absolute_size(font, size * PANGO_SCALE);

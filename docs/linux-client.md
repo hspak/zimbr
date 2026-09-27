@@ -16,7 +16,7 @@ Run the commands below from the repository root.
 ## Build and install
 
 Use Zig **0.16.0**, `pkg-config`, and development headers/libraries for SQLite,
-libcurl (7.88+ with the OpenSSL 3 backend), OpenSSL 3, Pango/Cairo, GLib/GIO,
+libcurl (7.88+ with the OpenSSL 3 backend), OpenSSL 3, Pango/Cairo (Pango 1.48+), Fontconfig, GLib/GIO,
 libpng, libjpeg, OpenGL, Wayland, and xkbcommon, plus `wayland-scanner`. Clay
 and raylib are pinned in [`build.zig.zon`](../build.zig.zon); Install a system
 sans-serif font and an emoji font for the scripts you use.
@@ -31,6 +31,10 @@ packaging/linux/install.sh
 
 For Arch packages and maintainer releases, see [Linux packaging](linux-packaging.md).
 
+Source builds default to `-Dprofile=dev`, independently of optimization mode.
+Use `-Dprofile=release` for the official build's paths. Both `client` and `run`
+accept the option; `zig-out/bin/zimbr --help` reports the compiled profile.
+
 ## Provisioning and configuration
 
 Provision a local device key/CSR and import the verified CA and signed leaf with
@@ -41,9 +45,18 @@ The relay must enable the device's entire-leaf SHA-256 fingerprint. Use a direct
 reachable hostname covered by its server certificate; proxies and redirects are
 disabled. Both API and SSE connections require TLS 1.3 and client authentication.
 
-Settings, cached messages and drafts live in `client.db` under
-`$XDG_STATE_HOME/zimbr`, falling back to `$HOME/.local/share/zimbr` when
-`XDG_STATE_HOME` is unset, empty or relative. `--data-dir PATH` overrides that
+Settings, cached messages and drafts live in `client.db`. Each build profile
+uses a separate directory:
+
+| Location | Dev (source default) | Release |
+| --- | --- | --- |
+| State | `$XDG_STATE_HOME/zimbr-dev` | `$XDG_STATE_HOME/zimbr` |
+| State fallback | `~/.local/share/zimbr-dev` | `~/.local/share/zimbr` |
+| Suggested certificates | `~/.config/zimbr-dev/tls` | `~/.config/zimbr/tls` |
+| Legacy config | `$XDG_CONFIG_HOME/zimbr-dev/config.json` | `$XDG_CONFIG_HOME/zimbr/config.json` |
+
+The state fallback applies when `XDG_STATE_HOME` is unset, empty or relative.
+`XDG_CONFIG_HOME` defaults to `~/.config` when unset. `--data-dir PATH` overrides that
 location, including when `HOME` is unset. `XDG_DATA_HOME` is no longer used.
 To keep an existing cache in another location, launch with `--data-dir` pointing
 to that directory. The database and media cache contain plaintext.
@@ -62,9 +75,11 @@ directories with no symlinks. The GUI never receives Apple account credentials.
 Saving reconnects both messaging and media with the new settings, preserving
 drafts, cached messages and send recovery.
 
-On the first launch for a database without settings, Zimbr imports an existing
-`$XDG_CONFIG_HOME/zimbr/config.json` (fallback `~/.config/zimbr/config.json`) if it
-is safe and readable. The JSON file is ignored thereafter and may be removed
+On the first launch for a database without settings, Zimbr imports its profile's
+legacy config file if it is safe and readable. A dev build does not import the
+release profile's database or certificate settings. Certificate paths remain
+explicit: provision separate dev credentials and enter their paths in Settings.
+The JSON file is ignored thereafter and may be removed
 after checking the imported settings. Invalid or obsolete JSON opens setup for
 repair. Legacy `theme` and `data_dir` fields are ignored; use `--data-dir` to
 select an existing database outside the default location.
@@ -144,10 +159,11 @@ Line baselines and spacing use the main font's metrics, so Korean and other
 fallback fonts do not add empty padding. Lines still expand for visible glyphs
 that need extra space, such as stacked accents or tall emoji. Drawing, selection,
 and caret placement share these line bounds.
-Lettering requests RGB subpixel antialiasing on opaque backgrounds, with a
-grayscale fallback where unsupported. Transparent text overlays use grayscale
-antialiasing; text on solid surfaces is composited against its actual background
-to preserve the RGB coverage at glyph edges.
+Lettering requests RGB subpixel antialiasing on opaque backgrounds, using the
+light LCD filter for sharper strokes with smooth edges and a grayscale fallback
+where unsupported. Transparent text overlays use grayscale antialiasing; text on
+solid surfaces is composited against its actual background to preserve the RGB
+coverage at glyph edges.
 Combining marks and joined emoji survive editing and restart. Full input-method/preedit
 integration, visual bidirectional cursor navigation, and accessibility are future
 work. For input-method users, turn off **Enter to send** in Settings to reserve plain Enter
@@ -310,6 +326,14 @@ python3 tests/mac_enrichment_packaging.py
 zig fmt --check build.zig src
 # Read-only connection check, with aggregate-only output:
 zig-out/bin/client-probe --data-dir /path/to/client-data
+```
+
+Check the official profile's paths and settings migration separately:
+
+```sh
+zig build client-probe test-client -Dprofile=release --prefix zig-out/client-release
+python3 tests/client_settings.py --profile release \
+  --binary zig-out/client-release/bin/client-probe
 ```
 
 `test-client` runs store, SSE, and Unicode text tests without a GPU. The Python

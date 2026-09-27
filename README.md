@@ -38,6 +38,11 @@ and direct network access from Linux to the relay.
    zig build run -Doptimize=ReleaseSafe
    ```
 
+Source builds default to the `dev` profile, including optimized builds. On Linux,
+dev databases and settings use `zimbr-dev` directories; provision certificates
+under `~/.config/zimbr-dev/tls`. Build with `-Dprofile=release` to use the official
+`zimbr` paths. See [client configuration](docs/linux-client.md#provisioning-and-configuration).
+
 Enter sends; Shift+Enter adds a line. Ctrl+N starts a conversation, Ctrl+F searches,
 and Ctrl+D opens connection details and **Reconnect**.
 

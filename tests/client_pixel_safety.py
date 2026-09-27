@@ -14,7 +14,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--baseline', default='1aa4f0b621091726db1ba35e02df0fff0db0d669', help='Git revision before the performance changes')
     args = parser.parse_args()
-    flags = shlex.split(subprocess.check_output(['pkg-config', '--cflags', '--libs', 'libcurl', 'openssl', 'pangocairo', 'gio-2.0', 'libpng', 'libjpeg'], text=True))
+    flags = shlex.split(subprocess.check_output(['pkg-config', '--cflags', '--libs', 'libcurl', 'openssl', 'pangocairo', 'pangoft2', 'fontconfig', 'gio-2.0', 'libpng', 'libjpeg'], text=True))
     env = os.environ.copy()
     # Font libraries keep process-global caches. Check bounds and undefined
     # behavior here; persistent third-party caches are not a leak test.
