@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Exercise the authoritative Mac signer with real mkcert, without installing trust.
 
-Run with ZIMBR_MKCERT=/path/to/mkcert python3 tests/cert_management.py.
+Build the dev-profile relay and fake-relay first, then run with
+ZIMBR_MKCERT=/path/to/mkcert python3 tests/cert_management.py.
 All CA and device material is temporary and stays outside runtime directories.
 """
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
 import tempfile
@@ -19,6 +21,9 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, ExtensionOID
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'tools'))
 from tls_admin import atomic, create_key, verify_leaf
+from tls_support import Credentials
+from fixture import create
+from integration import wait_for
 
 
 class CertificateManagement(unittest.TestCase):
@@ -39,6 +44,123 @@ class CertificateManagement(unittest.TestCase):
     def linux(self, *args):
         return subprocess.run([sys.executable, str(ROOT/'packaging/linux/provision.py'), *map(str, args)],
                               capture_output=True, text=True, timeout=30)
+
+    def admin(self, *args):
+        return subprocess.run([sys.executable, str(ROOT/'tools/tls_admin.py'), *map(str, args)],
+                              capture_output=True, text=True, timeout=30)
+
+    def test_turnkey_setup_and_device_handoff_with_real_relay_validation(self):
+        relay = ROOT/'zig-out/bin/relay'
+        directory = self.root/'setup'
+        issuer = self.root/'issuer'
+        args = ('setup', '--directory', directory, '--caroot', issuer, '--relay', relay,
+                '--server-name', 'localhost', '--listen-address', '127.0.0.1',
+                '--name', '127.0.0.1', '--mkcert', self.mkcert)
+        result = self.admin(*args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = json.loads((directory/'relay.json').read_text())
+        self.assertEqual(config['port'], 8732)
+        self.assertEqual(config['server_name'], 'localhost')
+        admin = json.loads((directory/'admin.json').read_text())
+        self.assertEqual(admin['relay_url'], 'https://localhost:8732')
+        devices_path = Path(config['device_allowlist_file'])
+        devices = json.loads(devices_path.read_text())
+        admin_cert = x509.load_pem_x509_certificate(Path(admin['client_cert_file']).read_bytes())
+        self.assertEqual(devices, [{'label': 'Mac administrator', 'enabled': True,
+                                   'sha256': admin_cert.fingerprint(hashes.SHA256()).hex()}])
+        original_key = Path(config['server_key_file']).read_bytes()
+        self.assertNotEqual(self.admin(*args).returncode, 0)
+        self.assertEqual(Path(config['server_key_file']).read_bytes(), original_key)
+        self.assertFalse(list(directory.rglob('rootCA-key.pem')))
+        for path in directory.rglob('*'):
+            self.assertEqual(path.stat().st_mode & 0o777, 0o700 if path.is_dir() else 0o600)
+
+        linux = self.root/'linux'
+        name = 'desktop.zimbr.invalid'
+        self.assertEqual(self.linux('request', '--tls-dir', linux, '--name', name).returncode, 0)
+        handoff = self.root/'handoff'
+        args = ('issue-device', '--csr', linux/'client.csr', '--name', name, '--label', 'Desktop',
+                '--directory', handoff, '--caroot', issuer, '--config', directory/'relay.json',
+                '--relay', relay, '--stage', '--mkcert', self.mkcert)
+        result = self.admin(*args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"restart_complete": false', result.stdout)
+        self.assertEqual({p.name for p in handoff.iterdir()}, {'ca.pem', 'client.pem'})
+        ca = x509.load_pem_x509_certificate((handoff/'ca.pem').read_bytes())
+        pin = ca.fingerprint(hashes.SHA256()).hex()
+        self.assertIn(pin, result.stdout)
+        cert = x509.load_pem_x509_certificate((handoff/'client.pem').read_bytes())
+        devices = json.loads(devices_path.read_text())
+        self.assertEqual(len(devices), 2)
+        self.assertEqual(devices[1], {'label': 'Desktop', 'enabled': True,
+                                     'sha256': cert.fingerprint(hashes.SHA256()).hex()})
+
+        # Exercise the real import and its GUI argument handoff without a display.
+        launcher = self.root/'client'
+        captured = self.root/'launch.json'
+        launcher.write_text(f'#!{sys.executable}\nimport json, pathlib, sys\n'
+                            f'pathlib.Path({str(captured)!r}).write_text(json.dumps(sys.argv[1:]))\n')
+        launcher.chmod(0o700)
+        args = ('import', '--tls-dir', linux, '--ca', handoff/'ca.pem', '--cert', handoff/'client.pem',
+                '--relay-url', admin['relay_url'], '--launch', launcher, '--ca-sha256')
+        self.assertNotEqual(self.linux(*args, '0'*64).returncode, 0)
+        self.assertFalse(captured.exists())
+        result = self.linux(*args, pin)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(captured.read_text()), [
+            '--settings', '--relay-url', admin['relay_url'], '--ca-file', str(linux/'ca.pem'),
+            '--client-cert-file', str(linux/'client.pem'), '--client-key-file', str(linux/'client-key.pem'),
+        ])
+
+        # The generated identities must work with the production TLS listener,
+        # beyond passing offline certificate/configuration validation.
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            port = listener.getsockname()[1]
+        config['port'] = port
+        atomic(directory/'relay.json', json.dumps(config).encode())
+        source = self.root/'source.db'
+        create(source, count=0)
+        common = ['--messages-db', str(source), '--data-dir', str(self.root/'data'),
+                  '--config', str(directory/'relay.json')]
+        fixture = ROOT/'zig-out/bin/fake-relay'
+        subprocess.run([str(fixture), 'setup', *common], check=True, capture_output=True)
+        with (self.root/'relay.log').open('w') as log:
+            process = subprocess.Popen([str(fixture), 'serve', *common], stdout=log, stderr=log)
+            try:
+                for client, folder in (('admin', directory/'admin'), ('linux', linux)):
+                    client_config = self.root/f'{client}.json'
+                    atomic(client_config, json.dumps({
+                        'relay_url': f'https://localhost:{port}', 'ca_file': str(folder/'ca.pem'),
+                        'client_cert_file': str(folder/'client.pem'),
+                        'client_key_file': str(folder/'client-key.pem'),
+                    }).encode())
+                    credentials = Credentials(client_config)
+                    def status():
+                        connection = credentials.connection(timeout=2)
+                        try:
+                            connection.request('GET', '/v1/status')
+                            response = connection.getresponse()
+                            self.assertEqual(response.status, 200)
+                            return json.loads(response.read())
+                        finally:
+                            connection.close()
+                    self.assertEqual(wait_for(status)['api_version'], '1')
+            finally:
+                process.terminate()
+                process.wait(timeout=10)
+
+    def test_setup_rejects_invalid_inputs_before_issuance(self):
+        base = ('setup', '--directory', self.root/'setup', '--caroot', self.root/'issuer',
+                '--relay', ROOT/'zig-out/bin/relay', '--server-name', 'localhost',
+                '--listen-address', '127.0.0.1', '--mkcert', self.mkcert)
+        for extra in (('--port', '0'), ('--port', '65536'), ('--profile', 'release'),
+                      ('--listen-address', '0.0.0.0'), ('--listen-address', '::'),
+                      ('--listen-address', 'not-an-ip'), ('--mkcert', str(self.root/'missing-mkcert'))):
+            with self.subTest(extra=extra):
+                result = self.admin(*base, *extra)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((self.root/'issuer/rootCA-key.pem').exists())
 
     def test_linux_request_mac_signer_and_linux_import(self):
         directory = self.root/'linux'

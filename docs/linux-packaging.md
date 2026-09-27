@@ -13,7 +13,8 @@ so package recipes must select release explicitly in their `zig build` commands.
 `release.sh` adds this selection to the staged recipe before building or publishing it.
 It includes `zimbr`, `zimbr-provision`, the desktop
 launcher, the scalable SVG, PNG icons from 16 to 512 px, setup documentation,
-and license notices. Provisioning uses Python cryptography and OpenSSL.
+and license notices. Linux provisioning uses Python cryptography and OpenSSL;
+certificate issuance on the Mac requires mkcert. See [setup](setup.md) for the user workflow.
 The macOS relay is distributed as the `zimbr-relay` Homebrew cask. Every release
 publishes both components at the version in `build.zig.zon`, even when only one
 component changed.
@@ -23,19 +24,14 @@ the extracted `zig-pkg` directory in offline system mode. Package checks run
 the headless client unit tests, validate the desktop entry, and exercise the
 provisioning helper's CLI. They do not launch the GUI or contact a live relay.
 
-## Build the initial package
+## Build the Linux package
 
 ```sh
 cd "$ZIMBR_AUR_DIR"
 makepkg -si
 ```
 
-There is no release tag yet, so the initial recipe pins public commit
-`7fbc3fe3f5ac9d7fcb3a2f07980e5fc34fe808f1` with a SHA-256 checksum. It packages
-the artwork in that commit. The first release will include the new icons once
-they are committed, and switch `_ref` to the release tag.
-
-To validate the current checkout, including uncommitted icon changes, from the
+To validate the current checkout, including local changes, from the
 Zimbr repository:
 
 ```sh
@@ -127,9 +123,7 @@ The AUR checkout must be its own git repository on `master`, with origin
 the first submission; existing tracked packaging edits must be committed first.
 The tap must have a clean tracked checkout on a branch synchronized with origin.
 The script generates `Casks/zimbr-relay.rb` from the template in this repository;
-existing formulae are preserved. The initial cask is disabled and uses an
-all-zero checksum that rejects downloads until the first release replaces it
-with the real archive checksum. Releases require the exact relay ZIP SHA-256
+existing formulae are preserved. Releases require the exact relay ZIP SHA-256
 in the cask and the exact source archive SHA-256 in the PKGBUILD and `.SRCINFO`;
 `:no_check` and `SKIP` are rejected before publishing package metadata.
 

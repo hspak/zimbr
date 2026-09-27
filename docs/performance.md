@@ -8,10 +8,10 @@ text and typed-record conversions in event delivery, history and enrichment.
 The [single-client pass](single-client.md) then amortizes disk-cache maintenance
 using its sole writer and removes per-connection mutexes from client SQLite use.
 
-The September 24 pass below uses the current native mTLS fake relay with temporary
-enrolled credentials. The older September 22 tables describe the pre-mTLS release;
-the old plaintext adapter has been removed. Current Mac
-transport/deployment checks are in [macOS TLS operation](macos-tls.md).
+The September 24 measurements below use the native mTLS fake relay with
+synthetic data and temporary enrolled credentials. They are historical results,
+not current performance guarantees. See [macOS TLS operation](macos-tls.md) for
+deployment checks.
 
 The critical path is the whole system: observing Apple's database, committing
 the relay journal, transporting changes, committing the client cache, publishing
@@ -135,8 +135,8 @@ fixture mostly leaves those columns null. Initial times are medians of three
 runs; unchanged times are medians of three per-run medians over 15 scans. Both
 variants include identical lightweight SQL counters. Every run checks all
 10,004 messages, the retained anchor boundaries, SQLite integrity, and foreign
-keys. The local reproduction artifacts are `.local/perf-review/run_resolved.py`
-and `.local/perf-review/resolved-results.json`.
+keys. The native follow-up harness was not committed; these historical figures cannot
+be reproduced with a repository command alone.
 
 These measurements call `Core.ingest` directly, without background workers,
 HTTP traffic, thread QoS, or launchd scheduling. They measure ingestion and
@@ -231,7 +231,7 @@ flowchart LR
 - **Dispatch and streaming:** generation-based notifications wake the sender on
   acceptance and stream subscribers after successful journal commits. Capturing
   the generation before checking work prevents a lost wakeup. Idle subscribers
-  still run bounded maintenance and token checks. Flush event pages together.
+  still run bounded maintenance and certificate-expiry checks. Flush event pages together.
 - **Transport:** reuse HTTP connections, authenticate every request, reset request
   deadlines, cap requests per connection, and disable server-side Nagle delay.
   Stream and connection limits remain enforced.
@@ -286,98 +286,11 @@ a separately validated adapter that returns an authoritative identity. The short
 window reduces the time available to discover competing matches; ambiguous
 requests remain uncertain and are never automatically resent.
 
-## Reproducing the measurements
-
-Measured on 2026-09-22 with Zig 0.16.0, ReleaseFast builds, and identical synthetic
-fixtures on the same Linux host. [Aggregate results](performance-results.json)
-retain the sample counts and tail latencies.
-
-| Measurement | Before | After |
-| --- | ---: | ---: |
-| Incoming visibility, median | 885 ms | 19 ms |
-| Incoming visibility, p95 | 1,210 ms | 26 ms |
-| Local outbox acknowledgement, median | 102 ms | 26 ms |
-| Send dispatch, median | 170 ms | 27 ms |
-| Outgoing echo visibility, median | 883 ms | 26 ms |
-| Connect | 267 ms | 26 ms |
-| Open selected history | 113 ms | 40 ms |
-| 500-message live burst | 4,034 ms | 60 ms |
-| Sidebar ready, 200 conversations | 20,734 ms | 26 ms |
-
-The small fixture uses 12 incoming and 6 send samples. The 200-conversation
-scenario separately measures sidebar completion. These are illustrative runs,
-not statistically stable hardware-independent bounds.
-
-```sh
-zig build fake-relay client-probe -Doptimize=ReleaseFast
-python3 tests/performance.py
-python3 tests/performance.py --chats 200 --samples 3 --burst 100
-```
-
-Use `--bin-dir` to compare saved release builds. Run comparisons sequentially on
-the same machine without competing tests. All data and recipients are synthetic;
-the benchmark creates temporary databases and only connects over localhost.
-It measures incoming visibility, local outbox acknowledgement, dispatch, outgoing
-echo visibility, connection/history opening, complete sidebar readiness, and a
-live burst. Counts and timings are the only output.
-
-The client probe samples views every 20 ms. Reported latencies therefore include
-that observation interval and exclude GPU presentation, SSH/WAN latency, native
-Mac storage, Messages automation startup, and Apple's delivery network. The small
-fixture has 244 source messages and four conversations. The sidebar fixture has
-200 conversations. These measurements establish software-path improvements, not
-an Apple delivery SLA.
-
-`send_ack` measures the UI seeing that its command has been durably saved to the
-local outbox and scheduled for transmission. It does not measure remote acceptance
-or Apple's delivery confirmation. `send_dispatch` observes the synthetic adapter's
-database write, after durable relay acceptance.
-
-### Large histories
-
-A separate scenario loads all 25,001 messages in the selected conversation from
-a 50,004-message source, with 1,024-byte historical text. Its baseline already
-includes the first round of notification, transport, and sidebar improvements.
-The final version additionally shares individual message records and previews,
-avoids repeated conversation scans within ingestion batches, and skips unchanged
-source-mapping writes. Source joins have indexes in both benchmark versions;
-the minimal correctness fixture otherwise makes these joins full-table scans.
-
-| Measurement | First performance pass | Final |
-| --- | ---: | ---: |
-| Incoming visibility, median / p95 | 121 / 165 ms | 81 / 135 ms |
-| Local outbox acknowledgement, median | 85 ms | 35 ms |
-| Send dispatch, median | 95 ms | 45 ms |
-| Outgoing echo visibility, median | 165 ms | 85 ms |
-| 500-message live burst | 340 ms | 200 ms |
-| Initial relay ingestion | 24.4 s | 18.3 s |
-| Load every selected history page | 23.2 s | 14.8 s |
-
-```sh
-python3 tests/performance.py --history 50000 --load-history --text-bytes 1024
-zig build client-bench -Doptimize=ReleaseFast
-zig-out/bin/client-bench 25000 1024
-```
-
-`client-bench` isolates cache publication in an in-memory synthetic database. It
-runs 15 unchanged-history, edit, and append samples each. At 25,000 messages,
-median edit/append publication fell from 45 ms to 6–7 ms; unchanged-history
-publication fell from 45 ms to 5 ms. Whole-process peak RSS, including fixture
-construction, fell from approximately 242 MiB to 177 MiB on this run. Both current
-and previous immutable snapshots coexist during updates in this benchmark.
-
-The worker's cold snapshot construction increased from 46 ms to 77 ms. The new
-path also prepares display previews and hashes that previously ran on the UI
-thread; the old cold timing excludes that rendering preparation. These numbers
-do not measure first-frame presentation. Ordinary ASCII preview scanning uses
-blocks, with the same scalar UTF-8, line-limit, and invalid-text handling at
-special characters. Edits reuse the unaffected previews and full message text.
-
 ## Verification
 
 The relay/client unit and integration suites cover atomic commits, failed cursor
 writes, batch rollback, replay, delayed joins, live bursts, source replacement,
-send idempotency, uncertain dispatch, process restart, token rotation, partial
+send idempotency, uncertain dispatch, process restart, credential renewal/revocation, partial
 responses, and recovery without duplicate sends. Additional checks exercise
 reauthentication on a reused socket, sending while a history response is blocked,
 shared snapshot lifetime, and full-text preservation with truncated projections.
@@ -393,7 +306,7 @@ the existing native acceptance evidence predates these performance changes.
 ## Further architectural opportunities
 
 The next measurements should use the real Mac, realistic conversation counts,
-reconnect backlogs, and an SSH tunnel with controlled RTT. Profile each stage
+reconnect backlogs, and a direct TLS connection with controlled RTT. Profile each stage
 before choosing the next change.
 
 1. **Authoritative send receipts:** investigate a persistent native automation

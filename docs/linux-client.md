@@ -6,8 +6,8 @@ existing-conversation replies, Unicode drafts, desktop notifications, send
 recovery, contact names/photos, inline images, stored link cards, and reaction
 chips when supplied by the relay.
 
-First [set up the Mac relay](macos-relay.md), then follow
-[Linux mTLS setup](linux-mtls.md) to enroll this device. Both endpoints share the
+Follow [first-run setup](setup.md) to build both apps and enroll this device.
+[Linux TLS operation](linux-mtls.md) covers later credential changes. Both endpoints share the
 [certificate management contract](certificate-management.md). Linux worker tests
 exercise the native mTLS relay directly; installed two-host acceptance is separate.
 
@@ -18,13 +18,13 @@ Run the commands below from the repository root.
 Use Zig **0.16.0**, `pkg-config`, and development headers/libraries for SQLite,
 libcurl (7.88+ with the OpenSSL 3 backend), OpenSSL 3, Pango/Cairo (Pango 1.48+), Fontconfig, GLib/GIO,
 libpng, libjpeg, OpenGL, Wayland, and xkbcommon, plus `wayland-scanner`. Clay
-and raylib are pinned in [`build.zig.zon`](../build.zig.zon); Install a system
+and raylib are pinned in [`build.zig.zon`](../build.zig.zon); install a system
 sans-serif font and an emoji font for the scripts you use.
 
 ```sh
-zig build client -Doptimize=ReleaseFast
+zig build client -Doptimize=ReleaseSafe
 # After provisioning and configuration below:
-zig build run -Doptimize=ReleaseFast
+zig build run -Doptimize=ReleaseSafe
 # Optional user-local executable, icon, and application launcher:
 packaging/linux/install.sh
 ```
@@ -116,6 +116,9 @@ from the send time; pending sends show “Sending…” during this grace period
 Confirmed failures appear immediately.
 Pending and uncertain sends stay in the timeline at their original send time;
 older cached sends use an estimated position from nearby history.
+Unknown pending sends are removed from the client five minutes after that time,
+and status polling for them stops. Expiry continues offline and across restarts;
+messages already found in Messages history remain visible.
 
 The compact composer grows from one to three text lines, then scrolls for longer
 drafts. Send stays the same size at the bottom right, and the input's bottom
@@ -271,7 +274,7 @@ the client exits and continue to be written to the terminal.
 
 ## Rendering and performance
 
-Linux uses Wayland exclusively. The GUI was rendered at 125% desktop scaling
+Linux uses Wayland exclusively. The GUI supports fractional desktop scaling
 and uses `zimbr` as its application ID. Movement, scrolling, and navigation target
 120 FPS, returning to idle rendering after half a second without activity. The
 background worker continues to receive messages while rendering sleeps.
@@ -304,7 +307,7 @@ for benchmarks, reliability constraints, and remaining platform validation.
 
 ```sh
 # Add -Dopenssl-prefix=/absolute/openssl-3.5 if system OpenSSL is another minor version.
-zig build test client-probe fake-relay
+zig build test relay client-probe fake-relay
 python3 tests/cert_management.py  # real mkcert required
 python3 tests/client_native_tls.py
 python3 tests/client_tls.py

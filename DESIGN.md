@@ -5,9 +5,9 @@ Current macOS TLS evidence is tracked in [docs/macos-tls.md](docs/macos-tls.md);
 the earlier Messages acceptance record is [docs/mac-validation.md](docs/mac-validation.md).
 Linux build, verification, and text-backend limitations are documented in the
 [Linux client guide](docs/linux-client.md).
-The proposed [message enrichment design](docs/message-enrichment.md) covers
-Contacts names/photos, attached images, existing URL previews, and reactions,
-including shared infrastructure, delivery order, and acceptance criteria.
+The [Mac enrichment contract](docs/mac-enrichment-acceptance.md) and
+[Linux enrichment guide](docs/linux-message-enrichment.md) describe implemented
+Contacts names/photos, images, stored link previews, and reactions.
 
 Build a small, self-hosted system that uses an always-on Mac mini, signed into
 Messages, to send and receive iMessages from a graphical Linux application.
@@ -31,10 +31,7 @@ The relay exposes our own API; Linux never receives Apple account credentials.
 Connectivity uses direct HTTPS with mandatory device certificates (TLS 1.3,
 HTTP/1.1). Both transport implementations and the Linux provisioning flow follow the
 shared certificate contract. Linux integration suites use the native relay TLS
-transport directly; the [integration review](docs/linux-mtls-review.md) records
-the resolved handoff issues.
-[The migration contract](docs/mtls-migration.md) supersedes the old SSH/bearer-token
-transport. The Mac defines [certificate policy](docs/certificate-management.md);
+transport directly. The Mac defines [certificate policy](docs/certificate-management.md);
 [Linux setup](docs/linux-mtls.md) documents the client workflow.
 
 ```mermaid

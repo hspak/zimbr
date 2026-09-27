@@ -94,6 +94,7 @@ pub fn open(path: [:0]const u8) ReadError!Store {
         \\CREATE TABLE IF NOT EXISTS pages(chat TEXT PRIMARY KEY,cursor TEXT);
         \\CREATE TABLE IF NOT EXISTS previews(chat TEXT PRIMARY KEY);
         \\CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY,epoch TEXT NOT NULL,draft_key TEXT NOT NULL,payload TEXT NOT NULL,state TEXT NOT NULL,detail TEXT NOT NULL DEFAULT '',record TEXT);
+        \\CREATE INDEX IF NOT EXISTS outbox_state ON outbox(state);
     );
     if (try db.scalar("SELECT count(*) FROM pragma_table_info('previews') WHERE name='record'") == 0) try db.exec("ALTER TABLE previews ADD COLUMN record TEXT");
     try db.exec("UPDATE records SET chat=id WHERE kind='conversation' AND chat=''");
@@ -585,6 +586,15 @@ pub fn outcome(s: Store, id: []const u8, state: []const u8, detail: []const u8) 
         .{ .text = id },
     });
 }
+/// Remove unknown pending sends five minutes after their saved send time, across
+/// all relay epochs. Returns whether entries were removed; message history stays.
+pub fn expireUnknown(s: Store, now_ms: i64) Sqlite.QueryError!bool {
+    try s.exec(
+        "DELETE FROM outbox WHERE state='unknown' AND julianday(sent_at)<=julianday(? / 1000.0,'unixepoch')",
+        &.{.{ .int = now_ms - 5 * 60 * 1000 }},
+    );
+    return u.c.sqlite3_changes(s.db.handle) > 0;
+}
 pub fn page(s: Store, chat: []const u8, cursor: ?[]const u8) Sqlite.QueryError!void {
     try s.exec(
         "INSERT INTO pages VALUES(?,?) ON CONFLICT(chat) DO UPDATE SET cursor=excluded.cursor",
@@ -982,4 +992,71 @@ pub fn directory(s: Store, a: u.Allocator) RecordError!Directory {
         try std.json.parseFromSliceLeaky(t.Identity, a, q.bytes(0), .{ .ignore_unknown_fields = true, .allocate = .alloc_always }),
     );
     return result;
+}
+
+test "unknown sends expire at five minutes without dropping other states or returning on late updates" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    const store = try Store.open(":memory:");
+    defer store.close();
+    const epoch = "12345678-1234-1234-1234-123456789012";
+    try store.beginSync(epoch, epoch ++ ":0");
+    const states = [_][]const u8{
+        "unknown",
+        "unknown",
+        "sending",
+        "queued",
+        "dispatching",
+        "submitted",
+        "delivered",
+        "failed",
+        "unconfirmed",
+    };
+    const target = t.Target{ .recipient = .{
+        .address = "peer@example.invalid",
+        .service = "imessage",
+    } };
+    for (states, 0..) |state, i| {
+        const id = try std.fmt.allocPrint(ar, "00000000-0000-0000-0000-{d:0>12}", .{i});
+        try store.persistSend(ar, "chat", .{
+            .request_id = id,
+            .server_epoch = epoch,
+            .target = target,
+            .text = state,
+        });
+        try store.outcome(id, state, "");
+        try store.exec("UPDATE outbox SET sent_at=? WHERE id=?", &.{
+            .{ .text = if (i == 1) "2026-01-01T00:00:00.001000000Z" else "2026-01-01T00:00:00Z" },
+            .{ .text = id },
+        });
+    }
+    // 2026-01-01 00:05:00 UTC. Legacy timestamps omit fractional seconds.
+    const deadline_ms = 1767225900000;
+    try testing.expect(!try store.expireUnknown(deadline_ms - 1));
+    try testing.expect(try store.expireUnknown(deadline_ms));
+    const boundary = try store.snapshot(ar, "chat");
+    try testing.expectEqual(@as(usize, 8), boundary.pending.len);
+    try testing.expectEqualStrings("00000000-0000-0000-0000-000000000001", boundary.pending[0].input.request_id);
+    try testing.expect(!try store.expireUnknown(deadline_ms));
+    try testing.expect(try store.expireUnknown(deadline_ms + 1));
+    const remaining = try store.snapshot(ar, "chat");
+    try testing.expectEqual(@as(usize, 7), remaining.pending.len);
+    for (remaining.pending, states[2..]) |pending, state| try testing.expectEqualStrings(state, pending.state);
+
+    var late = t.SendRequest{
+        .request_id = "00000000-0000-0000-0000-000000000000",
+        .server_epoch = epoch,
+        .revision = "1",
+        .target = target,
+        .text = "unknown",
+        .state = .unknown,
+    };
+    _ = try store.upsert(ar, "request", try u.json(ar, late));
+    late.revision = "2";
+    late.state = .delivered;
+    _ = try store.upsert(ar, "request", try u.json(ar, late));
+    try testing.expectEqual(@as(usize, 7), (try store.snapshot(ar, "chat")).pending.len);
+    try testing.expectEqual(@as(i64, 0), try store.db.scalar("SELECT count(*) FROM outbox WHERE state='unknown'"));
 }

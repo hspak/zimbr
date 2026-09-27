@@ -1,5 +1,9 @@
 # Performance hardening audit
 
+This is a historical implementation/measurement report. Benchmark results and
+suite counts below describe that revision; use [setup](setup.md) for current
+installation and rerun the listed checks for a new build.
+
 Reviewed the changes from security commit
 `1aa4f0b621091726db1ba35e02df0fff0db0d669` through performance commits `42b6943`
 and `9d9f840`. No hardening regression was found in the reviewed and tested paths.
@@ -13,7 +17,7 @@ behavior or require reverting a performance optimization.
 | JSON string SIMD | UTF-8 validation and byte limits still precede scanning; only ordinary quoted bytes are skipped. Escapes, delimiters, depth and token counts use the original state machine, followed by typed JSON parsing. Tests cover exact 32-container and 8,192-token limits after long escaped strings at 32 alignments. HTTP tests reject controls and invalid escapes in unknown fields without creating send records. |
 | Cached SQLite statements | The cache remains connection-owned, bounded to 256 idle entries, and protected by SQLite's connection mutex. Checked-out statements leave the cache. Close resets unfinished cursors and clears all borrowed bindings before arenas can be reset; failed statements are finalized. Tests cover nested queries, failed writes, schema changes, collisions, bounded retention, and partial binding failures followed by freed caller memory and reuse. |
 | Reused import scratch | Every entered row scope resets scratch through `defer`, including error and early-return paths. Retained capacity is limited to 256 KiB and freed at batch end. Conversation IDs and batch maps use the separate batch allocator. Stored link payloads still copy SQLite column data before decoding; the archive does not borrow a statement buffer across close/reuse. |
-| Reused frame scratch and history geometry | Frame scratch resets after drawing with a 1 MiB retention limit. Persistent UI values are copied into their owning allocations. Cached history still invalidates on content, conversation, width and scale changes. Input validation, link confirmation, and URL policy were not changed. |
+| Reused frame scratch and history geometry | Frame scratch resets after drawing with a 1 MiB retention limit. Persistent UI values are copied into their owning allocations. Cached history still invalidates on content, conversation, width and scale changes. Input validation and URL policy were not changed. |
 | Pixel SIMD and direct JPEG RGBA | Text geometry, tile and allocation limits are unchanged. JPEG input remains capped at 8 MiB, dimensions at 2,560 per side, and output at 32 MiB. Decoder errors and warnings still reject the result and clear output state. Sanitized comparisons exercise short rows, fractional scaling, RGB/grayscale/progressive JPEGs, every truncated prefix of selected fixtures, invalid dimensions and precision, and valid reads following failures. |
 | Worker/UI wakeups | Publishing still happens under the existing mutex and media generation checks still precede publication. The wake pipe is bounded, nonblocking and close-on-exec. Workers are joined before the pipe is closed. Epoch, credential and media cancellation behavior passed integration tests. |
 | macOS scheduling and randomness | QoS and launchd process type change scheduling; installation ownership, mode, signing entitlements and authentication policy are unchanged. `arc4random_buf` retains cryptographic random generation. Native runtime validation remains outstanding. |

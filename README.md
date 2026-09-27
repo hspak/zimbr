@@ -21,27 +21,13 @@ enrolled device certificate.
 
 ## Get started
 
-You need a Mac logged into Messages, a Linux Wayland desktop, Zig **0.16.0**,
-and direct network access from Linux to the relay.
+Follow the [Mac + Linux setup guide](docs/setup.md). It covers dependencies,
+building both apps, mkcert certificate issuance, Mac permissions, and device
+enrollment. The Linux importer opens Settings with verified credentials filled in.
 
-1. **Set up the Mac.** Follow the [relay guide](docs/macos-relay.md) to build,
-   [provision certificates](docs/macos-tls.md), install, and grant Full Disk Access
-   and Messages Automation. Contacts access is optional.
-2. **Enroll Linux.** Follow [Linux mTLS setup](docs/linux-mtls.md) to create the
-   device key, have its certificate signed and enrolled, and enter the paths in Settings.
-3. **Build and run.** Install the [Linux dependencies](docs/linux-client.md#build-and-install),
-   then run from this checkout:
-
-   ```sh
-   zig build client -Doptimize=ReleaseSafe
-   packaging/linux/install.sh  # User-local executable, icon, and launcher
-   zig build run -Doptimize=ReleaseSafe
-   ```
-
-Source builds default to the `dev` profile, including optimized builds. On Linux,
-dev databases and settings use `zimbr-dev` directories; provision certificates
-under `~/.config/zimbr-dev/tls`. Build with `-Dprofile=release` to use the official
-`zimbr` paths. See [client configuration](docs/linux-client.md#provisioning-and-configuration).
+You need Zig **0.16.0**, a Mac signed into Messages, a Linux Wayland desktop,
+and direct network access between them. Source builds use the **dev** profile
+(port 8732); packaged releases use **release** (port 8731).
 
 Enter sends; Shift+Enter adds a line. Ctrl+N starts a conversation, Ctrl+F searches,
 and Ctrl+D opens connection details and **Reconnect**.

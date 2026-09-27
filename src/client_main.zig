@@ -1766,15 +1766,6 @@ const App = struct {
                     &y,
                 );
             }
-            s.detailSection("Participants", clip, &y);
-            for (v.snapshot.chats) |chat| if (u.eq(chat.value.id, s.key)) {
-                for (chat.value.participants) |address| s.detailRow(
-                    v.snapshot.directory.name(chat.value.service, address),
-                    address,
-                    clip,
-                    &y,
-                );
-            };
             s.detailSection("Synchronization", clip, &y);
             s.detailRow("Current operation", d.job, clip, &y);
             s.detailRow("Initial download", if (d.bootstrapped) "Complete" else "Pending", clip, &y);

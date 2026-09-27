@@ -1,8 +1,10 @@
 # Certificate management contract
 
 The Mac administrator owns the Zimbr CA, issuance policy, and device allowlist.
-The enrollment/revocation examples target the release (Homebrew) profile; select
-`--profile dev` for local development.
+Administration defaults to dev; select `--profile release` explicitly for
+Homebrew. Start with [first-run setup](setup.md) for generated configurations and
+one-command device issuance/enrollment. The commands below expose the same
+underlying operations for custom workflows.
 
 This document and `tools/tls_admin.py` define the certificate contract for all
 clients. Client provisioning must follow it. The relay does not accept online
@@ -56,7 +58,7 @@ python3 tools/tls_admin.py sign --role client \
   --csr /private/import/linux-desktop/client.csr \
   --cert /private/import/linux-desktop/client.pem \
   --name linux-desktop.zimbr.invalid --mkcert /path/to/mkcert
-python3 tools/tls_admin.py enroll --profile release \
+python3 tools/tls_admin.py enroll --profile dev \
   --cert /private/import/linux-desktop/client.pem --label 'Linux desktop'
 ```
 
@@ -69,7 +71,7 @@ restarts the installed LaunchAgent, and verifies old-process exit and the new
 listener. Signing a certificate alone does not grant access.
 
 Return the issued `client.pem`, the **public** `rootCA.pem`, and the expected
-endpoint, for example `https://relay.example:8731` (a placeholder). Authenticate
+endpoint, for example `https://relay.example:8732` (a placeholder). Authenticate
 the CA's entire-DER SHA-256 fingerprint through trusted SSH or an independent
 channel before import:
 
@@ -99,7 +101,7 @@ under the same rules, enroll the new fingerprint, reconnect using the new
 credential, then revoke the old fingerprint:
 
 ```sh
-python3 tools/tls_admin.py revoke --profile release --sha256 OLD_LEAF_DER_SHA256
+python3 tools/tls_admin.py revoke --profile dev --sha256 OLD_LEAF_DER_SHA256
 ```
 
 Enrollment/revocation restarts the relay and closes existing HTTP and SSE
@@ -116,5 +118,4 @@ Its import verifies the returned SAN against its locally retained, signed CSR an
 checks both against the local private key. See [Linux setup](linux-mtls.md) for
 commands. Real-mkcert round trips run in `tests/cert_management.py`; native relay
 worker coverage runs in `tests/client_native_tls.py` and the converted client
-integration/fault/Details/performance suites. The original handoff findings and
-resolution are recorded in [the integration review](linux-mtls-review.md).
+integration/fault/Details/performance suites.

@@ -17,6 +17,7 @@ for enrollment and an authenticated status example.
 | GET | `/v1/identities?before=...&limit=50` | Observed-address `identities`, `next` |
 | GET | `/v1/assets/:id/:version/:variant` | Approved immutable JPEG/PNG bytes or availability/retry response |
 | GET | `/v1/messages/:id/enrichment?section=...&revision=...&after=...` | Bounded overflow metadata and revision-bound `next` |
+| GET | `/v1/messages/:id` | Canonical message including inline enrichment |
 | POST | `/v1/messages` | Durable send request; 202 new, 200 retry |
 | GET | `/v1/send-requests/:id` | Current send request |
 | GET | `/v1/events?after=...` | SSE replay followed by live events |
@@ -88,7 +89,7 @@ Reconnect using the last applied cursor to receive the explicit error.
 Errors use `error_info: {code, message, outcome}`. `outcome` is `unstarted` or
 `uncertain`. HTTP acceptance means persistence succeeded, not delivery. A success
 from AppleScript remains uncertain until a unique outgoing database record is
-observed in the actual route within the dispatch window. Correlation waits 30
+observed in the actual route within the dispatch window. Correlation waits 10
 seconds to expose competing candidates. Multiple candidates remain unknown.
 Interrupted dispatches are never automatically resent. If saving a dispatch
 result fails, the worker recovers it as unknown when persistence is available,

@@ -1,5 +1,9 @@
 # Decode once and retain wire records
 
+This is a historical implementation/measurement report. Benchmark results and
+suite counts below describe that revision; use [setup](setup.md) for current
+installation and rerun the listed checks for a new build.
+
 This pass follows the [bounded storage work](bounded-data.md). The shared v1
 types already describe both endpoints' payloads, so the client can decode those
 types directly and keep the original JSON bytes for persistence. A generic JSON

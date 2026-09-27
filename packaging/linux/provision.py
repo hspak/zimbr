@@ -14,6 +14,7 @@ import re
 import stat
 import subprocess
 import tempfile
+from urllib.parse import urlsplit
 
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
@@ -179,9 +180,13 @@ def import_certificate(args):
         print('Imported verified credentials.')
         print('Enroll this entire-leaf DER SHA-256 on the Mac: '+cert.fingerprint(hashes.SHA256()).hex())
         print('Client certificate expires: '+cert.not_valid_after_utc.isoformat())
-        print('Configure these absolute paths, then Reconnect (restart if configuration paths changed):')
+        print('Enter these paths in Settings and Save and connect, or Reconnect after replacing files:')
         for field, name in (('ca_file', 'ca.pem'), ('client_cert_file', 'client.pem'), ('client_key_file', 'client-key.pem')):
             print(f'  {field}: {path/name}')
+        if args.launch:
+            subprocess.run([args.launch, '--settings', '--relay-url', args.relay_url,
+                            '--ca-file', str(path/'ca.pem'), '--client-cert-file', str(path/'client.pem'),
+                            '--client-key-file', str(path/'client-key.pem')], check=True)
     finally:
         os.close(fd)
 
@@ -198,7 +203,21 @@ def main():
     imp.add_argument('--ca', required=True)
     imp.add_argument('--cert', required=True)
     imp.add_argument('--ca-sha256', required=True, help='CA DER SHA-256 verified over trusted SSH or independently')
+    imp.add_argument('--relay-url', help='HTTPS relay origin for --launch')
+    imp.add_argument('--launch', metavar='EXECUTABLE', help='open the client Settings with the verified paths filled in; click Save and connect')
     args = parser.parse_args()
+    if args.command == 'import' and args.launch:
+        if not args.relay_url:
+            parser.error('--launch requires --relay-url')
+        try:
+            endpoint = urlsplit(args.relay_url)
+            if (endpoint.scheme != 'https' or not endpoint.hostname or endpoint.username is not None or
+                    endpoint.password is not None or endpoint.path not in ('', '/') or
+                    '?' in args.relay_url or '#' in args.relay_url or endpoint.port == 0 or
+                    any(c.isspace() for c in args.relay_url)):
+                raise ValueError('Use an HTTPS origin without credentials, query, fragment or path')
+        except ValueError as exc:
+            parser.error(str(exc))
     os.umask(0o077)
     try:
         (request if args.command == 'request' else import_certificate)(args)

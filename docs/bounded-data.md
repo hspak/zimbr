@@ -1,5 +1,9 @@
 # Bounded storage and ownership
 
+This is a historical implementation/measurement report. Benchmark results and
+suite counts below describe that revision; use [setup](setup.md) for current
+installation and rerun the listed checks for a new build.
+
 This pass uses the shared protocol's existing bounds to reduce temporary storage
 and copying across the client and relay. It compares against `efb5e6e`, which
 already contains the fixed request-log buffer and the startup/shutdown panic fix.

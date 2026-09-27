@@ -1,5 +1,9 @@
 # Work enabled by one client owner
 
+This is a historical implementation/measurement report. Benchmark results and
+suite counts below describe that revision; use [setup](setup.md) for current
+installation and rerun the listed checks for a new build.
+
 The client already holds an exclusive lock for its data directory from startup
 through worker shutdown. This provides one writer for the media cache. Separate
 test instances with independent directories remain independent owners. Startup

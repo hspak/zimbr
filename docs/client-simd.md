@@ -1,5 +1,9 @@
 # Client SIMD trials, September 24
 
+This is a historical implementation/measurement report. Benchmark results and
+suite counts below describe that revision; use [setup](setup.md) for current
+installation and rerun the listed checks for a new build.
+
 Two candidates were retained: compiler-vectorized opaque text conversion and
 libjpeg-turbo's direct RGBA output. The printable-ASCII validation fast path was
 removed because it did not materially improve complete layout time.

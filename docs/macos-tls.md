@@ -1,21 +1,18 @@
 # macOS TLS operation
 
-The macOS relay now requires TLS 1.3, HTTP/1.1, and a separately enrolled client
-certificate on **every** API and SSE connection. The Linux transport code is
-also available.
-The Linux provisioning and test handoff corrections are recorded as resolved in
-[the integration review](linux-mtls-review.md); Linux suites now exercise the
-native relay directly. Installed two-host acceptance remains separate.
-There is no plaintext listener, bearer token, or automatic fallback.
+Start with [first-run setup](setup.md), which builds the relay, generates its
+configuration with mkcert, and enrolls Linux. Every HTTP/SSE connection requires
+TLS 1.3, HTTP/1.1, and an enabled client certificate. The
+[certificate contract](certificate-management.md) defines issuance and validation.
 
-Local examples use the default dev profile (`Zimbr Relay Dev`, port 8732).
-For Homebrew, select the release profile (port 8731) when building, installing,
-or running enrollment/revocation tools. See [profile isolation](macos-profiles.md).
+Commands default to **dev** (port 8732). Select `--profile release` for Homebrew
+(port 8731), including enrollment/revocation and installation. See
+[profiles](macos-profiles.md).
 
 ## Build
 
-Use Zig 0.16.0 and OpenSSL **3.5 LTS**, including current patches. The native
-migration build uses **3.5.8**, released 2026-08-25. Obtain source and verify its
+Use Zig 0.16.0 and OpenSSL **3.5 LTS**, including current patches. The repository
+tooling defaults to **3.5.8**. Obtain source and verify its
 published digest from [OpenSSL downloads](https://openssl-library.org/source/).
 Build static libraries for the target architecture, for example on Apple Silicon:
 
@@ -28,9 +25,10 @@ zig build relay fake-relay test -Dopenssl-prefix=/absolute/openssl-3.5
 
 The prefix must contain `include`, `lib/libssl.a`, and `lib/libcrypto.a`.
 Cross builds require libraries built for that target, plus the target macOS SDK.
-The source rejects other OpenSSL minor versions at compile time. The installed
-relay links only system SQLite/libSystem dynamically; it has no Homebrew runtime
-path. Ship OpenSSL's license with the app, and rebuild/re-sign for security updates.
+The source rejects other OpenSSL minor versions at compile time. The installed relay links
+OpenSSL statically and uses system libraries and frameworks; it has no Homebrew
+runtime path. Ship OpenSSL's license with the app, and rebuild/re-sign for
+security updates.
 
 Provisioning uses Python with `cryptography` (`tools/requirements-tls.txt`) and
 mkcert 1.4.4. Network tests and Mac API tools require a Python `ssl` module with
@@ -39,183 +37,88 @@ Provisioning tools are not relay runtime dependencies.
 
 ## Provisioning
 
-The Mac owns certificate issuance and enrollment. The authoritative
-[certificate management contract](certificate-management.md) specifies the CSR,
-issued-leaf, import, and renewal rules that clients must follow.
+`tools/tls_admin.py setup --server-name NAME --listen-address IP` generates a
+server key/CSR and a separate Mac administrative key/CSR, asks **mkcert** to sign
+both, enrolls the administrator, writes `relay.json` and `admin.json`, and runs
+`relay check-config`. Its defaults are:
 
-Use a dedicated private administrative CA directory **outside the repository and
-runtime state**, such as `~/.config/zimbr-ca-admin`. Never run `mkcert -install`,
-reuse a broadly trusted development CA, or copy `rootCA-key.pem` into the app,
-client distributions, or runtime state. The helper marks its dedicated CAROOT and
-rejects an existing unmarked CA. Keep the CA key for future manual renewals.
+| Material | Dev location |
+| --- | --- |
+| Dedicated signing CA | `~/.config/zimbr-dev-ca` |
+| Staging configuration/credentials | `~/.config/zimbr-dev-setup` |
+| Installed configuration | `~/Library/Application Support/Zimbr Dev/relay.json` |
+| Installed administrative configuration | `~/Library/Application Support/Zimbr Dev/admin.json` |
 
-Choose a reachable DNS name and an explicit private-network listening address.
-An SSH alias is not a certificate identity. The examples use the reserved name
-`relay.example` and documentation address `192.0.2.10`; replace both with your
-deployment values and include the identities clients use in the server SANs.
-Verify direct TCP reachability before installation. Keep actual endpoints and
-network configuration in private deployment records.
+Use `--directory`, `--caroot`, and `--relay` for explicit paths, `--name` for
+additional SANs, and `--port` to override the profile port. Release setup defaults
+to `zimbr-release-ca` and `zimbr-release-setup`. Staging must be empty; setup never
+rotates an existing installation implicitly. Reuse the issuer after a failed run,
+with a new staging directory. Install only after validation succeeds.
 
-Generate the server key **on the Mac**, then sign only its CSR. All paths in
-configuration must be absolute, without symlinks (on macOS use `/private/tmp`,
-not `/tmp`). Key, certificate, CA, allowlist, and configuration files are 0600 in
-owner-owned 0700 directories. Ancestors must not be writable by other users,
-except root-owned sticky temporary directories.
+The CA stays outside source/runtime directories. Never copy its `rootCA-key.pem`
+into the bundle or onto Linux. Do not run `mkcert -install` or reuse a broadly
+trusted development CA. mkcert uses a dedicated `CAROOT` and its `-csr` mode;
+client authentication purpose comes from the validated CSR, not `-client`.
 
-```sh
-umask 077
-python3 tools/tls_admin.py create-key --role server \
-  --directory /private/staging/server \
-  --name relay.example --name 192.0.2.10
-python3 tools/tls_admin.py sign --role server \
-  --caroot /Users/USER/.config/zimbr-ca-admin \
-  --csr /private/staging/server/server.csr \
-  --cert /private/staging/server/server.pem \
-  --name relay.example --name 192.0.2.10 --mkcert /path/to/mkcert
-```
+All security paths must be absolute without symlinks. On macOS, use a private
+folder in your home or `/private/tmp`, since `/tmp` is a symlink. Keys,
+certificates, allowlists and configurations are 0600 files in owned 0700
+directories. The installer creates immutable runtime credential generations
+outside the app; staging can be removed after checking installation and backups.
+Keep the signing CA for renewal and device issuance.
 
-Replace example names/addresses with the selected endpoint. Create a separate
-administrative client key/certificate on the Mac using `--role client` and
-`--name mac-admin.zimbr.invalid`. Client SANs/subjects are metadata; only the leaf
-DER SHA-256 fingerprint authorizes a device. Explicit SANs prevent mkcert from
-inventing a SAN from the CSR Common Name. The helper requires a non-CA leaf,
-exact EKU/SANs, safe key usage and strength, and no unexpected extensions. It
-validates the issued chain, purpose, dates, SANs and CSR public key before
-publishing the certificate. `-csr` is deliberately never combined with `-client`.
+For Linux requests, `issue-device` combines validated signing, enrollment and
+verified service restart. Its output directory contains only the public CA and
+issued device certificate. It verifies that `--caroot` matches the installed
+relay CA. Existing deployments should explicitly select their original issuer.
+Use the lower-level `create-key`, `sign`, `enroll`, and `revoke` commands from the
+[certificate contract](certificate-management.md) for custom administration.
 
-Linux creates its own key and CSR locally. Transfer only CSRs, issued leaf
-certificates, and the public `rootCA.pem` via authenticated SSH or a verified
-fingerprint. The CA file must be authenticated before importing it. Copy the
-public CA to each runtime TLS directory as `ca.pem` and chmod it to 0600.
-No Linux private key is generated or held by the Mac.
+`relay.json` contains `listen_address`, `port`, `server_name`,
+`server_cert_file`, `server_key_file`, `client_ca_file`, and
+`device_allowlist_file`. Optional `contacts_phone_region` provides national-number
+context. Use relay Settings to edit these fields with validation.
+The allowlist contains objects with `label`, `sha256` (64 hexadecimal digits over
+the entire leaf DER), and `enabled`. An empty list admits nobody; invalid or
+duplicate entries prevent startup. The limit is 256 devices.
 
-Relay configuration (`relay.json`):
+`admin.json` contains `relay_url`, `ca_file`, `client_cert_file` and
+`client_key_file`. Administrative API tools use the same mTLS policy as Linux.
+The local `doctor` command needs no administrative certificate.
 
-```json
-{
-  "listen_address": "192.0.2.10",
-  "port": 8732,
-  "server_name": "relay.example",
-  "server_cert_file": "/private/staging/server/server.pem",
-  "server_key_file": "/private/staging/server/server-key.pem",
-  "client_ca_file": "/private/staging/server/ca.pem",
-  "device_allowlist_file": "/private/staging/server/devices.json"
-}
-```
+## Code signing and installation
 
-`devices.json` is an array of objects containing `label`, `sha256` (64 hex
-characters, SHA-256 over the entire leaf's DER), and `enabled` (boolean). Use the
-fingerprint printed after signing, or `openssl x509 -in client.pem -noout
--fingerprint -sha256` with colons removed. An empty array admits nobody; invalid,
-duplicate, or unreadable entries prevent startup. Maximum 256 device entries.
-
-Mac administrative tools use a separate 0600 `admin.json`:
-
-```json
-{
-  "relay_url": "https://relay.example:8732",
-  "ca_file": "/private/staging/admin/ca.pem",
-  "client_cert_file": "/private/staging/admin/client.pem",
-  "client_key_file": "/private/staging/admin/client-key.pem"
-}
-```
-
-Enroll this administrative certificate as an enabled device before startup.
-Administrative tools verify the exact server identity using only the explicit
-CA, load their own client certificate, disable older TLS, and do not follow
-redirects. No localhost bypass exists. The local `doctor` command uses files
-and the database directly and therefore needs no administrative certificate.
-
-## Install, restart, and verify
-
-For local builds, create a persistent code-signing identity once **in Terminal
-on the Mac**, as the logged-in user without `sudo` (the certificate trust prompt
-cannot be approved over SSH):
+Run once in Terminal on the Mac, without sudo:
 
 ```sh
 .tools/python/bin/python3 packaging/macos/signing.py setup
 ```
 
-The helper creates a dedicated private Keychain under
-`~/.config/zimbr-code-signing`, generates a ten-year self-signed code-signing
-certificate, and trusts it only for the current user's code-signing policy.
-It preserves the login Keychain and its search list. The signing key stays on the
-Mac, is imported as non-extractable, and is unrelated to the relay's TLS CA or
-device credentials. Setup can be rerun to finish an interrupted setup; it reuses
-the same certificate and key. Preserve this directory with secure Mac backups.
+Approve the local certificate trust prompt. This creates a persistent Keychain
+and code-signing identity under `~/.config/zimbr-code-signing`. It is separate
+from the TLS CA. The helper can resume interrupted setup and preserves the login
+Keychain/search list. Back up this identity; changing it may require new Full
+Disk Access, Automation, and Contacts grants.
 
-The installer reuses this identity by default, unlocking its dedicated Keychain
-only while signing. The designated requirement pins both the certificate and
-`com.hsp.zimbr.relay.dev` for dev, or `com.hsp.zimbr.relay` for release, so updates
-within a profile retain the same code identity. The profiles do not share privacy
-grants. A missing identity stops installation rather than silently switching to
-ad-hoc signing.
-Use `--identity NAME_OR_SHA1` for a separately managed signing identity;
-`--identity -` explicitly opts into disposable ad-hoc builds.
+The installer uses that identity by default, pinning the signing certificate and
+selected bundle ID. `--identity NAME_OR_SHA1` selects another managed identity;
+`--identity -` opts into disposable ad-hoc signing. Local signing does not provide
+Developer ID distribution trust or notarization. Homebrew uses the publisher's
+signed bundle and may need fresh privacy/Gatekeeper approval.
 
-After the first switch from ad-hoc signing, remove and re-add
-`~/Applications/Zimbr Relay Dev.app` in Full Disk Access and approve Messages
-Automation if requested. Subsequent updates using the same identity should
-retain those grants. Changing the certificate, deleting the signing state, or
-returning to ad-hoc signing requires new grants. This local identity is for this
-Mac; it does not provide Developer ID distribution or notarization.
-
-To resume after approving the certificate trust prompt, verify that two different
-binaries retain the same identity, then install and restart the relay:
+Follow [setup](setup.md#2-generate-credentials-and-install-on-the-mac) for the
+first install. Later source updates reuse installed TLS material:
 
 ```sh
-.tools/python/bin/python3 tests/mac_signing.py
-.tools/python/bin/python3 packaging/macos/install.py --install --start
+./tools/update-relay.sh --profile dev --release=safe
 ```
 
-After restoring Full Disk Access for the newly signed app, restart it with:
-
-```sh
-launchctl kickstart -k "gui/$(id -u)/com.hsp.zimbr.relay.dev"
-```
-
-First stage and inspect, then install:
-
-```sh
-zig-out/bin/relay check-config --config /private/staging/relay.json
-python3 packaging/macos/install.py \
-  --tls-config /private/staging/relay.json --admin-config /private/staging/admin.json \
-  --openssl-license /openssl-source/LICENSE.txt
-python3 packaging/macos/install.py --install --start \
-  --tls-config /private/staging/relay.json --admin-config /private/staging/admin.json \
-  --openssl-license /openssl-source/LICENSE.txt
-```
-
-The installer validates before stopping the old service, verifies process exit,
-backs up the journal consistently under `Zimbr Dev/backups/TIMESTAMP/relay.db`, installs
-new private credential directories and configuration, removes the runtime token,
-and starts the same LaunchAgent identity: `com.hsp.zimbr.relay.dev`. The app remains
-`~/Applications/Zimbr Relay Dev.app`. Epoch, cursor, history, and durable request IDs
-are unchanged. Future upgrades can reuse installed material by omitting
-`--tls-config`/`--admin-config`. There is no database migration.
-
-The LaunchAgent has `RunAtLoad`, `KeepAlive`, and the existing Aqua login-session
-requirement. The installer verifies the actual process's configured listener;
-failed startup leaves it stopped for repair. Keep using the persistent signing
-identity across builds. Check the installed identity, not just
-a terminal/development executable:
-
-```sh
-open -n -W -a "$HOME/Applications/Zimbr Relay Dev.app" --args doctor --check-automation
-python3 - <<'PY'
-from pathlib import Path
-import sys
-sys.path.insert(0, 'tools')
-from mac_acceptance import Client
-print(Client(Path.home()/'Library/Application Support/Zimbr Dev').request('/v1/status'))
-PY
-```
-
-Use `tools/read_only_smoke.py --relay-config ... --tls-config ...` for a separate
-read-only development process on an **unused** explicit address/port, with an
-enrolled administrative certificate. It uses a temporary journal and does not
-send messages. `tools/mac_acceptance.py --tls-config ...` retains its requirement
-for an explicitly selected recipient and `--confirm-send`. Real-message checks require an explicitly authorized recipient.
+Keep the toolchain environment overrides from setup. Installation validates and
+signs before stopping the old process, preserves a consistent journal backup,
+and verifies process exit and the new listener. A failed startup leaves the
+service stopped for repair. Epoch, history and durable request IDs are retained.
+Run the installed doctor through Launch Services to check permission attribution;
+a Terminal binary's access does not establish the installed app's access.
 
 ## Renewal and revocation
 

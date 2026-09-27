@@ -7,15 +7,11 @@ AppleScript subprocess. Its native menu bar interface uses AppKit, with system
 SQLite and no Homebrew runtime dependency. The Linux client never receives Apple
 account credentials.
 
-For first-time setup, build the relay, [provision TLS credentials and a persistent
-signing identity](macos-tls.md), then [install and grant permissions](#install-and-permissions).
-For an existing installation, see [Update the running relay](#update-the-running-relay).
-Run the commands below from the repository root unless noted otherwise.
-
-Source builds and local update tools default to **Zimbr Relay Dev**. Homebrew uses
-**Zimbr Relay**. They have separate app identities, LaunchAgents, state directories,
-and default ports; see [development and release profiles](macos-profiles.md).
-Local commands below use dev unless the Homebrew section says otherwise.
+Follow [first-run setup](setup.md) to install dependencies, build, generate
+configuration with mkcert, install the app, and enroll Linux. For an existing
+installation, see [updates](#update-the-running-relay). Local builds/tools default
+to **Zimbr Relay Dev**; Homebrew uses **Zimbr Relay**. Their identities, data and
+ports are separate; see [profiles](macos-profiles.md).
 
 ## Menu bar and settings
 
@@ -68,17 +64,13 @@ or regenerate its LaunchAgent with the current installer/service helper to add
 leaves the previous LaunchAgent settings in place. An already-running headless
 process cannot reveal Settings.
 
-Native builds, signed installation, permission attribution, and basic menu and
-Settings interactions have passed validation. Restart failures found during
-validation have fixes and native regression coverage. The user confirmed that
-installed Save and Restart works, the icon returns promptly, and Settings reopens.
-Remaining appearance, recovery, and lifecycle cases are tracked in the
-[Mac menu bar validation record](macos-menu-bar-validation.md).
+Use the [menu validation checklist](macos-menu-bar-validation.md) after changes
+to native UI, settings, or lifecycle behavior.
 
 ## Homebrew
 
-After the first combined release is published, install the Apple Silicon relay
-on macOS 27 or newer with:
+When a release is available in the tap, install the Apple Silicon relay on
+macOS 27 or newer with:
 
 ```sh
 brew install --cask hspak/tap/zimbr-relay
@@ -91,19 +83,27 @@ A dev-profile installation can remain installed alongside the cask. A legacy
 source installation using the unsuffixed release identity must first be stopped
 and migrated or archived; see [profile migration](macos-profiles.md#permissions-and-existing-installations).
 
-For first-time setup, use the provisioning tools from the matching source tag
-and follow [macOS TLS setup](macos-tls.md#provisioning), selecting `--profile release`
-for enrollment and administration. Keep the configuration at
-`~/Library/Application Support/Zimbr/relay.json`, mode 0600 in an owner-only
-directory, referencing persistent credential paths. Grant Full Disk Access and
-Messages Automation as described [below](#install-and-permissions), then run:
+Use a matching source checkout for the setup tools. Install mkcert and the Python
+dependencies as in [setup](setup.md), then generate the release configuration:
 
 ```sh
+.tools/python/bin/python3 tools/tls_admin.py setup --profile release \
+  --relay "$HOME/Applications/Zimbr Relay.app/Contents/MacOS/relay" \
+  --directory "$HOME/Library/Application Support/Zimbr" \
+  --server-name relay.example --listen-address 192.0.2.10
 zimbr-relay check-config
 open -n -W -a "$HOME/Applications/Zimbr Relay.app" --args doctor --check-automation
 zimbr-relay-service start
 zimbr-relay-service status
 ```
+
+Replace the example endpoint and IP. This direct setup requires an empty data
+directory; for an existing installation retain its configuration and credentials.
+Grant Full Disk Access and Messages Automation under **Zimbr Relay.app**. Then
+follow the Linux CSR exchange in [setup](setup.md), selecting `--profile release`
+for issuance and the release client's paths and port. The TLS CA remains outside
+runtime state. The published app is already signed, so no local signing identity
+or Zig build is required for this installation.
 
 The service helper validates the existing TLS configuration and installs the
 per-user LaunchAgent with login startup and restart-on-exit behavior. It does
@@ -127,8 +127,7 @@ Install Zig **0.16.0**, Apple's Command Line Tools, and a target build of
 3.5 security patches and rebuild/re-sign the app when updating OpenSSL. The relay
 uses system SQLite and native AppKit, with no Homebrew runtime dependency.
 
-For the M1 Mac mini, build the deployed relay with optimization and an explicit
-M1 CPU target (including NEON and ARM SHA-256 instructions):
+For an Apple M1 target, an optional optimized build selects its CPU features:
 
 ```sh
 zig build relay -Doptimize=ReleaseFast -Dtarget=aarch64-macos -Dcpu=apple_m1 \
@@ -213,14 +212,9 @@ networking, and presentation.
 
 ## Install and permissions
 
-```sh
-# First provision certificates/configurations: docs/macos-tls.md
-python3 packaging/macos/install.py --profile dev --tls-config /private/staging/relay.json \
-  --admin-config /private/staging/admin.json --openssl-license /openssl-source/LICENSE.txt
-python3 packaging/macos/install.py --profile dev --install --start \
-  --tls-config /private/staging/relay.json --admin-config /private/staging/admin.json \
-  --openssl-license /openssl-source/LICENSE.txt
-```
+Use the [first-run installation command](setup.md#2-generate-credentials-and-install-on-the-mac)
+after generating credentials. The installer can stage without changing the
+installed app by omitting `--install --start`.
 
 This installs `~/Applications/Zimbr Relay Dev.app` and the user LaunchAgent
 `com.hsp.zimbr.relay.dev`. With `--start`, the installer persistently enables the agent

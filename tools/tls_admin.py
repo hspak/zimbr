@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import re
 import plistlib
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -126,6 +128,8 @@ def create_key(directory, role, expected_names):
 
 
 def sign(args):
+    if not shutil.which(args.mkcert):
+        raise ValueError('mkcert is required for issuance; install it with brew install mkcert on macOS')
     caroot = args.caroot.absolute()
     caroot.mkdir(parents=True, mode=0o700, exist_ok=True)
     private_directory(caroot)
@@ -158,6 +162,88 @@ def sign(args):
             raise ValueError('Issued certificate does not match CSR')
         atomic(args.cert, staged_cert.read_bytes())
     print(json.dumps({'sha256': cert.fingerprint(hashes.SHA256()).hex(), 'expires': cert.not_valid_after_utc.isoformat()}))
+
+
+def ca_directory(profile):
+    return Path.home()/'.config'/f'zimbr-{profile.name}-ca'
+
+
+def fresh_directory(path):
+    path = path.absolute()
+    path.mkdir(parents=True, mode=0o700, exist_ok=True)
+    private_directory(path)
+    if any(path.iterdir()):
+        raise ValueError(f'Use a new empty staging directory; existing credentials are preserved: {path}')
+    return path
+
+
+def setup(args):
+    """Stage a complete first-run configuration; installation owns service changes."""
+    profile = PROFILES[args.profile]
+    profile.verify_binary(args.relay)
+    address = ipaddress.ip_address(args.listen_address)
+    if address.is_unspecified:
+        raise ValueError('Use a specific local IP address, not a wildcard listener')
+    if not 1 <= args.port <= 65535:
+        raise ValueError('Port must be between 1 and 65535')
+    expected_names = list(dict.fromkeys([args.server_name, *args.name]))
+    names(expected_names)
+    if not shutil.which(args.mkcert):
+        raise ValueError('mkcert is required; install it with brew install mkcert on macOS')
+    directory = fresh_directory(args.directory)
+    for role, folder, identities in (
+            ('server', directory/'server', expected_names),
+            ('client', directory/'admin', ['mac-admin.zimbr.invalid'])):
+        csr = create_key(folder, role, identities)
+        sign(argparse.Namespace(caroot=args.caroot, csr=csr, cert=folder/f'{role}.pem',
+                                role=role, name=identities, mkcert=args.mkcert))
+    ca = private_path(args.caroot.absolute()/'rootCA.pem').read_bytes()
+    atomic(directory/'server/ca.pem', ca)
+    atomic(directory/'admin/ca.pem', ca)
+    admin_cert = certificate(directory/'admin/client.pem')
+    save_json(directory/'server/devices.json', [{
+        'label': 'Mac administrator', 'sha256': admin_cert.fingerprint(hashes.SHA256()).hex(),
+        'enabled': True,
+    }])
+    save_json(directory/'relay.json', {
+        'listen_address': str(address), 'port': args.port, 'server_name': args.server_name,
+        'server_cert_file': str(directory/'server/server.pem'),
+        'server_key_file': str(directory/'server/server-key.pem'),
+        'client_ca_file': str(directory/'server/ca.pem'),
+        'device_allowlist_file': str(directory/'server/devices.json'),
+    })
+    host = f'[{args.server_name}]' if ':' in args.server_name else args.server_name
+    save_json(directory/'admin.json', {
+        'relay_url': f'https://{host}:{args.port}', 'ca_file': str(directory/'admin/ca.pem'),
+        'client_cert_file': str(directory/'admin/client.pem'),
+        'client_key_file': str(directory/'admin/client-key.pem'),
+    })
+    subprocess.run([str(args.relay), 'check-config', '--config', str(directory/'relay.json')], check=True)
+    print('Ready to install: ' + shlex.join([
+        '--tls-config', str(directory/'relay.json'), '--admin-config', str(directory/'admin.json'),
+    ]))
+    print(f'Keep the signing CA on this Mac: {args.caroot.absolute()}')
+
+
+def issue_device(args):
+    """Sign a received CSR, enroll it, and export only public certificates."""
+    profile = PROFILES[args.profile]
+    args.config = args.config or profile.data(Path.home())/'relay.json'
+    cfg = read_json(args.config)
+    ca_path = args.caroot.absolute()/'rootCA.pem'
+    if certificate(ca_path).fingerprint(hashes.SHA256()) != certificate(cfg['client_ca_file']).fingerprint(hashes.SHA256()):
+        raise ValueError('Signing CA does not match the installed relay CA; select its original --caroot')
+    directory = fresh_directory(args.directory)
+    args.cert = directory/'client.pem'
+    args.role = 'client'
+    sign(args)
+    # No private key or administrative credential is included in the handoff.
+    atomic(directory/'ca.pem', private_path(ca_path).read_bytes())
+    args.action = 'enroll'
+    device(args)
+    print('CA DER SHA-256 (authenticate this output before Linux import): ' +
+          certificate(ca_path).fingerprint(hashes.SHA256()).hex())
+    print(f'Return {directory}/client.pem and {directory}/ca.pem to Linux.')
 
 
 def pid_of_service(profile):
@@ -237,6 +323,27 @@ def main():
     issue.add_argument('--role', choices=['server', 'client'], required=True)
     issue.add_argument('--name', action='append', default=[])
     issue.add_argument('--mkcert', default='mkcert')
+    setup_parser = sub.add_parser('setup', help='stage server/admin credentials and configuration using mkcert')
+    setup_parser.add_argument('--profile', choices=PROFILES, default='dev')
+    setup_parser.add_argument('--directory', type=Path, help='new staging directory (default: ~/.config/zimbr-PROFILE-setup)')
+    setup_parser.add_argument('--caroot', type=Path, help='dedicated issuer (default: ~/.config/zimbr-PROFILE-ca)')
+    setup_parser.add_argument('--relay', type=Path, default=Path('zig-out/bin/relay'))
+    setup_parser.add_argument('--server-name', required=True, help='DNS name or IP Linux uses to reach this Mac')
+    setup_parser.add_argument('--listen-address', required=True, help='local IP address to bind')
+    setup_parser.add_argument('--port', type=int, help='default: profile port (dev 8732, release 8731)')
+    setup_parser.add_argument('--name', action='append', default=[], help='additional server certificate SAN')
+    setup_parser.add_argument('--mkcert', default='mkcert')
+    handoff = sub.add_parser('issue-device', help='sign a client CSR, enroll/restart, and export public credentials')
+    handoff.add_argument('--profile', choices=PROFILES, default='dev')
+    handoff.add_argument('--caroot', type=Path)
+    handoff.add_argument('--config', type=Path)
+    handoff.add_argument('--relay', type=Path)
+    handoff.add_argument('--csr', type=Path, required=True)
+    handoff.add_argument('--name', action='append', required=True)
+    handoff.add_argument('--label', required=True)
+    handoff.add_argument('--directory', type=Path, required=True, help='new directory for returned public certificates')
+    handoff.add_argument('--mkcert', default='mkcert')
+    handoff.add_argument('--stage', action='store_true', help='stage enrollment only; restart is still required')
     for action in ('enroll', 'revoke'):
         d = sub.add_parser(action)
         d.add_argument('--profile', choices=PROFILES, default='dev')
@@ -247,9 +354,20 @@ def main():
             d.add_argument('--cert', type=Path, required=True); d.add_argument('--label', required=True)
         else: d.add_argument('--sha256', required=True)
     args = p.parse_args()
-    if args.action == 'create-key': print(create_key(args.directory, args.role, args.name))
-    elif args.action == 'sign': sign(args)
-    else: device(args)
+    if args.action in ('setup', 'issue-device'):
+        profile = PROFILES[args.profile]
+        args.caroot = args.caroot or ca_directory(profile)
+    if args.action == 'setup':
+        args.directory = args.directory or Path.home()/'.config'/f'zimbr-{profile.name}-setup'
+        if args.port is None: args.port = profile.default_port
+    try:
+        if args.action == 'create-key': print(create_key(args.directory, args.role, args.name))
+        elif args.action == 'sign': sign(args)
+        elif args.action == 'setup': setup(args)
+        elif args.action == 'issue-device': issue_device(args)
+        else: device(args)
+    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+        p.exit(1, f'Certificate operation failed: {exc}\n')
 
 
 if __name__ == '__main__': main()

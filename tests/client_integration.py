@@ -169,7 +169,41 @@ def main():
             assert rows('SELECT text FROM drafts WHERE key=?', (cid,)) == [(draft,)]
             assert rows('SELECT count(*) FROM outbox')[0][0] == 5
             stop(); proc=None
-            print('PASS: snapshots, pagination, live SSE, deduplication, Unicode drafts, echo merging, failed/uncertain sends, crash recovery, offline behavior, expired cursor, and epoch reset')
+            # Expiry must work before reconnecting and continue while offline.
+            server.terminate(); server.wait(timeout=5)
+            expired_id = rows("SELECT id FROM outbox WHERE state='unknown'")[0][0]
+            recent_id = 'aaaaaaaa-1234-1234-1234-123456789012'
+            with sqlite3.connect(client/'client.db') as db:
+                db.execute("UPDATE outbox SET sent_at='2000-01-01T00:00:00Z' WHERE id=?", (expired_id,))
+                db.execute("""INSERT INTO outbox(id,epoch,draft_key,payload,state,sent_at)
+                    SELECT ?, (SELECT value FROM meta WHERE key='epoch'), draft_key,
+                        json_set(payload,'$.request_id',?,'$.server_epoch',
+                            (SELECT value FROM meta WHERE key='epoch')),
+                        'unknown',strftime('%Y-%m-%dT%H:%M:%f000000Z','now')
+                    FROM outbox WHERE id=?""", (recent_id, recent_id, expired_id))
+            history = rows("SELECT id,record FROM records WHERE kind='message' ORDER BY id")
+            proc = start()
+            wait(lambda: rows('SELECT id FROM outbox WHERE id=?', (expired_id,)) == [], timeout=5)
+            pending_before = wait(lambda: pump().get('pending'))
+            assert rows('SELECT state FROM outbox WHERE id=?', (recent_id,)) == [('unknown',)]
+            assert rows('SELECT text FROM drafts WHERE key=?', (cid,)) == [(draft,)]
+            assert rows("SELECT id,record FROM records WHERE kind='message' ORDER BY id") == history
+            with sqlite3.connect(client/'client.db') as db:
+                db.execute("UPDATE outbox SET sent_at=strftime('%Y-%m-%dT%H:%M:%f000000Z','now','-5 minutes') WHERE id=?", (recent_id,))
+            wait(lambda: rows('SELECT id FROM outbox WHERE id=?', (recent_id,)) == [], timeout=5)
+            wait(lambda: pump().get('pending') == pending_before - 1)
+            assert rows('SELECT state,count(*) FROM outbox GROUP BY state') == [('delivered', 3), ('failed', 1)]
+            stop()
+            server=subprocess.Popen([str(BIN/'fake-relay'),'serve',*opts],stdout=logfile,stderr=logfile)
+            proc = start(); wait(online)
+            time.sleep(2)
+            stop()
+            stderr = proc.stderr.read().decode()
+            assert '/v1/send-requests/'+expired_id not in stderr
+            assert '/v1/send-requests/'+recent_id not in stderr
+            assert rows('SELECT count(*) FROM outbox')[0][0] == 4
+            proc = None
+            print('PASS: snapshots, pagination, live SSE, deduplication, Unicode drafts, echo merging, failed/uncertain sends, crash recovery, offline behavior, expired cursor, epoch reset, and unknown-send expiry across restart and offline use')
         finally:
             if proc and proc.poll() is None:
                 proc.kill(); proc.wait()

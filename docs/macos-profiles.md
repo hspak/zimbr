@@ -24,6 +24,8 @@ The Homebrew cask installs and removes only the release app and LaunchAgent.
 
 ## Build and update
 
+Use [first-run setup](setup.md) to generate credentials and configure dependencies.
+
 ```sh
 zig build relay -Dprofile=dev -Doptimize=ReleaseSafe \
   -Dopenssl-prefix=/absolute/openssl-3.5

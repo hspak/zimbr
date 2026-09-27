@@ -1,11 +1,8 @@
 # Linux message enrichment
 
-The Linux client consumes the shared contract from relay commit `4e65027`
-(`relay: add media enrichment support`), rechecked on 2026-09-24.
-No relay adapter, journal schema, or shared protocol types are changed by the
-client implementation. All six native enrichment capabilities are now enabled;
-the [Mac acceptance record](mac-enrichment-acceptance.md) records the installed
-evidence and remaining native reaction verification limits.
+The Linux client consumes the relay's additive enrichment API. All six native
+capabilities are implemented; readiness depends on permissions and source data.
+See the [Mac contract and validation limits](mac-enrichment-acceptance.md).
 
 ## Implementation and recovery
 
@@ -22,7 +19,7 @@ evidence and remaining native reaction verification limits.
   H, fetches all conversation and identity pages, then replays after H. Restart,
   same-epoch upgrade, downgrade/re-upgrade, and expired H cannot reuse an incomplete
   directory. Permission denial gates cached presentation through reconciliation.
-- `Content.zig` prepares text, attachment, card, reaction, and overflow controls.
+- `content.zig` prepares text, attachment, card, reaction, and overflow controls.
   Verified text ranges and part IDs preserve source placement; otherwise the full
   caption precedes attachment rows. Raw resolved reactions are suppressed when the
   target is cached; unresolved/unsupported rows keep an explanatory fallback.
@@ -77,35 +74,10 @@ failures. No test reads a real address book or Messages database.
 | Real asset delivery, pending conversion, avatar clearing, offline bytes | `client_enrichment.py` through the actual fake relay/image helper |
 | PNG alpha, JPEG, corruption, excessive dimensions/bytes, MIME, truncation | `Media` tests and `client_media_transport.py` |
 | Two transfers, send priority, cancellation, namespace and symlink isolation | `client_media_transport.py`; existing transport tests |
-| Cards and safe URL choice, custom emoji, actor counts, missing parts | `Content` / `Links` tests and GUI enrichment test |
+| Cards and safe URL choice, custom emoji, actor counts, missing parts | `content` / `links` tests and GUI enrichment test |
 | Captions/copy, image/card/chip hit targets, keyboard viewer, 100/125/200% | `test-gui` enrichment interaction test |
 | Scroll anchoring and reuse across large histories | `test-gui`, immutable-history tests, `client-bench` |
 | Existing sending, drafts, TLS renewal/revocation, offline recovery | existing client integration, transport, TLS, native TLS, and Details suites |
-
-### Completed relay compatibility check (2026-09-24)
-
-Compared `4e65027` with its WIP parent `78d8c9b`. Shared protocol types,
-identity/SSE negotiation, asset paths and metadata paging remain compatible.
-The relay now enables native names, avatars and reactions, reports the live
-Contacts permission monitor's decision, and bounds inline metadata preparation
-more efficiently. The client already handles these changes without a protocol or
-transport adjustment. The client integration fixture now checks denied,
-restricted and unavailable permissions plus same-generation recovery, preserving
-identity, epoch, drafts and quiet unread behavior.
-
-The updated configured hostname resolved through `tailscale0`. A read-only live
-check used a disposable client cache and verified mutual TLS, all six advertised
-capabilities/readiness states, complete negotiated identity bootstrap, and a
-bounded sample of histories containing attachments, stored cards and reactions.
-The production media worker decoded sample avatar, inline and viewer variants.
-Lazy media conversion can initially return pending; visible requests continue
-through the existing retry path. No messages were sent, and the disposable cache
-was removed afterward. This check does not add native source-format acceptance
-beyond the Mac record.
-
-Rebuilt the client/probe and fixture relay; `zig build test`,
-`client_enrichment.py`, `client_enrichment_protocol.py` and
-`client_media_transport.py` pass against this revision.
 
 Commands (Zig 0.16.0):
 
@@ -128,11 +100,6 @@ zig fmt --check build.zig src
 On systems with another OpenSSL minor version, add
 `-Dopenssl-prefix=/absolute/openssl-3.5` for relay tests. Linux additionally links
 libpng and libjpeg; it has no Contacts, Foundation, or ImageIO dependency.
-
-A local Debug benchmark of 25,000 cached 1 KiB messages measured unchanged
-snapshot p95 13.54 ms, one edited message p95 15.50 ms, and append p95 16.27 ms.
-The initial parse was 648 ms. This measures cache publication, not frame rate or
-Mac source ingestion.
 
 Native HEIC conversion, orientation handling, Messages payload decoding, Contacts
 attribution, and reaction source semantics are Mac acceptance work. Linux tests

@@ -78,6 +78,7 @@ retry_at: i64 = 0,
 backoff: i64 = 1000,
 status_at: i64 = 0,
 recovery_at: i64 = 0,
+expiry_at: i64 = 0,
 auth_blocked: bool = false,
 last_published: i64 = 0,
 last_status_ms: i64 = 0,
@@ -312,8 +313,10 @@ fn work(s: *Worker) !void {
         if (s.identities_before) |before| a.free(before);
         a.free(s.redirect_from);
     }
+    try s.expireUnknown();
     try s.publish();
     while (true) {
+        try s.expireUnknown();
         try s.drain();
         try s.resolveDirect();
         if (s.stop.load(.acquire)) break;
@@ -359,6 +362,7 @@ fn work(s: *Worker) !void {
         // publication coalescing and maintenance, rather than every request.
         const now = u.now();
         var delay: i64 = if (s.dirty) @max(0, 16 - (now - s.last_published)) else 1000;
+        delay = @min(delay, @max(0, s.expiry_at - now));
         if (!s.auth_blocked and s.job == .idle) {
             if (!s.online and !s.stream_active) delay = @min(delay, @max(0, s.retry_at - now));
             if (s.online) delay = @min(
@@ -494,6 +498,16 @@ fn disconnected(s: *Worker, status: c_long) void {
         c.zc_net_cancel_stream(s.net.?);
         s.stream_active = false;
         s.sse.reset();
+    }
+}
+fn expireUnknown(s: *Worker) !void {
+    const now = u.now();
+    if (now < s.expiry_at) return;
+    const removed = try s.store.expireUnknown(now);
+    s.expiry_at = now + 1000;
+    if (removed) {
+        s.content_dirty = true;
+        s.dirty = true;
     }
 }
 fn unresolved(s: *Worker) !bool {

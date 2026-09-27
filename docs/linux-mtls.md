@@ -1,105 +1,37 @@
-# Linux mTLS setup and handoff
+# Linux TLS operation
 
-The Linux client and native macOS relay use direct HTTPS with TLS 1.3,
-HTTP/1.1, and an enrolled device certificate. The provisioning and integration
-mismatches from [the review](linux-mtls-review.md) are resolved. Linux worker
-suites now connect directly to the production TLS implementation in `fake-relay`.
-No client fallback, plaintext adapter, or tunnel is used.
-
-The Mac owns issuance and enrollment policy. Follow the authoritative
-[certificate management contract](certificate-management.md): request an explicit
-device SAN, have the Mac signer validate that exact name, and validate the returned
-SAN against the retained local CSR during import. Examples use the reserved placeholder `https://relay.example:8731`; replace it
-with your relay endpoint. Installed two-host
-acceptance is separate from the synthetic tests documented here.
-
-## Provision a Linux device
-
-Choose the Mac's reachable DNS name or IP and ensure that exact identity is in
-its server certificate's SANs. SSH aliases and jump hosts do not supply direct
-TCP connectivity. The examples use `relay.example:8731`.
-
-The helper requires Python 3, `cryptography` (43 or newer), and the OpenSSL command
-line tool. The installed name is `zimbr-provision`; from the checkout use
+Use [first-run setup](setup.md) for the complete Mac/Linux workflow. The helper
+requires Python with the versions in `tools/requirements-tls.txt` and OpenSSL 3.
+mkcert runs on the Mac issuer; Linux generates and retains its own key and CSR.
+The installed helper is `zimbr-provision`; from a checkout use
 `python3 packaging/linux/provision.py`.
 
-Source builds use the `dev` profile by default. The examples below keep its
-credentials in `~/.config/zimbr-dev/tls`. For an official build or a source build
-with `-Dprofile=release`, use `~/.config/zimbr/tls` instead. `--tls-dir` is explicit;
-use the same directory for request and import, then enter those paths in the
-matching client's Settings. Provision each profile separately to keep its key
-and certificates independent.
+## Import and configuration
 
-```sh
-umask 077
-mkdir -p "$HOME/.config/zimbr-dev"
-chmod 700 "$HOME/.config/zimbr-dev"
-python3 packaging/linux/provision.py request \
-  --tls-dir "$HOME/.config/zimbr-dev/tls" \
-  --name linux-desktop.zimbr.invalid --label 'Linux desktop'
-```
+The [certificate contract](certificate-management.md) defines the validated CSR
+and certificate profile. `request --tls-dir PATH --name DEVICE.zimbr.invalid`
+creates the local P-256 key and retained CSR; it refuses to overwrite a key.
+The Mac's `issue-device` signs that request with mkcert and enrolls its leaf
+fingerprint. Return only the issued certificate and public CA over authenticated
+SSH, or authenticate the CA fingerprint independently.
 
-This creates a 0600 local P-256 key and `client.csr` in a 0700 directory. `--name`
-is the explicit device DNS SAN under `zimbr.invalid`; `--label` is human-readable
-subject metadata. Neither authorizes access. Keep the CSR locally for import
-verification, and pass the same `--name` to the Mac signer. The helper refuses
-to overwrite an existing key. Old CSRs without a SAN need a fresh key/CSR in a
-new private directory. Transfer **only the CSR** to the Mac's
-administrator using the existing trusted SSH channel. The administrator must
-inspect the CSR's signature, non-CA constraint, digital-signature key usage,
-and clientAuth EKU, exact SAN, and absence of unexpected extensions before signing. With the
-dedicated Zimbr `CAROOT`, sign using mkcert's `-csr` support; do not combine
-`-csr` with `-client`, run `mkcert -install`, or reuse a general development CA.
-Use the existing Mac `tools/tls_admin.py sign --role client --name ...` and
-`enroll` commands from the certificate contract for issuance and access.
+`import` verifies the CA pin, signatures, validity, exact clientAuth purpose,
+allowed extensions, SANs, and match to the local CSR/private key. Optional
+`--relay-url HTTPS_ORIGIN --launch EXECUTABLE` opens client Settings with the
+verified paths filled in. Close an existing client first, then click **Save and
+connect** to persist them. Without `--launch`, import only installs certificates
+and prints their paths. There is no client JSON file to maintain.
 
-Return the issued device certificate and public `rootCA.pem`. Authenticate the
-CA's entire-DER SHA-256 fingerprint over trusted SSH or an independent channel
-before passing it to the helper. An unauthenticated fingerprint accompanying an
-unauthenticated file does not establish trust. On the trusted administrator host:
+Runtime files must be owned 0600 regular files in owned 0700 directories, with
+no symlinks or hardlinks and no unsafe writable ancestors. These checks apply to
+parent components too. Use the exact server hostname/IP covered by its SANs;
+SSH forwarding configuration does not replace certificate identity checks.
 
-```sh
-openssl x509 -in rootCA.pem -noout -fingerprint -sha256
-```
-
-Then on Linux, using that verified fingerprint:
-
-```sh
-python3 packaging/linux/provision.py import \
-  --tls-dir "$HOME/.config/zimbr-dev/tls" \
-  --ca /absolute/path/to/returned/rootCA.pem \
-  --cert /absolute/path/to/returned/linux-client.pem \
-  --ca-sha256 VERIFIED_CA_DER_SHA256
-```
-
-Import verifies the pin, leaf signature, purpose, validity, extensions, allowed
-key usages, and the certificate/CSR/private-key match before replacing runtime
-public certificates. Its SAN must exactly match the signed local CSR, which
-must also be an owned 0600 regular file without symlinks or hardlinks. Enroll the **client leaf
-DER SHA-256** printed by the helper in the relay's enabled-device allowlist.
-The CA key stays in protected administrator storage; neither the helper nor the
-Linux application needs it. Private-key contents are never command arguments.
-
-Launch Zimbr and enter the relay HTTPS origin and the absolute paths to
-`ca.pem`, `client.pem` and `client-key.pem` in **Settings** (Ctrl+,). Click
-**Save and connect**. Settings are stored with client state in `client.db`;
-there is no JSON file to maintain. Missing or invalid required settings keep
-the pane open until corrected and saved.
-
-Runtime credential files must be owned by the current user, mode 0600, in owned
-0700 containing directories. Symlinks (including parent components), hardlinked
-files, unsafe writable ancestors, missing material and key mismatches are
-rejected. Shared system ancestors such as `/home` may be root-owned; they need
-not be 0700. The root-owned sticky `/tmp` ancestor is allowed for temporary tests.
-
-Dev state lives in `$XDG_STATE_HOME/zimbr-dev` or `$HOME/.local/share/zimbr-dev`.
-Release builds use `zimbr` in those locations. `--data-dir` selects another
-directory. Connection flags `--relay-url`, `--ca-file`,
-`--client-cert-file` and `--client-key-file` override saved settings for one
-launch. An origin may include a port and a trailing `/`, but no userinfo, query,
-fragment or application path. Old `--port`/`--token-file` options fail with
-migration guidance. See [configuration migration](linux-client.md#provisioning-and-configuration)
-for existing JSON files and caches.
+Dev uses `~/.config/zimbr-dev/tls` in the setup guide and stores its database in
+`$XDG_STATE_HOME/zimbr-dev` or `~/.local/share/zimbr-dev`. Release uses `zimbr`.
+`--tls-dir` is explicit; provision the profiles independently. See
+[client configuration](linux-client.md#provisioning-and-configuration) for launch
+overrides, state paths, and legacy settings import.
 
 ## Operation and renewal
 
@@ -122,8 +54,9 @@ automatically. Renewal does not clear the cache, drafts, cursor, or outbox.
 
 For renewal, generate a new key/CSR in another private directory, have it signed,
 import and verify it there, and enroll the new leaf fingerprint on the Mac. A
-brief overlap of enabled device fingerprints is permitted. Update the credential paths in Settings and save, or replace the validated files at its
-existing paths while disconnected and click Reconnect. Remove the old enrollment
+brief overlap of enabled device fingerprints is permitted. Update the credential
+paths in Settings and save, or replace validated files at the existing paths
+while disconnected and click Reconnect. Remove the old enrollment
 after verifying the new fingerprint. Server renewal retains its hostname and CA;
 CA replacement requires a coordinated trust update.
 
@@ -131,7 +64,7 @@ The existing client database format is unchanged. An interrupted POST remains
 uncertain until lookup by its original UUID; a new send is kept as a draft while
 that lookup is outstanding. An authoritative not-found result is shown as
 unconfirmed and is never automatically resubmitted. Back up the client database
-with the application stopped for the coordinated release cutover.
+with the application stopped before changing deployments.
 
 ## Linux verification and server handoff
 
@@ -150,7 +83,7 @@ different minor version, supply a target OpenSSL 3.5 build using
 [the relay build instructions](macos-tls.md#build).
 
 ```sh
-zig build test client client-probe fake-relay
+zig build test relay client client-probe fake-relay
 python3 tests/cert_management.py  # real mkcert required; ZIMBR_MKCERT may override its path
 python3 tests/client_tls.py
 python3 tests/client_native_tls.py
@@ -181,5 +114,5 @@ Installed-server verification is described in [macOS TLS operation](macos-tls.md
 The server contract is unchanged API v1 payloads/cursors/request IDs behind a
 TLS 1.3, HTTP/1.1 origin. Both API and event connections present the device leaf;
 there is no Authorization header. Validate the installed pair, relay restart,
-missed-event replay, and revocation before the coordinated cutover. Real sends
+missed-event replay, and revocation when validating a deployment. Real sends
 still require an explicitly selected and authorized recipient.

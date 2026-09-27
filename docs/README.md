@@ -1,50 +1,46 @@
 # Zimbr documentation
 
-Start with the [macOS relay](macos-relay.md), then enroll and configure the
-[Linux client](linux-client.md). Commands in these guides run from the repository
-root unless noted otherwise.
+Start with [Set up a Mac relay and Linux client](setup.md). It is the complete
+first-run path, using mkcert for issuance. Commands run from the repository root
+unless noted otherwise. Examples use generic paths and reserved network names;
+replace those with your deployment values. On the Mac, `python3` commands assume
+the setup environment is active (`. .tools/python/bin/activate`).
 
-## Setup and everyday use
+## Setup and operation
 
 | Guide | Contents |
 | --- | --- |
-| [Linux client](linux-client.md) | Dependencies, build/install, configuration, keyboard controls, notifications, offline behavior, media, and tests |
-| [macOS relay](macos-relay.md) | Build/test, installation, permissions, Contacts, updates, diagnostics, and service management |
-| [Linux mTLS setup](linux-mtls.md) | Device enrollment, client configuration, reconnect, and renewal |
-| [macOS TLS operation](macos-tls.md) | CA and server provisioning, code signing, credential installation, renewal, and revocation |
-| [macOS validation](mac-validation.md) | Installed permissions, deliberate test sends, restart recovery, and locked-session checks |
-| [macOS profiles](macos-profiles.md) | Separate development and Homebrew identities, data, ports, and migration |
-| [macOS menu bar validation](macos-menu-bar-validation.md) | Native/installed evidence and remaining icon, Settings, recovery, and lifecycle checks |
+| [First-run setup](setup.md) | Dependencies, builds, generated configuration, permissions, and Linux enrollment |
+| [Linux client](linux-client.md) | Configuration, keyboard controls, notifications, offline use, media, and tests |
+| [macOS relay](macos-relay.md) | Menu, permissions, updates, diagnostics, and service management |
+| [Linux TLS](linux-mtls.md) | Credential import, diagnostics, reconnect, and renewal |
+| [macOS TLS](macos-tls.md) | mkcert administration, code signing, server renewal, and revocation |
+| [Profiles](macos-profiles.md) | Independent dev/release identities, data directories, and ports |
+| [Mac validation](mac-validation.md) | Installed permissions, deliberate sends, restart and locked-session checks |
+| [Mac menu validation](macos-menu-bar-validation.md) | Repeatable appearance, settings, recovery, and lifecycle checks |
+| [Packaging and releases](linux-packaging.md) | Maintainer builds, archives, AUR, and Homebrew publishing |
 
 ## Protocol and implementation
 
-- [API v1](api.md): routes, synchronization, SSE, send outcomes, source resets,
-  and limits.
-- [Group delivery status](group-delivery.md): checkmark semantics, available
-  Messages metadata, and delivery-update coverage.
-- [Certificate management contract](certificate-management.md): issuance,
-  enrollment, CSR exchange, and credential lifecycle.
-- [Message security](message-security.md): parsing and storage boundaries with
-  regression coverage.
-- [Linux message enrichment](linux-message-enrichment.md): client behavior,
-  recovery, and verification for contacts, images, links, and reactions.
-- [Mac enrichment acceptance](mac-enrichment-acceptance.md): implemented
-  capabilities, installed evidence, source formats, and remaining validation.
-- [macOS 27 source schema](macos-27-schema.json): observed Messages database schema.
+- [API v1](api.md): routes, synchronization, SSE, send recovery, and limits.
+- [Certificate contract](certificate-management.md): key ownership, validated
+  issuance/import, fingerprint authorization, and lifecycle.
+- [Message security](message-security.md): parsing/storage boundaries and tests.
+- [Group delivery](group-delivery.md): checkmark semantics and source limitations.
+- [Linux enrichment](linux-message-enrichment.md): contacts, media, links, reactions,
+  and client recovery.
+- [Mac enrichment](mac-enrichment-acceptance.md): current source/transport contract
+  and native validation limits.
+- [Observed macOS 27 schema](macos-27-schema.json): a schema snapshot, not a promise
+  about every Messages version.
+- [System design](../DESIGN.md): architectural background; use the API and guides
+  above for operational commands.
 
 ## Performance
 
-- [Performance measurements and architecture](performance.md), with reproduction
-  commands and platform validation limits.
-- [Performance hardening audit](performance-hardening.md).
-- [Client SIMD trials](client-simd.md).
-
-## Design and migration records
-
-These documents retain design decisions and earlier implementation plans; use the
-guides and acceptance records above for current behavior.
-
-- [System design](../DESIGN.md).
-- [Message enrichment design](message-enrichment.md).
-- [mTLS migration](mtls-migration.md).
-- [Linux mTLS integration review](linux-mtls-review.md).
+[Performance](performance.md) describes the architecture and dated measurements.
+Related reports cover [bounded storage](bounded-data.md),
+[serialization](serialization.md), [single-client ownership](single-client.md),
+[SIMD trials](client-simd.md), and [hardening](performance-hardening.md).
+The linked JSON files preserve synthetic benchmark evidence; their timings and
+historical test counts are not results from the current checkout.
