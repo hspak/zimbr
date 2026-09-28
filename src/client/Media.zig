@@ -242,6 +242,18 @@ pub fn take(s: *Media) ?*Result {
     s.wake();
     return result;
 }
+
+/// Snapshot of work for the current GUI context; stale generations are excluded.
+pub fn syncing(s: *Media) bool {
+    s.mutex.lockUncancelable(s.io);
+    defer s.mutex.unlock(s.io);
+    if (!s.online or s.stop.load(.acquire)) return false;
+    if (s.queue.items.len > 0) return true;
+    for (s.active) |active| if (active) |request_value| {
+        if (request_value.generation == s.generation) return true;
+    };
+    return false;
+}
 pub fn release(s: *Media, result: *Result) void {
     result.destroy();
     s.mutex.lockUncancelable(s.io);
@@ -272,16 +284,21 @@ fn resultFor(r: *Request, message: []const u8) !*Result {
     return result;
 }
 fn run(s: *Media) void {
+    defer s.stop.store(true, .release);
     s.work() catch |err| log.err("Image worker stopped: {s}", .{@errorName(err)});
 }
 fn work(s: *Media) !void {
     var net: ?*c.ZcNet = null;
     defer if (net) |n| c.zc_net_free(n);
     var net_generation: u64 = 0;
-    defer for (&s.active) |*active| if (active.*) |r| {
-        r.destroy(s.dir);
-        active.* = null;
-    };
+    defer {
+        s.mutex.lockUncancelable(s.io);
+        defer s.mutex.unlock(s.io);
+        for (&s.active) |*active| if (active.*) |r| {
+            r.destroy(s.dir);
+            active.* = null;
+        };
+    }
     // Leave room for both 8 MiB download lanes and trim in batches near the cap.
     var disk = DiskCache.init(s.dir, .{
         .bytes = disk_budget - 16 * 1024 * 1024,
@@ -627,6 +644,34 @@ test "queued media owns only validated download fields and survives caller reuse
     try std.testing.expectEqual(@as(usize, 1), media.queue.items.len);
     _ = try media.context("epoch", "other", 0, false, true);
     try std.testing.expectEqual(@as(usize, 0), media.queue.items.len);
+}
+
+test "sync activity excludes offline queues and cancelled media generations" {
+    var media = Media{ .io = std.testing.io, .config = .{ .data = "" } };
+    defer media.shutdown();
+    const asset = t.AssetRef{
+        .id = "EjRWeBI0EjQSNBI0VniQEg",
+        .version = "q83vq6vNq82rzavN76vN7w",
+        .variant = .inline_image,
+    };
+    _ = try media.context("epoch", "chat", 0, false, true);
+    try media.request(asset);
+    try std.testing.expect(!media.syncing());
+    _ = try media.context("epoch", "chat", 0, true, true);
+    try std.testing.expect(!media.syncing());
+    try media.request(asset);
+    try std.testing.expect(media.syncing());
+    const request_value = media.queue.orderedRemove(0);
+    defer request_value.destroy(media.dir);
+    media.active[0] = request_value;
+    defer media.active[0] = null;
+    try std.testing.expect(media.syncing());
+    _ = try media.context("epoch", "other", 0, true, true);
+    try std.testing.expect(!media.syncing());
+    try media.request(asset);
+    try std.testing.expect(media.syncing());
+    media.stop.store(true, .release);
+    try std.testing.expect(!media.syncing());
 }
 
 test "asset keys separate relay identities, epochs, versions and variants" {

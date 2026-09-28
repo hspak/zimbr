@@ -49,6 +49,7 @@ pub const Status = struct {
     reason: []const u8 = "starting",
     last_refresh_ms: ?i64 = null,
     stale: bool = false,
+    refreshing: bool = false,
 };
 pub const Contact = struct {
     id: []const u8,
@@ -365,6 +366,9 @@ pub fn loop(core: *Core) void {
         defer arena.deinit();
         const a = arena.allocator();
         const refresh = u.now() >= next_refresh;
+        core.lock();
+        core.contacts_status.refreshing = true;
+        core.unlock();
         const observed = snapshot(a, core, generation, old_permission, refresh) catch Snapshot{
             .permission = old_permission orelse .unavailable,
             .generation = generation orelse 0,
@@ -417,6 +421,7 @@ pub fn loop(core: *Core) void {
         };
         const epoch = j.epoch(a) catch null;
         core.contacts_status.permission = observed.permission;
+        core.contacts_status.refreshing = false;
         core.contacts_status.stale = failed;
         core.contacts_status.ready = false;
         core.contacts_status.reason = if (failed) "contacts_query_failed" else if (observed.permission != .authorized) @tagName(observed.permission) else "reconciling";

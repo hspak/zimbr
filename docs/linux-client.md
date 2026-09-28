@@ -323,6 +323,14 @@ ingestion batches resolve each conversation once and skip unchanged writes.
 Conversation pages can include small sidebar previews, avoiding a request per
 conversation.
 
+While background work is active, the sidebar's connection footer shows a spinning
+refresh icon and the categories being synced: Messages, Contacts, Images, or Media.
+This includes history and contact backfills, image preparation/downloads, and
+message metadata. Live contact updates also trigger the indicator between relay
+status polls and keep it visible for 1.2 seconds after the last update. It returns
+to the connected host when idle. Offline connections, unavailable permissions,
+and delayed retries do not keep the icon spinning.
+
 ## Verification
 
 ```sh
@@ -341,6 +349,7 @@ python3 tests/client_lazy_history.py
 python3 tests/client_enrichment.py
 python3 tests/contact_refresh.py
 python3 tests/client_enrichment_protocol.py
+python3 tests/client_contact_sync.py
 python3 tests/client_media_transport.py
 python3 tests/client_details.py
 # Requires a running Wayland desktop and Python cryptography for temporary test certificates:

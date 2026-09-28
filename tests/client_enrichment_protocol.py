@@ -31,6 +31,8 @@ def main():
                 path=urlsplit(self.path); query=parse_qs(path.query)
                 if path.path=='/v1/status':
                     body=dict(api_version='1',server_epoch=EPOCH,adapter_ready=True,capabilities=dict(send_direct=True,reply_existing=True),degraded_reasons=[])
+                    if 'sync_activity' in state:
+                        body['sync_activity'] = state['sync_activity']
                     if state['enabled']:
                         body['event_extensions']=['identity-v1']; body['capabilities']['identity_directory_v1']=True
                         body['enrichment_readiness']=dict(identity_directory_v1=dict(ready=True,permission='authorized'))
@@ -71,12 +73,23 @@ def main():
         probe=start()
         try:
             probe.until(lambda v:v.get('online'))
+            assert not any(probe.latest['sync_activity'].values())
+            # Report simultaneous relay backfills, then clear them through the
+            # normal status poll without a reconnect or message/content change.
+            state['sync_activity'] = dict(messages=True, contacts=True, images=True, media=True)
+            probe.until(lambda v: all(v['sync_activity'].values()), timeout=8)
+            state['sync_activity'] = dict(images=True)
+            probe.until(lambda v: v['sync_activity'] == dict(
+                messages=False, contacts=False, images=True, media=False), timeout=4)
+            state['sync_activity'] = {}
+            probe.until(lambda v: not any(v['sync_activity'].values()), timeout=4)
             assert state['pages']==0
             probe.command(kind='draft',key='new:peer@example.invalid',text='Keep through upgrade')
             wait(lambda:rows('SELECT count(*) FROM drafts')==[(1,)])
             state.update(enabled=True,hold=True)
             probe.command(kind='reconnect')
             assert held.wait(timeout=10)
+            probe.until(lambda v: v['sync_activity']['contacts'], timeout=3)
             assert rows("SELECT value FROM meta WHERE key='bootstrapped'")==[('0',)]
             assert rows("SELECT value FROM meta WHERE key='identity_bootstrapped'")==[('0',)]
             assert state['identity_streams']==0
@@ -88,10 +101,12 @@ def main():
             assert rows("SELECT value FROM meta WHERE key='accepted_extensions'")==[('identity-v1',)]
             assert rows('SELECT text FROM drafts')==[('Keep through upgrade',)]
             # A lying/old relay cannot silently accept a requested extension.
-            state['echo']=False
+            state.update(echo=False, sync_activity=dict(images=True))
             probe.command(kind='reconnect')
             probe.until(lambda v:v.get('diagnostics',{}).get('auth_blocked'))
             assert not probe.latest['online']
+            assert not any(probe.latest['sync_activity'].values())
+            state['sync_activity'] = {}
             assert rows("SELECT value FROM meta WHERE key='cursor'")==[(EPOCH+':0',)]
             streams=state['identity_streams']; time.sleep(.5)
             assert state['identity_streams']==streams

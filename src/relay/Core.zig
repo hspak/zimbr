@@ -62,6 +62,31 @@ pub fn unlock(self: *Core) void {
 pub fn sleep(self: *Core, ms: i64) void {
     std.Io.sleep(self.io, .fromMilliseconds(ms), .awake) catch {};
 }
+
+/// Caller holds the Core mutex. Reads bounded queue/progress probes, not record counts.
+pub fn syncActivity(self: *Core) Journal.QueryError!t.SyncActivity {
+    if (self.reset_required) return .{};
+    const j = self.journal;
+    const directory = contacts.currentStatus(self.contacts_status);
+    const contact_ready = directory.permission == .authorized and !directory.stale and
+        !u.eq(directory.reason, "contacts_persistence_failure");
+    const images = try j.db.prepare(
+        "SELECT EXISTS(SELECT 1 FROM asset_work w JOIN asset_sources s ON s.id=w.asset_id AND s.version=w.version WHERE w.attempt_ms<=? AND (s.kind!='contact' OR ?) AND EXISTS(SELECT 1 FROM asset_owners WHERE asset_id=s.id))",
+    );
+    defer images.close();
+    try images.bind(&.{ .{ .int = u.now() }, .{ .int = @intFromBool(contact_ready) } });
+    _ = try images.step();
+    return .{
+        .messages = self.read_ready and (try j.position("backfill") > 0 or
+            try j.db.scalar("SELECT EXISTS(SELECT 1 FROM reconcile_chats)") != 0),
+        .contacts = contact_ready and (directory.refreshing or
+            u.eq(directory.reason, "reconciling") or
+            try j.db.scalar("SELECT EXISTS(SELECT 1 FROM identity_work) OR NOT EXISTS(SELECT 1 FROM ingestion_progress WHERE key='identity_backfill_v1' AND value='complete')") != 0),
+        .images = self.assets_service != null and images.int(0) != 0,
+        .media = self.read_ready and
+            try j.db.scalar("SELECT NOT EXISTS(SELECT 1 FROM ingestion_progress WHERE key='enrichment_backfill_v1' AND value='complete')") != 0,
+    };
+}
 pub fn ingestLoop(self: *Core) void {
     u.c.zr_thread_qos(0);
     var tick: usize = 0;
@@ -631,4 +656,56 @@ fn reconcile(self: *Core, a: u.Allocator, batch: *ImportBatch, complete: bool) !
         } else null;
         _ = try j.updateRequest(a, v);
     }
+}
+
+test "sync activity follows durable backfills and runnable asset work" {
+    if (comptime !fake) return error.SkipZigTest;
+    const j = try Journal.open(":memory:");
+    defer j.close();
+    var core = Core{
+        .io = std.testing.io,
+        .journal = j,
+        .source_path = "",
+        .read_ready = true,
+        .contacts_status = .{
+            .permission = .authorized,
+            .ready = true,
+            .reason = "",
+        },
+    };
+    try j.setPosition("backfill", 200);
+    var activity = try core.syncActivity();
+    try std.testing.expect(activity.messages and activity.contacts and activity.media);
+    try std.testing.expect(!activity.images);
+    try j.setPosition("backfill", 0);
+    try j.setProgress("identity_backfill_v1", "complete");
+    try j.setProgress("enrichment_backfill_v1", "complete");
+    try std.testing.expect(!(try core.syncActivity()).active());
+
+    core.contacts_status.refreshing = true;
+    try std.testing.expect((try core.syncActivity()).contacts);
+    core.contacts_status.refreshing = false;
+    core.contacts_status.permission = .denied;
+    try j.setProgress("identity_backfill_v1", "cursor");
+    try std.testing.expect(!(try core.syncActivity()).contacts);
+
+    core.assets_service = .{
+        .root_path = "",
+        .cache_fd = -1,
+        .helper_path = "",
+    };
+    try j.db.exec(
+        "INSERT INTO asset_sources(id,kind,source_key,path,version) VALUES('image','attachment','image','','v1');" ++
+            "INSERT INTO asset_owners VALUES('image','message','message');" ++
+            "INSERT INTO asset_work VALUES('image','v1','inline_image',0);",
+    );
+    activity = try core.syncActivity();
+    try std.testing.expect(activity.images);
+    try j.execute("UPDATE asset_work SET attempt_ms=?", &.{.{ .int = u.now() + 30000 }});
+    try std.testing.expect(!(try core.syncActivity()).images);
+    try j.db.exec("UPDATE asset_work SET attempt_ms=0,version='old'");
+    try std.testing.expect(!(try core.syncActivity()).images);
+    try j.db.exec("DELETE FROM asset_work");
+    core.reset_required = true;
+    try std.testing.expect(!(try core.syncActivity()).active());
 }

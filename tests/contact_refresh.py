@@ -137,6 +137,7 @@ def main():
                 contacts('Automatically refreshed 👋')
                 wait(lambda: directory().get('display_name') == 'Automatically refreshed 👋')
                 wait(lambda: pump().get('selected_title') == 'Automatically refreshed 👋')
+                assert latest['sync_activity']['contacts'], 'Live Contacts changes must show sync activity'
                 assert latest['directory_revision'] != directory_revision
                 wait(lambda: rows("SELECT count(*) FROM identities WHERE json_extract(record,'$.display_name')='Automatically refreshed 👋'") == [(206,)])
                 assert rows("SELECT id,record FROM records WHERE kind='message' ORDER BY id") == messages

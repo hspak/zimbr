@@ -68,6 +68,8 @@ hydration_request: ?Command = null,
 hydration_at: i64 = 0,
 text_first_history: bool = false,
 identities_before: ?[]const u8 = null,
+// Keep brief live updates visible across publication coalescing and UI frames.
+contacts_sync_until: i64 = 0,
 preview_at: i64 = 0,
 recover_row: i64 = 0,
 need_history: bool = false,
@@ -93,6 +95,10 @@ transport_error: c.ZcError = std.mem.zeroes(c.ZcError),
 identity: c.ZcIdentity = std.mem.zeroes(c.ZcIdentity),
 
 const a = std.heap.page_allocator;
+const EventBatch = struct {
+    worker: *Worker,
+    contacts: bool = false,
+};
 pub const Reset = enum { idle, pending, failed, complete };
 pub const Command = struct {
     kind: enum {
@@ -121,6 +127,7 @@ pub const Readiness = struct {
     last_refresh_ms: ?i64 = null,
 };
 pub const RelayStatus = struct {
+    sync_activity: t.SyncActivity = .{},
     event_extensions: []const []const u8 = &.{},
     enrichment_readiness: struct {
         identity_directory_v1: Readiness = .{},
@@ -173,6 +180,7 @@ pub const View = struct {
     snapshot: Store.Snapshot,
     status: []const u8,
     online: bool,
+    sync_activity: t.SyncActivity = .{},
     send_direct: bool,
     reply_existing: bool,
     generation: u64,
@@ -327,6 +335,7 @@ fn work(s: *Worker) !void {
     try s.expireUnknown();
     try s.publish();
     while (true) {
+        s.expireContactSync(u.now());
         try s.expireUnknown();
         try s.drain();
         if (s.reset == .idle) try s.resolveDirect();
@@ -374,6 +383,7 @@ fn work(s: *Worker) !void {
         const now = u.now();
         var delay: i64 = if (s.dirty) @max(0, 16 - (now - s.last_published)) else 1000;
         delay = @min(delay, @max(0, s.expiry_at - now));
+        if (s.contacts_sync_until != 0) delay = @min(delay, @max(0, s.contacts_sync_until - now));
         if (!s.auth_blocked and s.job == .idle and s.reset != .complete) {
             if (!s.online and !s.stream_active) delay = @min(delay, @max(0, s.retry_at - now));
             if (s.online) delay = @min(
@@ -438,8 +448,10 @@ fn receiveBatch(s: *Worker, bytes: []const u8) !void {
     // reconnect replays from the last durable cursor.
     try s.store.db.exec("BEGIN IMMEDIATE");
     errdefer s.store.db.exec("ROLLBACK") catch {};
-    try s.sse.feed(event, s, bytes);
+    var batch = EventBatch{ .worker = s };
+    try s.sse.feed(event, &batch, bytes);
     try s.store.db.exec("COMMIT");
+    if (batch.contacts) s.contacts_sync_until = u.now() + 1200;
     // Never publish side effects for a rolled-back frame or cursor update.
     s.mutex.lockUncancelable(s.io);
     defer s.mutex.unlock(s.io);
@@ -449,7 +461,8 @@ fn receiveBatch(s: *Worker, bytes: []const u8) !void {
     }
     s.batch_notifications.clearRetainingCapacity();
 }
-fn event(s: *Worker, arena: u.Allocator, raw: []const u8, id: []const u8, kind: []const u8) !void {
+fn event(batch: *EventBatch, arena: u.Allocator, raw: []const u8, id: []const u8, kind: []const u8) !void {
+    const s = batch.worker;
     if (try s.store.eventNotification(arena, raw, id, kind, if (s.viewed) s.selected else "")) |message| {
         const notification = Notification.create(s.store, message) catch null;
         if (notification) |n| {
@@ -457,6 +470,7 @@ fn event(s: *Worker, arena: u.Allocator, raw: []const u8, id: []const u8, kind: 
             s.batch_notifications.append(a, n) catch n.destroy();
         }
     }
+    if (u.eq(kind, "identity.upsert")) batch.contacts = true;
     if (u.eq(kind, "conversation.upsert") and s.selected.len > 0) {
         if (try s.store.nextPage(arena, try s.store.threadKey(arena, s.selected))) |next| if (next.len == 0) {
             s.need_history = true;
@@ -466,6 +480,11 @@ fn event(s: *Worker, arena: u.Allocator, raw: []const u8, id: []const u8, kind: 
     s.last_event_ms = u.now();
     s.dirty = true;
     s.content_dirty = true;
+}
+fn expireContactSync(s: *Worker, now: i64) void {
+    if (s.contacts_sync_until == 0 or now < s.contacts_sync_until) return;
+    s.contacts_sync_until = 0;
+    s.dirty = true;
 }
 fn request(
     s: *Worker,
@@ -896,7 +915,7 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
             }
             s.send_direct = v.capabilities.send_direct;
             s.reply_existing = v.capabilities.reply_existing;
-            s.status_at = u.now() + 15000;
+            s.status_at = u.now() + @as(i64, if (v.sync_activity.active()) 1000 else 5000);
             if (!u.eq(v.server_epoch, try s.store.get(ar, "epoch")) or !u.eq(
                 try s.store.get(ar, "bootstrapped"),
                 "1",
@@ -1401,6 +1420,7 @@ fn publish(s: *Worker) !void {
         .saved_drafts = try s.store.db.scalar("SELECT count(*) FROM drafts WHERE length(text)>0"),
         .pending_sends = shared.pending_sends,
     };
+    v.sync_activity = s.syncActivity(v.diagnostics.server);
     // Arena state changes during snapshot construction: retain the final state.
     v.arena = arena;
     s.mutex.lockUncancelable(s.io);
@@ -1410,6 +1430,25 @@ fn publish(s: *Worker) !void {
     s.dirty = false;
     s.last_published = u.now();
     if (s.on_ready) |ready| ready();
+}
+
+fn syncActivity(s: *const Worker, server: ?RelayStatus) t.SyncActivity {
+    if (s.auth_blocked or s.reset != .idle or u.now() < s.retry_at) return .{};
+    var activity: t.SyncActivity = if (s.online and server != null)
+        server.?.sync_activity
+    else
+        .{};
+    activity.contacts = activity.contacts or s.identities_before != null or
+        (s.online and s.contacts_sync_until != 0);
+    activity.messages = activity.messages or (s.online and s.need_history and
+        s.selected.len > 0 and !std.mem.startsWith(u8, s.selected, "new:"));
+    switch (s.job) {
+        .sync, .chats, .history, .preview => activity.messages = true,
+        .identities => activity.contacts = true,
+        .enrichment, .hydrate => activity.media = true,
+        .idle, .status, .send, .recover, .reset_status, .reset => {},
+    }
+    return activity;
 }
 
 test "lazy metadata upgrades a text snapshot without changing its revision or losing newer text" {
@@ -1562,6 +1601,55 @@ test "metadata views share immutable history while edited records replace it" {
     try std.testing.expect(first.shared != changed.shared);
     try std.testing.expectEqualStrings("Original", first.snapshot.messages[0].text.?);
     try std.testing.expectEqualStrings("Edited", changed.snapshot.messages[0].text.?);
+}
+
+test "contact sync is published only after commit and expires without changing content" {
+    const epoch = "EjRWeBI0EjQSNBI0VniQEg";
+    var worker = Worker{
+        .io = std.testing.io,
+        .config = .{ .data = "" },
+        .online = true,
+    };
+    worker.store = try Store.open(":memory:");
+    defer worker.store.close();
+    defer worker.shutdown();
+    defer worker.sse.deinit();
+    try worker.store.beginSync(epoch, epoch ++ ":0");
+    try worker.store.set("accepted_extensions", "identity-v1");
+    const frame = "id: " ++ epoch ++ ":1\nevent: identity.upsert\ndata: {\"cursor\":\"" ++
+        epoch ++ ":1\",\"sequence\":\"1\",\"type\":\"identity.upsert\",\"origin\":\"reconciliation\"," ++
+        "\"record\":{\"id\":\"peer\",\"revision\":\"1\",\"service\":\"imessage\"," ++
+        "\"address\":\"peer@example.invalid\",\"match_state\":\"matched\",\"display_name\":\"Updated\"}}\n\n";
+    try std.testing.expectError(error.InvalidFrame, worker.receiveBatch(frame ++ "data: invalid\n\n"));
+    try std.testing.expect(!worker.syncActivity(null).contacts);
+    worker.sse.reset();
+    // Fail the outer commit after the contact record and cursor were applied.
+    try worker.store.db.exec(
+        "PRAGMA foreign_keys=ON; CREATE TABLE commit_parent(id TEXT PRIMARY KEY);" ++
+            "CREATE TABLE commit_guard(id TEXT REFERENCES commit_parent(id) DEFERRABLE INITIALLY DEFERRED);" ++
+            "CREATE TRIGGER reject_contact AFTER INSERT ON identities BEGIN INSERT INTO commit_guard VALUES('missing'); END;",
+    );
+    try std.testing.expectError(error.DatabaseFailure, worker.receiveBatch(frame));
+    try std.testing.expect(!worker.syncActivity(null).contacts);
+    try worker.store.db.exec("DROP TRIGGER reject_contact; DROP TABLE commit_guard; DROP TABLE commit_parent");
+    worker.sse.reset();
+    try worker.receiveBatch(frame);
+    try worker.publish();
+    const syncing = worker.take().?;
+    defer syncing.destroy();
+    try std.testing.expect(syncing.sync_activity.contacts);
+    worker.online = false;
+    try std.testing.expect(!worker.syncActivity(null).contacts);
+    worker.online = true;
+    worker.expireContactSync(worker.contacts_sync_until - 1);
+    try std.testing.expect(!worker.dirty);
+    worker.expireContactSync(worker.contacts_sync_until);
+    try std.testing.expect(worker.dirty);
+    try worker.publish();
+    const idle = worker.take().?;
+    defer idle.destroy();
+    try std.testing.expect(!idle.sync_activity.active());
+    try std.testing.expectEqual(syncing.shared, idle.shared);
 }
 
 test "an invalid frame rolls back the complete network batch for safe replay" {

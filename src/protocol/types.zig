@@ -15,6 +15,18 @@ pub const max_inline_previews = 4;
 pub const max_inline_reactions = 128;
 pub const max_inline_parts = 128;
 
+/// Background work currently running or ready to run; excludes blocked retries.
+pub const SyncActivity = struct {
+    messages: bool = false,
+    contacts: bool = false,
+    images: bool = false,
+    media: bool = false,
+
+    pub fn active(self: SyncActivity) bool {
+        return self.messages or self.contacts or self.images or self.media;
+    }
+};
+
 // Null enrichment fields mean "not supplied". A complete, empty aggregate
 // explicitly clears earlier content. No existing v1 enum is extended.
 pub const EnrichmentStatus = enum {

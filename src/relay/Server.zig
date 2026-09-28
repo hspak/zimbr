@@ -228,6 +228,7 @@ pub fn handle(self: *Server, a: u.Allocator, req: *Request, peer: *Tls.c.ZrTls) 
                 .event_extensions = [_][]const u8{"identity-v1"},
                 .server_epoch = try j.epoch(a),
                 .adapter_ready = self.core.read_ready,
+                .sync_activity = try self.core.syncActivity(),
                 .source_features = self.core.source_features,
                 .capabilities = .{
                     .state_reset_v1 = true,

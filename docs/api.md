@@ -13,7 +13,7 @@ for enrollment and an authenticated status example.
 
 | Method | Path | Response |
 | --- | --- | --- |
-| GET | `/v1/status` | Epoch, readiness, capabilities, degraded reasons |
+| GET | `/v1/status` | Epoch, readiness, capabilities, sync activity, degraded reasons |
 | GET | `/v1/sync` | Epoch and durable event cursor |
 | GET | `/v1/conversations?before=...&limit=50` | `conversations`, `next` |
 | GET | `/v1/conversations/:id/messages?before=...&limit=50` | `messages`, `next` |
@@ -80,7 +80,15 @@ separate, so permission loss can still synchronize clearing records.
 The relay updates observed identities automatically when Contacts changes on the
 Mac and through periodic scans. Clients receive those updates through negotiated
 identity events. `enrichment_readiness.identity_directory_v1` in `/v1/status`
-reports `ready`, `stale`, `permission`, `reason`, and `last_refresh_ms`.
+reports `ready`, `stale`, `permission`, `reason`, `refreshing`, and `last_refresh_ms`.
+
+`/v1/status` also reports `sync_activity`, with boolean `messages`, `contacts`,
+`images`, and `media` fields. Multiple fields can be true during overlapping
+backfills. They cover historical message import/reconciliation, contact lookup
+and identity backfill, runnable image preparation, and metadata backfill,
+respectively. Blocked work and delayed image retries are excluded. Clients may
+poll more frequently while work is active and combine this with their own
+download queues; missing fields on older relays default to false.
 
 ## Events
 

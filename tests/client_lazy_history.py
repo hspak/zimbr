@@ -142,6 +142,7 @@ def main():
 
         try:
             assert contacts_held.wait(timeout=10)
+            probe.until(lambda v: v['sync_activity']['contacts'], timeout=3)
             probe.command(kind='select', key=CHAT)
             probe.until(lambda v: v['selected'] == CHAT and v['messages'] == 1, timeout=3)
             assert not contacts_release.is_set()
@@ -157,6 +158,7 @@ def main():
 
             probe.command(kind='hydrate', key=CHAT, text=json.dumps([PHOTO]))
             assert metadata_held.wait(timeout=5)
+            probe.until(lambda v: v['sync_activity']['media'], timeout=3)
             probe.command(kind='older')
             probe.until(lambda v: v['selected'] == CHAT and v['messages'] == 2, timeout=3)
             assert record(OLDER) and not metadata_release.is_set()
@@ -173,6 +175,7 @@ def main():
             probe.command(kind='hydrate', key=CHAT, text=json.dumps([PHOTO]))
             probe.until(lambda v: v['diagnostics']['last_http_status'] == 503, timeout=5)
             assert probe.latest['online']
+            assert not probe.latest['sync_activity']['media'], 'Retry backoff is not active sync'
             assert record(PHOTO)['metadata_deferred']
             fail_metadata = False
             wait(lambda: not record(PHOTO).get('metadata_deferred'), timeout=8)

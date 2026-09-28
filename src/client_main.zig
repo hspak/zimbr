@@ -180,7 +180,9 @@ fn runSession(init: std.process.Init, config: Config) !?Config {
         // Keep rendering between input events so scrolling and key repeat do
         // not fall back to the idle polling cadence during an interaction.
         if (input or window_changed or revision != last_revision) active_until = now + 0.5;
-        if (frames < 4 or config.frames > 0 or background_ready or app.layout_pending or now < active_until or generation != last_generation or u.now() - last_draw >= 500) {
+        const syncing = !app.settings.visible and app.syncActivity().active();
+        const frame_delay: i64 = if (syncing) 33 else 500;
+        if (frames < 4 or config.frames > 0 or background_ready or app.layout_pending or now < active_until or generation != last_generation or u.now() - last_draw >= frame_delay) {
             app.capture_frame = config.screenshot != null and config.frames > 0 and frames + 1 >= config.frames;
             app.draw(window.scale);
             background_ready = false;
@@ -191,7 +193,7 @@ fn runSession(init: std.process.Init, config: Config) !?Config {
             last_window = window;
             frames += 1;
         } else {
-            background_ready = bridge.zc_activation_wait(25) != 0;
+            background_ready = bridge.zc_activation_wait(if (syncing) 10 else 25) != 0;
             rl.pollInputEvents();
         }
         if (app.next_config != null) break;
@@ -1001,7 +1003,9 @@ const App = struct {
                 theme.colors.line,
             );
             const online = s.view != null and s.view.?.online;
-            const status = if (online) status: {
+            const activity = s.syncActivity();
+            var sync_buffer: [96]u8 = undefined;
+            const status = if (activity.active()) display.syncLabel(activity, &sync_buffer) else if (online) status: {
                 const endpoint = std.Uri.parse(s.worker.config.relay_url) catch break :status "Connected";
                 const host = endpoint.host orelse break :status "Connected";
                 break :status std.fmt.allocPrint(ar, "Connected to {s}", .{host.percent_encoded}) catch
@@ -1013,11 +1017,13 @@ const App = struct {
             const status_y = @round((footer.y + (footer.height - status_size.y) / 2) * scale) / scale;
             // Align with the visible glyphs, excluding the font's line and texture padding.
             const dot_y = status_y + s.text.lineInkCenterY(status, 11, status_width);
-            drawStatusDot(
-                .{ .x = footer.x + sidebar_padding + sidebar_icon_inset + sidebar_icon_size / 2, .y = dot_y },
-                scale,
-                if (online) theme.colors.success else theme.colors.danger,
-            );
+            const icon_center = rl.Vector2{
+                .x = footer.x + sidebar_padding + sidebar_icon_inset + sidebar_icon_size / 2,
+                .y = dot_y,
+            };
+            if (activity.active()) {
+                shapes.drawRefresh(icon_center, rl.getTime(), theme.colors.muted);
+            } else drawStatusDot(icon_center, scale, if (online) theme.colors.success else theme.colors.danger);
             s.text.drawLine(
                 status,
                 status_x,
@@ -1054,6 +1060,15 @@ const App = struct {
         }
         if (!rl.isMouseButtonDown(.left)) s.message_selection.dragging = false;
     }
+    fn syncActivity(s: *App) t.SyncActivity {
+        const view = s.view orelse return .{};
+        var activity = view.sync_activity;
+        if (view.online) if (s.media) |media| {
+            activity.images = activity.images or media.syncing();
+        };
+        return activity;
+    }
+
     fn drawStatusDot(center: rl.Vector2, scale: f32, color: rl.Color) void {
         // Keep this six-pixel dot symmetric on the physical pixel grid, with
         // a one-pixel antialiased edge even at fractional display scales.

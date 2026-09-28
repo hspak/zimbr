@@ -7,6 +7,31 @@ pub const max_lines = 64;
 pub const shortened = "\n… Preview shortened · select and Ctrl+C to copy full text";
 pub const unavailable = "Text preview unavailable · select and Ctrl+C to copy";
 
+/// Formats all active categories into caller-owned storage, or returns empty when idle.
+pub fn syncLabel(activity: t.SyncActivity, buffer: *[96]u8) []const u8 {
+    if (!activity.active()) return "";
+    const label_prefix = "Syncing ";
+    @memcpy(buffer[0..label_prefix.len], label_prefix);
+    var end: usize = label_prefix.len;
+    inline for (.{
+        .{ "messages", "Messages" },
+        .{ "contacts", "Contacts" },
+        .{ "images", "Images" },
+        .{ "media", "Media" },
+    }) |category| {
+        if (@field(activity, category[0])) {
+            if (end > label_prefix.len) {
+                @memcpy(buffer[end..][0..2], ", ");
+                end += 2;
+            }
+            @memcpy(buffer[end..][0..category[1].len], category[1]);
+            end += category[1].len;
+        }
+    }
+    @memcpy(buffer[end..][0.."…".len], "…");
+    return buffer[0 .. end + "…".len];
+}
+
 pub const unknown_grace_ms = 30_000;
 pub const MessageStatus = union(enum) {
     none,

@@ -95,6 +95,71 @@ fn cornerSegments(radius: f32, dpi: rl.Vector2) i32 {
     return @intFromFloat(@max(8, @ceil(std.math.pi / 2.0 * @sqrt(physical_radius))));
 }
 
+/// Two rotating arrows, with time supplied by the frame clock in seconds.
+pub fn drawRefresh(center: rl.Vector2, seconds: f64, color: rl.Color) void {
+    const rotation: f32 = @floatCast(@mod(seconds, 1.2) * 300);
+    for ([_]f32{ 0, 180 }) |offset| {
+        const end = rotation + offset + 135;
+        rl.drawRing(center, 4.5, 6, rotation + offset, end, 20, color);
+        const angle = std.math.degreesToRadians(end);
+        const radial = rl.Vector2{ .x = @cos(angle), .y = @sin(angle) };
+        const tangent = rl.Vector2{ .x = -radial.y, .y = radial.x };
+        const tip = center.add(radial.scale(5.25)).add(tangent.scale(2));
+        const base = center.add(radial.scale(5.25)).subtract(tangent.scale(1));
+        rl.drawTriangle(tip, base.add(radial.scale(2.5)), base.subtract(radial.scale(2.5)), color);
+    }
+}
+
+test "refresh arrows visibly rotate at fractional display scales" {
+    rl.setTraceLogLevel(.none);
+    rl.setConfigFlags(.{ .window_highdpi = true, .msaa_4x_hint = true });
+    rl.initWindow(640, 480, "Zimbr sync animation checks");
+    defer rl.closeWindow();
+    rl.pollInputEvents();
+    for (0..4) |_| {
+        rl.beginDrawing();
+        rl.clearBackground(rl.Color.black);
+        rl.endDrawing();
+    }
+    for ([_]f32{
+        1,
+        1.25,
+        2,
+    }) |scale| {
+        var frames: [2]rl.Image = undefined;
+        for (&frames, [_]f64{ 0, 0.15 }) |*frame, seconds| {
+            rl.beginDrawing();
+            rl.clearBackground(rl.Color.black);
+            rl.beginMode2D(.{
+                .offset = .{ .x = 0, .y = 0 },
+                .target = .{ .x = 0, .y = 0 },
+                .rotation = 0,
+                .zoom = scale,
+            });
+            drawRefresh(.{ .x = 40, .y = 40 }, seconds, rl.Color.white);
+            rl.endMode2D();
+            rl.gl.rlDrawRenderBatchActive();
+            frame.* = try rl.loadImageFromScreen();
+            rl.endDrawing();
+        }
+        defer for (frames) |frame| rl.unloadImage(frame);
+        var changed: usize = 0;
+        var ink: usize = 0;
+        var y: i32 = @intFromFloat(30 * scale);
+        while (y < @as(i32, @intFromFloat(50 * scale))) : (y += 1) {
+            var x: i32 = @intFromFloat(30 * scale);
+            while (x < @as(i32, @intFromFloat(50 * scale))) : (x += 1) {
+                const first = rl.getImageColor(frames[0], x, y);
+                const second = rl.getImageColor(frames[1], x, y);
+                if (first.r > 0) ink += 1;
+                if (!std.meta.eql(first, second)) changed += 1;
+            }
+        }
+        try std.testing.expect(ink > 25);
+        try std.testing.expect(changed > 20);
+    }
+}
+
 test "rounded outlines retain their thickness and smooth edges under display scaling" {
     rl.setTraceLogLevel(.none);
     rl.setConfigFlags(.{ .window_highdpi = true, .msaa_4x_hint = true });
