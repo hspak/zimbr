@@ -1,16 +1,20 @@
 # Zimbr documentation
 
-Start with [Set up a Mac relay and Linux client](setup.md). It is the complete
-first-run path, using mkcert for issuance. Commands run from the repository root
-unless noted otherwise. Examples use generic paths and reserved network names;
-replace those with your deployment values. On the Mac, `python3` commands assume
-the setup environment is active (`. .tools/python/bin/activate`).
+For an installed AUR client, start with [AUR client setup](linux-setup.md).
+For a packaged Mac relay, use [Homebrew setup](macos-relay.md#homebrew).
+[Development setup](setup.md) covers building both apps from source.
+Examples use generic paths and reserved network names; replace those with your
+deployment values. Source-build and maintenance commands run from the repository
+root unless noted otherwise. On the Mac, `python3` commands assume the setup
+environment is active (`. .tools/python/bin/activate`).
 
 ## Setup and operation
 
 | Guide | Contents |
 | --- | --- |
-| [First-run setup](setup.md) | Dependencies, builds, generated configuration, permissions, and Linux enrollment |
+| [AUR client setup](linux-setup.md) | Enroll and connect an installed Linux client using release paths and commands |
+| [Homebrew relay setup](macos-relay.md#homebrew) | Configure the packaged Mac relay, permissions, and login startup |
+| [Development setup](setup.md) | Dependencies, source builds, generated configuration, permissions, and Linux enrollment |
 | [Linux client](linux-client.md) | Configuration, keyboard controls, notifications, offline use, media, and tests |
 | [macOS relay](macos-relay.md) | Menu, permissions, updates, diagnostics, and service management |
 | [Linux TLS](linux-mtls.md) | Credential import, diagnostics, reconnect, and renewal |

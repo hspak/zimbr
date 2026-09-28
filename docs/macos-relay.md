@@ -93,8 +93,22 @@ The cask installs `~/Applications/Zimbr Relay.app` and exposes `zimbr-relay` and
 `~/Library/Application Support/Zimbr`.
 A dev-profile installation can remain installed alongside the cask.
 
-Use a matching source checkout for the setup tools. Install mkcert and the Python
-dependencies as in [setup](setup.md), then generate the release configuration:
+Use a source checkout matching the installed release for the certificate
+administration tools; these scripts are not included in the cask. You can also
+download and extract the matching source archive from the
+[release page](https://github.com/hspak/zimbr/releases). Run the following
+commands from that source directory on the Mac to prepare their Python environment:
+
+```sh
+brew install mkcert python
+mkdir -p .tools
+"$(brew --prefix)/bin/python3" -m venv .tools/python
+.tools/python/bin/python3 -m pip install -r tools/requirements-tls.txt
+```
+
+For a new installation, generate the release configuration with the installed
+relay. Replace the example hostname with one that resolves to the Mac from both
+computers and the example IP with a specific local address on the Mac:
 
 ```sh
 .tools/python/bin/python3 tools/tls_admin.py setup --profile release \
@@ -102,18 +116,27 @@ dependencies as in [setup](setup.md), then generate the release configuration:
   --directory "$HOME/Library/Application Support/Zimbr" \
   --server-name relay.example --listen-address 192.0.2.10
 zimbr-relay check-config
+```
+
+This direct setup requires an empty data directory; for an existing installation
+retain its configuration and credentials. The TLS CA remains outside runtime
+state, at `~/.config/zimbr-release-ca` by default. Keep its private key on the Mac;
+Zimbr uses explicit CA trust, so `mkcert -install` is unnecessary.
+
+Add `~/Applications/Zimbr Relay.app` to **System Settings → Privacy & Security →
+Full Disk Access**. Then run the permission check from the Mac's Terminal,
+approve Messages Automation, and start the login service:
+
+```sh
 open -n -W -a "$HOME/Applications/Zimbr Relay.app" --args doctor --check-automation
 zimbr-relay-service start
 zimbr-relay-service status
 ```
 
-Replace the example endpoint and IP. This direct setup requires an empty data
-directory; for an existing installation retain its configuration and credentials.
-Grant Full Disk Access and Messages Automation under **Zimbr Relay.app**. Then
-follow the Linux CSR exchange in [setup](setup.md), selecting `--profile release`
-for issuance and the release client's paths and port. The TLS CA remains outside
-runtime state. The published app is already signed, so no local signing identity
-or Zig build is required for this installation.
+Use **Check Permissions** and **Open Logs** in the relay menu to verify readiness.
+Then follow [AUR client setup](linux-setup.md) to enroll Linux and connect on the
+default release port, 8731. The published app is already signed, so no local
+signing identity or Zig build is required for this installation.
 
 The service helper validates the existing TLS configuration and installs the
 per-user LaunchAgent with login startup and restart-on-exit behavior. It does

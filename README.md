@@ -4,7 +4,7 @@
 self-hosted macOS relay, written in Zig 0.16.0. The Mac stays signed into Messages;
 Linux never receives your Apple account credentials.
 
-[Linux client](docs/linux-client.md) · [Mac setup](docs/macos-relay.md) ·
+[AUR setup](docs/linux-setup.md) · [Linux client](docs/linux-client.md) · [Mac setup](docs/macos-relay.md) ·
 [Documentation](docs/README.md) · [API](docs/api.md)
 
 ## Features
@@ -21,13 +21,15 @@ enrolled device certificate.
 
 ## Get started
 
-Follow the [Mac + Linux setup guide](docs/setup.md). It covers dependencies,
-building both apps, mkcert certificate issuance, Mac permissions, and device
-enrollment. The Linux importer opens Settings with verified credentials filled in.
+Installed the Linux client from AUR? Follow [AUR client setup](docs/linux-setup.md)
+to enroll it and connect. For the packaged Mac relay, start with
+[Homebrew setup](docs/macos-relay.md#homebrew). The Linux importer opens Settings
+with verified credentials filled in; click **Save and connect**.
 
-You need Zig **0.16.0**, a Mac signed into Messages, a Linux Wayland desktop,
-and direct network access between them. Source builds use the **dev** profile
-(port 8732); packaged releases use **release** (port 8731).
+You need a Mac signed into Messages, a Linux Wayland desktop, and direct network
+access between them. Packaged releases use the **release** profile (port 8731).
+To build from source with Zig **0.16.0**, follow the
+[development setup guide](docs/setup.md), which uses **dev** (port 8732).
 
 Enter sends; Shift+Enter adds a line. Ctrl+N starts a conversation, Ctrl+F searches,
 and Ctrl+D opens connection details and **Reconnect**.

@@ -1,4 +1,7 @@
-# Set up a Mac relay and Linux client
+# Development setup: build a Mac relay and Linux client
+
+Installed from AUR? Use [AUR client setup](linux-setup.md). For the packaged Mac
+relay, use [Homebrew setup](macos-relay.md#homebrew). This guide builds from source.
 
 Run commands from a checkout of the same revision on both computers. The Mac
 must be signed into Messages in its graphical login session; Linux needs a

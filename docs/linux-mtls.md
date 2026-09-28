@@ -1,6 +1,7 @@
 # Linux TLS operation
 
-Use [first-run setup](setup.md) for the complete Mac/Linux workflow. The helper
+Use [AUR client setup](linux-setup.md) for an installed client, or
+[development setup](setup.md) when building from source. The helper
 requires Python with the versions in `tools/requirements-tls.txt` and OpenSSL 3.
 mkcert runs on the Mac issuer; Linux generates and retains its own key and CSR.
 The installed helper is `zimbr-provision`; from a checkout use

@@ -6,12 +6,13 @@ existing-conversation replies, Unicode drafts, desktop notifications, send
 recovery, contact names/photos, inline images, stored link cards, and reaction
 chips when supplied by the relay.
 
-Follow [first-run setup](setup.md) to build both apps and enroll this device.
+Installed from AUR? Follow [AUR client setup](linux-setup.md) to enroll and connect.
+Use [development setup](setup.md) to build both apps from source.
 [Linux TLS operation](linux-mtls.md) covers later credential changes. Both endpoints share the
 [certificate management contract](certificate-management.md). Linux worker tests
 exercise the native mTLS relay directly; installed two-host acceptance is separate.
 
-Run the commands below from the repository root.
+Run source-build and test commands below from the repository root.
 
 ## Build and install
 
@@ -38,7 +39,8 @@ accept the option; `zig-out/bin/zimbr --help` reports the compiled profile.
 ## Provisioning and configuration
 
 Provision a local device key/CSR and import the verified CA and signed leaf with
-`packaging/linux/provision.py`, following [Linux mTLS setup](linux-mtls.md).
+the installed `zimbr-provision` helper, following [AUR client setup](linux-setup.md).
+From a checkout, use `python3 packaging/linux/provision.py` instead.
 Request an explicit `--name linux-desktop.zimbr.invalid`, have the Mac signer
 approve that same name, and retain `client.csr` for import verification.
 The relay must enable the device's entire-leaf SHA-256 fingerprint. Use a directly

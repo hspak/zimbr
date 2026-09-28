@@ -1,5 +1,8 @@
 # Linux and macOS releases
 
+For an already-installed AUR client, use [AUR client setup](linux-setup.md).
+This page covers package maintenance and release publishing.
+
 Keep the AUR recipe in a separate checkout and point `release.sh` at it:
 
 ```sh
@@ -14,7 +17,8 @@ so package recipes must select release explicitly in their `zig build` commands.
 It includes `zimbr`, `zimbr-provision`, the desktop
 launcher, the scalable SVG, PNG icons from 16 to 512 px, setup documentation,
 and license notices. Linux provisioning uses Python cryptography and OpenSSL;
-certificate issuance on the Mac requires mkcert. See [setup](setup.md) for the user workflow.
+certificate issuance on the Mac requires mkcert. See [AUR client setup](linux-setup.md)
+for the user workflow.
 The macOS relay is distributed as the `zimbr-relay` Homebrew cask. Every release
 publishes both components at the version in `build.zig.zon`, even when only one
 component changed.
