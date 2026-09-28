@@ -21,7 +21,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, ExtensionOID, NameOID
-from tls_support import private_path, private_directory, read_json
+from tls_support import Credentials, admin_files, private_path, private_directory, read_json, relay_files
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'packaging/macos'))
 from profiles import PROFILES
@@ -50,11 +50,15 @@ def atomic(path, content):
         with os.fdopen(fd, 'wb') as f:
             f.write(content); f.flush(); os.fsync(f.fileno())
         os.replace(tmp, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try: os.fsync(directory)
-        finally: os.close(directory)
+        sync_directory(path.parent)
     finally:
         if os.path.exists(tmp): os.unlink(tmp)
+
+
+def sync_directory(path):
+    directory = os.open(path, os.O_RDONLY)
+    try: os.fsync(directory)
+    finally: os.close(directory)
 
 
 def save_json(path, value):
@@ -145,6 +149,8 @@ def sign(args):
     if not shutil.which(args.mkcert):
         raise ValueError('mkcert is required for issuance; install it with brew install mkcert on macOS')
     caroot = args.caroot.absolute()
+    if caroot.is_relative_to(Path(__file__).resolve().parents[1]):
+        raise ValueError('CAROOT must remain outside the source directory and app bundle')
     caroot.mkdir(parents=True, mode=0o700, exist_ok=True)
     private_directory(caroot)
     # Explicit marker prevents accidentally reusing the normal mkcert development CA.
@@ -153,8 +159,6 @@ def sign(args):
     if not marker.exists(): atomic(marker, b'Zimbr setup-time issuer; never install in system trust.\n')
     for existing in (marker, caroot/'rootCA.pem', caroot/'rootCA-key.pem'):
         if existing.exists(): private_path(existing)
-    if caroot.is_relative_to(Path(__file__).resolve().parents[1]) or any(caroot.is_relative_to(profile.data(Path.home())) for profile in PROFILES.values()):
-        raise ValueError('CAROOT must remain outside source and runtime directories')
     csr_bytes = private_path(args.csr).read_bytes()
     csr = x509.load_pem_x509_csr(csr_bytes)
     if not csr.is_signature_valid: raise ValueError('Invalid CSR signature')
@@ -180,7 +184,114 @@ def sign(args):
 
 
 def ca_directory(profile):
-    return Path.home()/'.config'/f'zimbr-{profile.name}-ca'
+    return profile.data(Path.home())/'ca'
+
+
+def validate_issuer(directory, ca_file):
+    private_directory(directory)
+    private_path(directory/'zimbr-dedicated-ca')
+    ca = certificate(directory/'rootCA.pem')
+    key = serialization.load_pem_private_key(private_path(directory/'rootCA-key.pem').read_bytes(), None)
+    encoding, form = serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+    if key.public_key().public_bytes(encoding, form) != ca.public_key().public_bytes(encoding, form):
+        raise ValueError('Signing CA private key does not match its certificate')
+    if ca_file is not None and ca.fingerprint(hashes.SHA256()) != certificate(ca_file).fingerprint(hashes.SHA256()):
+        raise ValueError('Signing CA does not match the installed relay CA')
+
+
+def prepare_ca(profile, ca_file=None):
+    """Select the issuer and migrate the old default with the data administration lock held.
+
+    The directory rename preserves all issuer bytes. A retry repairs provisioning
+    if interrupted after the rename. Custom issuers are copied so another
+    installation sharing the old issuer retains its original files.
+    """
+    data = profile.data(Path.home())
+    destination = ca_directory(profile)
+    legacy = Path.home()/'.config'/f'zimbr-{profile.name}-ca'
+    settings_path = data/'provisioning.json'
+    settings = read_json(settings_path) if settings_path.exists() else {}
+    selected = Path(settings.get('caroot', legacy if legacy.exists() or legacy.is_symlink() else destination))
+    if selected != destination and (selected.exists() or selected.is_symlink()):
+        validate_issuer(selected, ca_file)
+        if selected == legacy and (destination.exists() or destination.is_symlink()):
+            raise ValueError('Both legacy and data-directory CAs exist; resolve the conflicting directories before migrating')
+        if selected == legacy:
+            legacy.rename(destination)
+            sync_directory(data)
+            sync_directory(legacy.parent)
+        else:
+            material = {name: private_path(selected/name).read_bytes()
+                        for name in ('rootCA.pem', 'rootCA-key.pem', 'zimbr-dedicated-ca')}
+            if destination.exists() or destination.is_symlink():
+                validate_issuer(destination, ca_file)
+                if any(private_path(destination/name).read_bytes() != content for name, content in material.items()):
+                    raise ValueError('The fixed CA directory contains a different issuer')
+            else:
+                with tempfile.TemporaryDirectory(prefix='.ca-', dir=data) as temporary:
+                    staged = Path(temporary)/'ca'
+                    for name, content in material.items(): atomic(staged/name, content)
+                    staged.rename(destination)
+                    sync_directory(data)
+    elif ca_file is not None or selected != destination:
+        validate_issuer(destination, ca_file)
+    if settings_path.exists():
+        settings_path.unlink()
+        sync_directory(data)
+    return destination
+
+
+def read_credentials(config_path, admin_path=None):
+    """Read current or legacy credentials without modifying their source files."""
+    data = config_path.parent
+    config = read_json(config_path)
+    admin = read_json(admin_path) if admin_path is not None else None
+    server_paths = relay_files(data)
+    material = {path.relative_to(data): private_path(config.get(field, path)).read_bytes()
+                for field, path in server_paths.items()}
+    if admin:
+        admin_paths = admin_files(admin_path.parent)
+        material.update({path.relative_to(admin_path.parent): private_path(admin.get(field, path)).read_bytes()
+                         for field, path in admin_paths.items()})
+        admin = {key: value for key, value in admin.items() if key not in admin_paths}
+    config = {key: value for key, value in config.items() if key not in server_paths}
+    return config, admin, material
+
+
+def stage_credentials(directory, relay, config, admin, material):
+    for relative, content in material.items(): atomic(directory/relative, content)
+    save_json(directory/'relay.json', config)
+    subprocess.run([str(relay), 'check-config', '--config', str(directory/'relay.json')],
+                   check=True, stdout=subprocess.DEVNULL)
+    if admin:
+        save_json(directory/'admin.json', admin)
+        Credentials(directory/'admin.json')
+
+
+def migrate_credentials(data, relay):
+    """Publish fixed credential locations with the data administration lock held.
+
+    Validate the whole candidate before copying files. Keep legacy source files
+    for recovery; publish configurations last so interrupted copies can retry.
+    """
+    config_path, admin_path = data/'relay.json', data/'admin.json'
+    config = read_json(config_path)
+    admin = read_json(admin_path) if admin_path.exists() else None
+    if not (set(config) & relay_files(data).keys() or (admin and set(admin) & admin_files(data).keys())):
+        return config
+    config, admin, material = read_credentials(config_path, admin_path if admin is not None else None)
+    for relative, content in material.items():
+        path = data/relative
+        if (path.exists() or path.is_symlink()) and private_path(path).read_bytes() != content:
+            raise ValueError(f'Fixed credential destination already contains different material: {path}')
+    with tempfile.TemporaryDirectory(prefix='.credentials-', dir=data) as temporary:
+        staged = Path(temporary)
+        stage_credentials(staged, relay, config, admin, material)
+        for relative, content in material.items():
+            if not (data/relative).exists(): atomic(data/relative, content)
+        if admin: save_json(admin_path, admin)
+        save_json(config_path, config)
+    return config
 
 
 def fresh_directory(path):
@@ -207,31 +318,25 @@ def setup(args, *, quiet=False):
         raise ValueError('mkcert is required; install it with brew install mkcert on macOS')
     directory = fresh_directory(args.directory)
     for role, folder, identities in (
-            ('server', directory/'server', expected_names),
+            ('server', directory, expected_names),
             ('client', directory/'admin', ['mac-admin.zimbr.invalid'])):
         csr = create_key(folder, role, identities)
         sign(argparse.Namespace(caroot=args.caroot, csr=csr, cert=folder/f'{role}.pem',
                                 role=role, name=identities, mkcert=args.mkcert))
     ca = private_path(args.caroot.absolute()/'rootCA.pem').read_bytes()
-    atomic(directory/'server/ca.pem', ca)
+    atomic(directory/'ca.pem', ca)
     atomic(directory/'admin/ca.pem', ca)
     admin_cert = certificate(directory/'admin/client.pem')
-    save_json(directory/'server/devices.json', [{
+    save_json(directory/'devices.json', [{
         'label': 'Mac administrator', 'sha256': admin_cert.fingerprint(hashes.SHA256()).hex(),
         'enabled': True,
     }])
     save_json(directory/'relay.json', {
         'listen_address': str(address), 'port': args.port, 'server_name': args.server_name,
-        'server_cert_file': str(directory/'server/server.pem'),
-        'server_key_file': str(directory/'server/server-key.pem'),
-        'client_ca_file': str(directory/'server/ca.pem'),
-        'device_allowlist_file': str(directory/'server/devices.json'),
     })
     host = f'[{args.server_name}]' if ':' in args.server_name else args.server_name
     save_json(directory/'admin.json', {
-        'relay_url': f'https://{host}:{args.port}', 'ca_file': str(directory/'admin/ca.pem'),
-        'client_cert_file': str(directory/'admin/client.pem'),
-        'client_key_file': str(directory/'admin/client-key.pem'),
+        'relay_url': f'https://{host}:{args.port}',
     })
     subprocess.run([str(args.relay), 'check-config', '--config', str(directory/'relay.json')], check=True)
     if not quiet:
@@ -245,10 +350,11 @@ def issue_device(args):
     """Sign a received CSR, enroll it, and export only public certificates."""
     profile = PROFILES[args.profile]
     args.config = args.config or profile.data(Path.home())/'relay.json'
-    cfg = read_json(args.config)
+    with administration_lock(profile.data(Path.home())):
+        args.caroot = prepare_ca(profile, args.config.parent/'ca.pem')
     ca_path = args.caroot.absolute()/'rootCA.pem'
-    if certificate(ca_path).fingerprint(hashes.SHA256()) != certificate(cfg['client_ca_file']).fingerprint(hashes.SHA256()):
-        raise ValueError('Signing CA does not match the installed relay CA; select its original --caroot')
+    if certificate(ca_path).fingerprint(hashes.SHA256()) != certificate(args.config.parent/'ca.pem').fingerprint(hashes.SHA256()):
+        raise ValueError('Signing CA does not match the installed relay CA')
     directory = fresh_directory(args.directory)
     args.cert = directory/'client.pem'
     args.role = 'client'
@@ -310,10 +416,10 @@ def update_device(args):
             installed = plistlib.load(f)['ProgramArguments']
         if '--config' not in installed or Path(installed[installed.index('--config')+1]).resolve() != args.config.resolve() or Path(installed[0]).resolve() != args.relay.resolve():
             raise ValueError('Device changes must target the configuration and executable used by the installed LaunchAgent')
-    path = Path(cfg['device_allowlist_file']); devices = read_json(path)
+    path = args.config.parent/'devices.json'; devices = read_json(path)
     if args.action == 'enroll':
         cert = certificate(args.cert)
-        verify_leaf(cert, certificate(cfg['client_ca_file']), 'client')
+        verify_leaf(cert, certificate(args.config.parent/'ca.pem'), 'client')
         fingerprint = cert.fingerprint(hashes.SHA256()).hex()
         devices = [d for d in devices if d['sha256'].lower() != fingerprint]
         devices.append({'label': args.label, 'sha256': fingerprint, 'enabled': True})
@@ -326,7 +432,9 @@ def update_device(args):
     # Validate a candidate before replacing the live allowlist.
     with tempfile.TemporaryDirectory(prefix='.policy-', dir=path.parent) as folder:
         candidate = Path(folder)/'devices.json'; candidate_config = Path(folder)/'relay.json'
-        save_json(candidate, devices); save_json(candidate_config, {**cfg, 'device_allowlist_file': str(candidate)})
+        for source in relay_files(args.config.parent).values():
+            if source != path: atomic(Path(folder)/source.name, private_path(source).read_bytes())
+        save_json(candidate, devices); save_json(candidate_config, cfg)
         subprocess.run([str(args.relay), 'check-config', '--config', str(candidate_config)], check=True, stdout=subprocess.DEVNULL)
         save_json(path, devices)
     if args.stage:
@@ -358,11 +466,11 @@ def issue_ssh(args):
     validate_extensions(csr, 'client', [name])
     profile = PROFILES[args.profile]
     data = profile.data(Path.home())
-    cfg = read_json(data/'relay.json')
-    settings = data/'provisioning.json'
-    caroot = Path(read_json(settings)['caroot']) if settings.exists() else ca_directory(profile)
+    with administration_lock(data):
+        cfg = migrate_credentials(data, profile.app(Path.home())/'Contents/MacOS/relay')
+        caroot = prepare_ca(profile, data/'ca.pem')
     ca = certificate(caroot/'rootCA.pem')
-    if ca.fingerprint(hashes.SHA256()) != certificate(cfg['client_ca_file']).fingerprint(hashes.SHA256()):
+    if ca.fingerprint(hashes.SHA256()) != certificate(data/'ca.pem').fingerprint(hashes.SHA256()):
         raise ValueError('Signing CA does not match the installed relay CA')
     # Retain public results by CSR so interrupted SSH exchanges retry the same identity.
     directory = data/'enrollments'/hashlib.sha256(csr_bytes).hexdigest()
@@ -400,7 +508,7 @@ def main():
     key.add_argument('--role', choices=['server', 'client'], required=True)
     key.add_argument('--name', action='append', default=[])
     issue = sub.add_parser('sign')
-    issue.add_argument('--caroot', type=Path, required=True)
+    issue.add_argument('--profile', choices=PROFILES, default=os.environ.get('ZIMBR_PROFILE', 'dev'))
     issue.add_argument('--csr', type=Path, required=True)
     issue.add_argument('--cert', type=Path, required=True)
     issue.add_argument('--role', choices=['server', 'client'], required=True)
@@ -409,7 +517,6 @@ def main():
     setup_parser = sub.add_parser('setup', help='stage server/admin credentials and configuration using mkcert')
     setup_parser.add_argument('--profile', choices=PROFILES, default=os.environ.get('ZIMBR_PROFILE', 'dev'))
     setup_parser.add_argument('--directory', type=Path, help='new staging directory (default: ~/.config/zimbr-PROFILE-setup)')
-    setup_parser.add_argument('--caroot', type=Path, help='dedicated issuer (default: ~/.config/zimbr-PROFILE-ca)')
     setup_parser.add_argument('--relay', type=Path, help='default: installed app for packaged helpers, zig-out/bin/relay from source')
     setup_parser.add_argument('--server-name', required=True, help='DNS name or IP Linux uses to reach this Mac')
     setup_parser.add_argument('--listen-address', required=True, help='local IP address to bind')
@@ -418,7 +525,6 @@ def main():
     setup_parser.add_argument('--mkcert', default='mkcert')
     handoff = sub.add_parser('issue-device', help='sign a client CSR, enroll/restart, and export public credentials')
     handoff.add_argument('--profile', choices=PROFILES, default=os.environ.get('ZIMBR_PROFILE', 'dev'))
-    handoff.add_argument('--caroot', type=Path)
     handoff.add_argument('--config', type=Path)
     handoff.add_argument('--relay', type=Path)
     handoff.add_argument('--csr', type=Path, required=True)
@@ -437,18 +543,27 @@ def main():
             d.add_argument('--cert', type=Path, required=True); d.add_argument('--label', required=True)
         else: d.add_argument('--sha256', required=True)
     args = p.parse_args()
-    if args.action in ('setup', 'issue-device'):
-        profile = PROFILES[args.profile]
-        args.caroot = args.caroot or ca_directory(profile)
+    if args.action in ('setup', 'sign', 'issue-device'):
+        args.caroot = None
     if args.action == 'setup':
+        profile = PROFILES[args.profile]
         args.relay = args.relay or (profile.app(Path.home())/'Contents/MacOS/relay'
                                    if 'ZIMBR_PROFILE' in os.environ else Path('zig-out/bin/relay'))
         args.directory = args.directory or Path.home()/'.config'/f'zimbr-{profile.name}-setup'
         if args.port is None: args.port = profile.default_port
     try:
         if args.action == 'create-key': print(create_key(args.directory, args.role, args.name))
-        elif args.action == 'sign': sign(args)
-        elif args.action == 'setup': setup(args)
+        elif args.action == 'sign':
+            profile = PROFILES[args.profile]
+            data = profile.data(Path.home())
+            with administration_lock(data):
+                args.caroot = prepare_ca(profile, data/'ca.pem' if (data/'relay.json').exists() else None)
+                sign(args)
+        elif args.action == 'setup':
+            data = profile.data(Path.home())
+            with administration_lock(data):
+                args.caroot = prepare_ca(profile, data/'ca.pem' if (data/'relay.json').exists() else None)
+                setup(args)
         elif args.action == 'issue-device': issue_device(args)
         elif args.action == 'issue-ssh': issue_ssh(args)
         else: device(args)

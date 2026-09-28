@@ -59,8 +59,8 @@ zig fmt --check build.zig src
 - [ ] Modify a disposable configuration externally while Settings is closed and
   verify reopening reloads the current file.
 - [ ] Check field labels with VoiceOver, keyboard navigation, Return to save, and
-  standard copy/paste/select-all/undo shortcuts. Check advanced-section layout,
-  long paths, file-picker cancellation, and readable validation messages.
+  standard copy/paste/select-all/undo shortcuts and readable validation messages.
+  Confirm there are no credential-path fields or file pickers.
 - [ ] Hold the menu open during a readiness change. Status must update, and the
   UI must stay responsive while history ingestion or validation is busy.
 - [ ] Open Logs from an installed service and check the expected log opens.
@@ -78,9 +78,9 @@ configuration and credentials before installed acceptance checks.
 - [ ] Change only the Contacts phone region and save. Check that the running
   relay reports the new region after restart. Blank remains an explicit choice;
   no region is chosen automatically.
-- [ ] Use the advanced file pickers with paths containing spaces. Verify the
-  selected paths are stored correctly and credential files are never copied into
-  the app bundle or rewritten by Settings.
+- [ ] Save ordinary settings and verify credential locations and bytes remain
+  unchanged. Credential files are never copied into the app bundle or rewritten
+  by Settings. JSON credential-path overrides must be rejected.
 - [ ] Reject a malformed IP, wildcard address, port outside 1–65535, unsupported
   phone region, mismatched key, expired certificate, and wrong server identity.
   The existing file and running relay must remain unchanged after rejection.
@@ -88,11 +88,14 @@ configuration and credentials before installed acceptance checks.
   The app must report the conflict and preserve the external edit. Reload warns
   before discarding edits; after reloading, a valid save succeeds.
 - [ ] Start with missing, malformed, and empty configuration. The menu stays
-  present; Settings can supply a complete valid configuration and restart. With
+  present; Settings can supply a complete valid configuration and restart when
+  credentials exist at the fixed locations. Otherwise rerun setup. With
   unsafe file/directory permissions, editing stays disabled until repaired and
   reloaded. No credentials are silently generated.
 - [ ] Open a file with unsupported JSON entries. Confirm the notice that saving
   removes those entries, and verify the resulting configuration passes validation.
+- [ ] Open an older configuration containing credential paths. Saving stays
+  disabled until setup migrates it and Settings is reloaded.
 - [ ] Occupy the proposed port with another process. A valid save can still fail
   at listener startup: the UI must report the error, remain usable, and allow the
   previous port to be restored. There is no automatic configuration rollback.

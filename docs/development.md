@@ -68,7 +68,9 @@ It refuses to replace existing staging credentials. After an interrupted run,
 use `--directory` with a new private directory and pass its configurations to
 the installer. Keep the existing CA for retries and renewal.
 
-The issuer lives at `~/.config/zimbr-dev-ca`; **keep `rootCA-key.pem` on the Mac**.
+The issuer lives at `~/Library/Application Support/Zimbr Dev/ca/`;
+**keep `rootCA-key.pem` on the Mac**. Setup migrates the former default
+`~/.config/zimbr-dev-ca` without changing its certificate or key.
 mkcert's [`CAROOT` and CSR options](https://github.com/FiloSottile/mkcert#advanced-topics)
 provide issuance. Zimbr uses explicit trust, so do not run `mkcert -install` or
 reuse your general development CA. Code signing is a separate identity; approve

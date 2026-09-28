@@ -28,8 +28,8 @@ cask "zimbr-relay" do
     Grant macOS permissions as described here:
       https://github.com/hspak/zimbr/blob/main/docs/macos-relay.md#homebrew
 
-    After an upgrade, run:
-      zimbr-relay-service start
+    After an upgrade, migrate credentials and start the service:
+      zimbr-relay-setup
 
     Uninstalling preserves ~/Library/Application Support/Zimbr.
   EOS

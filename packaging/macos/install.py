@@ -19,7 +19,8 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT/'tools'))
-from tls_support import private_directory, private_path, read_json
+from tls_support import private_directory, private_path
+from tls_admin import atomic, read_credentials, stage_credentials
 from signing import default_directory
 from bundle import stage
 from profiles import PROFILES
@@ -171,16 +172,10 @@ def main():
         if old.get('CFBundleIdentifier') != profile.bundle_id: raise RuntimeError('Refusing to replace unrelated app')
     # Validate everything before touching the running service. Never package issuer keys.
     source_config = args.tls_config or data/'relay.json'
-    cfg = read_json(source_config)
-    subprocess.run([str(args.binary), 'check-config', '--config', str(source_config)], check=True)
-    materials = {field: private_path(cfg[field]).read_bytes() for field in
-        ('server_cert_file', 'server_key_file', 'client_ca_file', 'device_allowlist_file')}
-    admin = read_json(args.admin_config) if args.admin_config else None
-    admin_material = {field: private_path(admin[field]).read_bytes() for field in
-        ('ca_file', 'client_cert_file', 'client_key_file')} if admin else None
-    if admin:
-        from tls_support import Credentials
-        Credentials(args.admin_config)  # Check key matching, CA loading and strict origin syntax.
+    admin_source = args.admin_config or (data/'admin.json' if (data/'admin.json').exists() else None)
+    cfg, admin, material = read_credentials(source_config, admin_source)
+    with tempfile.TemporaryDirectory(prefix='zimbr-credentials-') as temporary:
+        stage_credentials(Path(temporary).resolve(), args.binary, cfg, admin, material)
     staging = ROOT/'zig-out/macos'/profile.name; staging.mkdir(parents=True, exist_ok=True)
     bundle = staging/profile.app_name
     stage(bundle, args.binary, args.image_helper, args.openssl_license, args.phone_license,
@@ -202,16 +197,11 @@ def main():
     backup = prepare_journal(data, reset=args.reset_cache)
     if backup:
         print('Archived relay cache:' if args.reset_cache else 'Consistent journal backup:', backup)
-    # Immutable credential generation: never overwrite files a running process used.
-    generation = Path(tempfile.mkdtemp(prefix='tls-', dir=data))
-    filenames = {'server_cert_file': 'server.pem', 'server_key_file': 'server-key.pem', 'client_ca_file': 'ca.pem', 'device_allowlist_file': 'devices.json'}
-    for field, content in materials.items():
-        path = generation/filenames[field]; path.write_bytes(content); path.chmod(0o600); cfg[field] = str(path)
+    # The old process has exited; replace credentials at their fixed locations.
+    for relative, content in material.items():
+        atomic(data/relative, content)
     write_json(data/'relay.json', cfg)
     if admin:
-        admin_dir = Path(tempfile.mkdtemp(prefix='admin-', dir=data))
-        for field, filename in {'ca_file': 'ca.pem', 'client_cert_file': 'client.pem', 'client_key_file': 'client-key.pem'}.items():
-            path = admin_dir/filename; path.write_bytes(admin_material[field]); path.chmod(0o600); admin[field] = str(path)
         write_json(data/'admin.json', admin)
     subprocess.run([str(args.binary), 'check-config', '--config', str(data/'relay.json')], check=True)
     destination.parent.mkdir(parents=True, exist_ok=True)

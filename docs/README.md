@@ -1,5 +1,11 @@
 # Zimbr documentation
 
+I wanted an iMessage bridge without having to disable SIP on the Mac host. It
+just requires 3 macOS permissions:
+- Messages Automation (programmatic iMessage access)
+- Full Disk Access (for the iMessage DB access)
+- (Optional) Contacts access (to sync contacts to the client)
+
 Start with [two-step setup](setup.md): install the Homebrew relay and run its
 setup command, then install the AUR client and enroll over SSH. Neither machine
 needs a source checkout. [Development setup](development.md) covers source builds.

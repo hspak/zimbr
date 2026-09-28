@@ -38,14 +38,14 @@ static int spawnReplacement(NSArray<NSString *> *arguments) {
 
 static NSString *explanation(NSString *code, NSString *name) {
     NSDictionary *messages = @{
-        @"UnsafeOrMissingSecurityFile": @"Settings or credentials are missing or have unsafe permissions. Select provisioned files in private directories.",
-        @"InvalidTlsConfiguration": @"Check the server name, port, and required credential paths.",
+        @"UnsafeOrMissingSecurityFile": @"Settings or credentials are missing or have unsafe permissions. Rerun relay setup, then Reload.",
+        @"InvalidTlsConfiguration": @"Check the server name and port. For an older installation, rerun relay setup to migrate its credentials.",
         @"InvalidTlsCredentials": @"The certificates and key could not be validated. Check their identity, expiry, and permissions. Open Logs for details.",
         @"ExplicitListenAddressRequired": @"Enter a specific IPv4 or IPv6 listening address.",
         @"WildcardListenAddressForbidden": @"Choose a specific network address instead of a wildcard address.",
         @"InvalidContactsPhoneRegion": @"Use a supported two-letter country code, or leave the phone region blank.",
-        @"InvalidDeviceAllowlist": @"The selected device list is invalid. Select a provisioned device list.",
-        @"InvalidDeviceFingerprint": @"A device certificate fingerprint is invalid. Check the selected device list.",
+        @"InvalidDeviceAllowlist": @"The device list is invalid. Repair it with the relay administration tools.",
+        @"InvalidDeviceFingerprint": @"A device certificate fingerprint is invalid. Check the device list.",
         @"DuplicateDeviceFingerprint": @"The device list contains a duplicate certificate. Correct the device list before saving.",
         @"TooManyDevices": @"The device list exceeds the supported limit of 256 entries.",
         @"OutOfMemory": @"The relay could not allocate enough memory. Close other applications and try again.",
@@ -96,8 +96,6 @@ static NSString *explanation(NSString *code, NSString *name) {
 @property(nonatomic, strong) NSTextField *notice;
 @property(nonatomic, strong) NSButton *saveButton;
 @property(nonatomic, strong) NSButton *reloadButton;
-@property(nonatomic, strong) NSButton *advancedButton;
-@property(nonatomic, strong) NSStackView *advanced;
 - (void)showSettings:(id)sender;
 - (void)refresh;
 @end
@@ -243,12 +241,12 @@ static NSString *explanation(NSString *code, NSString *name) {
     return stack;
 }
 
-- (void)addField:(NSString *)key label:(NSString *)label stack:(NSStackView *)stack file:(BOOL)file {
+- (void)addField:(NSString *)key label:(NSString *)label stack:(NSStackView *)stack {
     NSTextField *caption = [NSTextField labelWithString:label];
     [caption.widthAnchor constraintEqualToConstant:145].active = YES;
     NSTextField *field = [NSTextField textFieldWithString:@""];
     field.placeholderString = [key isEqualToString:@"contacts_phone_region"] ? @"Optional, e.g. US" : @"";
-    [field.widthAnchor constraintEqualToConstant:file ? 330 : 430].active = YES;
+    [field.widthAnchor constraintEqualToConstant:430].active = YES;
     [field setAccessibilityLabel:label];
     field.identifier = key;
     self.fields[key] = field;
@@ -257,17 +255,11 @@ static NSString *explanation(NSString *code, NSString *name) {
     row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     row.alignment = NSLayoutAttributeCenterY;
     row.spacing = 10;
-    if (file) {
-        NSButton *choose = [NSButton buttonWithTitle:@"Choose…" target:self action:@selector(chooseFile:)];
-        choose.identifier = key;
-        [row addArrangedSubview:choose];
-        [self.editControls addObject:choose];
-    }
     [stack addArrangedSubview:row];
 }
 
 - (void)buildWindow {
-    self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 660, 590)
+    self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 660, 350)
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
     self.window.title = [self.appName stringByAppendingString:@" Settings"];
     self.window.releasedWhenClosed = NO;
@@ -285,19 +277,10 @@ static NSString *explanation(NSString *code, NSString *name) {
     NSTextField *intro = [NSTextField wrappingLabelWithString:@"Changes take effect after restarting the relay. Existing clients reconnect automatically."];
     [intro.widthAnchor constraintEqualToConstant:600].active = YES;
     [content addArrangedSubview:intro];
-    [self addField:@"listen_address" label:@"Listening address" stack:content file:NO];
-    [self addField:@"port" label:@"Port" stack:content file:NO];
-    [self addField:@"server_name" label:@"Server name" stack:content file:NO];
-    [self addField:@"contacts_phone_region" label:@"Phone region" stack:content file:NO];
-    self.advancedButton = [NSButton checkboxWithTitle:@"Advanced: certificates and device list" target:self action:@selector(toggleAdvanced:)];
-    [content addArrangedSubview:self.advancedButton];
-    self.advanced = [self column];
-    [self addField:@"server_cert_file" label:@"Server certificate" stack:self.advanced file:YES];
-    [self addField:@"server_key_file" label:@"Server private key" stack:self.advanced file:YES];
-    [self addField:@"client_ca_file" label:@"Client CA certificate" stack:self.advanced file:YES];
-    [self addField:@"device_allowlist_file" label:@"Device list" stack:self.advanced file:YES];
-    [content addArrangedSubview:self.advanced];
-    self.advanced.hidden = YES;
+    [self addField:@"listen_address" label:@"Listening address" stack:content];
+    [self addField:@"port" label:@"Port" stack:content];
+    [self addField:@"server_name" label:@"Server name" stack:content];
+    [self addField:@"contacts_phone_region" label:@"Phone region" stack:content];
     self.notice = [NSTextField wrappingLabelWithString:@"Loading settings…"];
     [self.notice.widthAnchor constraintEqualToConstant:600].active = YES;
     [content addArrangedSubview:self.notice];
@@ -308,11 +291,6 @@ static NSString *explanation(NSString *code, NSString *name) {
     buttons.spacing = 12;
     [content addArrangedSubview:buttons];
     [self.window center];
-}
-
-- (void)toggleAdvanced:(id)sender {
-    (void)sender;
-    self.advanced.hidden = self.advancedButton.state != NSControlStateValueOn;
 }
 
 - (void)showSettings:(id)sender {
@@ -352,16 +330,17 @@ static NSString *explanation(NSString *code, NSString *name) {
             }
             if (!object[@"port"]) self.fields[@"port"].stringValue = [NSString stringWithFormat:@"%u", self.bridge.default_port];
             self.notice.stringValue = length == -1 ? @"Settings could not be safely read. Check the file and directory permissions, then Reload." :
-                (!object ? @"Complete the settings using provisioned certificates and a device list. Certificate issuance is managed separately." :
+                (!object ? @"Rerun relay setup if credentials have not been provisioned, then complete these settings." :
                 @"Credentials are validated before saving. Changing the server name requires a certificate that covers that name.");
-            if (!object) {
-                self.advancedButton.state = NSControlStateValueOn;
-                self.advanced.hidden = NO;
-            }
             NSMutableSet *unknown = [NSMutableSet setWithArray:object.allKeys ?: @[]];
             [unknown minusSet:[NSSet setWithArray:self.fields.allKeys]];
             if (unknown.count)
                 self.notice.stringValue = @"This file contains unsupported settings. Saving replaces it with the fields shown here and removes unsupported entries.";
+            if (object[@"server_cert_file"] || object[@"server_key_file"] ||
+                object[@"client_ca_file"] || object[@"device_allowlist_file"]) {
+                self.loaded = NO;
+                self.notice.stringValue = @"Rerun relay setup to migrate existing credentials, then Reload.";
+            }
             [self setEditingBusy:NO];
         });
     });
@@ -377,18 +356,6 @@ static NSString *explanation(NSString *code, NSString *name) {
     [alert addButtonWithTitle:@"Cancel"];
     [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
         if (response == NSAlertFirstButtonReturn) [self loadSettings];
-    }];
-}
-
-- (void)chooseFile:(NSButton *)sender {
-    NSOpenPanel *panel = [NSOpenPanel openPanel];
-    panel.canChooseDirectories = NO;
-    panel.allowsMultipleSelection = NO;
-    [panel beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
-        if (response == NSModalResponseOK) {
-            // System paths such as /tmp are symlinks; store the actual selected location.
-            self.fields[sender.identifier].stringValue = panel.URL.URLByResolvingSymlinksInPath.path;
-        }
     }];
 }
 

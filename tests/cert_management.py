@@ -3,7 +3,7 @@
 
 Build the dev-profile relay and fake-relay first, then run with
 ZIMBR_MKCERT=/path/to/mkcert python3 tests/cert_management.py.
-All CA and device material is temporary and stays outside runtime directories.
+All CA and device material stays in temporary test directories.
 """
 import json
 import os
@@ -32,28 +32,56 @@ class CertificateManagement(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
         self.mkcert = os.environ.get('ZIMBR_MKCERT', 'mkcert')
+        self.home = self.root/'home'
+        self.home.mkdir(mode=0o700)
+        self.issuer = self.home/'Library/Application Support/Zimbr Dev/ca'
+        self.environment = dict(os.environ, HOME=str(self.home))
 
     def sign(self, csr, role, names, output):
         args = [sys.executable, str(ROOT/'tools/tls_admin.py'), 'sign',
-                '--caroot', str(self.root/'issuer'), '--csr', str(csr),
+                '--profile', 'dev', '--csr', str(csr),
                 '--cert', str(output), '--role', role, '--mkcert', self.mkcert]
         for name in names:
             args += ['--name', name]
-        return subprocess.run(args, capture_output=True, text=True, timeout=30)
+        return subprocess.run(args, env=self.environment, capture_output=True, text=True, timeout=30)
 
     def linux(self, *args):
         return subprocess.run([sys.executable, str(ROOT/'packaging/linux/provision.py'), *map(str, args)],
                               capture_output=True, text=True, timeout=30)
 
-    def admin(self, *args):
+    def admin(self, *args, env=None):
         return subprocess.run([sys.executable, str(ROOT/'tools/tls_admin.py'), *map(str, args)],
-                              capture_output=True, text=True, timeout=30)
+                              env=env or self.environment, capture_output=True, text=True, timeout=30)
+
+    def test_default_dev_issuer_supports_setup_and_manual_device_issuance(self):
+        home = self.home
+        environment = dict(os.environ, HOME=str(home))
+        directory = self.root/'setup'
+        relay = ROOT/'zig-out/bin/relay'
+        result = self.admin('setup', '--directory', directory, '--relay', relay,
+                            '--server-name', 'localhost', '--listen-address', '127.0.0.1',
+                            '--mkcert', self.mkcert, env=environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        issuer = home/'Library/Application Support/Zimbr Dev/ca'
+        original_key = (issuer/'rootCA-key.pem').read_bytes()
+        linux = self.root/'linux'
+        result = self.linux('request', '--tls-dir', linux, '--name', 'desktop.zimbr.invalid')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        handoff = self.root/'handoff'
+        result = self.admin('issue-device', '--csr', linux/'client.csr', '--name', 'desktop.zimbr.invalid',
+                            '--label', 'Desktop', '--directory', handoff, '--config', directory/'relay.json',
+                            '--relay', relay, '--stage', '--mkcert', self.mkcert, env=environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        cert = x509.load_pem_x509_certificate((handoff/'client.pem').read_bytes())
+        cert.verify_directly_issued_by(x509.load_pem_x509_certificate((issuer/'rootCA.pem').read_bytes()))
+        self.assertEqual((issuer/'rootCA-key.pem').read_bytes(), original_key)
+        self.assertFalse((home/'.config').exists())
 
     def test_turnkey_setup_and_device_handoff_with_real_relay_validation(self):
         relay = ROOT/'zig-out/bin/relay'
         directory = self.root/'setup'
-        issuer = self.root/'issuer'
-        args = ('setup', '--directory', directory, '--caroot', issuer, '--relay', relay,
+        issuer = self.issuer
+        args = ('setup', '--directory', directory, '--relay', relay,
                 '--server-name', 'localhost', '--listen-address', '127.0.0.1',
                 '--name', '127.0.0.1', '--mkcert', self.mkcert)
         result = self.admin(*args)
@@ -63,14 +91,14 @@ class CertificateManagement(unittest.TestCase):
         self.assertEqual(config['server_name'], 'localhost')
         admin = json.loads((directory/'admin.json').read_text())
         self.assertEqual(admin['relay_url'], 'https://localhost:8732')
-        devices_path = Path(config['device_allowlist_file'])
+        devices_path = directory/'devices.json'
         devices = json.loads(devices_path.read_text())
-        admin_cert = x509.load_pem_x509_certificate(Path(admin['client_cert_file']).read_bytes())
+        admin_cert = x509.load_pem_x509_certificate((directory/'admin/client.pem').read_bytes())
         self.assertEqual(devices, [{'label': 'Mac administrator', 'enabled': True,
                                    'sha256': admin_cert.fingerprint(hashes.SHA256()).hex()}])
-        original_key = Path(config['server_key_file']).read_bytes()
+        original_key = (directory/'server-key.pem').read_bytes()
         self.assertNotEqual(self.admin(*args).returncode, 0)
-        self.assertEqual(Path(config['server_key_file']).read_bytes(), original_key)
+        self.assertEqual((directory/'server-key.pem').read_bytes(), original_key)
         self.assertFalse(list(directory.rglob('rootCA-key.pem')))
         for path in directory.rglob('*'):
             self.assertEqual(path.stat().st_mode & 0o777, 0o700 if path.is_dir() else 0o600)
@@ -80,7 +108,7 @@ class CertificateManagement(unittest.TestCase):
         self.assertEqual(self.linux('request', '--tls-dir', linux, '--name', name).returncode, 0)
         handoff = self.root/'handoff'
         args = ('issue-device', '--csr', linux/'client.csr', '--name', name, '--label', 'Desktop',
-                '--directory', handoff, '--caroot', issuer, '--config', directory/'relay.json',
+                '--directory', handoff, '--config', directory/'relay.json',
                 '--relay', relay, '--stage', '--mkcert', self.mkcert)
         result = self.admin(*args)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -129,12 +157,11 @@ class CertificateManagement(unittest.TestCase):
             process = subprocess.Popen([str(fixture), 'serve', *common], stdout=log, stderr=log)
             try:
                 for client, folder in (('admin', directory/'admin'), ('linux', linux)):
-                    client_config = self.root/f'{client}.json'
-                    atomic(client_config, json.dumps({
-                        'relay_url': f'https://localhost:{port}', 'ca_file': str(folder/'ca.pem'),
-                        'client_cert_file': str(folder/'client.pem'),
-                        'client_key_file': str(folder/'client-key.pem'),
-                    }).encode())
+                    client_config = self.root/client/'admin.json'
+                    client_config.parent.mkdir(mode=0o700, exist_ok=True)
+                    for filename in ('ca.pem', 'client.pem', 'client-key.pem'):
+                        atomic(client_config.parent/'admin'/filename, (folder/filename).read_bytes())
+                    atomic(client_config, json.dumps({'relay_url': f'https://localhost:{port}'}).encode())
                     credentials = Credentials(client_config)
                     def status():
                         connection = credentials.connection(timeout=2)
@@ -150,8 +177,16 @@ class CertificateManagement(unittest.TestCase):
                 process.terminate()
                 process.wait(timeout=10)
 
+    def test_signer_rejects_custom_issuer_path_override(self):
+        result = self.admin('sign', '--role', 'client', '--csr', self.root/'client.csr',
+                            '--cert', self.root/'client.pem', '--name', 'desktop.zimbr.invalid',
+                            '--caroot', self.root/'other-ca')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('unrecognized arguments: --caroot', result.stderr)
+        self.assertFalse((self.root/'other-ca').exists())
+
     def test_setup_rejects_invalid_inputs_before_issuance(self):
-        base = ('setup', '--directory', self.root/'setup', '--caroot', self.root/'issuer',
+        base = ('setup', '--directory', self.root/'setup',
                 '--relay', ROOT/'zig-out/bin/relay', '--server-name', 'localhost',
                 '--listen-address', '127.0.0.1', '--mkcert', self.mkcert)
         for extra in (('--port', '0'), ('--port', '65536'), ('--profile', 'release'),
@@ -160,7 +195,7 @@ class CertificateManagement(unittest.TestCase):
             with self.subTest(extra=extra):
                 result = self.admin(*base, *extra)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertFalse((self.root/'issuer/rootCA-key.pem').exists())
+                self.assertFalse((self.issuer/'rootCA-key.pem').exists())
 
     def test_linux_request_mac_signer_and_linux_import(self):
         directory = self.root/'linux'
@@ -177,7 +212,7 @@ class CertificateManagement(unittest.TestCase):
         result = self.sign(csr_path, 'client', [name], issued)
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads(result.stdout)
-        ca_path = self.root/'issuer/rootCA.pem'
+        ca_path = self.issuer/'rootCA.pem'
         ca = x509.load_pem_x509_certificate(ca_path.read_bytes())
         args = ('import', '--tls-dir', directory, '--ca', ca_path, '--cert', issued, '--ca-sha256')
         result = self.linux(*args, '0'*64)
@@ -248,7 +283,7 @@ class CertificateManagement(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 report = json.loads(result.stdout)
                 cert = x509.load_pem_x509_certificate(output.read_bytes())
-                ca = x509.load_pem_x509_certificate((self.root/'issuer/rootCA.pem').read_bytes())
+                ca = x509.load_pem_x509_certificate((self.issuer/'rootCA.pem').read_bytes())
                 csr = x509.load_pem_x509_csr(csr_path.read_bytes())
                 key = serialization.load_pem_private_key((directory/f'{role}-key.pem').read_bytes(), None)
                 verify_leaf(cert, ca, role, names)
@@ -260,7 +295,7 @@ class CertificateManagement(unittest.TestCase):
                 self.assertEqual(report['sha256'], cert.fingerprint(hashes.SHA256()).hex())
                 self.assertEqual(report['expires'], cert.not_valid_after_utc.isoformat())
                 self.assertEqual(output.stat().st_mode & 0o777, 0o600)
-        self.assertEqual((self.root/'issuer/rootCA-key.pem').stat().st_mode & 0o777, 0o600)
+        self.assertEqual((self.issuer/'rootCA-key.pem').stat().st_mode & 0o777, 0o600)
 
     def test_signer_rejects_absent_or_unapproved_client_san(self):
         directory = self.root/'client'
@@ -281,7 +316,7 @@ class CertificateManagement(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn('SANs do not exactly match', result.stderr)
                 self.assertFalse(output.exists())
-                self.assertFalse((self.root/'issuer/rootCA-key.pem').exists())
+                self.assertFalse((self.issuer/'rootCA-key.pem').exists())
 
 
 if __name__ == '__main__':

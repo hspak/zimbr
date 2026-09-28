@@ -53,6 +53,17 @@ class RelaySettings(unittest.TestCase):
         self.assertEqual(json.loads(checked.stdout)['server_sha256'], self.tls.fingerprint('server'))
         self.assertEqual(list(self.tls.root.glob('.relay-settings-*')), [])
 
+    def test_credential_path_overrides_are_rejected_even_for_valid_files(self):
+        for field, filename in (
+            ('server_cert_file', 'server.pem'), ('server_key_file', 'server-key.pem'),
+            ('client_ca_file', 'ca.pem'), ('device_allowlist_file', 'devices.json'),
+        ):
+            with self.subTest(field=field):
+                result = self.save({**self.value, field: str(self.tls.root / filename)})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b'InvalidTlsConfiguration', result.stderr)
+                self.assertEqual(self.tls.config.read_bytes(), self.original)
+
     def test_invalid_settings_leave_original_bytes_and_inode_untouched(self):
         inode = self.tls.config.stat().st_ino
         for changes in (

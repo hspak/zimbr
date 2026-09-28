@@ -93,6 +93,32 @@ os._exit(0)
         with closing(sqlite3.connect(backup / 'relay.db')) as db:
             self.assertEqual(db.execute('SELECT epoch FROM relay_meta').fetchone(), (OLD_EPOCH,))
 
+    def test_cache_reset_preserves_issuer_and_provisioning(self):
+        issuer = self.data / 'ca'
+        issuer.mkdir(mode=0o700)
+        originals = {
+            issuer / 'rootCA-key.pem': b'CA signing key',
+            issuer / 'rootCA.pem': b'CA certificate',
+            issuer / 'zimbr-dedicated-ca': b'dedicated issuer',
+            self.data / 'server.pem': b'server certificate',
+            self.data / 'server-key.pem': b'server key',
+            self.data / 'ca.pem': b'client trust',
+            self.data / 'devices.json': b'enrolled devices',
+            self.data / 'admin/ca.pem': b'administrative trust',
+            self.data / 'admin/client.pem': b'administrative certificate',
+            self.data / 'admin/client-key.pem': b'administrative key',
+            self.data / 'admin.json': b'administrative endpoint',
+        }
+        for path, content in originals.items():
+            path.parent.mkdir(mode=0o700, exist_ok=True)
+            path.write_bytes(content)
+            path.chmod(0o600)
+        backup = install.prepare_journal(self.data, reset=True)
+        self.setup_relay()
+        for path, content in originals.items():
+            self.assertEqual(path.read_bytes(), content)
+        self.assertFalse(list(backup.rglob('rootCA-key.pem')))
+
     def test_running_relay_prevents_reset(self):
         with (self.data / 'relay.lock').open('w') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

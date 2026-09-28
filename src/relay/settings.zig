@@ -19,7 +19,7 @@ pub fn save(
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    var candidate = try Tls.loadBytes(a, bytes);
+    var candidate = try Tls.loadBytes(a, path, bytes);
     defer candidate.deinit();
     const terminated_path = try a.dupeZ(u8, path);
     return switch (Tls.c.zr_tls_replace_config(

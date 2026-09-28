@@ -38,12 +38,11 @@ class Fixture:
         self.devices = [{'label': 'synthetic admin', 'sha256': self.fingerprint('client'), 'enabled': True}]
         save_json(self.root/'devices.json', self.devices)
         self.config = self.root/'relay.json'
-        save_json(self.config, {'listen_address': '127.0.0.1', 'port': port, 'server_name': 'localhost',
-            'server_cert_file': str(self.root/'server.pem'), 'server_key_file': str(self.root/'server-key.pem'),
-            'client_ca_file': str(self.root/'ca.pem'), 'device_allowlist_file': str(self.root/'devices.json')})
+        save_json(self.config, {'listen_address': '127.0.0.1', 'port': port, 'server_name': 'localhost'})
         self.admin = self.root/'admin.json'
-        save_json(self.admin, {'relay_url': f'https://localhost:{port}', 'ca_file': str(self.root/'ca.pem'),
-            'client_cert_file': str(self.root/'client.pem'), 'client_key_file': str(self.root/'client-key.pem')})
+        for name in ('ca.pem', 'client.pem', 'client-key.pem'):
+            atomic(self.root/'admin'/name, (self.root/name).read_bytes())
+        save_json(self.admin, {'relay_url': f'https://localhost:{port}'})
 
     def issue(self, name, server=False, before=None, after=None, eku=None, sans=None):
         now = dt.datetime.now(UTC)

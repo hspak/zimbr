@@ -36,6 +36,20 @@ def read_json(path):
     return json.loads(private_path(path).read_text())
 
 
+def relay_files(directory):
+    return {field: Path(directory)/name for field, name in (
+        ('server_cert_file', 'server.pem'), ('server_key_file', 'server-key.pem'),
+        ('client_ca_file', 'ca.pem'), ('device_allowlist_file', 'devices.json'),
+    )}
+
+
+def admin_files(directory):
+    return {field: Path(directory)/'admin'/name for field, name in (
+        ('ca_file', 'ca.pem'), ('client_cert_file', 'client.pem'),
+        ('client_key_file', 'client-key.pem'),
+    )}
+
+
 def origin(value):
     parsed = urlsplit(value)
     if (parsed.scheme != 'https' or not parsed.hostname or parsed.username is not None or
@@ -50,18 +64,19 @@ def origin(value):
 class Credentials:
     def __init__(self, path):
         cfg = read_json(path)
-        if set(cfg) != {'relay_url', 'ca_file', 'client_cert_file', 'client_key_file'}:
-            raise ValueError('Expected relay_url, ca_file, client_cert_file, client_key_file in administrative TLS config')
+        if set(cfg) != {'relay_url'}:
+            raise ValueError('Expected relay_url; administrative credential paths are fixed under admin/')
+        files = admin_files(Path(path).parent)
         self.endpoint = origin(cfg['relay_url'])
         if not ssl.HAS_TLSv1_3:
             raise RuntimeError('Python with OpenSSL and TLS 1.3 is required; Apple system Python is unsupported')
-        for key in ('ca_file', 'client_cert_file', 'client_key_file'):
-            private_path(cfg[key])
+        for file in files.values():
+            private_path(file)
         # A new context has no default roots. Do not use create_default_context().
         self.context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         self.context.minimum_version = self.context.maximum_version = ssl.TLSVersion.TLSv1_3
-        self.context.load_verify_locations(cafile=cfg['ca_file'])
-        self.context.load_cert_chain(cfg['client_cert_file'], cfg['client_key_file'])
+        self.context.load_verify_locations(cafile=files['ca_file'])
+        self.context.load_cert_chain(files['client_cert_file'], files['client_key_file'])
         self.context.set_alpn_protocols(['h2'])
 
     def connection(self, timeout=20):

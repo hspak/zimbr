@@ -25,8 +25,8 @@ shows a simple confirmation with an **OK** button. Otherwise it shows the curren
 status and permission setup actions.
 
 Settings edits the existing `relay.json`: listening address, port, server name,
-and optional Contacts phone region. **Advanced** exposes file pickers for the
-server certificate, server key, client CA, and device list. **Save and Restart**
+and optional Contacts phone region. Credential and device-list locations are
+fixed inside the profile data directory. **Save and Restart**
 uses the same configuration and credential validation as startup, then replaces
 the file atomically with mode 0600. If the file changed while editing, reload it
 before saving again. Invalid settings leave the existing file untouched.
@@ -98,8 +98,8 @@ administration scripts, and their Homebrew dependencies. It exposes
 No source checkout, Zig installation, Python environment, or local signing step
 is needed.
 
-Setup creates a dedicated CA at `~/.config/zimbr-release-ca`, configures server
-and administrative credentials under `~/Library/Application Support/Zimbr`,
+Setup creates a dedicated CA in `~/Library/Application Support/Zimbr/ca/`,
+with server and administrative credentials under the same profile data directory,
 and starts a per-user login service. It validates the listener before reporting
 success. Rerunning keeps the existing configuration and keys; conflicting
 endpoint arguments are rejected. The CA private key stays on this Mac and is
@@ -137,7 +137,8 @@ zimbr-relay-service start
 ```
 
 The service starts at login and restarts after an unexpected exit. After
-`brew upgrade --cask hspak/tap/zimbr-relay`, run `zimbr-relay-service start`.
+`brew upgrade --cask hspak/tap/zimbr-relay`, run `zimbr-relay-setup` to migrate
+older credential layouts and start the updated service.
 Uninstalling stops the service and preserves configuration, credentials, and
 history. A dev-profile installation can coexist with the cask.
 

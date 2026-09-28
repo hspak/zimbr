@@ -63,16 +63,27 @@ configuration, starts the login service, and verifies the listener. Its defaults
 
 | Material | Release location |
 | --- | --- |
-| Dedicated signing CA | `~/.config/zimbr-release-ca` |
+| Dedicated signing CA | `~/Library/Application Support/Zimbr/ca/` |
 | Configuration | `~/Library/Application Support/Zimbr/relay.json` |
 | Administrative configuration | `~/Library/Application Support/Zimbr/admin.json` |
-| Issuer selection for SSH enrollment | `~/Library/Application Support/Zimbr/provisioning.json` |
+| Server certificate and key | `~/Library/Application Support/Zimbr/server.pem`, `server-key.pem` |
+| Client verification CA and device list | `~/Library/Application Support/Zimbr/ca.pem`, `devices.json` |
+| Administrative credentials | `~/Library/Application Support/Zimbr/admin/ca.pem`, `client.pem`, `client-key.pem` |
 
-Reruns retain the existing configuration. Credential generations stay in the
-private data directory; do not remove files referenced by either configuration.
-Existing installations with a custom issuer can store its absolute `caroot`
-path in the private `provisioning.json` file. Without this file, SSH enrollment
-uses the profile's default CA directory.
+These locations are fixed; configuration and Settings do not accept credential
+paths. Reruns retain the existing configuration, credentials, and enrolled devices.
+
+The installed package needs no files under `~/.config`. Rerunning setup or
+enrolling a device moves the former `~/.config/zimbr-release-ca` directory into
+`ca/`, preserving the CA certificate and private key. A formerly configured
+custom issuer is copied there, leaving the original available to any other
+installation sharing it. Migration removes the obsolete `provisioning.json`.
+Server and administrative credentials from older layouts are validated and
+copied to the fixed locations before their path fields are removed from JSON.
+Legacy credential copies remain available for recovery. Migration refuses to
+overwrite different credentials already at a fixed destination. The dev profile
+migrates independently. Existing clients and server credentials remain valid;
+a relay cache reset preserves all credentials.
 
 The bundled `zimbr-relay-admin issue-ssh` accepts the Linux helper's JSON request
 on stdin. The authenticated SSH login authorizes the requested device name.
@@ -82,41 +93,42 @@ certificates by CSR hash so retries reuse the same identity. The HTTPS API does
 not expose certificate enrollment.
 
 For source installations and custom staging, `python3 tools/tls_admin.py setup`
-provides `--directory`, `--caroot`, `--relay`, `--server-name`, `--listen-address`,
+provides `--directory`, `--relay`, `--server-name`, `--listen-address`,
 `--name`, and `--port`; see [development setup](development.md). Staging must be
 empty. This lower-level command validates credentials but leaves installation
 and service startup to the source installer.
 
-The CA stays outside source/runtime directories. Never copy its `rootCA-key.pem`
-into the bundle or onto Linux. Do not run `mkcert -install` or reuse a broadly
+The CA stays in the private data directory, outside the source and app bundle.
+Never copy its `rootCA-key.pem` into the bundle or onto Linux. Do not run
+`mkcert -install` or reuse a broadly
 trusted development CA. mkcert uses a dedicated `CAROOT` and its `-csr` mode;
 client authentication purpose comes from the validated CSR, not `-client`.
 
 All security paths must be absolute without symlinks. On macOS, use a private
 folder in your home or `/private/tmp`, since `/tmp` is a symlink. Keys,
 certificates, allowlists and configurations are 0600 files in owned 0700
-directories. The installer creates immutable runtime credential generations
-outside the app. Only separate source-installer staging can be removed after
-checking that installed configurations refer to their copied runtime credentials.
+directories. The installer stops the old relay before replacing credentials at
+their fixed locations outside the app. Separate source-installer staging can be
+removed after verifying the installed credentials.
 Keep the signing CA for renewal and device issuance.
 
 For Linux requests, `issue-device` combines validated signing, enrollment and
 verified service restart. Its output directory contains only the public CA and
-issued device certificate. It verifies that `--caroot` matches the installed
-relay CA. Existing deployments should explicitly select their original issuer.
+issued device certificate. It verifies that the profile's fixed signing CA
+matches the installed relay CA. The signing commands select the issuer by
+`--profile`; there is no `--caroot` override.
 Use the lower-level `create-key`, `sign`, `enroll`, and `revoke` commands from the
 [certificate contract](certificate-management.md) for custom administration.
 
-`relay.json` contains `listen_address`, `port`, `server_name`,
-`server_cert_file`, `server_key_file`, `client_ca_file`, and
-`device_allowlist_file`. Optional `contacts_phone_region` provides national-number
+`relay.json` contains `listen_address`, `port`, and `server_name`.
+Optional `contacts_phone_region` provides national-number
 context. Use relay Settings to edit these fields with validation.
 The allowlist contains objects with `label`, `sha256` (64 hexadecimal digits over
 the entire leaf DER), and `enabled`. An empty list admits nobody; invalid or
 duplicate entries prevent startup. The limit is 256 devices.
 
-`admin.json` contains `relay_url`, `ca_file`, `client_cert_file` and
-`client_key_file`. Administrative API tools use the same mTLS policy as Linux.
+`admin.json` contains only `relay_url`; its credentials live under `admin/`.
+Administrative API tools use the same mTLS policy as Linux.
 The local `doctor` command needs no administrative certificate.
 
 ## Code signing and installation
@@ -176,7 +188,8 @@ streams; the new process reauthenticates every connection. Already accepted
 sends retain their journal identities and normal recovery semantics.
 
 Server renewal uses the same CA and endpoint SANs and fresh locally generated
-key/CSR. Stage a new relay config, validate it, then install/restart. Reconnect
+key/CSR. Stage the new certificate and key beside a relay config, validate them,
+then stop the relay, replace `server.pem` and `server-key.pem`, and restart. Reconnect
 clients afterwards. CA replacement requires a coordinated explicit trust update.
 Enrollment uses SSH, with no HTTPS enrollment endpoint, OCSP/CRL service, or
 automatic renewal. Read

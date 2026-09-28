@@ -351,7 +351,11 @@ extension/purpose/SAN validation. Never install this CA into system trust.
 The relay requires a valid clientAuth chain and an enabled SHA-256 leaf fingerprint
 before parsing HTTP. Subject names and labels are not authorization. Keep keys
 and security configuration in owner-only files under 0700 directories, without
-symlinks. The CA key stays in administrative storage outside runtime directories.
+symlinks. The CA key stays in the profile's private data directory under `ca/`,
+outside the app bundle, and survives relay cache resets. Setup and enrollment
+migrate earlier issuer locations without changing identity. Server and admin
+credentials and the device list have fixed locations within that data directory;
+JSON and Settings expose no credential-path overrides.
 
 Installed packages own bootstrap: the Mac setup helper creates credentials and
 starts the login service; the Linux helper sends a locally generated CSR through

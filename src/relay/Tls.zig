@@ -15,10 +15,6 @@ pub const Config = struct {
     listen_address: []const u8,
     port: u16 = options.relay_default_port,
     server_name: []const u8,
-    server_cert_file: []const u8,
-    server_key_file: []const u8,
-    client_ca_file: []const u8,
-    device_allowlist_file: []const u8,
     contacts_phone_region: []const u8 = "",
 };
 pub const Device = struct {
@@ -59,16 +55,17 @@ pub fn readPrivate(a: u.Allocator, path: []const u8) ReadPrivateError![]const u8
 }
 /// Configuration allocations belong to the caller's arena; deinit releases the native TLS context.
 pub fn load(a: u.Allocator, path: []const u8) LoadError!Tls {
-    return loadBytes(a, try readPrivate(a, path));
+    return loadBytes(a, path, try readPrivate(a, path));
 }
 
 /// Validates proposed settings, including credentials, without changing the running relay.
+/// Path names the configuration file; its directory contains the fixed credential files.
 /// Configuration allocations belong to the caller's arena; deinit releases the TLS context.
-pub fn loadBytes(a: u.Allocator, bytes: []const u8) LoadError!Tls {
+pub fn loadBytes(a: u.Allocator, path: []const u8, bytes: []const u8) LoadError!Tls {
     const config = std.json.parseFromSliceLeaky(Config, a, bytes, .{}) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
         std.debug.print(
-            "relay: invalid TLS config; expected listen_address, port, server_name, server_cert_file, server_key_file, client_ca_file, device_allowlist_file\n",
+            "relay: invalid settings; credential paths are fixed beside relay.json; rerun setup to migrate older configurations\n",
             .{},
         );
         return error.InvalidTlsConfiguration;
@@ -76,13 +73,10 @@ pub fn loadBytes(a: u.Allocator, bytes: []const u8) LoadError!Tls {
     inline for (.{
         config.listen_address,
         config.server_name,
-        config.server_cert_file,
-        config.server_key_file,
-        config.client_ca_file,
-        config.device_allowlist_file,
     }) |value| {
         if (std.mem.indexOfScalar(u8, value, 0) != null) return error.InvalidTlsConfiguration;
     }
+    const directory = std.fs.path.dirname(path) orelse return error.InvalidTlsConfiguration;
     if (config.port == 0 or config.server_name.len == 0) return error.InvalidTlsConfiguration;
     try contacts.validateRegion(a, config.contacts_phone_region);
     // A literal IP is deliberate: never resolve a bind name to an unintended interface.
@@ -99,7 +93,7 @@ pub fn loadBytes(a: u.Allocator, bytes: []const u8) LoadError!Tls {
     const devices = std.json.parseFromSliceLeaky(
         []const Device,
         a,
-        try readPrivate(a, config.device_allowlist_file),
+        try readPrivate(a, try std.fmt.allocPrint(a, "{s}/devices.json", .{directory})),
         .{},
     ) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
@@ -120,9 +114,9 @@ pub fn loadBytes(a: u.Allocator, bytes: []const u8) LoadError!Tls {
     }
     var diagnostic: [256]u8 = @splat(0);
     const ctx = c.zr_tls_context(
-        try a.dupeZ(u8, config.server_cert_file),
-        try a.dupeZ(u8, config.server_key_file),
-        try a.dupeZ(u8, config.client_ca_file),
+        try std.fmt.allocPrintSentinel(a, "{s}/server.pem", .{directory}, 0),
+        try std.fmt.allocPrintSentinel(a, "{s}/server-key.pem", .{directory}, 0),
+        try std.fmt.allocPrintSentinel(a, "{s}/ca.pem", .{directory}, 0),
         try a.dupeZ(u8, config.server_name),
         @ptrCast(&fingerprints),
         count,

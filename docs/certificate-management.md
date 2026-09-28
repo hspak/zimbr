@@ -61,7 +61,7 @@ the intended SAN independently of the untrusted CSR contents. On the Mac:
 
 ```sh
 zimbr-relay-admin sign --role client \
-  --caroot "$HOME/.config/zimbr-release-ca" \
+  --profile release \
   --csr /private/import/linux-desktop/client.csr \
   --cert /private/import/linux-desktop/client.pem \
   --name linux-desktop.zimbr.invalid
@@ -83,7 +83,7 @@ the CA's entire-DER SHA-256 fingerprint through trusted SSH or an independent
 channel before import:
 
 ```sh
-openssl x509 -in "$HOME/.config/zimbr-release-ca/rootCA.pem" \
+openssl x509 -in "$HOME/Library/Application Support/Zimbr/ca/rootCA.pem" \
   -noout -fingerprint -sha256
 ```
 
@@ -95,8 +95,9 @@ directories with 0600 files; reject symlinks, hardlinks, and unsafe ancestors.
 Use the explicit CA exclusively for TLS, verify the server's endpoint SAN, and
 present the device leaf on every TLS 1.3 HTTP/2 connection, including SSE.
 
-The dedicated signing `CAROOT` stays outside the repository, app bundle, and
-runtime directories. Its `rootCA-key.pem` remains on the administrator's Mac.
+The dedicated signing `CAROOT` defaults to `ca/` inside the profile data directory,
+outside the repository and app bundle. Its `rootCA-key.pem` remains on the
+administrator's Mac and is preserved by relay cache resets.
 Never run `mkcert -install` or reuse a broadly trusted development CA. The packages supply the
 helpers and declare their Python/cryptography, mkcert, OpenSSH, and OpenSSL
 dependencies. Setup commands are documented in [macOS TLS operation](macos-tls.md).
