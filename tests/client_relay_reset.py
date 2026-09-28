@@ -171,6 +171,26 @@ def main():
                     raise AssertionError('Unauthenticated reset accepted')
                 assert value('/v1/sync')[1]['server_epoch'] == epoch
                 assert scalar(source, "SELECT count(*) FROM message WHERE text='Do not dispatch this old queued send'") == 0
+
+                # Reset a running relay after its Contacts index has been loaded.
+                wait(lambda: value('/v1/status')[1]['enrichment_readiness']['identity_directory_v1']['ready'])
+                contacts = value('/v1/status')[1]['enrichment_readiness']['identity_directory_v1']
+                last_refresh_ms = contacts['last_refresh_ms']
+                assert last_refresh_ms is not None and last_refresh_ms > 0
+                status, reset = value('/v1/reset', {'server_epoch': epoch})
+                assert status == 200 and reset['server_epoch'] != epoch
+                contacts = value('/v1/status')[1]['enrichment_readiness']['identity_directory_v1']
+                assert contacts['last_refresh_ms'] == last_refresh_ms, (
+                    'Reset must retain freshness for the cached Contacts index')
+                probe.until(lambda v: v['online'] and
+                            v['diagnostics']['server']['server_epoch'] == reset['server_epoch'] and
+                            v['diagnostics']['server']['enrichment_readiness']['identity_directory_v1']['ready'])
+                contacts = probe.latest['diagnostics']['server']['enrichment_readiness']['identity_directory_v1']
+                assert contacts['last_refresh_ms'] == last_refresh_ms
+                assert contacts['permission'] == 'authorized' and not contacts['stale']
+                wait(lambda: scalar(client / 'client.db',
+                                    "SELECT count(*) FROM identities WHERE address='alice@example.invalid' "
+                                    "AND json_extract(record,'$.display_name')='Alice'") == 1)
             finally:
                 if probe:
                     probe.close()
@@ -178,7 +198,7 @@ def main():
                 server.terminate()
                 server.wait(timeout=10)
     print('PASS: client-triggered relay reset, old IDs, retained drafts on failure, lost-response retry, '
-          'held sends, local wipe, rebuilt avatars, transaction rollback and authentication')
+          'held sends, local wipe, rebuilt avatars, transaction rollback, authentication and retained Contacts freshness')
 
 
 if __name__ == '__main__':

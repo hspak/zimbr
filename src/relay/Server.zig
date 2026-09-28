@@ -202,7 +202,12 @@ pub fn handle(self: *Server, a: u.Allocator, req: *Request, peer: *Tls.c.ZrTls) 
                 self.core.read_ready = false;
                 self.core.last_scan_ms = 0;
                 self.core.ingest_pending = true;
-                self.core.contacts_status = .{};
+                // The Contacts worker retains its source index across journal resets.
+                // Keep its freshness and permission while rebuilding identity matches.
+                if (self.core.contacts_status.ready) {
+                    self.core.contacts_status.ready = false;
+                    self.core.contacts_status.reason = "reconciling";
+                }
                 self.core.degraded = "rebuilding_cache";
             } else {
                 // A lost response or another client's reset must not reset twice.

@@ -1014,13 +1014,13 @@ const App = struct {
             } else "Offline · drafts saved locally";
             const status_x = footer.x + sidebar_padding + sidebar_text_inset;
             const status_width = footer.x + footer.width - sidebar_padding - status_x;
-            const status_size = s.text.lineSize(status, 11, status_width);
-            const status_y = @round((footer.y + (footer.height - status_size.y) / 2) * scale) / scale;
-            // Align with the visible glyphs, excluding the font's line and texture padding.
-            const dot_y = status_y + s.text.lineInkCenterY(status, 11, status_width);
+            const center_y = footer.y + footer.height / 2;
+            // Center visible glyphs in the footer, excluding font and texture padding.
+            const ink_center_y = s.text.lineInkCenterY(status, 11, status_width);
+            const status_y = @round((center_y - ink_center_y) * scale) / scale;
             const icon_center = rl.Vector2{
                 .x = footer.x + sidebar_padding + sidebar_icon_inset + sidebar_icon_size / 2,
-                .y = dot_y,
+                .y = center_y,
             };
             if (activity.active()) {
                 shapes.drawRefresh(icon_center, rl.getTime(), theme.colors.muted);
