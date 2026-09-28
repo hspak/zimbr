@@ -1,4 +1,6 @@
 const std = @import("std");
+const log = std.log.scoped(.relay_core);
+
 const contacts = @import("adapter/contacts.zig");
 const Assets = @import("Assets.zig");
 const Mutex = @import("Mutex.zig");
@@ -10,7 +12,6 @@ const Journal = @import("Journal.zig");
 const MessagesDb = @import("adapter/MessagesDb.zig");
 const reactions = @import("reactions.zig");
 const Signal = @import("../Signal.zig");
-const log = std.log.scoped(.relay_core);
 const adapter_api = if (options.fake) fake_adapter else @import("adapter/macos.zig");
 const fake = options.fake;
 const observation_window_ms = 10000;
@@ -100,6 +101,11 @@ pub fn ingestLoop(self: *Core) void {
         const was_ready = self.read_ready;
         const started = u.c.zr_monotonic_ms();
         self.ingest(arena.allocator()) catch |err| {
+            if (was_ready or tick % 60 == 0) {
+                if (err == error.DatabaseBusy) {
+                    log.warn("Message ingestion delayed: {s}", .{@errorName(err)});
+                } else log.err("Message ingestion stopped: {s}", .{@errorName(err)});
+            }
             self.read_ready = false;
             self.degraded = switch (err) {
                 error.SchemaUnsupported => "schema_unsupported",
@@ -209,8 +215,10 @@ pub fn ingest(self: *Core, a: u.Allocator) IngestError!void {
     }
     try j.setPosition("live", live);
     try j.setProgress("anchor", (try source.guid(a, live)) orelse "");
+    var backfill_rows: usize = 0;
     if (backfill > 0) {
         const old = try source.rowsFor(&row_buffer, .backfill, backfill, 0);
+        backfill_rows = old.len;
         for (old) |row| try self.importRow(a, &batch, row, "historical_import", false);
         backfill = if (old.len == 0) 0 else old[old.len - 1] - 1;
         try j.setPosition("backfill", backfill);
@@ -253,9 +261,11 @@ pub fn ingest(self: *Core, a: u.Allocator) IngestError!void {
     // Existing journals receive a distinct resumable enrichment pass. Recent
     // and requested chats above remain prioritized while this drains.
     const enrichment_backfill = (try j.progress(a, "enrichment_backfill_v1")) orelse "0";
+    var enrichment_rows: ?usize = null;
     if (!u.eq(enrichment_backfill, "complete")) {
         const position = std.fmt.parseInt(i64, enrichment_backfill, 10) catch 0;
         const rows = try source.rowsFor(&row_buffer, .rolling, position, 0);
+        enrichment_rows = rows.len;
         for (rows) |row| try self.importRow(a, &batch, row, "reconciliation", complete);
         if (rows.len == 0) try j.setProgress("enrichment_backfill_v1", "complete") else try j.setPosition(
             "enrichment_backfill_v1",
@@ -282,6 +292,24 @@ pub fn ingest(self: *Core, a: u.Allocator) IngestError!void {
     try reactions.trimAnchors(j);
     try j.backfillIdentities(a);
     try j.commit();
+    if (reset) log.warn("Messages source changed; relay journal reset and sync restarted", .{});
+    if (stored_identity == null or reset) {
+        log.info("Message backfill initialized: source_high={d}", .{high});
+    }
+    if (live_rows.len > 0 or !complete) log.debug(
+        "Message batch committed: live_rows={d} backfill_rows={d} backfill_before={d}",
+        .{
+            live_rows.len,
+            backfill_rows,
+            backfill,
+        },
+    );
+    if (!complete and backfill == 0) log.info("Message backfill complete", .{});
+    if (enrichment_rows) |count| {
+        if (count == 0) {
+            log.info("Media metadata backfill complete", .{});
+        } else log.debug("Media metadata batch committed: source_rows={d}", .{count});
+    }
     self.read_ready = true;
     self.degraded = if (self.automation_ready) "" else self.automation_error;
     self.last_scan_ms = u.now();

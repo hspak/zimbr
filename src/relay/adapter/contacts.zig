@@ -2,6 +2,8 @@
 //! published. Native calls and index construction never hold the Core mutex.
 const std = @import("std");
 const builtin = @import("builtin");
+const log = std.log.scoped(.relay_contacts);
+
 const Core = @import("../Core.zig");
 const options = @import("options");
 const u = @import("../../common.zig");
@@ -367,15 +369,25 @@ pub fn loop(core: *Core) void {
         const a = arena.allocator();
         const refresh = u.now() >= next_refresh;
         core.lock();
+        const previous_status = core.contacts_status;
         core.contacts_status.refreshing = true;
         core.unlock();
-        const observed = snapshot(a, core, generation, old_permission, refresh) catch Snapshot{
-            .permission = old_permission orelse .unavailable,
-            .generation = generation orelse 0,
-            .failed = true,
+        const started = u.c.zr_monotonic_ms();
+        const observed = snapshot(a, core, generation, old_permission, refresh) catch |err| observed: {
+            if (!query_failed) log.warn("Contact snapshot unavailable: {s}", .{@errorName(err)});
+            break :observed Snapshot{
+                .permission = old_permission orelse .unavailable,
+                .generation = generation orelse 0,
+                .failed = true,
+            };
         };
         const changed = generation != observed.generation or old_permission != observed.permission;
         const needs_refresh = changed or refresh or (observed.failed and !query_failed);
+        if (needs_refresh) log.debug("Contact refresh: changed={} scheduled={} permission={s}", .{
+            changed,
+            refresh,
+            @tagName(observed.permission),
+        });
         var failed = observed.permission == .authorized and (observed.failed or (!needs_refresh and query_failed));
         if (observed.permission == .authorized and (changed or refresh) and !failed) {
             // Build a replacement index before dropping the usable old snapshot.
@@ -408,88 +420,146 @@ pub fn loop(core: *Core) void {
         core.lock();
         const j = core.journal;
         const jobs = jobs: {
-            j.begin() catch break :jobs null;
-            const result = prepare(a, j, needs_refresh) catch {
+            j.begin() catch |err| {
+                log.debug("Contact queue transaction could not start: {s}", .{@errorName(err)});
+                break :jobs null;
+            };
+            const result = prepare(a, j, needs_refresh) catch |err| {
+                log.debug("Contact queue could not be prepared: {s}", .{@errorName(err)});
                 j.rollback();
                 break :jobs null;
             };
-            j.commit() catch {
+            j.commit() catch |err| {
+                log.debug("Contact queue could not be committed: {s}", .{@errorName(err)});
                 j.rollback();
                 break :jobs null;
             };
             break :jobs result;
         };
-        const epoch = j.epoch(a) catch null;
+        const epoch = j.epoch(a) catch |err| epoch: {
+            log.debug("Contact sync epoch unavailable: {s}", .{@errorName(err)});
+            break :epoch null;
+        };
         core.contacts_status.permission = observed.permission;
         core.contacts_status.refreshing = false;
         core.contacts_status.stale = failed;
         core.contacts_status.ready = false;
         core.contacts_status.reason = if (failed) "contacts_query_failed" else if (observed.permission != .authorized) @tagName(observed.permission) else "reconciling";
-        if (jobs != null and epoch != null and needs_refresh and !failed and observed.permission == .authorized) core.contacts_status.last_refresh_ms = u.now();
-        if (jobs == null or epoch == null) core.contacts_status.reason = "contacts_persistence_failure";
-        core.unlock();
         if (jobs == null or epoch == null) {
+            core.contacts_status.reason = "contacts_persistence_failure";
+            logStatus(previous_status, core.contacts_status);
+            core.unlock();
             // Do not acknowledge a source generation whose queue transaction
             // failed; retry it so a rename cannot disappear until the next scan.
             core.sleep(1000);
             continue;
         }
-        if (jobs != null and epoch != null) {
-            for (jobs.?) |job| {
-                var value = job.value;
-                var contact_id: ?[]const u8 = null;
-                var photo: ?PhotoSource = null;
-                if (failed) {
-                    value.freshness = .stale;
-                } else if (observed.permission != .authorized) {
-                    value.match_state = .unavailable;
-                    value.freshness = .fresh;
-                } else if (index) |idx| {
-                    value.freshness = .fresh;
-                    const candidate = idx.match(a, value.address, core.contacts_phone_region) catch null;
-                    value.match_state = if (candidate == null) .unmatched else if (candidate.?.ambiguous) .ambiguous else .matched;
-                    if (value.match_state == .matched) {
-                        const contact = idx.contacts[candidate.?.index];
-                        value.display_name = contact.name;
-                        value.avatar = null;
-                        contact_id = contact.id;
-                        if (contact.has_image and core.assets_service != null) photo = .{
-                            .contact_id = contact.id,
-                            .generation = observed.generation,
-                            .token = source_version,
-                        };
-                    }
-                } else continue;
-                // A notification/permission change during matching invalidates
-                // the completion. Epoch and per-identity generation gate commits.
-                if (comptime native) if (permission() != observed.permission or zr_contacts_generation() != observed.generation) break;
-                core.lock();
-                complete(
-                    a,
-                    j,
-                    epoch.?,
-                    job.generation,
-                    value,
-                    contact_id,
-                    source_version,
-                    failed,
-                    photo,
-                ) catch {};
-                core.unlock();
+        if (needs_refresh and !failed and observed.permission == .authorized) {
+            core.contacts_status.last_refresh_ms = u.now();
+        }
+        core.unlock();
+        var failed_jobs: usize = 0;
+        for (jobs.?) |job| {
+            var value = job.value;
+            var contact_id: ?[]const u8 = null;
+            var photo: ?PhotoSource = null;
+            if (failed) {
+                value.freshness = .stale;
+            } else if (observed.permission != .authorized) {
+                value.match_state = .unavailable;
+                value.freshness = .fresh;
+            } else if (index) |idx| {
+                value.freshness = .fresh;
+                const candidate = idx.match(a, value.address, core.contacts_phone_region) catch null;
+                value.match_state = if (candidate) |match|
+                    if (match.ambiguous) .ambiguous else .matched
+                else
+                    .unmatched;
+                if (value.match_state == .matched) {
+                    const contact = idx.contacts[candidate.?.index];
+                    value.display_name = contact.name;
+                    value.avatar = null;
+                    contact_id = contact.id;
+                    if (contact.has_image and core.assets_service != null) photo = .{
+                        .contact_id = contact.id,
+                        .generation = observed.generation,
+                        .token = source_version,
+                    };
+                }
+            } else continue;
+            // A notification/permission change during matching invalidates
+            // the completion. Epoch and per-identity generation gate commits.
+            if (comptime native) {
+                if (permission() != observed.permission or
+                    zr_contacts_generation() != observed.generation) break;
             }
+            core.lock();
+            complete(
+                a,
+                j,
+                epoch.?,
+                job.generation,
+                value,
+                contact_id,
+                source_version,
+                failed,
+                photo,
+            ) catch |err| {
+                if (failed_jobs == 0) {
+                    log.err("Contact batch could not be persisted: {s}", .{@errorName(err)});
+                }
+                failed_jobs += 1;
+            };
+            core.unlock();
         }
         generation = observed.generation;
         old_permission = observed.permission;
         query_failed = failed;
         if (needs_refresh) next_refresh = u.now() + if (failed) @as(i64, 30000) else 15 * 60 * 1000;
         core.lock();
-        const remaining = j.db.scalar("SELECT count(*) FROM identity_work") catch 1;
+        const remaining = j.db.scalar("SELECT count(*) FROM identity_work") catch |err| remaining: {
+            log.err("Contact sync progress unavailable: {s}", .{@errorName(err)});
+            break :remaining @as(i64, 1);
+        };
         core.contacts_status.ready = !failed and observed.permission == .authorized and remaining == 0;
         if (core.contacts_status.ready) core.contacts_status.reason = "";
+        logStatus(previous_status, core.contacts_status);
         core.unlock();
-        if (!failed and observed.permission == .authorized) Assets.contactWork(a, core) catch {};
+        if (needs_refresh or jobs.?.len > 0) log.debug(
+            "Contact batch finished: queued={d} failed={d} remaining={d} duration_ms={d}",
+            .{
+                jobs.?.len,
+                failed_jobs,
+                remaining,
+                u.c.zr_monotonic_ms() - started,
+            },
+        );
+        if (!failed and observed.permission == .authorized) {
+            Assets.contactWork(a, core) catch |err| {
+                log.err("Contact photo processing failed: {s}", .{@errorName(err)});
+            };
+        }
         core.sleep(if (remaining > 0 and !failed) 10 else 1000);
     }
+}
+
+fn logStatus(previous: Status, current: Status) void {
+    if (previous.permission == current.permission and previous.ready == current.ready and
+        previous.stale == current.stale and u.eq(previous.reason, current.reason)) return;
+    const format = "Contact sync: permission={s} ready={} stale={} reason={s}";
+    const args = .{
+        @tagName(current.permission),
+        current.ready,
+        current.stale,
+        if (current.reason.len == 0) "none" else current.reason,
+    };
+    if (u.eq(current.reason, "contacts_persistence_failure")) {
+        log.err(format, args);
+    } else if (current.stale or
+        (previous.permission == .authorized and current.permission != .authorized))
+    {
+        log.warn(format, args);
+    } else log.info(format, args);
 }
 
 fn prepare(a: u.Allocator, j: Journal, refresh: bool) ![]Work {

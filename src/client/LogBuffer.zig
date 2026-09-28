@@ -10,7 +10,7 @@ start: usize = 0,
 count: usize = 0,
 serial: u64 = 0,
 
-pub const capacity = 200;
+pub const capacity = 500;
 pub const Entry = struct {
     serial: u64,
     storage: [768]u8,

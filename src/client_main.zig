@@ -1,5 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const log = std.log.scoped(.client);
+const a = std.heap.page_allocator;
+
 const rl = @import("raylib");
 const clay = @import("zclay");
 const client_options = @import("client_options");
@@ -25,8 +28,6 @@ const shapes = @import("client.zig").shapes;
 const layout = @import("client.zig").layout;
 const Scrollbar = @import("client.zig").Scrollbar;
 const bridge = @import("client.zig").c.api;
-const log = std.log.scoped(.client);
-const a = std.heap.page_allocator;
 
 var session_logs: LogBuffer = .{};
 pub const std_options: std.Options = .{
@@ -2059,10 +2060,11 @@ const App = struct {
         endClip();
         s.logs_bar.draw(viewport, total, s.logs_scroll);
         var zone: [80]u8 = undefined;
+        const latest_label = std.fmt.comptimePrint("latest {d} entries", .{LogBuffer.capacity});
         const status = std.fmt.allocPrint(ar, "{s} · {s} · {s}", .{
             if (s.logs_follow) "Live" else "Scrolled back",
             LogBuffer.timeZone(&zone),
-            if (s.logs_follow) "latest 200 entries" else "Latest resumes live updates",
+            if (s.logs_follow) latest_label else "Latest resumes live updates",
         }) catch "Local time";
         s.text.drawLine(
             status,

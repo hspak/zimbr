@@ -283,12 +283,16 @@ Conversation lists, message history, Details, and overflowing drafts show a
 scrollbar: drag its thumb or click the track to move. Wheel scrolling is 25%
 faster. Participant avatars and sender labels use matching colors on the dark background.
 
-The **Logs** textbox at the top of Details streams the latest 200 session
+The **Logs** textbox at the top of Details streams the latest 500 session
 entries with local timestamps in `YYYY-MM-DD:HH:MM:SSSS` format (the final two
 digits are hundredths of a second). The footer shows the host's timezone
-abbreviation and UTC offset. Logs include connection changes, request results,
-image disk-cache hits and misses, downloads, and texture evictions. Scroll inside
-the textbox to read earlier entries; **Latest** resumes following new entries.
+abbreviation and UTC offset. Info logs include bootstrap milestones and live-sync
+connections; warnings report interrupted sync and rejected responses, and errors
+report blocked connections or stopped workers. Debug builds also log HTTP results,
+committed message/contact pages, live-event batches, and metadata hydration. Image
+disk-cache hits and misses, downloads, and texture evictions remain enabled at
+debug level in every client build. Scroll inside the textbox to read earlier
+entries; **Latest** resumes following new entries.
 **Copy** copies the retained logs, and **Clear** empties them. Click the textbox
 to use arrow keys, Page Up/Down, Home/End, or Ctrl+C. Logs stay in memory until
 the client exits and continue to be written to the terminal.

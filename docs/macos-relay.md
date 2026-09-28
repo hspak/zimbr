@@ -58,6 +58,13 @@ Opening the app manually does not install a LaunchAgent or enable login startup.
 Logs opened from the menu are the installed service's log; command-line launches
 write to their inherited output.
 
+Info logs report ingestion readiness, message and media-metadata backfill
+completion, contact readiness changes, and send outcomes. Debug builds include
+batch counts, contact refresh timing, and image preparation results. Warnings
+report temporary delays, lost Contacts access, and unusable images; errors report
+source, queue, cache, or persistence failures. Sync logs use counts and opaque
+asset IDs without including message bodies or contact names.
+
 Plain `serve` is headless and cannot reveal Settings. Use `serve --menu-bar` to
 include the native interface.
 

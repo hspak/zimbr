@@ -2,6 +2,8 @@
 //! conversion run outside the journal mutex; immutable completions are guarded
 //! by source version and epoch before owner metadata is published.
 const std = @import("std");
+const log = std.log.scoped(.relay_assets);
+
 const Sqlite = @import("Sqlite.zig");
 const MessagesDb = @import("adapter/MessagesDb.zig");
 const link_preview = @import("adapter/link_preview.zig");
@@ -644,7 +646,7 @@ fn nextJob(a: u.Allocator, core: *Core, contact: bool) !?Job {
         .etag = if (q.bytes(7).len > 0) try q.text(a, 7) else null,
     };
 }
-fn failJob(a: u.Allocator, j: Journal, job: Job, code: c_int) !void {
+fn failJob(a: u.Allocator, j: Journal, job: Job, code: c_int) !t.AssetRef {
     var ref = try reference(a, j, job.source.id, job.variant);
     ref.availability = switch (code) {
         -2 => .not_local,
@@ -680,8 +682,15 @@ fn failJob(a: u.Allocator, j: Journal, job: Job, code: c_int) !void {
         .{ .text = @tagName(ref.variant) },
     });
     try publishOwners(a, j, ref.id);
+    return ref;
 }
 fn convert(self: *Assets, core: *Core, a: u.Allocator, job: Job) !void {
+    const started = u.c.zr_monotonic_ms();
+    log.debug("Image preparation started: asset={s} kind={s} variant={s}", .{
+        job.source.id,
+        job.source.kind,
+        @tagName(job.variant),
+    });
     var fp: c.ZrMediaFingerprint = undefined;
     const photo = if (u.eq(job.source.kind, "contact")) (try std.json.parseFromSlice(
         contacts.PhotoSource,
@@ -773,10 +782,12 @@ fn convert(self: *Assets, core: *Core, a: u.Allocator, job: Job) !void {
     errdefer j.rollback();
     if (!try current(a, j, job.epoch, job.source)) {
         j.rollback();
+        log.debug("Image preparation discarded after source change: asset={s}", .{job.source.id});
         return;
     }
+    var failure: ?t.AssetRef = null;
     if (code != 0) {
-        try failJob(a, j, job, code);
+        failure = try failJob(a, j, job, code);
     } else if (job.etag != null and !u.eq(job.etag.?, hash.?)) {
         // An evicted representation may only reuse its URL if bytes agree.
         _ = try rotate(a, j, job.source, job.source.path, job.source.fingerprint);
@@ -812,6 +823,29 @@ fn convert(self: *Assets, core: *Core, a: u.Allocator, job: Job) !void {
     }
     try j.commit();
     published = true;
+    if (failure) |ref| {
+        const format = "Image preparation incomplete: asset={s} variant={s} " ++
+            "reason={s} retryable={} duration_ms={d}";
+        const args = .{
+            ref.id,
+            @tagName(ref.variant),
+            ref.reason orelse "unknown",
+            retryable(ref),
+            u.c.zr_monotonic_ms() - started,
+        };
+        if (code == -2 or code == -7) {
+            log.debug(format, args);
+        } else log.warn(format, args);
+    } else if (installed_name != null) {
+        log.debug("Image preparation committed: asset={s} variant={s} bytes={d} duration_ms={d}", .{
+            job.source.id,
+            @tagName(job.variant),
+            info.bytes,
+            u.c.zr_monotonic_ms() - started,
+        });
+    } else log.debug("Image representation changed; new version queued: asset={s}", .{
+        job.source.id,
+    });
 }
 
 fn collect(self: *Assets, core: *Core, a: u.Allocator, reserve: usize) !void {
@@ -932,9 +966,16 @@ pub fn loop(core: *Core) void {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        self.checkSources(core, a) catch {};
-        if (nextJob(a, core, false) catch null) |job| {
-            self.collect(core, a, max_derivative) catch {
+        self.checkSources(core, a) catch |err| {
+            log.err("Image source scan failed: {s}", .{@errorName(err)});
+        };
+        const next_job = nextJob(a, core, false) catch |err| next_job: {
+            log.err("Image queue unavailable: {s}", .{@errorName(err)});
+            break :next_job null;
+        };
+        if (next_job) |job| {
+            self.collect(core, a, max_derivative) catch |err| {
+                log.err("Image cache cleanup failed: {s}", .{@errorName(err)});
                 self.worker_busy.store(false, .release);
                 core.sleep(1000);
                 continue;
@@ -942,13 +983,21 @@ pub fn loop(core: *Core) void {
             core.lock();
             const enough_space = (core.journal.db.scalar("SELECT coalesce(sum(bytes),0) FROM asset_representations") catch cache_budget) <= cache_budget - max_derivative;
             core.unlock();
-            if (enough_space) self.convert(core, a, job) catch {
+            if (enough_space) self.convert(core, a, job) catch |err| {
+                log.err("Image preparation failed: asset={s} reason={s}", .{
+                    job.source.id,
+                    @errorName(err),
+                });
                 core.sleep(1000);
             } else core.sleep(250);
         }
         if (u.now() >= maintenance) {
-            self.collect(core, a, 0) catch {};
-            self.sweepOrphans(core) catch {};
+            self.collect(core, a, 0) catch |err| {
+                log.warn("Image cache maintenance deferred: {s}", .{@errorName(err)});
+            };
+            self.sweepOrphans(core) catch |err| {
+                log.warn("Image orphan cleanup deferred: {s}", .{@errorName(err)});
+            };
             maintenance = u.now() + 10000;
         }
         self.worker_busy.store(false, .release);

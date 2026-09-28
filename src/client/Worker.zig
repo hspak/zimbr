@@ -1,4 +1,7 @@
 const std = @import("std");
+const log = std.log.scoped(.client_worker);
+const a = std.heap.page_allocator;
+
 const json_bounds = @import("../protocol.zig").json;
 const url_format = @import("../protocol.zig").url;
 const content = @import("content.zig");
@@ -10,7 +13,6 @@ const Store = @import("Store.zig");
 const Sse = @import("Sse.zig");
 const Notification = @import("Notification.zig");
 const SharedSnapshot = @import("SharedSnapshot.zig");
-const log = std.log.scoped(.client_worker);
 const Worker = @This();
 
 io: std.Io,
@@ -94,10 +96,10 @@ last_http_status: i64 = 0,
 transport_error: c.ZcError = std.mem.zeroes(c.ZcError),
 identity: c.ZcIdentity = std.mem.zeroes(c.ZcIdentity),
 
-const a = std.heap.page_allocator;
 const EventBatch = struct {
     worker: *Worker,
-    contacts: bool = false,
+    events: usize = 0,
+    contacts: usize = 0,
 };
 pub const Reset = enum { idle, pending, failed, complete };
 pub const Command = struct {
@@ -353,6 +355,9 @@ fn work(s: *Worker) !void {
                 s.stream_active = false;
                 s.sse.reset();
                 if (s.transport_error.curl_code == 0 and (status == 409 or status == 410)) {
+                    log.info("Live sync cursor expired; restarting bootstrap (HTTP {d})", .{
+                        status,
+                    });
                     s.need_sync = true;
                     s.status = "Refreshing expired history…";
                     s.online = false;
@@ -370,6 +375,7 @@ fn work(s: *Worker) !void {
                     continue;
                 };
                 s.online = true;
+                log.info("Live sync connected: contacts={}", .{s.want_identities});
                 s.backoff = 1000;
                 s.transport_error = std.mem.zeroes(c.ZcError);
                 s.status = if (s.send_direct or s.reply_existing) "Connected" else "Connected · relay cannot send; run relay doctor on the Mac";
@@ -417,7 +423,10 @@ fn connect(s: *Worker) !void {
 }
 fn receive(ctx: ?*anyopaque, bytes: [*c]const u8, len: usize) callconv(.c) c_int {
     const s: *Worker = @ptrCast(@alignCast(ctx.?));
-    s.receiveBatch(bytes[0..len]) catch {
+    s.receiveBatch(bytes[0..len]) catch |err| {
+        log.warn("Live sync batch rejected: {s}; reconnecting from saved cursor", .{
+            @errorName(err),
+        });
         s.status = "Invalid event stream · reconnecting from saved progress";
         s.dirty = true;
         return 0;
@@ -451,7 +460,12 @@ fn receiveBatch(s: *Worker, bytes: []const u8) !void {
     var batch = EventBatch{ .worker = s };
     try s.sse.feed(event, &batch, bytes);
     try s.store.db.exec("COMMIT");
-    if (batch.contacts) s.contacts_sync_until = u.now() + 1200;
+    if (batch.contacts > 0) s.contacts_sync_until = u.now() + 1200;
+    if (batch.events > 0) log.debug("Live sync committed: events={d} contacts={d} bytes={d}", .{
+        batch.events,
+        batch.contacts,
+        bytes.len,
+    });
     // Never publish side effects for a rolled-back frame or cursor update.
     s.mutex.lockUncancelable(s.io);
     defer s.mutex.unlock(s.io);
@@ -470,7 +484,8 @@ fn event(batch: *EventBatch, arena: u.Allocator, raw: []const u8, id: []const u8
             s.batch_notifications.append(a, n) catch n.destroy();
         }
     }
-    if (u.eq(kind, "identity.upsert")) batch.contacts = true;
+    batch.events += 1;
+    if (u.eq(kind, "identity.upsert")) batch.contacts += 1;
     if (u.eq(kind, "conversation.upsert") and s.selected.len > 0) {
         if (try s.store.nextPage(arena, try s.store.threadKey(arena, s.selected))) |next| if (next.len == 0) {
             s.need_history = true;
@@ -525,6 +540,17 @@ fn disconnected(s: *Worker, status: c_long) void {
         s.retry_at = u.now() + s.backoff + @mod(u.now(), 251);
         s.backoff = @min(s.backoff * 2, 30000);
     }
+    if (s.auth_blocked) {
+        log.err("Sync blocked: HTTP {d}, curl {d}; {s}", .{
+            status,
+            s.transport_error.curl_code,
+            s.status,
+        });
+    } else log.warn("Sync disconnected: HTTP {d}, curl {d}, retry_in_ms={d}", .{
+        status,
+        s.transport_error.curl_code,
+        @max(0, s.retry_at - u.now()),
+    });
     if (s.stream_active) {
         c.zc_net_cancel_stream(s.net.?);
         s.stream_active = false;
@@ -727,14 +753,14 @@ fn complete(s: *Worker) !void {
     const ar = arena.allocator();
     c.zc_net_ack(n, 0);
     const job = s.job;
-    if (request_error.curl_code == 0) {
-        log.info("{s} response: HTTP {d}, {d} bytes", .{
+    if (request_error.curl_code == 0 and http_status >= 200 and http_status < 300) {
+        log.debug("{s} response: HTTP {d}, {d} bytes", .{
             s.job_path[0..s.job_path_len],
             http_status,
             len,
         });
     } else {
-        log.info("{s} response: HTTP {d}, curl {d}, {d} bytes", .{
+        log.warn("{s} response: HTTP {d}, curl {d}, {d} bytes", .{
             s.job_path[0..s.job_path_len],
             http_status,
             request_error.curl_code,
@@ -752,6 +778,7 @@ fn complete(s: *Worker) !void {
         }
         s.handleResponse(ar, job, raw) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
+            log.warn("{s} response rejected: {s}", .{ @tagName(job), @errorName(err) });
             s.resetError("Invalid relay reset response. Local data was kept; update the relay and retry.");
         };
         s.dirty = true;
@@ -809,7 +836,7 @@ fn complete(s: *Worker) !void {
     }
     if (s.auth_blocked and job != .send and job != .recover) return;
     s.handleResponse(ar, job, raw) catch |err| {
-        log.warn("client response: {s}", .{@errorName(err)});
+        log.warn("{s} response could not be applied: {s}", .{ @tagName(job), @errorName(err) });
         if (job == .hydrate) {
             s.hydration_at = u.now() + 5000;
             s.dirty = true;
@@ -945,6 +972,7 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
                 .{ .ignore_unknown_fields = true },
             );
             try s.store.beginSync(v.server_epoch, v.cursor);
+            log.info("Sync bootstrap started: contacts={}", .{s.want_identities});
             s.status = "Downloading conversations…";
             try s.request(.chats, "/v1/conversations?limit=200&previews=1", .{}, null);
         },
@@ -975,12 +1003,18 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
                 }
             }
             try s.store.db.exec("COMMIT");
+            log.debug("Conversation page committed: conversations={d} previews={d} more={}", .{
+                v.conversations.len,
+                if (v.previews) |items| items.len else 0,
+                v.next != null,
+            });
             if (v.next) |next| try s.request(
                 .chats,
                 "/v1/conversations?limit=200&previews=1&before={f}",
                 .{url_format.escaped(next)},
                 null,
             ) else {
+                log.info("Conversation bootstrap complete", .{});
                 if (s.want_identities) {
                     s.status = "Downloading contact names…";
                     s.identities_before = try a.dupe(u8, "");
@@ -1001,6 +1035,11 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
             for (v.identities) |identity| _ = try s.store.upsertDecoded(ar, .{ .identity = identity });
             if (v.next == null) try s.store.set("identity_bootstrapped", "1");
             try s.store.db.exec("COMMIT");
+            log.debug("Contact page committed: identities={d} more={}", .{
+                v.identities.len,
+                v.next != null,
+            });
+            if (v.next == null) log.info("Contact bootstrap complete", .{});
             if (s.identities_before) |before| a.free(before);
             s.identities_before = null;
             if (v.next) |next| {
@@ -1023,6 +1062,11 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
                 &.{.{ .text = s.job_key }},
             );
             try s.store.db.exec("COMMIT");
+            log.debug("{s} page committed: messages={d} more={}", .{
+                @tagName(job),
+                v.messages.len,
+                v.next != null,
+            });
         },
         .enrichment => {
             const cmd = s.enrichment_request orelse return;
@@ -1030,7 +1074,7 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
                 freeCommand(cmd);
                 s.enrichment_request = null;
             }
-            _ = try s.store.enrichmentPage(
+            const applied = try s.store.enrichmentPage(
                 ar,
                 raw,
                 cmd.key,
@@ -1038,6 +1082,7 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
                 std.meta.stringToEnum(content.Section, cmd.text) orelse return error.InvalidSection,
                 s.enrichment_after,
             );
+            log.debug("Message metadata page: section={s} applied={}", .{ cmd.text, applied });
         },
         .hydrate => {
             const message = try std.json.parseFromSliceLeaky(
@@ -1049,8 +1094,9 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
             if (!u.eq(message.value.id, s.job_key) or message.value.metadata_deferred) return error.InvalidRecord;
             try s.store.db.exec("BEGIN IMMEDIATE");
             errdefer s.store.db.exec("ROLLBACK") catch {};
-            _ = try s.store.upsertDecoded(ar, .{ .message = message });
+            const updated = try s.store.upsertDecoded(ar, .{ .message = message });
             try s.store.db.exec("COMMIT");
+            log.debug("Message hydration committed: updated={}", .{updated});
         },
         .send, .recover => {
             _ = try s.store.upsert(ar, "request", raw);
@@ -1061,6 +1107,7 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
 }
 fn finishBootstrap(s: *Worker, ar: u.Allocator) !void {
     try s.store.set("bootstrapped", "1");
+    log.info("Sync bootstrap complete; attaching live stream", .{});
     s.need_history = true;
     try s.attach(ar);
 }
