@@ -97,7 +97,7 @@ pub fn build(b: *std.Build) !void {
             "Test native Contacts normalization without reading the address book",
         ).dependOn(&b.addRunArtifact(native_tests).step);
     }
-    if (target.result.os.tag == .linux) client(b, target, optimize, profile_name);
+    if (target.result.os.tag == .linux) try client(b, target, optimize, profile_name);
 }
 
 fn clientModule(
@@ -145,7 +145,7 @@ fn client(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     profile: ProfileName,
-) void {
+) !void {
     const fps_counter = b.option(
         bool,
         "fps-counter",
@@ -205,6 +205,7 @@ fn client(
     const ray_module = ray.module("raylib");
     const artifact = ray.artifact("raylib");
     artifact.root_module.addCMacro("RAYLIB_WAYLAND_APP_ID", "\"zimbr\"");
+    try patchRaylibWayland(b, artifact);
     // Zig 0.16 must link Linux shared libraries at the executable, not archive them.
     var retained: usize = 0;
     for (artifact.root_module.link_objects.items) |object| switch (object) {
@@ -263,6 +264,53 @@ fn client(
     b.getInstallStep().dependOn(&desktop.step);
     b.getInstallStep().dependOn(&icon.step);
 }
+
+fn patchRaylibWayland(b: *std.Build, artifact: *std.Build.Step.Compile) !void {
+    const dependency = artifact.root_module.owner;
+    const platform_path = dependency.path("src/platforms/rcore_desktop_glfw.c");
+    const source = try std.Io.Dir.cwd().readFileAlloc(
+        b.graph.io,
+        platform_path.getPath(b),
+        b.allocator,
+        .limited(1024 * 1024),
+    );
+    // Flamez's workaround: raylib clears GLFW hints before creating its window.
+    // Keep the patch in the build so clean package builds get the same app ID.
+    const hint =
+        "#if defined(_GLFW_WAYLAND) && defined(RAYLIB_WAYLAND_APP_ID)\n" ++
+        "    glfwWindowHintString(GLFW_WAYLAND_APP_ID, RAYLIB_WAYLAND_APP_ID);\n" ++
+        "#endif\n";
+    const defaults = "    glfwDefaultWindowHints();                       // Set default windows hints\n";
+    // Existing development dependency trees may already carry Flamez's patch.
+    const unpatched = try std.mem.replaceOwned(u8, b.allocator, source, hint, "");
+    if (std.mem.count(u8, unpatched, defaults) != 1) return error.RaylibWindowHintsChanged;
+    const patched = try std.mem.replaceOwned(u8, b.allocator, unpatched, defaults, defaults ++ hint);
+    const files = b.addWriteFiles();
+    _ = files.add("platforms/rcore_desktop_glfw.c", patched);
+    const core = files.addCopyFile(dependency.path("src/rcore.c"), "rcore.c");
+    artifact.root_module.addIncludePath(dependency.path("src"));
+
+    // Compile the generated copy; leave the downloaded dependency untouched.
+    for (artifact.root_module.link_objects.items) |object| {
+        if (object != .c_source_files) continue;
+        const sources = object.c_source_files;
+        for (sources.files, 0..) |file, index| {
+            if (!std.mem.eql(u8, file, "src/rcore.c")) continue;
+            const remaining = try b.allocator.alloc([]const u8, sources.files.len - 1);
+            @memcpy(remaining[0..index], sources.files[0..index]);
+            @memcpy(remaining[index..], sources.files[index + 1 ..]);
+            sources.files = remaining;
+            artifact.root_module.addCSourceFile(.{
+                .file = core,
+                .flags = sources.flags,
+                .language = sources.language,
+            });
+            return;
+        }
+    }
+    return error.RaylibCoreSourceNotFound;
+}
+
 fn module(
     b: *std.Build,
     target: std.Build.ResolvedTarget,

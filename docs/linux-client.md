@@ -360,6 +360,7 @@ python3 tests/client_media_transport.py
 python3 tests/client_details.py
 # Requires a running Wayland desktop and Python cryptography for temporary test certificates:
 zig build test-gui
+python3 tests/client_desktop.py
 python3 tests/integration.py
 python3 tests/mac_acceptance_test.py
 python3 tests/mac_enrichment_packaging.py
