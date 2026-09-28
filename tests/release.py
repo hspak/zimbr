@@ -160,6 +160,7 @@ class Release(unittest.TestCase):
                      'packaging/macos/bundle.py',
                      'packaging/macos/signing.py', 'tools/tls_support.py',
                      'packaging/macos/profiles.py', 'packaging/macos/profiles.json',
+                     'packaging/linux/PKGBUILD.in',
                      'packaging/homebrew/zimbr-relay.rb.in'):
             target = self.source / name
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -249,6 +250,8 @@ check() { zig build test-client -Dprofile=release; }
         self.assertIn(f'sha256sums=("{checksum}")', recipe)
         self.assertIn('_ref=0.1.0', recipe)
         self.assertIn('pkgrel=1', recipe)
+        self.assertIn('"openssh"', recipe)
+        self.assertIn('packaging/linux/provision.py "$pkgdir/usr/bin/zimbr-provision"', recipe)
         srcinfo = self.git(self.root / 'aur.git', 'show', 'master:.SRCINFO')
         self.assertIn('pkgname = zimbr', srcinfo)
         self.assertIn(f'sha256sums = {checksum}', srcinfo)

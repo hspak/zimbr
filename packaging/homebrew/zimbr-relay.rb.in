@@ -9,20 +9,26 @@ cask "zimbr-relay" do
 
   depends_on arch: :arm64
   depends_on macos: :golden_gate
+  depends_on formula: ["mkcert", "python@3.14", "cryptography"]
 
   # Keep the installed path consistent with Zimbr's per-user installer.
   app "Zimbr Relay.app", target: "#{Dir.home}/Applications/Zimbr Relay.app"
   binary "#{Dir.home}/Applications/Zimbr Relay.app/Contents/MacOS/relay", target: "zimbr-relay"
   binary "#{Dir.home}/Applications/Zimbr Relay.app/Contents/Resources/zimbr-relay-service"
+  binary "#{Dir.home}/Applications/Zimbr Relay.app/Contents/Resources/zimbr-relay-setup"
+  binary "#{Dir.home}/Applications/Zimbr Relay.app/Contents/Resources/zimbr-relay-admin"
 
   uninstall launchctl: "com.hsp.zimbr.relay",
             delete:    "#{Dir.home}/Library/LaunchAgents/com.hsp.zimbr.relay.plist"
 
   caveats <<~EOS
-    Provision TLS and grant macOS permissions before starting the relay:
+    Set up and start the relay (use a hostname reachable from Linux):
+      zimbr-relay-setup relay.example
+
+    Grant macOS permissions as described here:
       https://github.com/hspak/zimbr/blob/main/docs/macos-relay.md#homebrew
 
-    After installation or an upgrade, run:
+    After an upgrade, run:
       zimbr-relay-service start
 
     Uninstalling preserves ~/Library/Application Support/Zimbr.

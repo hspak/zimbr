@@ -38,7 +38,7 @@ def make_archive(path, revision, version='0.1.0', *, extra=None, arch=0x0100000C
     with zipfile.ZipFile(path, 'w') as archive:
         for name, content in files.items():
             item = zipfile.ZipInfo(name)
-            executable = '/MacOS/' in name or name.endswith('/zimbr-relay-service')
+            executable = '/MacOS/' in name or '/Resources/zimbr-relay-' in name
             item.external_attr = (0o100755 if executable else 0o100644) << 16
             archive.writestr(item, content)
 

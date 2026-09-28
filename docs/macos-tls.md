@@ -1,12 +1,13 @@
 # macOS TLS operation
 
-Start with [first-run setup](setup.md), which builds the relay, generates its
-configuration with mkcert, and enrolls Linux. Every HTTP/SSE connection requires
+Start with [two-step setup](setup.md), which configures the installed relay and
+enrolls Linux over SSH without a source checkout. Every HTTP/SSE connection requires
 TLS 1.3 with `TLS_AES_256_GCM_SHA384`, HTTP/2, and an enabled client certificate. The
 [certificate contract](certificate-management.md) defines issuance and validation.
 
-Commands default to **dev** (port 8732). Select `--profile release` for Homebrew
-(port 8731), including enrollment/revocation and installation. See
+The packaged `zimbr-relay-admin` selects **release** (port 8731). The source
+helper `python3 tools/tls_admin.py` defaults to **dev** (port 8732); use
+`--profile release` when administering a release install from source. See
 [profiles](macos-profiles.md).
 
 ## Cipher policy
@@ -56,23 +57,35 @@ Provisioning tools are not relay runtime dependencies.
 
 ## Provisioning
 
-`tools/tls_admin.py setup --server-name NAME --listen-address IP` generates a
-server key/CSR and a separate Mac administrative key/CSR, asks **mkcert** to sign
-both, enrolls the administrator, writes `relay.json` and `admin.json`, and runs
-`relay check-config`. Its defaults are:
+Run `zimbr-relay-setup relay.example` after installing the cask. It generates
+server and Mac administrative credentials with mkcert, installs their
+configuration, starts the login service, and verifies the listener. Its defaults:
 
-| Material | Dev location |
+| Material | Release location |
 | --- | --- |
-| Dedicated signing CA | `~/.config/zimbr-dev-ca` |
-| Staging configuration/credentials | `~/.config/zimbr-dev-setup` |
-| Installed configuration | `~/Library/Application Support/Zimbr Dev/relay.json` |
-| Installed administrative configuration | `~/Library/Application Support/Zimbr Dev/admin.json` |
+| Dedicated signing CA | `~/.config/zimbr-release-ca` |
+| Configuration | `~/Library/Application Support/Zimbr/relay.json` |
+| Administrative configuration | `~/Library/Application Support/Zimbr/admin.json` |
+| Issuer selection for SSH enrollment | `~/Library/Application Support/Zimbr/provisioning.json` |
 
-Use `--directory`, `--caroot`, and `--relay` for explicit paths, `--name` for
-additional SANs, and `--port` to override the profile port. Release setup defaults
-to `zimbr-release-ca` and `zimbr-release-setup`. Staging must be empty; setup never
-rotates an existing installation implicitly. Reuse the issuer after a failed run,
-with a new staging directory. Install only after validation succeeds.
+Reruns retain the existing configuration. Credential generations stay in the
+private data directory; do not remove files referenced by either configuration.
+Existing installations with a custom issuer can store its absolute `caroot`
+path in the private `provisioning.json` file. Without this file, SSH enrollment
+uses the profile's default CA directory.
+
+The bundled `zimbr-relay-admin issue-ssh` accepts the Linux helper's JSON request
+on stdin. The authenticated SSH login authorizes the requested device name.
+The helper validates the CSR, signs it, enrolls its fingerprint, verifies restart,
+and returns only the CA, certificate, and endpoint as JSON. It retains issued
+certificates by CSR hash so retries reuse the same identity. The HTTPS API does
+not expose certificate enrollment.
+
+For source installations and custom staging, `python3 tools/tls_admin.py setup`
+provides `--directory`, `--caroot`, `--relay`, `--server-name`, `--listen-address`,
+`--name`, and `--port`; see [development setup](development.md). Staging must be
+empty. This lower-level command validates credentials but leaves installation
+and service startup to the source installer.
 
 The CA stays outside source/runtime directories. Never copy its `rootCA-key.pem`
 into the bundle or onto Linux. Do not run `mkcert -install` or reuse a broadly
@@ -83,7 +96,8 @@ All security paths must be absolute without symlinks. On macOS, use a private
 folder in your home or `/private/tmp`, since `/tmp` is a symlink. Keys,
 certificates, allowlists and configurations are 0600 files in owned 0700
 directories. The installer creates immutable runtime credential generations
-outside the app; staging can be removed after checking installation and backups.
+outside the app. Only separate source-installer staging can be removed after
+checking that installed configurations refer to their copied runtime credentials.
 Keep the signing CA for renewal and device issuance.
 
 For Linux requests, `issue-device` combines validated signing, enrollment and
@@ -107,7 +121,8 @@ The local `doctor` command needs no administrative certificate.
 
 ## Code signing and installation
 
-Run once in Terminal on the Mac, without sudo:
+This section applies to source builds. Homebrew already installs a signed app.
+For development, run once in Terminal on the Mac, without sudo:
 
 ```sh
 .tools/python/bin/python3 packaging/macos/signing.py setup
@@ -125,7 +140,7 @@ selected bundle ID. `--identity NAME_OR_SHA1` selects another managed identity;
 Developer ID distribution trust or notarization. Homebrew uses the publisher's
 signed bundle and may need fresh privacy/Gatekeeper approval.
 
-Follow [setup](setup.md#2-generate-credentials-and-install-on-the-mac) for the
+Follow [development setup](development.md#2-generate-credentials-and-install-on-the-mac) for the
 first install. Later source updates reuse installed TLS material:
 
 ```sh
@@ -145,10 +160,10 @@ Generate a new key/CSR in a fresh directory on the device, sign and verify the
 replacement, then enroll the new fingerprint. A short overlap is allowed:
 
 ```sh
-python3 tools/tls_admin.py enroll --cert /private/import/new-client.pem \
+zimbr-relay-admin enroll --cert /private/import/new-client.pem \
   --label 'Linux desktop'
 # Reconnect with the new Linux credential, then retire the old fingerprint:
-python3 tools/tls_admin.py revoke --sha256 OLD_64_HEX_FINGERPRINT
+zimbr-relay-admin revoke --sha256 OLD_64_HEX_FINGERPRINT
 ```
 
 These commands validate a candidate allowlist, write atomically, restart only the
@@ -163,7 +178,8 @@ sends retain their journal identities and normal recovery semantics.
 Server renewal uses the same CA and endpoint SANs and fresh locally generated
 key/CSR. Stage a new relay config, validate it, then install/restart. Reconnect
 clients afterwards. CA replacement requires a coordinated explicit trust update.
-No online enrollment, OCSP/CRL service, or automatic renewal is provided. Read
+Enrollment uses SSH, with no HTTPS enrollment endpoint, OCSP/CRL service, or
+automatic renewal. Read
 actual certificate expiry; `doctor` warns within 30 days for the server or CA.
 Client devices monitor their own leaf expiry. Active requests/SSE sessions close
 when their certificate validity expires, including CA/server validity.

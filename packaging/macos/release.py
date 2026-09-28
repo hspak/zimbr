@@ -25,6 +25,10 @@ REQUIRED = {
     f'{APP}/Info.plist', f'{APP}/MacOS/relay', f'{APP}/MacOS/image-helper',
     f'{APP}/Resources/zimbr-relay-service', f'{APP}/Resources/zimbr.icns',
     f'{APP}/Resources/statusTemplate.pdf',
+    f'{APP}/Resources/zimbr-relay-setup', f'{APP}/Resources/zimbr-relay-admin',
+    f'{APP}/Resources/bootstrap.py', f'{APP}/Resources/tls_admin.py',
+    f'{APP}/Resources/tls_support.py', f'{APP}/Resources/profiles.py',
+    f'{APP}/Resources/profiles.json',
     f'{APP}/Resources/LICENSE', f'{APP}/Resources/OpenSSL-LICENSE.txt',
     f'{APP}/Resources/nghttp2-LICENSE.txt',
     f'{APP}/Resources/libPhoneNumber-LICENSE.txt', f'{APP}/_CodeSignature/CodeResources',
@@ -68,7 +72,8 @@ def validate(archive, version, revision):
             binary = package.read(path)
             if binary[:8] != struct.pack('<II', 0xFEEDFACF, 0x0100000C):
                 raise ValueError(f'{name} is not an arm64 Mach-O executable')
-        for name in ('MacOS/relay', 'MacOS/image-helper', 'Resources/zimbr-relay-service'):
+        for name in ('MacOS/relay', 'MacOS/image-helper', 'Resources/zimbr-relay-service',
+                     'Resources/zimbr-relay-setup', 'Resources/zimbr-relay-admin'):
             if not package.getinfo(f'{APP}/{name}').external_attr >> 16 & 0o111:
                 raise ValueError(f'{name} is not executable')
 

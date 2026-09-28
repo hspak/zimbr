@@ -49,6 +49,12 @@ def stage(bundle, binary, image_helper, openssl_license, phone_license, *,
     # can rely on extended attributes that a ZIP archive would not preserve.
     shutil.copy2(ROOT / 'packaging/macos/service.sh', resources / (profile.command + '-service'))
     (resources / (profile.command + '-service')).chmod(0o755)
+    for suffix in ('setup', 'admin'):
+        shutil.copy2(ROOT / 'packaging/macos/admin.sh', resources / (profile.command + '-' + suffix))
+        (resources / (profile.command + '-' + suffix)).chmod(0o755)
+    for source in ('tools/tls_admin.py', 'tools/tls_support.py', 'packaging/macos/bootstrap.py',
+                   'packaging/macos/profiles.py', 'packaging/macos/profiles.json'):
+        shutil.copy2(ROOT / source, resources / Path(source).name)
     version = source_version()
     info = {
         'CFBundleIdentifier': profile.bundle_id,

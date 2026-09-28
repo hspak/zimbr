@@ -7,7 +7,7 @@ recovery, contact names/photos, inline images, stored link cards, and reaction
 chips when supplied by the relay.
 
 Installed from AUR? Follow [AUR client setup](linux-setup.md) to enroll and connect.
-Use [development setup](setup.md) to build both apps from source.
+Use [development setup](development.md) to build both apps from source.
 [Linux TLS operation](linux-mtls.md) covers later credential changes. Both endpoints share the
 [certificate management contract](certificate-management.md). Linux worker tests
 exercise the native mTLS relay directly; installed two-host acceptance is separate.
@@ -38,14 +38,14 @@ accept the option; `zig-out/bin/zimbr --help` reports the compiled profile.
 
 ## Provisioning and configuration
 
-Provision a local device key/CSR and import the verified CA and signed leaf with
-the installed `zimbr-provision` helper, following [AUR client setup](linux-setup.md).
-From a checkout, use `python3 packaging/linux/provision.py` instead.
-Request an explicit `--name linux-desktop.zimbr.invalid`, have the Mac signer
-approve that same name, and retain `client.csr` for import verification.
-The relay must enable the device's entire-leaf SHA-256 fingerprint. Use a directly
-reachable hostname covered by its server certificate; proxies and redirects are
-disabled. Both API and SSE connections require TLS 1.3 and client authentication.
+Run `zimbr-provision setup user@relay.example`, following
+[package setup](setup.md). It creates the local key, enrolls the CSR over SSH,
+verifies the response, and opens the client with the connection saved.
+From a checkout, use `python3 packaging/linux/provision.py setup` with
+`--profile dev --launch /path/to/zimbr` for a dev client and relay.
+The HTTPS hostname must be directly reachable and covered by the server
+certificate; proxies and redirects are disabled. Both API and SSE connections
+require TLS 1.3 and client authentication.
 
 Settings, cached messages and drafts live in `client.db`. Each build profile
 uses a separate directory:
@@ -61,7 +61,7 @@ The state fallback applies when `XDG_STATE_HOME` is unset, empty or relative.
 To keep an existing cache in another location, launch with `--data-dir` pointing
 to that directory. The database and media cache contain plaintext.
 
-Launch Zimbr and open **Settings** in the navigation rail (Ctrl+,). Enter the
+To change a connection manually, open **Settings** in the navigation rail (Ctrl+,). Enter the
 HTTPS relay origin and absolute paths to your CA certificate, client certificate
 and private key, then click **Save and connect** (Ctrl+Enter). The pane also
 controls **Enter to send**. Tab and Shift+Tab move between fields; Cancel or Escape
@@ -105,12 +105,16 @@ connection again in Settings. This offline CLI command only resets the client;
 the Settings action resets both client and relay. For manual relay recovery, see
 [relay update and reset](macos-relay.md#update-the-running-relay).
 
-Provision separate credentials for each profile and enter their paths in Settings.
+Provision separate credentials for each profile.
 
 Optional `--relay-url`, `--ca-file`, `--client-cert-file` and `--client-key-file`
 flags override saved values for one launch. **Save and connect** explicitly saves
 the values displayed in Settings, including any overrides. `--settings` opens
 Settings at launch; `--details` opens diagnostics when setup is valid.
+The provisioning helper adds `--save-connection` with all four connection flags
+to validate and persist the connection before opening the window. Partial or
+invalid connections are rejected, existing non-connection preferences are kept,
+and the client lock prevents replacing settings while another instance is running.
 
 After replacing credentials at their existing paths, **Reconnect** in Details
 reloads them and discards old TLS connections. Certificate errors wait for

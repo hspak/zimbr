@@ -1,14 +1,14 @@
 # Certificate management contract
 
 The Mac administrator owns the Zimbr CA, issuance policy, and device allowlist.
-Administration defaults to dev; select `--profile release` explicitly for
-Homebrew. Start with [first-run setup](setup.md) for generated configurations and
-one-command device issuance/enrollment. The commands below expose the same
-underlying operations for custom workflows.
+Start with [two-step setup](setup.md). The packaged `zimbr-relay-admin` uses its
+release app profile; source `tools/tls_admin.py` defaults to dev. The commands
+below expose the same underlying operations for custom workflows.
 
 This document and `tools/tls_admin.py` define the certificate contract for all
-clients. Client provisioning must follow it. The relay does not accept online
-enrollment requests; signing and enrollment are separate administrative actions.
+clients. Client provisioning must follow it. Enrollment runs through an
+authenticated SSH login to the Mac account owning the relay. The HTTPS API does
+not accept enrollment requests.
 
 ## Issuance profile
 
@@ -47,18 +47,25 @@ one during import.
 
 ## CSR exchange and Mac administration
 
-The client sends only `client.csr` and the requested device label through the
-existing authenticated administrative channel. Keep its private key on the
+The normal `zimbr-provision setup` command sends only the CSR, expected SAN,
+and display label to the packaged `zimbr-relay-admin issue-ssh` over SSH. That
+login authorizes the request. The helper validates it, signs, enrolls, verifies
+the relay restart, and returns the public CA, leaf, and endpoint. Retries reuse
+the certificate stored for that CSR; access changes are serialized to preserve
+concurrent enrollments. No private key crosses the connection.
+
+For manual exchange, the client sends `client.csr` and the requested device
+label through an authenticated administrative channel. Keep its private key on the
 client. Put the received CSR in a private directory, with mode 0600, and confirm
 the intended SAN independently of the untrusted CSR contents. On the Mac:
 
 ```sh
-python3 tools/tls_admin.py sign --role client \
-  --caroot "$HOME/.config/zimbr-ca-admin" \
+zimbr-relay-admin sign --role client \
+  --caroot "$HOME/.config/zimbr-release-ca" \
   --csr /private/import/linux-desktop/client.csr \
   --cert /private/import/linux-desktop/client.pem \
-  --name linux-desktop.zimbr.invalid --mkcert /path/to/mkcert
-python3 tools/tls_admin.py enroll --profile dev \
+  --name linux-desktop.zimbr.invalid
+zimbr-relay-admin enroll \
   --cert /private/import/linux-desktop/client.pem --label 'Linux desktop'
 ```
 
@@ -71,12 +78,12 @@ restarts the installed LaunchAgent, and verifies old-process exit and the new
 listener. Signing a certificate alone does not grant access.
 
 Return the issued `client.pem`, the **public** `rootCA.pem`, and the expected
-endpoint, for example `https://relay.example:8732` (a placeholder). Authenticate
+endpoint, for example `https://relay.example:8731` (a placeholder). Authenticate
 the CA's entire-DER SHA-256 fingerprint through trusted SSH or an independent
 channel before import:
 
 ```sh
-openssl x509 -in "$HOME/.config/zimbr-ca-admin/rootCA.pem" \
+openssl x509 -in "$HOME/.config/zimbr-release-ca/rootCA.pem" \
   -noout -fingerprint -sha256
 ```
 
@@ -90,9 +97,9 @@ present the device leaf on every TLS 1.3 HTTP/2 connection, including SSE.
 
 The dedicated signing `CAROOT` stays outside the repository, app bundle, and
 runtime directories. Its `rootCA-key.pem` remains on the administrator's Mac.
-Never run `mkcert -install` or reuse a broadly trusted development CA. Existing
-Python/cryptography, mkcert 1.4.4, and OpenSSL tooling is sufficient; no new
-service or dependency is required for this workflow. Setup commands are documented in [macOS TLS operation](macos-tls.md).
+Never run `mkcert -install` or reuse a broadly trusted development CA. The packages supply the
+helpers and declare their Python/cryptography, mkcert, OpenSSH, and OpenSSL
+dependencies. Setup commands are documented in [macOS TLS operation](macos-tls.md).
 
 ## Renewal and revocation
 
@@ -101,7 +108,7 @@ under the same rules, enroll the new fingerprint, reconnect using the new
 credential, then revoke the old fingerprint:
 
 ```sh
-python3 tools/tls_admin.py revoke --profile dev --sha256 OLD_LEAF_DER_SHA256
+zimbr-relay-admin revoke --sha256 OLD_LEAF_DER_SHA256
 ```
 
 Enrollment/revocation restarts the relay and closes existing HTTP and SSE
@@ -113,9 +120,11 @@ CA replacement requires a coordinated explicit trust update on every device.
 
 ## Client handoff
 
-The Linux helper implements this profile with `request --name DEVICE.zimbr.invalid`.
+The Linux helper implements this profile through `setup`, or the manual
+`request --name DEVICE.zimbr.invalid` and `import` commands.
 Its import verifies the returned SAN against its locally retained, signed CSR and
 checks both against the local private key. See [Linux setup](linux-mtls.md) for
-commands. Real-mkcert round trips run in `tests/cert_management.py`; native relay
+commands. Package-only setup and retry checks run in `tests/bootstrap.py`.
+Real-mkcert round trips run in `tests/cert_management.py`; native relay
 worker coverage runs in `tests/client_native_tls.py` and the converted client
 integration/fault/Details/performance suites.

@@ -3,7 +3,9 @@
 For an already-installed AUR client, use [AUR client setup](linux-setup.md).
 This page covers package maintenance and release publishing.
 
-Keep the AUR recipe in a separate checkout and point `release.sh` at it:
+The maintained recipe is `packaging/linux/PKGBUILD.in`. `release.sh` fills in the
+version and source checksum, validates the package, then updates the separate AUR
+checkout. Point the publisher at your AUR checkout and Homebrew tap:
 
 ```sh
 export ZIMBR_AUR_DIR=/path/to/aur/zimbr
@@ -16,9 +18,11 @@ so package recipes must select release explicitly in their `zig build` commands.
 `release.sh` adds this selection to the staged recipe before building or publishing it.
 It includes `zimbr`, `zimbr-provision`, the desktop
 launcher, the scalable SVG, PNG icons from 16 to 512 px, setup documentation,
-and license notices. Linux provisioning uses Python cryptography and OpenSSL;
-certificate issuance on the Mac requires mkcert. See [AUR client setup](linux-setup.md)
-for the user workflow.
+and license notices. Its dependencies include OpenSSH, Python cryptography, and
+OpenSSL. The Mac cask includes `zimbr-relay-setup`, `zimbr-relay-admin`, the service
+helper, and all their Python modules as signed app resources. Homebrew installs
+mkcert, Python, and cryptography for them. Neither installed package needs a
+source checkout or pip environment. See [two-step setup](setup.md).
 The macOS relay is distributed as the `zimbr-relay` Homebrew cask. Every release
 publishes both components at the version in `build.zig.zon`, even when only one
 component changed.
@@ -51,6 +55,10 @@ Run `python3 tests/release.py`, `python3 tests/mac_release.py`, and
 `python3 tests/mac_remote.py` to check release ordering, failure handling,
 archive validation, and isolated Mac builds using temporary local Git remotes
 and simulated build and hosting services.
+`python3 tests/bootstrap.py` exercises the copied package helpers outside the
+source tree with real mkcert and relay configuration validation. SSH transport
+and macOS service operations are simulated; test actual launchd and permissions
+on a Mac before publishing.
 
 ## Configure the Mac builder
 

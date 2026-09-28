@@ -84,7 +84,7 @@ stage_recipe() {
   local archive=$1 checksum
   checksum=$(sha256sum "$archive")
   checksum=${checksum%% *}
-  python3 - "$pkgbuild" "$stage/PKGBUILD" "$version" "$checksum" <<'PY'
+  python3 - "$repo_dir/packaging/linux/PKGBUILD.in" "$stage/PKGBUILD" "$version" "$checksum" <<'PY'
 from pathlib import Path
 import re
 import sys

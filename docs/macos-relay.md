@@ -7,9 +7,8 @@ AppleScript subprocess. Its native menu bar interface uses AppKit, with system
 SQLite and no Homebrew runtime dependency. The Linux client never receives Apple
 account credentials.
 
-Follow [first-run setup](setup.md) to install dependencies, build, generate
-configuration with mkcert, install the app, and enroll Linux. For an existing
-installation, see [updates](#update-the-running-relay). Local builds/tools default
+Follow the [two-step setup](setup.md) for the packaged relay and Linux client.
+For source builds, use [development setup](development.md). Local builds default
 to **Zimbr Relay Dev**; Homebrew uses **Zimbr Relay**. Their identities, data and
 ports are separate; see [profiles](macos-profiles.md).
 
@@ -81,77 +80,70 @@ to native UI, settings, or lifecycle behavior.
 
 ## Homebrew
 
-When a release is available in the tap, install the Apple Silicon relay on
-macOS 27 or newer with:
+On an Apple Silicon Mac running macOS 27 or newer:
 
 ```sh
 brew install --cask hspak/tap/zimbr-relay
+zimbr-relay-setup relay.example
 ```
 
-The cask installs `~/Applications/Zimbr Relay.app` and exposes `zimbr-relay` and
-`zimbr-relay-service`. Credentials and history live in
-`~/Library/Application Support/Zimbr`.
-A dev-profile installation can remain installed alongside the cask.
+Use a hostname or IP reachable directly from Linux. Setup resolves it to a local
+listening address; `--listen-address IP` overrides that choice. The default port
+is 8731; `--port NUMBER` overrides it. With no hostname, setup uses the Mac's
+hostname for a new installation or keeps the existing configuration.
 
-Use a source checkout matching the installed release for the certificate
-administration tools; these scripts are not included in the cask. You can also
-download and extract the matching source archive from the
-[release page](https://github.com/hspak/zimbr/releases). Run the following
-commands from that source directory on the Mac to prepare their Python environment:
+The cask installs the signed `~/Applications/Zimbr Relay.app`, its setup and
+administration scripts, and their Homebrew dependencies. It exposes
+`zimbr-relay`, `zimbr-relay-setup`, `zimbr-relay-admin`, and `zimbr-relay-service`.
+No source checkout, Zig installation, Python environment, or local signing step
+is needed.
 
-```sh
-brew install mkcert python
-mkdir -p .tools
-"$(brew --prefix)/bin/python3" -m venv .tools/python
-.tools/python/bin/python3 -m pip install -r tools/requirements-tls.txt
-```
+Setup creates a dedicated CA at `~/.config/zimbr-release-ca`, configures server
+and administrative credentials under `~/Library/Application Support/Zimbr`,
+and starts a per-user login service. It validates the listener before reporting
+success. Rerunning keeps the existing configuration and keys; conflicting
+endpoint arguments are rejected. The CA private key stays on this Mac and is
+never installed into system trust.
 
-For a new installation, generate the release configuration with the installed
-relay. Replace the example hostname with one that resolves to the Mac from both
-computers and the example IP with a specific local address on the Mac:
-
-```sh
-.tools/python/bin/python3 tools/tls_admin.py setup --profile release \
-  --relay "$HOME/Applications/Zimbr Relay.app/Contents/MacOS/relay" \
-  --directory "$HOME/Library/Application Support/Zimbr" \
-  --server-name relay.example --listen-address 192.0.2.10
-zimbr-relay check-config
-```
-
-This direct setup requires an empty data directory; for an existing installation
-retain its configuration and credentials. The TLS CA remains outside runtime
-state, at `~/.config/zimbr-release-ca` by default. Keep its private key on the Mac;
-Zimbr uses explicit CA trust, so `mkcert -install` is unnecessary.
+### Permissions
 
 Add `~/Applications/Zimbr Relay.app` to **System Settings → Privacy & Security →
-Full Disk Access**. Then run the permission check from the Mac's Terminal,
-approve Messages Automation, and start the login service:
+Full Disk Access**. From the Mac's Terminal, approve Messages Automation:
 
 ```sh
 open -n -W -a "$HOME/Applications/Zimbr Relay.app" --args doctor --check-automation
-zimbr-relay-service start
-zimbr-relay-service status
 ```
 
-Use **Check Permissions** and **Open Logs** in the relay menu to verify readiness.
-Then follow [AUR client setup](linux-setup.md) to enroll Linux and connect on the
-default release port, 8731. The published app is already signed, so no local
-signing identity or Zig build is required for this installation.
+For optional contact names and photos:
 
-The service helper validates the existing TLS configuration and installs the
-per-user LaunchAgent with login startup and restart-on-exit behavior. It does
-not provision credentials or grant macOS permissions. Use
-`zimbr-relay-service stop` to stop it.
+```sh
+open -n -a "$HOME/Applications/Zimbr Relay.app" --args doctor --request-contacts --read-only
+```
 
-Homebrew upgrades stop the old service. Run `zimbr-relay-service start` after
-`brew upgrade --cask hspak/tap/zimbr-relay`, then check `zimbr-relay doctor` and
-the relay log. Uninstalling stops the service and preserves configuration,
-credentials, and history. Homebrew installs the publisher's signed app; moving
-from a locally signed build may require granting macOS permissions again.
-The current packaging flow does not notarize the app, so Gatekeeper approval
-may also be needed. It does not disable quarantine or Gatekeeper checks.
+Choose **Restart Relay** after granting access, or rerun `zimbr-relay-setup` if
+setup could not start the listener. **Check Permissions** and **Open Logs** show
+readiness and failures. Keep this user logged into the graphical session.
+Enable **Remote Login** for this same account so Linux can enroll over SSH.
 
-For maintainers, see [combined releases](linux-packaging.md).
+The published app is signed but is not notarized. Gatekeeper approval may also
+be needed. Privacy grants remain separate from installation.
+
+### Service controls and updates
+
+```sh
+zimbr-relay-service status
+zimbr-relay-service stop
+zimbr-relay-service start
+```
+
+The service starts at login and restarts after an unexpected exit. After
+`brew upgrade --cask hspak/tap/zimbr-relay`, run `zimbr-relay-service start`.
+Uninstalling stops the service and preserves configuration, credentials, and
+history. A dev-profile installation can coexist with the cask.
+
+Next, [connect Linux](linux-setup.md). For certificate maintenance, use the
+packaged `zimbr-relay-admin` commands in [TLS operation](macos-tls.md).
+Maintainers should see [combined releases](linux-packaging.md).
 
 ## Build and test
 
@@ -244,7 +236,7 @@ networking, and presentation.
 
 ## Install and permissions
 
-Use the [first-run installation command](setup.md#2-generate-credentials-and-install-on-the-mac)
+Use the [first-run installation command](development.md#2-generate-credentials-and-install-on-the-mac)
 after generating credentials. The installer can stage without changing the
 installed app by omitting `--install --start`.
 

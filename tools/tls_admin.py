@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Local Zimbr certificate provisioning and device lifecycle. Never installs system trust."""
 import argparse
+from contextlib import contextmanager, redirect_stdout
 import datetime as dt
+import fcntl
+import hashlib
 import ipaddress
 import json
 import os
@@ -23,6 +26,17 @@ from tls_support import private_path, private_directory, read_json
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'packaging/macos'))
 from profiles import PROFILES
 UTC = dt.timezone.utc
+
+
+@contextmanager
+def administration_lock(directory):
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    private_directory(directory)
+    descriptor = os.open(directory/'administration.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, 'r+') as lock:
+        private_path(directory/'administration.lock')
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
 
 
 def atomic(path, content):
@@ -154,7 +168,8 @@ def sign(args):
     with tempfile.TemporaryDirectory(prefix='.issue-', dir=args.cert.parent) as folder:
         staged_csr, staged_cert = Path(folder)/'request.pem', Path(folder)/'issued.pem'
         atomic(staged_csr, csr_bytes)
-        subprocess.run([args.mkcert, '-cert-file', str(staged_cert), '-csr', str(staged_csr)], env=env, check=True)
+        subprocess.run([args.mkcert, '-cert-file', str(staged_cert), '-csr', str(staged_csr)],
+                       env=env, check=True, stdout=sys.stderr)
         for path in (caroot/'rootCA.pem', caroot/'rootCA-key.pem', staged_cert): path.chmod(0o600)
         ca = certificate(caroot/'rootCA.pem'); cert = certificate(staged_cert)
         verify_leaf(cert, ca, args.role, args.name)
@@ -177,7 +192,7 @@ def fresh_directory(path):
     return path
 
 
-def setup(args):
+def setup(args, *, quiet=False):
     """Stage a complete first-run configuration; installation owns service changes."""
     profile = PROFILES[args.profile]
     profile.verify_binary(args.relay)
@@ -219,10 +234,11 @@ def setup(args):
         'client_key_file': str(directory/'admin/client-key.pem'),
     })
     subprocess.run([str(args.relay), 'check-config', '--config', str(directory/'relay.json')], check=True)
-    print('Ready to install: ' + shlex.join([
-        '--tls-config', str(directory/'relay.json'), '--admin-config', str(directory/'admin.json'),
-    ]))
-    print(f'Keep the signing CA on this Mac: {args.caroot.absolute()}')
+    if not quiet:
+        print('Ready to install: ' + shlex.join([
+            '--tls-config', str(directory/'relay.json'), '--admin-config', str(directory/'admin.json'),
+        ]))
+        print(f'Keep the signing CA on this Mac: {args.caroot.absolute()}')
 
 
 def issue_device(args):
@@ -252,6 +268,13 @@ def pid_of_service(profile):
     return int(match.group(1)) if match else None
 
 
+def listener_ready(config, pid):
+    sockets = subprocess.run(['/usr/sbin/lsof', '-nP', '-a', '-p', str(pid), '-iTCP', '-sTCP:LISTEN'], capture_output=True, text=True)
+    endpoint = config['listen_address']
+    if ':' in endpoint: endpoint = '[' + endpoint + ']'
+    return f'{endpoint}:{config["port"]} (LISTEN)' in sockets.stdout
+
+
 def restart(config, profile):
     old = pid_of_service(profile)
     subprocess.run(['launchctl', 'kickstart', '-k', f'gui/{os.getuid()}/{profile.bundle_id}'], check=True)
@@ -263,16 +286,20 @@ def restart(config, profile):
             try: os.kill(old, 0)
             except ProcessLookupError: old_gone = True
         if old_gone and new and new != old:
-            sockets = subprocess.run(['/usr/sbin/lsof', '-nP', '-a', '-p', str(new), '-iTCP', '-sTCP:LISTEN'], capture_output=True, text=True)
-            endpoint = config['listen_address']
-            if ':' in endpoint: endpoint = '[' + endpoint + ']'
-            if f'{endpoint}:{config["port"]} (LISTEN)' in sockets.stdout:
+            if listener_ready(config, new):
                 return {'old_pid': old, 'pid': new, 'restart_complete': True}
         time.sleep(.2)
     raise RuntimeError('Restart failed: old process exit and new configured listener were not both verified; policy is staged, revocation is NOT complete')
 
 
 def device(args):
+    profile = PROFILES[args.profile]
+    config = args.config or profile.data(Path.home())/'relay.json'
+    with administration_lock(config.parent):
+        update_device(args)
+
+
+def update_device(args):
     profile = PROFILES[args.profile]
     args.config = args.config or profile.data(Path.home())/'relay.json'
     args.relay = args.relay or profile.app(Path.home())/'Contents/MacOS/relay'
@@ -308,10 +335,66 @@ def device(args):
         print(json.dumps({'sha256': fingerprint, **restart(cfg, profile)}))
 
 
+def issue_ssh(args):
+    """The authenticated SSH login authorizes enrollment; stdout is one JSON response."""
+    raw = sys.stdin.buffer.read(65537)
+    if len(raw) > 65536:
+        raise ValueError('Enrollment request is too large')
+    request = json.loads(raw)
+    if not isinstance(request, dict) or set(request) != {'schema', 'csr', 'name', 'label'} or request['schema'] != 1:
+        raise ValueError('Unsupported enrollment request')
+    if any(not isinstance(request[key], str) for key in ('csr', 'name', 'label')):
+        raise ValueError('Enrollment fields must be strings')
+    name = request['name']
+    if (len(name) > 253 or not name.endswith('.zimbr.invalid') or
+            any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', part) for part in name.split('.'))):
+        raise ValueError('Expected a device name under zimbr.invalid')
+    if not 1 <= len(request['label']) <= 128 or any(ord(c) < 32 for c in request['label']):
+        raise ValueError('Invalid device label')
+    csr_bytes = request['csr'].encode('ascii')
+    csr = x509.load_pem_x509_csr(csr_bytes)
+    if not csr.is_signature_valid:
+        raise ValueError('Invalid CSR signature')
+    validate_extensions(csr, 'client', [name])
+    profile = PROFILES[args.profile]
+    data = profile.data(Path.home())
+    cfg = read_json(data/'relay.json')
+    settings = data/'provisioning.json'
+    caroot = Path(read_json(settings)['caroot']) if settings.exists() else ca_directory(profile)
+    ca = certificate(caroot/'rootCA.pem')
+    if ca.fingerprint(hashes.SHA256()) != certificate(cfg['client_ca_file']).fingerprint(hashes.SHA256()):
+        raise ValueError('Signing CA does not match the installed relay CA')
+    # Retain public results by CSR so interrupted SSH exchanges retry the same identity.
+    directory = data/'enrollments'/hashlib.sha256(csr_bytes).hexdigest()
+    with administration_lock(directory), redirect_stdout(sys.stderr):
+        cert_path = directory/'client.pem'
+        if not cert_path.exists():
+            atomic(directory/'client.csr', csr_bytes)
+            sign(argparse.Namespace(caroot=caroot, csr=directory/'client.csr', cert=cert_path,
+                                    role='client', name=[name], mkcert=args.mkcert))
+        cert = certificate(cert_path)
+        verify_leaf(cert, ca, 'client', [name])
+        encoding = serialization.Encoding.DER
+        form = serialization.PublicFormat.SubjectPublicKeyInfo
+        if cert.public_key().public_bytes(encoding, form) != csr.public_key().public_bytes(encoding, form):
+            raise ValueError('Issued certificate does not match CSR')
+        device(argparse.Namespace(profile=args.profile, config=None, relay=None, stage=False,
+                                  action='enroll', cert=cert_path, label=request['label']))
+        host = cfg['server_name']
+        if ':' in host: host = '[' + host + ']'
+        response = {'schema': 1, 'relay_url': f'https://{host}:{cfg["port"]}',
+                    'ca': private_path(caroot/'rootCA.pem').read_text(),
+                    'cert': private_path(cert_path).read_text()}
+    print(json.dumps(response))
+
+
 def main():
     os.umask(0o077)
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest='action', required=True)
+    remote = sub.add_parser('issue-ssh', help='enroll a CSR received as JSON over authenticated SSH')
+    remote.add_argument('--profile', choices=PROFILES, default=os.environ.get('ZIMBR_PROFILE', 'dev'))
+    remote.add_argument('--mkcert', default='mkcert')
     key = sub.add_parser('create-key')
     key.add_argument('--directory', type=Path, required=True)
     key.add_argument('--role', choices=['server', 'client'], required=True)
@@ -324,17 +407,17 @@ def main():
     issue.add_argument('--name', action='append', default=[])
     issue.add_argument('--mkcert', default='mkcert')
     setup_parser = sub.add_parser('setup', help='stage server/admin credentials and configuration using mkcert')
-    setup_parser.add_argument('--profile', choices=PROFILES, default='dev')
+    setup_parser.add_argument('--profile', choices=PROFILES, default=os.environ.get('ZIMBR_PROFILE', 'dev'))
     setup_parser.add_argument('--directory', type=Path, help='new staging directory (default: ~/.config/zimbr-PROFILE-setup)')
     setup_parser.add_argument('--caroot', type=Path, help='dedicated issuer (default: ~/.config/zimbr-PROFILE-ca)')
-    setup_parser.add_argument('--relay', type=Path, default=Path('zig-out/bin/relay'))
+    setup_parser.add_argument('--relay', type=Path, help='default: installed app for packaged helpers, zig-out/bin/relay from source')
     setup_parser.add_argument('--server-name', required=True, help='DNS name or IP Linux uses to reach this Mac')
     setup_parser.add_argument('--listen-address', required=True, help='local IP address to bind')
     setup_parser.add_argument('--port', type=int, help='default: profile port (dev 8732, release 8731)')
     setup_parser.add_argument('--name', action='append', default=[], help='additional server certificate SAN')
     setup_parser.add_argument('--mkcert', default='mkcert')
     handoff = sub.add_parser('issue-device', help='sign a client CSR, enroll/restart, and export public credentials')
-    handoff.add_argument('--profile', choices=PROFILES, default='dev')
+    handoff.add_argument('--profile', choices=PROFILES, default=os.environ.get('ZIMBR_PROFILE', 'dev'))
     handoff.add_argument('--caroot', type=Path)
     handoff.add_argument('--config', type=Path)
     handoff.add_argument('--relay', type=Path)
@@ -346,7 +429,7 @@ def main():
     handoff.add_argument('--stage', action='store_true', help='stage enrollment only; restart is still required')
     for action in ('enroll', 'revoke'):
         d = sub.add_parser(action)
-        d.add_argument('--profile', choices=PROFILES, default='dev')
+        d.add_argument('--profile', choices=PROFILES, default=os.environ.get('ZIMBR_PROFILE', 'dev'))
         d.add_argument('--config', type=Path)
         d.add_argument('--relay', type=Path)
         d.add_argument('--stage', action='store_true', help='Stage only; explicitly does not complete enrollment/revocation')
@@ -358,6 +441,8 @@ def main():
         profile = PROFILES[args.profile]
         args.caroot = args.caroot or ca_directory(profile)
     if args.action == 'setup':
+        args.relay = args.relay or (profile.app(Path.home())/'Contents/MacOS/relay'
+                                   if 'ZIMBR_PROFILE' in os.environ else Path('zig-out/bin/relay'))
         args.directory = args.directory or Path.home()/'.config'/f'zimbr-{profile.name}-setup'
         if args.port is None: args.port = profile.default_port
     try:
@@ -365,8 +450,9 @@ def main():
         elif args.action == 'sign': sign(args)
         elif args.action == 'setup': setup(args)
         elif args.action == 'issue-device': issue_device(args)
+        elif args.action == 'issue-ssh': issue_ssh(args)
         else: device(args)
-    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+    except (ValueError, OSError, RuntimeError, subprocess.CalledProcessError) as exc:
         p.exit(1, f'Certificate operation failed: {exc}\n')
 
 

@@ -226,7 +226,7 @@ Sidebar projection skips resolved reaction rows and preserves conversation order
 ## Verification
 
 Build with Zig 0.16.0, Apple's Command Line Tools, OpenSSL 3.5 static archives,
-and the Python dependencies from [setup](setup.md):
+and the Python dependencies from [development setup](development.md):
 
 ```sh
 zig build relay fake-relay test test-macos-enrichment -Dopenssl-prefix=/absolute/openssl-3.5

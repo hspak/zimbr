@@ -21,28 +21,32 @@ enrolled device certificate.
 
 ## Get started
 
-Installed the Linux client from AUR? Follow [AUR client setup](docs/linux-setup.md)
-to enroll it and connect. For the packaged Mac relay, start with
-[Homebrew setup](docs/macos-relay.md#homebrew). The Linux importer opens Settings
-with verified credentials filled in; click **Save and connect**.
+1. On the Mac, install the relay and configure it with a hostname Linux can reach:
 
-You need a Mac signed into Messages, a Linux Wayland desktop, and direct network
-access between them. Packaged releases use the **release** profile (port 8731).
-To build from source with Zig **0.16.0**, follow the
-[development setup guide](docs/setup.md), which uses **dev** (port 8732).
+   ```sh
+   brew install --cask hspak/tap/zimbr-relay
+   zimbr-relay-setup relay.example
+   ```
 
-Enter sends; Shift+Enter adds a line. Ctrl+N starts a conversation, Ctrl+F searches,
-and Ctrl+D opens connection details and **Reconnect**.
+2. On Linux, install from AUR and connect through the Mac's SSH login:
 
-To update the development relay, run on the Mac from this checkout:
+   ```sh
+   yay -S zimbr
+   zimbr-provision setup user@relay.example
+   ```
 
-```sh
-./tools/update-relay.sh --profile dev --release=safe
-```
+Setup handles certificates, enrollment, login startup, and saved connection
+settings. Neither machine needs the Zimbr source. You need a Mac signed into
+Messages, a Linux Wayland desktop, SSH access, and direct HTTPS access to the Mac.
+Grant the required [macOS permissions](docs/macos-relay.md#permissions).
+The [setup guide](docs/setup.md) covers these prerequisites and retries.
 
-See [relay updates](docs/macos-relay.md#update-the-running-relay) for prerequisites
-and verification. [Dev and release profiles](docs/macos-profiles.md) keep local
-builds separate from the Homebrew installation.
+Later, open **Zimbr** or run `zimbr`. Enter sends; Shift+Enter adds a line.
+Ctrl+N starts a conversation, Ctrl+F searches, and Ctrl+D opens connection details.
+
+Building from source? Use [development setup](docs/development.md) with Zig
+**0.16.0**. [Dev and release profiles](docs/macos-profiles.md) keep local builds
+separate from packaged installations.
 
 ## Limits to know
 

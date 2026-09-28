@@ -19,6 +19,7 @@ control: bool = false,
 enter_to_send: bool = true,
 details: bool = false,
 settings: bool = false,
+save_connection: bool = false,
 reset_cache: bool = false,
 legacy_path: ?[:0]const u8 = null,
 overrides: Overrides = .{},
@@ -51,6 +52,7 @@ const connection_fields = .{
 pub const LockCacheError = u.Allocator.Error || error{ClientAlreadyRunning};
 pub const ValidateError = error{ InvalidRelayOrigin, CredentialPathsRequired };
 pub const SaveError = Sqlite.QueryError || ValidateError;
+pub const LoadError = Store.ReadError || SaveError || error{InvalidCredentials};
 pub const ResetCacheError = Store.ReadError || u.IdError ||
     std.Io.Dir.OpenError || std.Io.Dir.StatFileError || std.Io.File.OpenError ||
     std.Io.Dir.DeleteTreeError || std.Io.Dir.DeleteFileError || std.Io.Dir.RenameError;
@@ -118,8 +120,10 @@ pub fn parse(init: std.process.Init) ParseError!Config {
                 "       zimbr --reset-cache [--data-dir PATH]\n" ++
                 "       zimbr [--relay-url HTTPS_ORIGIN] [--ca-file PATH]\n" ++
                 "             [--client-cert-file PATH] [--client-key-file PATH]\n" ++
+                "       Add --save-connection to validate and persist all four connection flags.\n" ++
                 "       zimbr [--screenshot PATH --frames 90]\n" ++
-                "Settings: edit in the app; saved in client.db. CLI overrides last this launch.\n" ++
+                "First run: zimbr-provision setup user@mac.example\n" ++
+                "Settings: saved in client.db. CLI overrides are temporary unless --save-connection is used.\n" ++
                 "Reset: delete local messages, drafts, pending sends and media, then exit.\n" ++
                 "       Retain readable saved settings and credential files.\n" ++
                 "Profile: " ++ @tagName(options.profile) ++ "\n" ++
@@ -139,6 +143,10 @@ pub fn parse(init: std.process.Init) ParseError!Config {
         }
         if (u.eq(arg, "--settings")) {
             config.settings = true;
+            continue;
+        }
+        if (u.eq(arg, "--save-connection")) {
+            config.save_connection = true;
             continue;
         }
         if (u.eq(arg, "--reset-cache")) {
@@ -167,6 +175,12 @@ pub fn parse(init: std.process.Init) ParseError!Config {
             config.frames = std.fmt.parseInt(usize, value, 10) catch return error.InvalidArguments;
         } else return error.InvalidArguments;
         i += 1;
+    }
+    if (config.save_connection) {
+        if (config.reset_cache) return error.InvalidArguments;
+        inline for (connection_fields) |field| {
+            if (@field(config.overrides, field) == null) return error.InvalidArguments;
+        }
     }
     const home = init.environ_map.get("HOME");
     config.data = try dataDirectory(a, explicit, init.environ_map.get("XDG_STATE_HOME"), home);
@@ -220,8 +234,9 @@ fn importLegacy(s: *Config, a: u.Allocator) !void {
 }
 
 /// Assume lockCache is held. Imports a legacy JSON file only when this database
-/// has no settings yet. Launch overrides never overwrite saved preferences.
-pub fn load(s: *Config, a: u.Allocator) Store.ReadError!void {
+/// has no settings yet. Overrides persist only with an explicit save_connection
+/// request, after validating the complete connection and local credentials.
+pub fn load(s: *Config, a: u.Allocator) LoadError!void {
     const path = try std.fmt.allocPrintSentinel(a, "{s}/client.db", .{s.data}, 0);
     const store = try Store.open(path);
     defer store.close();
@@ -237,6 +252,17 @@ pub fn load(s: *Config, a: u.Allocator) Store.ReadError!void {
     }
     inline for (connection_fields) |field| {
         if (@field(s.overrides, field)) |value| @field(s, field) = value;
+    }
+    if (s.save_connection) {
+        try s.validate();
+        var detail: c.ZcError = undefined;
+        if (!s.check(&detail)) {
+            log.err("{s}", .{std.mem.sliceTo(&detail.message, 0)});
+            return error.InvalidCredentials;
+        }
+        try s.save(store);
+        s.save_connection = false;
+        s.overrides = .{};
     }
 }
 

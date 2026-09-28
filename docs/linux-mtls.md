@@ -1,13 +1,22 @@
 # Linux TLS operation
 
 Use [AUR client setup](linux-setup.md) for an installed client, or
-[development setup](setup.md) when building from source. The helper
-requires Python with the versions in `tools/requirements-tls.txt` and OpenSSL 3.
+[development setup](development.md) when building from source. The helper
+ships with Python cryptography, OpenSSH, and OpenSSL 3 dependencies in AUR.
 mkcert runs on the Mac issuer; Linux generates and retains its own key and CSR.
 The installed helper is `zimbr-provision`; from a checkout use
 `python3 packaging/linux/provision.py`.
 
 ## Import and configuration
+
+Normal setup uses `zimbr-provision setup user@relay.example`. The packaged Mac
+helper signs and enrolls over the authenticated SSH session, verifies the relay
+restart, and returns the public CA, device certificate, and HTTPS endpoint.
+Linux verifies the response and saves the connection before opening the client.
+Only CSR metadata and public certificates cross SSH; private keys stay local.
+Retries keep the same key and reuse the certificate issued for that CSR.
+
+For manual exchange without SSH, use the lower-level commands below.
 
 The [certificate contract](certificate-management.md) defines the validated CSR
 and certificate profile. `request --tls-dir PATH --name DEVICE.zimbr.invalid`
@@ -30,7 +39,8 @@ SSH forwarding configuration does not replace certificate identity checks.
 
 Dev uses `~/.config/zimbr-dev/tls` in the setup guide and stores its database in
 `$XDG_STATE_HOME/zimbr-dev` or `~/.local/share/zimbr-dev`. Release uses `zimbr`.
-`--tls-dir` is explicit; provision the profiles independently. See
+`setup` chooses this directory automatically and honors `XDG_CONFIG_HOME`;
+the lower-level commands require `--tls-dir`. Provision the profiles independently. See
 [client configuration](linux-client.md#provisioning-and-configuration) for launch
 overrides and state paths.
 
@@ -53,12 +63,17 @@ connections and TLS session state. File changes alone do not change a running
 credential snapshot. Changing paths or the endpoint in Settings and saving reconnects
 automatically. Renewal does not clear the cache, drafts, cursor, or outbox.
 
-For renewal, generate a new key/CSR in another private directory, have it signed,
-import and verify it there, and enroll the new leaf fingerprint on the Mac. A
-brief overlap of enabled device fingerprints is permitted. Update the credential
-paths in Settings and save, or replace validated files at the existing paths
-while disconnected and click Reconnect. Remove the old enrollment
-after verifying the new fingerprint. Server renewal retains its hostname and CA;
+For renewal, close Zimbr and select a new private directory:
+
+```sh
+zimbr-provision setup user@relay.example --tls-dir "$HOME/.config/zimbr/tls-renewed"
+```
+
+This creates and enrolls a new key/certificate and saves its paths, preserving
+the cache and drafts. Verify the new fingerprint in Details, then retire the old
+one on the Mac with `zimbr-relay-admin revoke --sha256 OLD_LEAF_DER_SHA256`.
+A brief overlap of enabled fingerprints is allowed. Manual request/import and
+Settings changes remain available. Server renewal retains its hostname and CA;
 CA replacement requires a coordinated trust update.
 
 An interrupted POST remains uncertain until lookup by its original UUID; a new
@@ -91,6 +106,7 @@ different minor version, supply a target OpenSSL 3.5 build using
 ```sh
 zig build test relay client client-probe fake-relay
 python3 tests/cert_management.py  # real mkcert required; ZIMBR_MKCERT may override its path
+python3 tests/bootstrap.py        # package-only setup; simulated SSH/launchd, real certificates
 python3 tests/client_tls.py
 python3 tests/client_native_tls.py
 python3 tests/client_integration.py

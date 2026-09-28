@@ -106,6 +106,26 @@ def main():
             run(env, *args, '--client-key-file', 'relative.pem', error='CredentialPathsRequired')
             assert saved(migrated) == expected
             run(env, *args)
+            connection = ('--relay-url', preferences['relay_url'],
+                          '--ca-file', preferences['ca_file'],
+                          '--client-cert-file', preferences['client_cert_file'],
+                          '--client-key-file', preferences['client_key_file'])
+            # Setup explicitly persists a complete validated connection, including on an
+            # already initialized database, while ordinary launch overrides remain temporary.
+            configured = root / 'configured'
+            run(env, '--data-dir', str(configured), error='InvalidRelayOrigin')
+            run(env, '--data-dir', str(configured), '--save-connection', *connection)
+            assert saved(configured) == (*expected[:4], 1)
+            run(env, '--data-dir', str(configured))
+            run(env, *args, '--save-connection', *connection)
+            assert saved(migrated) == expected  # Keep non-connection preferences.
+            for extra, error in ((('--client-key-file', str(root/'missing.pem')), 'InvalidCredentials'),
+                                 (('--relay-url', 'http://invalid.example'), 'InvalidRelayOrigin')):
+                run(env, *args, '--save-connection', *connection, *extra, error=error)
+                assert saved(migrated) == expected
+            run(env, *args, '--save-connection', '--relay-url', preferences['relay_url'],
+                error='InvalidArguments')
+            run(env, *args, '--save-connection', *connection, '--reset-cache', error='InvalidArguments')
             reset = subprocess.run([str(BIN), '--reset-cache', *args], env=env, capture_output=True, timeout=10)
             assert reset.returncode == 0, reset.stderr.decode()
             assert saved(migrated) == expected

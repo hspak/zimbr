@@ -353,6 +353,15 @@ before parsing HTTP. Subject names and labels are not authorization. Keep keys
 and security configuration in owner-only files under 0700 directories, without
 symlinks. The CA key stays in administrative storage outside runtime directories.
 
+Installed packages own bootstrap: the Mac setup helper creates credentials and
+starts the login service; the Linux helper sends a locally generated CSR through
+authenticated SSH to the packaged Mac administrator. The Mac returns only the
+public CA, issued leaf, and configured HTTPS endpoint after verified enrollment
+and restart. CSR-indexed issuance records make interrupted exchanges retryable
+without changing device identity. Linux verifies the response against its retained
+CSR and key, then the native client validates and saves the complete connection
+under its existing instance lock. No source checkout participates in this flow.
+
 An atomic allowlist update followed by a verified LaunchAgent restart applies
 enrollment, renewal, or revocation and closes established sessions. Session
 resumption and early data are disabled. Check leaf validity for each HTTP request

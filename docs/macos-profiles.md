@@ -11,6 +11,8 @@ ReleaseSafe, or ReleaseFast optimization.
 | Directory in `~/Library/Application Support` | `Zimbr Dev` | `Zimbr` |
 | Default port | `8732` | `8731` |
 | Packaged service helper | `zimbr-relay-dev-service` | `zimbr-relay-service` |
+| Packaged setup helper | `zimbr-relay-dev-setup` | `zimbr-relay-setup` |
+| Packaged certificate helper | `zimbr-relay-dev-admin` | `zimbr-relay-admin` |
 
 Each directory owns its configuration, credentials, journal, process lock,
 assets, and logs. Existing explicit configuration ports take precedence over the
@@ -24,7 +26,7 @@ The Homebrew cask installs and removes only the release app and LaunchAgent.
 
 ## Build and update
 
-Use [first-run setup](setup.md) to generate credentials and configure dependencies.
+Use [development setup](development.md) for source builds and local signing.
 
 ```sh
 zig build relay -Dprofile=dev -Doptimize=ReleaseSafe \
@@ -54,10 +56,11 @@ For source installs, invoke the service helper from the app bundle:
 ```
 
 The Homebrew cask exposes its release commands on PATH. Installing a dev app does
-not replace those commands. Administrative tools also default to dev:
+not replace those commands. Packaged helpers select their app's profile.
+Source administrative tools default to dev:
 
 ```sh
-python3 tools/tls_admin.py enroll --profile release --cert /private/staging/client.pem --label client
+zimbr-relay-admin enroll --cert /private/staging/client.pem --label client
 python3 tools/mac_acceptance.py --profile dev --enrichment --output /private/evidence/dev.json
 python3 tools/mac_conversation_probe.py --profile dev --conversation CONVERSATION_ID
 ```

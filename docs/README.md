@@ -1,8 +1,8 @@
 # Zimbr documentation
 
-For an installed AUR client, start with [AUR client setup](linux-setup.md).
-For a packaged Mac relay, use [Homebrew setup](macos-relay.md#homebrew).
-[Development setup](setup.md) covers building both apps from source.
+Start with [two-step setup](setup.md): install the Homebrew relay and run its
+setup command, then install the AUR client and enroll over SSH. Neither machine
+needs a source checkout. [Development setup](development.md) covers source builds.
 Examples use generic paths and reserved network names; replace those with your
 deployment values. Source-build and maintenance commands run from the repository
 root unless noted otherwise. On the Mac, `python3` commands assume the setup
@@ -12,9 +12,10 @@ environment is active (`. .tools/python/bin/activate`).
 
 | Guide | Contents |
 | --- | --- |
-| [AUR client setup](linux-setup.md) | Enroll and connect an installed Linux client using release paths and commands |
+| [Two-step setup](setup.md) | Install, configure, and connect the packaged apps |
+| [AUR client setup](linux-setup.md) | SSH enrollment options, paths, retries, and troubleshooting |
 | [Homebrew relay setup](macos-relay.md#homebrew) | Configure the packaged Mac relay, permissions, and login startup |
-| [Development setup](setup.md) | Dependencies, source builds, generated configuration, permissions, and Linux enrollment |
+| [Development setup](development.md) | Dependencies, source builds, local signing, and dev enrollment |
 | [Linux client](linux-client.md) | Configuration, keyboard controls, notifications, offline use, media, and tests |
 | [macOS relay](macos-relay.md) | Menu, permissions, updates, diagnostics, and service management |
 | [Linux TLS](linux-mtls.md) | Credential import, diagnostics, reconnect, and renewal |
