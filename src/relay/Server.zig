@@ -24,7 +24,7 @@ pub const RunError = std.Io.net.Ip6Address.ParseError || std.Io.net.IpAddress.Li
     std.Io.net.Server.AcceptError;
 
 pub const HandleError = http2.Error || Journal.AcceptError || Journal.CheckCursorError ||
-    Assets.LookupError || Assets.EvictedError || enrichment.PageError || std.fmt.ParseIntError || error{
+    Journal.ResetError || Assets.LookupError || Assets.EvictedError || enrichment.PageError || std.fmt.ParseIntError || error{
     BodyTooLarge,
     CertificateExpired,
     AssetResponseLimit,
@@ -33,6 +33,7 @@ pub const HandleError = http2.Error || Journal.AcceptError || Journal.CheckCurso
     InvalidAsset,
     UnsupportedExtension,
     TooManyStreams,
+    RelayCacheResetRequired,
 };
 pub const PollEventsError = http2.Error || Journal.EventsError || Journal.CheckCursorError ||
     std.Io.Writer.Error;
@@ -119,6 +120,12 @@ pub fn handle(self: *Server, a: u.Allocator, req: *Request, peer: *Tls.c.ZrTls) 
     const split = std.mem.indexOfScalar(u8, target, '?') orelse target.len;
     const path = target[0..split];
     const query = if (split < target.len) target[split + 1 ..] else "";
+    const resetting = req.head.method == .POST and u.eq(path, "/v1/reset");
+    self.core.lock();
+    const reset_required = self.core.reset_required;
+    self.core.unlock();
+    if (reset_required and !resetting and !(req.head.method == .GET and u.eq(path, "/v1/status")))
+        return error.RelayCacheResetRequired;
     if (req.head.method == .GET and std.mem.startsWith(u8, path, "/v1/assets/")) {
         // Four media responses leave capacity for SSE and ordinary commands.
         if (self.asset_responses.fetchAdd(1, .acq_rel) >= 4) {
@@ -138,7 +145,8 @@ pub fn handle(self: *Server, a: u.Allocator, req: *Request, peer: *Tls.c.ZrTls) 
         return;
     }
     var input: ?t.SendInput = null;
-    if (req.head.method == .POST and u.eq(path, "/v1/messages")) {
+    var reset_epoch: ?[]const u8 = null;
+    if (resetting or (req.head.method == .POST and u.eq(path, "/v1/messages"))) {
         const content_type = req.head.content_type orelse return error.InvalidRequest;
         var media_type = std.mem.splitScalar(u8, content_type, ';');
         if (!std.ascii.eqlIgnoreCase(
@@ -147,7 +155,20 @@ pub fn handle(self: *Server, a: u.Allocator, req: *Request, peer: *Tls.c.ZrTls) 
         )) return error.InvalidRequest;
         const body = req.body.items;
         json_bounds.check(body, t.max_body, 8192) catch return error.InvalidRequest;
-        input = (std.json.parseFromSlice(
+        if (resetting) {
+            if (query.len != 0) return error.InvalidRequest;
+            const value = std.json.parseFromSliceLeaky(
+                struct { server_epoch: []const u8 },
+                a,
+                body,
+                .{},
+            ) catch |err| {
+                if (err == error.OutOfMemory) return error.OutOfMemory;
+                return error.InvalidRequest;
+            };
+            if (value.server_epoch.len == 0 or value.server_epoch.len > 128) return error.InvalidRequest;
+            reset_epoch = value.server_epoch;
+        } else input = (std.json.parseFromSlice(
             t.SendInput,
             a,
             body,
@@ -164,7 +185,34 @@ pub fn handle(self: *Server, a: u.Allocator, req: *Request, peer: *Tls.c.ZrTls) 
         self.core.lock();
         defer self.core.unlock();
         const j = self.core.journal;
-        if (input) |v| {
+        if (reset_epoch) |expected| {
+            const current = try j.epoch(a);
+            const fresh = u.eq(expected, current);
+            if (fresh) {
+                try j.begin();
+                errdefer j.rollback();
+                try j.reset(a);
+                const epoch = try j.epoch(a);
+                response = try u.json(a, .{
+                    .server_epoch = epoch,
+                    .cursor = try t.cursor(a, epoch, try j.sequence()),
+                });
+                try j.commit();
+                self.core.reset_required = false;
+                self.core.read_ready = false;
+                self.core.last_scan_ms = 0;
+                self.core.ingest_pending = true;
+                self.core.contacts_status = .{};
+                self.core.degraded = "rebuilding_cache";
+            } else {
+                // A lost response or another client's reset must not reset twice.
+                if (!t.validId(current)) return error.ResyncRequired;
+                response = try u.json(a, .{
+                    .server_epoch = current,
+                    .cursor = try t.cursor(a, current, try j.sequence()),
+                });
+            }
+        } else if (input) |v| {
             const accepted = try j.accept(
                 a,
                 v,
@@ -182,6 +230,7 @@ pub fn handle(self: *Server, a: u.Allocator, req: *Request, peer: *Tls.c.ZrTls) 
                 .adapter_ready = self.core.read_ready,
                 .source_features = self.core.source_features,
                 .capabilities = .{
+                    .state_reset_v1 = true,
                     .read_history = self.core.read_ready,
                     .live_messages = self.core.read_ready,
                     .send_direct = self.core.read_ready and self.core.automation_ready,
@@ -538,6 +587,11 @@ const ErrorMapping = struct {
 };
 fn mapError(err: anytype) ErrorMapping {
     return switch (err) {
+        error.RelayCacheResetRequired => .{
+            .status = .conflict,
+            .code = "relay_cache_reset_required",
+            .message = "Reset client and relay data from the client's Settings to rebuild incompatible IDs.",
+        },
         error.InvalidRequest => .{
             .status = .bad_request,
             .code = "invalid_request",

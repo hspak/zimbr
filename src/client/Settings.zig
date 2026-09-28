@@ -11,6 +11,7 @@ enter_to_send: bool = true,
 visible: bool = false,
 required: bool = false,
 confirm_reset: bool = false,
+reset_pending: bool = false,
 failure: c.ZcError = std.mem.zeroes(c.ZcError),
 
 pub const field_names = .{
@@ -53,6 +54,7 @@ pub fn toConfig(s: *const Settings, a: std.mem.Allocator, base: Config) std.mem.
 
 /// The required pane stays open until the caller applies a successfully saved config.
 pub fn close(s: *Settings) void {
+    if (s.reset_pending) return;
     s.confirm_reset = false;
     if (!s.required) s.visible = false;
 }

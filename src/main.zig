@@ -273,7 +273,7 @@ const Service = struct {
         const core = try a.create(Core);
         core.* = .{
             .io = self.io,
-            .journal = try Journal.open(db_path),
+            .journal = try Journal.openForReset(db_path),
             .source_path = source_path,
             .event_limit = event_limit,
             .automation_ready = if (read_only) false else fake,
@@ -292,7 +292,10 @@ const Service = struct {
         core.assets_service = Assets.init(a, self.io, data, attachment_root) catch null;
         core.assets_reason = if (core.assets_service != null) "" else "image_service_unavailable";
         core.journal.changed = .{ .signal = &core.changed, .io = self.io };
-        try core.journal.recover(a);
+        core.reset_required = !t.validId(try core.journal.epoch(a));
+        if (core.reset_required) {
+            core.degraded = "relay_cache_reset_required";
+        } else try core.journal.recover(a);
         if (comptime !fake and builtin.os.tag == .macos) {
             contact_directory.startAuthorizationChecks();
             const authorization = try std.Thread.spawn(

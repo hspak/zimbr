@@ -354,6 +354,13 @@ pub fn loop(core: *Core) void {
     var query_failed = false;
     var source_version: []const u8 = "";
     while (!core.stop.load(.acquire)) {
+        core.lock();
+        const reset_required = core.reset_required;
+        core.unlock();
+        if (reset_required) {
+            core.sleep(1000);
+            continue;
+        }
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
         const a = arena.allocator();

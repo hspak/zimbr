@@ -16,7 +16,7 @@ pub const QueryError = Db.QueryError;
 pub const ReadError = Db.QueryError || u.Allocator.Error;
 pub const RecordError = Db.QueryError || std.json.ParseError(std.json.Scanner);
 pub const EventsError = Db.QueryError || Json.InitError;
-pub const OpenError = ReadError || error{RandomUnavailable};
+pub const OpenError = ReadError || error{ RandomUnavailable, RelayCacheResetRequired };
 pub const BeginError = error{DatabaseFailure};
 pub const CommitError = error{DatabaseFailure};
 pub const ConversationError = ReadError || error{RandomUnavailable};
@@ -53,6 +53,13 @@ pub const IdentityPageError = PageError;
 pub const BackfillIdentitiesError = RecordError || error{RandomUnavailable};
 
 pub fn open(path: [:0]const u8) OpenError!Journal {
+    return openImpl(path, false);
+}
+/// Open an incompatible journal only for a service that gates normal work until reset.
+pub fn openForReset(path: [:0]const u8) OpenError!Journal {
+    return openImpl(path, true);
+}
+fn openImpl(path: [:0]const u8, allow_reset: bool) OpenError!Journal {
     const db = try Db.open(path, false);
     errdefer db.close();
     try db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;");
@@ -69,6 +76,9 @@ pub fn open(path: [:0]const u8) OpenError!Journal {
     }
     const version = try db.scalar("SELECT version FROM relay_meta");
     if (version < 1 or version > 6) return error.SchemaUnsupported;
+    const meta = try db.prepare("SELECT epoch FROM relay_meta");
+    defer meta.close();
+    if (!try meta.step() or (!allow_reset and !t.validId(meta.bytes(0)))) return error.RelayCacheResetRequired;
     if (version < 6) try db.exec("UPDATE relay_meta SET version=6");
     try db.exec("COMMIT");
     // Connection-local and bounded: normalization changes take effect on reopen.
@@ -413,10 +423,18 @@ pub fn reset(self: Journal, a: u.Allocator) ResetError!void {
         v.candidate_message_id = null;
         v.error_info = .{
             .code = "source_reset",
-            .message = "Source changed; this request is held for review.",
+            .message = "Relay state changed; this request is held for review.",
             .outcome = .uncertain,
         };
-        _ = try self.updateRequest(a, v);
+        if (t.validId(v.request_id) and t.validId(v.server_epoch)) {
+            _ = try self.updateRequest(a, v);
+        } else {
+            // Keep old idempotency records private; never replay incompatible IDs.
+            try self.execute("UPDATE send_requests SET state='unknown',record=?,message_id=NULL WHERE id=?", &.{
+                .{ .text = try u.json(a, v) },
+                .{ .text = v.request_id },
+            });
+        }
     }
 }
 pub fn checkCursor(self: Journal, a: u.Allocator, cursor: []const u8) CheckCursorError!i64 {

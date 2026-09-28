@@ -107,6 +107,26 @@ network failure. Idempotency identities are never automatically pruned.
 
 ## Source resets
 
+`POST /v1/reset` accepts JSON `{"server_epoch":"<epoch from /v1/status>"}`
+from an enrolled mTLS client. Status advertises `state_reset_v1`. When the supplied
+epoch matches, the relay transactionally creates a fresh epoch, clears generated
+history, identity and media records, and restarts ingestion. Existing streams
+must resync. Unreferenced media files are reclaimed in the background; source
+Messages and Contacts, TLS configuration and credentials are untouched.
+
+The response is HTTP 200 with `server_epoch` and `cursor`, like `/v1/sync`. If the
+epoch already changed, it returns the current snapshot without another reset,
+making a retry of the same request safe after a lost response. Keep the original
+epoch until a complete, valid response arrives. The reset affects every connected
+client. Pending sends are held as `unknown`; idempotency records are retained and
+never automatically resent. Old-format send identities remain private in the
+journal rather than being emitted as invalid events.
+
+A relay with an incompatible stored epoch accepts only `/v1/status` and this
+reset operation; other requests return HTTP 409 `relay_cache_reset_required`.
+The reset's expected epoch is opaque so the same operation can recover old IDs.
+Invalid bodies return 400; failed transactions roll back and return 503.
+
 On macOS, the source identity uses a persistent volume UUID, inode, and birth
 time, so reboot-time device renumbering preserves the journal. Source identity
 changes or unexplained high-water/anchor mismatches rebuild normalized

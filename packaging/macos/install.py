@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Stage/install the signed mTLS relay under its stable per-user identity."""
 import argparse
+from contextlib import closing
 import datetime
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -9,6 +11,7 @@ import plistlib
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -16,7 +19,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT/'tools'))
-from tls_support import private_path, read_json
+from tls_support import private_directory, private_path, read_json
 from signing import default_directory
 from bundle import stage
 from profiles import PROFILES
@@ -82,10 +85,68 @@ def wait_listener(service, cfg):
     raise RuntimeError('Configured TLS listener did not start; relay left stopped for repair')
 
 
+def prepare_journal(data, *, reset=False):
+    """Back up a stopped relay, optionally archiving its DB and derived media.
+
+    Returns the backup directory, or None if there was no journal/cache. The
+    consistent SQLite copy includes committed WAL records, including send history.
+    """
+    private_directory(data)
+    descriptor = os.open(data / 'relay.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, 'r+') as lock:
+        info = os.fstat(lock.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise ValueError('Refusing unsafe relay lock')
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError('Relay is still running; journal left untouched') from None
+        journal = data / 'relay.db'
+        entries = [data / name for name in ('assets', 'relay.db-wal', 'relay.db-shm',
+                                           'relay.db-journal', 'relay.db')]
+        for path in entries:
+            if path.is_symlink():
+                raise ValueError(f'Refusing symlink relay cache: {path}')
+            if path.exists():
+                if path.name == 'assets':
+                    private_directory(path)
+                else:
+                    private_path(path)
+        if not journal.exists() and not (reset and any(path.exists() for path in entries)):
+            return None
+        backups = data / 'backups'
+        backups.mkdir(mode=0o700, exist_ok=True)
+        private_directory(backups)
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ-')
+        backup = Path(tempfile.mkdtemp(prefix=stamp, dir=backups))
+        if journal.exists():
+            # A read-only connection includes committed WAL pages without replaying sends.
+            (backup / 'relay.db').touch(mode=0o600)
+            with closing(sqlite3.connect(journal.as_uri()+'?mode=ro', uri=True)) as source:
+                with closing(sqlite3.connect(backup / 'relay.db')) as target:
+                    source.backup(target)
+        if reset:
+            original = backup / 'original'
+            original.mkdir(mode=0o700)
+            moved = []
+            try:
+                for path in entries:
+                    if path.exists():
+                        path.rename(original / path.name)
+                        moved.append(path)
+            except OSError:
+                for path in reversed(moved):
+                    (original / path.name).rename(path)
+                raise
+        return backup
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--install', action='store_true')
     p.add_argument('--start', action='store_true')
+    p.add_argument('--reset-cache', action='store_true',
+                   help='Archive relay DB, send history and cached media, then rebuild; requires --install')
     p.add_argument('--profile', choices=PROFILES, default='dev', help='Installation identity (default: dev)')
     p.add_argument('--identity', help='Explicit codesign identity override; use - only for disposable ad-hoc builds')
     p.add_argument('--signing-directory', type=Path, default=default_directory(), help='Persistent local signing state (created by signing.py setup)')
@@ -100,6 +161,7 @@ def main():
     profile.verify_binary(args.binary)
     args.image_helper = args.image_helper or args.binary.parent/'image-helper'
     if args.start and not args.install: p.error('--start requires --install')
+    if args.reset_cache and not args.install: p.error('--reset-cache requires --install')
     os.umask(0o077)
     home = Path.home(); data = profile.data(home)
     destination = profile.app(home)
@@ -137,13 +199,9 @@ def main():
     data.mkdir(mode=0o700, parents=True, exist_ok=True)
     if data.is_symlink() or data.stat().st_uid != os.getuid() or data.stat().st_mode & 0o077:
         raise RuntimeError('Unsafe relay state directory; relay left stopped')
-    # SQLite backup is consistent after the service exits; retain epoch and request IDs.
-    if (data/'relay.db').exists():
-        backup = data/'backups'/datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
-        backup.mkdir(mode=0o700, parents=True)
-        with sqlite3.connect((data/'relay.db').as_uri()+'?mode=ro', uri=True) as source, sqlite3.connect(backup/'relay.db') as target:
-            source.backup(target)
-        print('Consistent journal backup:', backup/'relay.db')
+    backup = prepare_journal(data, reset=args.reset_cache)
+    if backup:
+        print('Archived relay cache:' if args.reset_cache else 'Consistent journal backup:', backup)
     # Immutable credential generation: never overwrite files a running process used.
     generation = Path(tempfile.mkdtemp(prefix='tls-', dir=data))
     filenames = {'server_cert_file': 'server.pem', 'server_key_file': 'server-key.pem', 'client_ca_file': 'ca.pem', 'device_allowlist_file': 'devices.json'}
@@ -159,7 +217,9 @@ def main():
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists(): shutil.rmtree(destination)
     shutil.copytree(bundle, destination)
-    subprocess.run([str(destination/'Contents/MacOS/relay'), 'setup'], check=True)
+    # Existing incompatible journals must reach the authenticated reset API.
+    if not (data/'relay.db').exists():
+        subprocess.run([str(destination/'Contents/MacOS/relay'), 'setup'], check=True)
     (data/'token').unlink(missing_ok=True)
     (data/'relay.log').touch(mode=0o600); (data/'relay.log').chmod(0o600)
     agents = home/'Library/LaunchAgents'; agents.mkdir(parents=True, exist_ok=True)

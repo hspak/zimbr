@@ -4,12 +4,16 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: tools/update-relay.sh [--profile dev|release] [--release=safe]
+Usage: tools/update-relay.sh [--profile dev|release] [--release=safe] [--reset-cache]
 
 Build the relay and run its tests in ReleaseSafe, install the signed app using
 the existing credentials/signing identity, restart it, and verify the running
 executable. The default profile is dev; release must be selected explicitly.
 Run as the Mac login user, without sudo.
+
+--reset-cache archives the relay database and cached media before rebuilding
+them. This clears relay send history and pending sends; the backup retains them.
+Apple Messages, TLS credentials, and connection settings are preserved.
 
 Defaults use the toolchain under .tools, falling back to zig/python3 on PATH.
 Overrides: ZIMBR_ZIG, ZIMBR_PYTHON, ZIMBR_OPENSSL_PREFIX, ZIMBR_OPENSSL_LICENSE.
@@ -18,10 +22,12 @@ EOF
 }
 
 profile=dev
+reset_cache=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --release=safe) shift ;;
+    --reset-cache) reset_cache=true; shift ;;
     --profile)
       [ "$#" -ge 2 ] || { usage >&2; exit 2; }
       profile=$2; shift 2 ;;
@@ -69,7 +75,9 @@ printf 'Building relay %s with --release=safe\n' "$revision"
 
 # install.py signs/validates before stopping the old process, backs up the
 # journal, waits for process exit, then bootstraps and checks the new listener.
-"$python" packaging/macos/install.py --profile "$profile" --install --start \
+install_options=(--profile "$profile" --install --start)
+if "$reset_cache"; then install_options+=(--reset-cache); fi
+"$python" packaging/macos/install.py "${install_options[@]}" \
   --binary "$build_dir/bin/relay" --image-helper "$build_dir/bin/image-helper" \
   --phone-license "$build_dir/share/zimbr/licenses/libPhoneNumber-LICENSE" \
   --openssl-license "$openssl_license"

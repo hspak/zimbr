@@ -885,14 +885,9 @@ fn sweepOrphans(self: *Assets, core: *Core) !void {
         const n = c.zr_media_scan_next(scan, &name, name.len);
         if (n <= 0) break;
         const key = name[0..@intCast(n)];
-        const version_start = t.id_length + 1;
-        const variant_start = 2 * version_start;
-        if (key.len <= variant_start or key[version_start - 1] != '-' or
-            key[variant_start - 1] != '-' or !t.validId(key[0..t.id_length]) or
-            !t.validId(key[version_start .. variant_start - 1]) or std.meta.stringToEnum(
-            Variant,
-            key[variant_start..],
-        ) == null) continue;
+        // The private directory contains only derivatives and active temporary
+        // files. Reclaim obsolete filename formats after a journal reset too.
+        if (std.mem.startsWith(u8, key, ".tmp-")) continue;
         core.lock();
         const referenced = referenced: {
             defer core.unlock();
@@ -923,6 +918,13 @@ pub fn loop(core: *Core) void {
     const self = if (core.assets_service) |*value| value else return;
     var maintenance: i64 = 0;
     while (!core.stop.load(.acquire)) {
+        core.lock();
+        const reset_required = core.reset_required;
+        core.unlock();
+        if (reset_required) {
+            core.sleep(1000);
+            continue;
+        }
         if (self.worker_busy.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) {
             core.sleep(250);
             continue;

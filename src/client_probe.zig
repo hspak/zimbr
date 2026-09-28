@@ -124,6 +124,7 @@ fn control(init: std.process.Init, worker: *Worker) !void {
             const raw = try u.json(a, .{
                 .online = v.online,
                 .status = v.status,
+                .reset = v.reset,
                 .chats = v.snapshot.chats.len,
                 .messages = v.snapshot.messages.len,
                 .pending = v.snapshot.pending.len,

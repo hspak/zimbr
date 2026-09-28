@@ -140,6 +140,7 @@ zig build test-macos-enrichment -Dopenssl-prefix=/absolute/openssl-3.5
 python3 -m pip install -r tools/requirements-tls.txt
 python3 tests/integration.py
 python3 tests/enrichment.py
+python3 tests/relay_reset.py
 python3 tests/assets.py
 python3 tests/links.py
 python3 tests/reactions.py
@@ -272,6 +273,34 @@ Defaults use the Apple Silicon Zig, OpenSSL, and Python installations under
 `.tools`, with PATH fallbacks for Zig and Python. Use `ZIMBR_ZIG`, `ZIMBR_PYTHON`,
 `ZIMBR_OPENSSL_PREFIX`, and `ZIMBR_OPENSSL_LICENSE` to override those paths;
 `./tools/update-relay.sh --help` describes the options. Run without `sudo`.
+
+The client's **Settings → Client and relay data → Reset client and relay…**
+action resets both caches after confirmation. A relay with incompatible stored
+IDs stays reachable for status and authenticated reset requests while ingestion,
+sends and ordinary reads are paused. Updating an existing installation preserves
+that journal so the client can request recovery; no manual database removal is
+needed. An old binary must be updated once to expose the reset API.
+
+To instead archive and reset the relay's generated state during installation:
+
+```sh
+./tools/update-relay.sh --profile dev --reset-cache
+```
+
+Use `--profile release` for the release installation. This stops the relay,
+backs up the journal (including committed WAL records), and archives the old
+database, sidecars, and cached media under the profile's `backups/` directory.
+The new relay creates a fresh epoch and rebuilds messages, identities, and media
+from their sources. Connection settings, TLS credentials, and Apple Messages
+are preserved. Relay send history and pending sends remain only in the backup;
+check Messages before resending anything whose outcome was uncertain.
+
+`InvalidEpoch` in the client can mean the relay still serves an old UUID epoch.
+The offline client `--reset-cache` command cannot change the relay's epoch.
+A current relay reports `relay_cache_reset_required` for ordinary API requests
+until the client requests a reset, instead of serving incompatible IDs.
+The reset option also installs the current binary, since an old binary would
+generate old IDs even with a fresh database.
 
 The installer also checks that the restarted service opens its configured
 listener. For configuration and Messages access diagnostics, run:

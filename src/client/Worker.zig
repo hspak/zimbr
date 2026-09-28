@@ -41,6 +41,8 @@ content_generation: u64 = 0,
 credential_generation: u64 = 0,
 generation: u64 = 0,
 ack: u64 = 0,
+reset: Reset = .idle,
+reset_epoch: []const u8 = "",
 job: enum {
     idle,
     status,
@@ -53,6 +55,8 @@ job: enum {
     recover,
     enrichment,
     hydrate,
+    reset_status,
+    reset,
 } = .idle,
 // The complete URL must fit this capacity, so any accepted path fits too.
 job_path: [c.ZC_REQUEST_URL_CAPACITY]u8 = undefined,
@@ -89,6 +93,7 @@ transport_error: c.ZcError = std.mem.zeroes(c.ZcError),
 identity: c.ZcIdentity = std.mem.zeroes(c.ZcIdentity),
 
 const a = std.heap.page_allocator;
+pub const Reset = enum { idle, pending, failed, complete };
 pub const Command = struct {
     kind: enum {
         select,
@@ -102,6 +107,7 @@ pub const Command = struct {
         unhide,
         enrichment,
         hydrate,
+        reset,
     },
     key: []const u8 = "",
     text: []const u8 = "",
@@ -128,6 +134,7 @@ pub const RelayStatus = struct {
     server_epoch: []const u8,
     adapter_ready: bool,
     capabilities: struct {
+        state_reset_v1: bool = false,
         send_direct: bool,
         reply_existing: bool,
         read_history: bool = false,
@@ -177,6 +184,7 @@ pub const View = struct {
     shared: ?*SharedSnapshot = null,
     content_generation: ?u64 = null,
     credential_generation: u64 = 0,
+    reset: Reset = .idle,
     pub fn destroy(v: *View) void {
         if (v.shared) |shared| shared.release();
         v.arena.deinit();
@@ -212,6 +220,7 @@ pub fn shutdown(s: *Worker) void {
     s.stop.store(true, .release);
     s.wake();
     if (s.thread) |th| th.join();
+    a.free(s.reset_epoch);
     for (s.wake_pipe) |fd| if (fd >= 0) {
         _ = u.c.close(fd);
     };
@@ -264,6 +273,7 @@ fn run(s: *Worker) void {
     s.work() catch |err| {
         log.err("client worker: {s}", .{@errorName(err)});
         s.status = "Client cache unavailable. Check the data directory and restart.";
+        if (s.reset == .pending) s.reset = .failed;
         s.online = false;
         const v = a.create(View) catch return;
         v.* = .{
@@ -278,6 +288,7 @@ fn run(s: *Worker) void {
                 .more = false,
             },
             .status = s.status,
+            .reset = s.reset,
             .cache_unavailable = true,
             .online = false,
             .send_direct = false,
@@ -318,7 +329,7 @@ fn work(s: *Worker) !void {
     while (true) {
         try s.expireUnknown();
         try s.drain();
-        try s.resolveDirect();
+        if (s.reset == .idle) try s.resolveDirect();
         if (s.stop.load(.acquire)) break;
         if (s.net == null and !s.auth_blocked) try s.connect();
         if (s.net) |n| {
@@ -355,7 +366,7 @@ fn work(s: *Worker) !void {
                 s.status = if (s.send_direct or s.reply_existing) "Connected" else "Connected · relay cannot send; run relay doctor on the Mac";
                 s.dirty = true;
             }
-            if (s.job == .idle and !s.auth_blocked and u.now() >= s.retry_at) try s.schedule();
+            if (s.job == .idle and !s.auth_blocked and s.reset != .complete and u.now() >= s.retry_at) try s.schedule();
         }
         if (s.dirty and u.now() - s.last_published >= 16) try s.publish();
         // Network activity and commands wake immediately; timers only bound
@@ -363,7 +374,7 @@ fn work(s: *Worker) !void {
         const now = u.now();
         var delay: i64 = if (s.dirty) @max(0, 16 - (now - s.last_published)) else 1000;
         delay = @min(delay, @max(0, s.expiry_at - now));
-        if (!s.auth_blocked and s.job == .idle) {
+        if (!s.auth_blocked and s.job == .idle and s.reset != .complete) {
             if (!s.online and !s.stream_active) delay = @min(delay, @max(0, s.retry_at - now));
             if (s.online) delay = @min(
                 delay,
@@ -387,6 +398,7 @@ fn connect(s: *Worker) !void {
     );
     if (s.net == null) {
         s.disconnected(0);
+        if (s.reset == .pending) s.resetError("Could not connect to reset the relay. Local data was kept; retry after fixing the connection.");
         return;
     }
     s.status = "Connecting with mTLS…";
@@ -517,6 +529,13 @@ fn schedule(s: *Worker) !void {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const ar = arena.allocator();
+    if (s.reset == .pending) {
+        if (s.reset_epoch.len == 0) {
+            try s.request(.reset_status, "/v1/status", .{}, null);
+        } else try s.request(.reset, "/v1/reset", .{}, try u.json(ar, .{ .server_epoch = s.reset_epoch }));
+        return;
+    }
+    if (s.reset != .idle) return;
     // Contact bootstrap retains its cursor and extension handshake, but text
     // history can run between pages or preempt an in-flight directory GET.
     if (!s.need_sync) if (s.identities_before) |before| {
@@ -704,6 +723,21 @@ fn complete(s: *Worker) !void {
         });
     }
     s.job = .idle;
+    if (job == .reset or job == .reset_status) {
+        if (status != 200) {
+            s.resetError(if (status == 404 or status == 405)
+                "This relay does not support reset yet. Update the relay on the Mac, then retry. Local data was kept."
+            else
+                "Relay reset was not confirmed. Local data was kept; check the connection and retry.");
+            return;
+        }
+        s.handleResponse(ar, job, raw) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            s.resetError("Invalid relay reset response. Local data was kept; update the relay and retry.");
+        };
+        s.dirty = true;
+        return;
+    }
     if (job != .status) s.content_dirty = true;
     if (status < 200 or status >= 300) {
         if (job == .hydrate and status != 401 and status != 403 and (status != 0 or request_error.kind == c.ZC_NETWORK)) {
@@ -772,13 +806,41 @@ fn complete(s: *Worker) !void {
             "Response interrupted. Checking the original request ID; no automatic resend.",
         );
         s.disconnected(0);
-        s.status = "Invalid relay response · saved messages remain available";
+        s.status = if (err == error.InvalidEpoch)
+            "Relay uses incompatible IDs · use Reset client and relay in Settings"
+        else
+            "Invalid relay response · saved messages remain available";
     };
     s.dirty = true;
 }
 fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), raw: []const u8) !void {
     try json_bounds.check(raw, t.max_history_bytes, 512 * 1024);
     switch (job) {
+        .reset_status => {
+            const v = try std.json.parseFromSliceLeaky(
+                struct { server_epoch: []const u8 },
+                ar,
+                raw,
+                .{ .ignore_unknown_fields = true },
+            );
+            // Recovery accepts the old epoch as an opaque conditional token.
+            if (v.server_epoch.len == 0 or v.server_epoch.len > 128) return error.InvalidEpoch;
+            const epoch = try a.dupe(u8, v.server_epoch);
+            a.free(s.reset_epoch);
+            s.reset_epoch = epoch;
+        },
+        .reset => {
+            const v = try std.json.parseFromSliceLeaky(
+                struct { server_epoch: []const u8, cursor: []const u8 },
+                ar,
+                raw,
+                .{ .ignore_unknown_fields = true },
+            );
+            if (!t.validId(v.server_epoch) or u.eq(v.server_epoch, s.reset_epoch)) return error.InvalidEpoch;
+            _ = try t.parseCursor(v.cursor, v.server_epoch);
+            s.reset = .complete;
+            s.status = "Relay reset complete · clearing local data…";
+        },
         .status => {
             const v = try std.json.parseFromSliceLeaky(
                 RelayStatus,
@@ -798,6 +860,15 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
                 s.auth_blocked = true;
                 s.online = false;
                 s.status = "Unsupported relay API version";
+                return;
+            }
+            if (!t.validId(v.server_epoch)) {
+                if (s.stream_active) c.zc_net_cancel_stream(s.net.?);
+                s.stream_active = false;
+                s.sse.reset();
+                s.auth_blocked = true;
+                s.online = false;
+                s.status = "Relay uses incompatible IDs · use Reset client and relay in Settings";
                 return;
             }
             var identities = false;
@@ -974,6 +1045,13 @@ fn finishBootstrap(s: *Worker, ar: u.Allocator) !void {
     s.need_history = true;
     try s.attach(ar);
 }
+fn resetError(s: *Worker, message: []const u8) void {
+    s.reset = .failed;
+    s.status = message;
+    s.auth_blocked = true;
+    s.online = false;
+    s.dirty = true;
+}
 fn drain(s: *Worker) !void {
     // A send can preempt an idempotent background GET. A POST is never
     // cancelled or repeated here: its result must remain authoritative.
@@ -983,7 +1061,7 @@ fn drain(s: *Worker) !void {
             s.mutex.unlock(s.io);
             break;
         }
-        if (s.commands.items[0].kind == .send and s.job != .idle and !s.stop.load(.acquire)) {
+        if (s.reset == .idle and s.commands.items[0].kind == .send and s.job != .idle and !s.stop.load(.acquire)) {
             if (s.online and (s.job == .history or s.job == .preview or s.job == .status or s.job == .recover or s.job == .enrichment or s.job == .hydrate)) {
                 switch (s.job) {
                     .history => {
@@ -1012,11 +1090,31 @@ fn drain(s: *Worker) !void {
         var arena = std.heap.ArenaAllocator.init(a);
         defer arena.deinit();
         const ar = arena.allocator();
+        if (s.reset != .idle and cmd.kind != .reset and cmd.kind != .reconnect and cmd.kind != .draft) continue;
         if ((cmd.kind == .select or cmd.kind == .older) and (s.job == .hydrate or s.job == .enrichment or s.job == .preview or s.job == .identities or (cmd.kind == .select and s.job == .history))) {
             c.zc_net_cancel_request(s.net.?);
             s.job = .idle;
         }
         switch (cmd.kind) {
+            .reset => {
+                if (s.reset == .pending or s.reset == .complete) continue;
+                if (s.job == .send) try s.store.outcome(
+                    s.job_key,
+                    "unknown",
+                    "Relay reset requested; the original send may already have reached Messages.",
+                );
+                if (s.net) |n| c.zc_net_free(n);
+                s.net = null;
+                s.job = .idle;
+                s.stream_active = false;
+                s.sse.reset();
+                s.online = false;
+                s.auth_blocked = false;
+                s.retry_at = 0;
+                s.reset = .pending;
+                s.status = "Resetting relay data…";
+                s.dirty = true;
+            },
             .hydrate => {
                 if (!u.eq(cmd.key, s.selected)) continue;
                 const ids = std.json.parseFromSliceLeaky([]const []const u8, ar, cmd.text, .{}) catch continue;
@@ -1097,6 +1195,10 @@ fn drain(s: *Worker) !void {
                 s.need_history = true;
             },
             .reconnect => {
+                if (s.reset == .pending or s.reset == .complete) continue;
+                s.reset = .idle;
+                a.free(s.reset_epoch);
+                s.reset_epoch = "";
                 if (s.identities_before) |before| a.free(before);
                 s.identities_before = null;
                 if (s.job == .send) {
@@ -1247,6 +1349,7 @@ fn publish(s: *Worker) !void {
         .reply_existing = s.reply_existing,
         .generation = s.generation,
         .ack = s.ack,
+        .reset = s.reset,
         .loading_history = s.need_history or s.job == .history,
         .redirect_from = try arena.allocator().dupe(u8, s.redirect_from),
     };

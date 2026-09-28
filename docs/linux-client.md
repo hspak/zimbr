@@ -73,13 +73,20 @@ directories with no symlinks. The GUI never receives Apple account credentials.
 Saving reconnects both messaging and media with the new settings, preserving
 drafts, cached messages and send recovery.
 
-To start with a fresh local cache, open **Settings → Local data → Reset local
-data…**, then **Delete and resync**. The client stops its messaging and media
-workers, recreates `client.db`, deletes cached media, and reconnects. This removes
-local messages, drafts, pending-send records, unread counts and hidden-chat
-preferences. Saved connection settings and credential files are retained;
-messages on the Mac are unaffected. A reset does not cancel sends already
-accepted by the relay.
+To rebuild cached state, open **Settings → Client and relay data → Reset client
+and relay…**, then **Reset and resync**. The client first requests an authenticated
+relay reset. The relay creates a fresh epoch and rebuilds history, identities and
+media from their sources; other connected clients resync too. Only after the
+relay confirms does this client stop its workers, recreate `client.db`, delete
+cached media and reconnect. Local drafts, pending-send records, unread counts and
+hidden-chat preferences are removed. Saved connection settings, credential files
+and Apple Messages are retained. The relay preserves send identities and holds
+pending sends for review; it cannot cancel an operation already received by Messages.
+
+If the relay is offline, rejects the request or returns an incomplete response,
+local data is kept and Settings shows the failure. Retry uses the original epoch
+so a lost response does not reset the relay twice. An older relay without the
+reset API must be updated on the Mac first.
 
 If the UI will not open, close the client and run:
 
@@ -92,8 +99,9 @@ zimbr --reset-cache --data-dir /path/to/client-state
 The command works offline without opening a window and exits after resetting.
 It refuses to run while another client holds the selected cache open. A corrupt
 database can also be reset; if its settings cannot be recovered, configure the
-connection again in Settings. This only resets the client: an incompatible
-epoch or IDs still stored by the relay require a separate relay reset.
+connection again in Settings. This offline CLI command only resets the client;
+the Settings action resets both client and relay. For manual relay recovery, see
+[relay update and reset](macos-relay.md#update-the-running-relay).
 
 Provision separate credentials for each profile and enter their paths in Settings.
 
@@ -325,6 +333,7 @@ python3 tests/client_native_tls.py
 python3 tests/client_tls.py
 python3 tests/client_settings.py
 python3 tests/client_reset.py
+python3 tests/client_relay_reset.py
 python3 tests/client_integration.py
 python3 tests/conversations.py
 python3 tests/client_transport.py

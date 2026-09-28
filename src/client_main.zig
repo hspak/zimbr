@@ -545,6 +545,16 @@ const App = struct {
     }
     fn update(s: *App) !void {
         if (s.worker.take()) |v| incoming: {
+            if (s.settings.reset_pending) switch (v.reset) {
+                .idle, .pending => {},
+                .complete => s.finishReset(),
+                .failed => {
+                    s.settings.reset_pending = false;
+                    s.settings.failure = std.mem.zeroes(bridge.ZcError);
+                    const message = v.status[0..@min(v.status.len, s.settings.failure.message.len - 1)];
+                    @memcpy(s.settings.failure.message[0..message.len], message);
+                },
+            };
             if (s.pending_key) |key| {
                 // An older publication may still be in flight after a click,
                 // including a response to a selection since superseded.
@@ -1095,6 +1105,7 @@ const App = struct {
         s.dragging = false;
     }
     fn saveSettings(s: *App) !void {
+        if (s.settings.reset_pending) return;
         // Validate and commit before replacing either worker's credential snapshot.
         const candidate = try s.settings.toConfig(s.config_allocator, s.worker.config);
         if (!candidate.check(&s.settings.failure)) {
@@ -1114,7 +1125,14 @@ const App = struct {
         const message = "Could not save settings. Check the state directory is writable and try again.";
         @memcpy(s.settings.failure.message[0..message.len], message);
     }
-    fn resetLocalData(s: *App) void {
+    fn resetLocalData(s: *App) !void {
+        if (s.settings.reset_pending) return;
+        if (s.settings.required or (if (s.view) |v| v.cache_unavailable else false)) return error.RelayConnectionRequired;
+        try s.worker.push(.{ .kind = .reset });
+        s.settings.reset_pending = true;
+        s.settings.failure = std.mem.zeroes(bridge.ZcError);
+    }
+    fn finishReset(s: *App) void {
         var next = s.worker.config;
         next.reset_cache = true;
         next.settings = false;
@@ -1143,10 +1161,12 @@ const App = struct {
             s.text.height(failure, 14, width) + 12
         else
             @as(f32, 0)) + 20;
-        const reset_help = if (s.settings.confirm_reset)
-            "Delete cached messages, media, drafts and pending-send records? Messages on your Mac, saved settings and certificates are kept. This cannot be undone."
+        const reset_help = if (s.settings.reset_pending)
+            "Waiting for the relay to confirm its reset. Local data will be cleared after it succeeds."
+        else if (s.settings.confirm_reset)
+            "Reset the relay for all connected clients, then delete local history, media, drafts and pending-send records? Messages on your Mac, settings and certificates are kept. Relay sends are held for review."
         else
-            "Rebuild local history and media from your relay. This also removes drafts and pending-send records. Saved settings and certificates are kept.";
+            "Rebuild cached history and media on this device and the relay. Local drafts and pending-send records are removed after the relay confirms. Settings and certificates are kept.";
         const reset_buttons_y = reset_y + 25 + s.text.height(reset_help, 14, width) + 12;
         const content_height = reset_buttons_y + 48;
         const viewport = rl.Rectangle{
@@ -1229,9 +1249,9 @@ const App = struct {
             theme.colors.danger,
             theme.colors.paper,
         );
-        s.text.drawLine("Local data", x, top + reset_y, 16, width, theme.colors.ink, theme.colors.paper);
+        s.text.drawLine("Client and relay data", x, top + reset_y, 16, width, theme.colors.ink, theme.colors.paper);
         s.text.draw(reset_help, x, top + reset_y + 25, 14, width, theme.colors.muted, theme.colors.paper);
-        const reset_label = if (s.settings.confirm_reset) "Delete and resync" else "Reset local data…";
+        const reset_label = if (s.settings.reset_pending) "Resetting…" else if (s.settings.confirm_reset) "Reset and resync" else "Reset client and relay…";
         const reset_size = s.buttonSize(reset_label);
         if (s.button(.{
             .x = x,
@@ -1239,9 +1259,18 @@ const App = struct {
             .width = reset_size.x,
             .height = reset_size.y,
         }, reset_label, false)) {
-            if (s.settings.confirm_reset) s.resetLocalData() else s.settings.confirm_reset = true;
+            if (s.settings.confirm_reset) {
+                s.resetLocalData() catch |err| {
+                    const message = if (err == error.RelayConnectionRequired)
+                        "Save valid connection settings and connect before resetting the relay. Local data was kept."
+                    else
+                        "Could not request a reset. Local data was kept; try again.";
+                    s.settings.failure = std.mem.zeroes(bridge.ZcError);
+                    @memcpy(s.settings.failure.message[0..message.len], message);
+                };
+            } else s.settings.confirm_reset = true;
         }
-        if (s.settings.confirm_reset) {
+        if (s.settings.confirm_reset and !s.settings.reset_pending) {
             const keep_size = s.buttonSize("Keep local data");
             if (s.button(.{
                 .x = x + reset_size.x + 12,
@@ -6295,7 +6324,7 @@ test "required settings block navigation and invalid saves keep setup open" {
     try std.testing.expect(!app.canSend());
 }
 
-test "settings reset requires confirmation and defers deletion until the session stops" {
+test "settings reset waits for relay confirmation before stopping the session for deletion" {
     const reset_context: *const fn (?*clay.Context) callconv(.c) void = @ptrCast(&clay.setCurrentContext);
     reset_context(null);
     defer reset_context(null);
@@ -6330,15 +6359,17 @@ test "settings reset requires confirmation and defers deletion until the session
     };
     defer app.deinit();
     try app.settings.fields[0].set("https://unsaved.example");
+    // This inert worker stands in for a configured connection in the UI test.
+    app.settings.required = false;
     app.draw(WindowMetrics.current().scale);
     const x = clay.getElementData(.ID("sidebar")).bounding_box.x + 32;
     const y = @as(f32, @floatFromInt(rl.getScreenHeight())) - 120;
-    const reset_size = app.buttonSize("Reset local data…");
+    const reset_size = app.buttonSize("Reset client and relay…");
     clickTestFrame(&app, x + reset_size.x / 2, y + reset_size.y / 2);
     try std.testing.expect(app.settings.confirm_reset and app.next_config == null);
     app.settings_scroll = std.math.inf(f32);
     app.draw(WindowMetrics.current().scale);
-    const confirm_size = app.buttonSize("Delete and resync");
+    const confirm_size = app.buttonSize("Reset and resync");
     const keep_size = app.buttonSize("Keep local data");
     clickTestFrame(&app, x + confirm_size.x + 12 + keep_size.x / 2, y + keep_size.y / 2);
     try std.testing.expect(!app.settings.confirm_reset and app.next_config == null);
@@ -6348,6 +6379,40 @@ test "settings reset requires confirmation and defers deletion until the session
     app.settings_scroll = std.math.inf(f32);
     app.draw(WindowMetrics.current().scale);
     clickTestFrame(&app, x + confirm_size.x / 2, y + confirm_size.y / 2);
+    // The contract now requires a relay acknowledgment before any local wipe.
+    try std.testing.expect(app.next_config == null and app.settings.reset_pending);
+    try std.testing.expectEqual(.reset, worker.commands.items[worker.commands.items.len - 1].kind);
+    const publish = struct {
+        fn result(target: *App, reset: Worker.Reset) !void {
+            const view = try a.create(Worker.View);
+            view.* = .{
+                .arena = std.heap.ArenaAllocator.init(a),
+                .snapshot = .{
+                    .chats = &.{},
+                    .messages = &.{},
+                    .pending = &.{},
+                    .selected = "",
+                    .draft = "",
+                    .epoch = "",
+                    .more = false,
+                },
+                .status = "Reset result",
+                .online = false,
+                .send_direct = false,
+                .reply_existing = false,
+                .generation = 1,
+                .ack = 0,
+                .reset = reset,
+            };
+            target.worker.view = view;
+            try target.update();
+        }
+    }.result;
+    try publish(&app, .failed);
+    try std.testing.expect(app.next_config == null and !app.settings.reset_pending);
+    try std.testing.expectEqualStrings("Keep until confirmed and workers stop", try store.draft(ar, "chat"));
+    try app.resetLocalData();
+    try publish(&app, .complete);
     const next = app.next_config.?;
     try std.testing.expect(next.reset_cache and !next.settings);
     try std.testing.expectEqualStrings(data, next.data);

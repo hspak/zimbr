@@ -26,6 +26,7 @@ assets_service: ?Assets = null,
 assets_reason: []const u8 = "starting",
 mutex: Mutex = .init,
 read_ready: bool = false,
+reset_required: bool = false,
 automation_ready: bool = fake,
 automation_error: []const u8 = "automation_unverified",
 degraded: []const u8 = "starting",
@@ -47,6 +48,7 @@ pub const IngestError = Journal.QueryError || std.json.ParseError(std.json.Scann
     NotFound,
     Oversized,
     RandomUnavailable,
+    RelayCacheResetRequired,
     Unsupported,
     WriteFailed,
 };
@@ -78,6 +80,7 @@ pub fn ingestLoop(self: *Core) void {
                 error.SchemaUnsupported => "schema_unsupported",
                 error.DatabaseBusy => "database_busy",
                 error.DatabaseUnavailable => "database_access_required",
+                error.RelayCacheResetRequired => "relay_cache_reset_required",
                 else => "persistence_or_source_failure",
             };
         };
@@ -106,6 +109,7 @@ pub fn ingestLoop(self: *Core) void {
     }
 }
 pub fn ingest(self: *Core, a: u.Allocator) IngestError!void {
+    if (self.reset_required) return error.RelayCacheResetRequired;
     var source = try adapter_api.open(a, self.source_path);
     defer source.close();
     self.source_features = source.features;
