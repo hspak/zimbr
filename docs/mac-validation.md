@@ -12,6 +12,13 @@ acceptance-helper suites. Use synthetic databases for fault injection, source
 replacement, Unicode decoding, routing, cursor replay, and send recovery.
 Never mutate the real Messages database to exercise a failure.
 
+`python3 tests/initial_sync.py` checks initial batch sizes, rollback and restart
+recovery, live event origins, and subsequent reconciliation. To compare initial
+import throughput between fixture relay builds, run
+`python3 tests/initial_sync.py --benchmark --messages 20000 --samples 3`, using
+`--bin-dir` to select each build. Compare equivalent optimization modes; these
+synthetic results do not include native Contacts or image preparation.
+
 Check the app signature and LaunchAgent property list. Cross compilation is
 supplementary; it does not establish native permissions or recipient delivery.
 

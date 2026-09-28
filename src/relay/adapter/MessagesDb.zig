@@ -198,8 +198,8 @@ pub fn chatRows(self: MessagesDb, buffer: *[row_batch_size]i64, after: i64) Chat
     try s.bind(&.{.{ .int = after }});
     return rows(buffer, s);
 }
-/// Returned row IDs borrow buffer until it is reused by the caller.
-pub fn rowsFor(self: MessagesDb, buffer: *[row_batch_size]i64, mode: enum {
+/// Reads at most buffer.len row IDs, borrowing buffer until the caller reuses it.
+pub fn rowsFor(self: MessagesDb, buffer: []i64, mode: enum {
     live,
     backfill,
     recent,
@@ -207,16 +207,20 @@ pub fn rowsFor(self: MessagesDb, buffer: *[row_batch_size]i64, mode: enum {
     chat,
 }, position: i64, chat_row: i64) RowsForError![]const i64 {
     const s = try self.db.prepare(switch (mode) {
-        .live, .rolling => "SELECT ROWID FROM message WHERE ROWID>? ORDER BY ROWID" ++ row_limit,
-        .backfill => "SELECT ROWID FROM message WHERE ROWID<=? ORDER BY ROWID DESC" ++ row_limit,
-        .recent => "SELECT ROWID FROM message WHERE ROWID<=? ORDER BY ROWID DESC" ++ row_limit,
-        .chat => "SELECT message_id FROM chat_message_join WHERE message_id>? AND chat_id=? ORDER BY message_id" ++ row_limit,
+        .live, .rolling => "SELECT ROWID FROM message WHERE ROWID>? ORDER BY ROWID LIMIT ?",
+        .backfill => "SELECT ROWID FROM message WHERE ROWID<=? ORDER BY ROWID DESC LIMIT ?",
+        .recent => "SELECT ROWID FROM message WHERE ROWID<=? ORDER BY ROWID DESC LIMIT ?",
+        .chat => "SELECT message_id FROM chat_message_join WHERE message_id>? AND chat_id=? ORDER BY message_id LIMIT ?",
     });
     defer s.close();
-    if (mode == .chat) try s.bind(&.{ .{ .int = position }, .{ .int = chat_row } }) else try s.bind(&.{.{ .int = position }});
+    if (mode == .chat) try s.bind(&.{
+        .{ .int = position },
+        .{ .int = chat_row },
+        .{ .int = @intCast(buffer.len) },
+    }) else try s.bind(&.{ .{ .int = position }, .{ .int = @intCast(buffer.len) } });
     return rows(buffer, s);
 }
-fn rows(buffer: *[row_batch_size]i64, s: Db.Statement) ![]const i64 {
+fn rows(buffer: []i64, s: Db.Statement) ![]const i64 {
     var len: usize = 0;
     while (try s.step()) : (len += 1) buffer[len] = s.int(0);
     return buffer[0..len];
@@ -255,6 +259,30 @@ test "bounded row scans preserve ordering pagination and conversation filters" {
     try std.testing.expectEqualSlices(i64, &.{101}, chats);
     const empty = try source.chatRows(&buffer, 101);
     try std.testing.expectEqual(@as(usize, 0), empty.len);
+}
+
+test "row scans honor caller capacity including empty buffers" {
+    const db = try Db.open(":memory:", false);
+    defer db.close();
+    try db.exec(
+        \\CREATE TABLE message(id INTEGER PRIMARY KEY);
+        \\CREATE TABLE chat_message_join(message_id INTEGER,chat_id INTEGER);
+        \\INSERT INTO message VALUES(1),(3),(5),(7);
+        \\INSERT INTO chat_message_join VALUES(1,2),(3,1),(5,2),(7,1);
+    );
+    const source = MessagesDb{ .db = db, .identity = "fixture", .features = .{} };
+    var buffer: [4]i64 = @splat(-1);
+    try std.testing.expectEqualSlices(i64, &.{ 7, 5 }, try source.rowsFor(buffer[0..2], .backfill, 7, 0));
+    try std.testing.expectEqual(@as(i64, -1), buffer[2]);
+    try std.testing.expectEqualSlices(i64, &.{ 3, 1 }, try source.rowsFor(buffer[0..2], .backfill, 4, 0));
+    try std.testing.expectEqualSlices(i64, &.{7}, try source.rowsFor(buffer[0..1], .chat, 3, 1));
+    try std.testing.expectEqual(@as(usize, 0), (try source.rowsFor(buffer[0..0], .live, 0, 0)).len);
+    try std.testing.expectEqualSlices(i64, &.{
+        1,
+        3,
+        5,
+        7,
+    }, try source.rowsFor(&buffer, .live, 0, 0));
 }
 
 const message_sql =

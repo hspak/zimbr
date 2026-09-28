@@ -23,7 +23,7 @@ BIN = ROOT / 'zig-out/bin/fake-relay'
 def main():
     with tempfile.TemporaryDirectory(prefix='zimbr-reactions-') as temporary:
         root = Path(temporary).resolve(); source, data = root / 'source.db', root / 'data'
-        create(source, count=360)
+        create(source, count=2360)
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0)); tls = Fixture(root, sock.getsockname()[1])
         args = ['--data-dir', str(data), '--messages-db', str(source), '--config', str(tls.config)]
@@ -41,9 +41,9 @@ def main():
         with database(source) as db:
             db.executescript('ALTER TABLE message ADD COLUMN associated_message_guid TEXT; ALTER TABLE message ADD COLUMN associated_message_emoji TEXT; ALTER TABLE message ADD COLUMN associated_message_range_location INTEGER; ALTER TABLE message ADD COLUMN associated_message_range_length INTEGER;')
             db.execute('ALTER TABLE message ADD COLUMN payload_data BLOB')
-            # Outside both initial first/last source pages: dependency lookup
-            # must import this target before the rolling scan gets here.
-            db.execute('UPDATE message SET guid=?,text=?,date=10 WHERE ROWID=180', (target, 'Old target with caption'))
+            # Keep the target outside the larger initial 1,000-row backfill
+            # page so dependency lookup still exercises importing a missing row.
+            db.execute('UPDATE message SET guid=?,text=?,date=10 WHERE ROWID=1180', (target, 'Old target with caption'))
             # Source timestamp, then row, establishes the same result even
             # though initial import visits descending row IDs.
             like = react(db)

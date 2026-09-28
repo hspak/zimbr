@@ -65,6 +65,14 @@ report temporary delays, lost Contacts access, and unusable images; errors repor
 source, queue, cache, or persistence failures. Sync logs use counts and opaque
 asset IDs without including message bodies or contact names.
 
+Initial history import favors throughput with 1,000-row backfill pages committed
+together. Live, recent, and requested-conversation scans retain their 100-row
+limits. Once initial import finishes, periodic reconciliation also runs in
+100-row pages to keep subsequent sync responsive. Import progress is durable:
+restarting resumes an unfinished import, while restarting a completed relay
+keeps the smaller batches. New imports collect contact identities and message
+metadata directly, avoiding separate upgrade scans over the same records.
+
 Plain `serve` is headless and cannot reveal Settings. Use `serve --menu-bar` to
 include the native interface.
 

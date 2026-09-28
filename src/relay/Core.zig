@@ -15,6 +15,7 @@ const Signal = @import("../Signal.zig");
 const adapter_api = if (options.fake) fake_adapter else @import("adapter/macos.zig");
 const fake = options.fake;
 const observation_window_ms = 10000;
+const initial_import_limit = 1000;
 const Core = @This();
 
 io: std.Io,
@@ -199,6 +200,10 @@ pub fn ingest(self: *Core, a: u.Allocator) IngestError!void {
         try j.setPosition("live", live);
         try j.setPosition("backfill", high);
         try j.setProgress("anchor", (try source.guid(a, high)) orelse "");
+        // New imports already normalize identities and metadata. The separate
+        // upgrade passes are only needed for records from older relay versions.
+        try j.setProgress("identity_backfill_v1", "complete");
+        try j.setProgress("enrichment_backfill_v1", "complete");
     }
     var backfill = try j.position("backfill");
     const complete = backfill == 0;
@@ -217,7 +222,10 @@ pub fn ingest(self: *Core, a: u.Allocator) IngestError!void {
     try j.setProgress("anchor", (try source.guid(a, live)) orelse "");
     var backfill_rows: usize = 0;
     if (backfill > 0) {
-        const old = try source.rowsFor(&row_buffer, .backfill, backfill, 0);
+        // Initial import favors throughput: amortize source setup, conversation
+        // queries, and durable commits across more rows. Live scans stay small.
+        var initial_rows: [initial_import_limit]i64 = undefined;
+        const old = try source.rowsFor(&initial_rows, .backfill, backfill, 0);
         backfill_rows = old.len;
         for (old) |row| try self.importRow(a, &batch, row, "historical_import", false);
         backfill = if (old.len == 0) 0 else old[old.len - 1] - 1;
@@ -238,10 +246,14 @@ pub fn ingest(self: *Core, a: u.Allocator) IngestError!void {
         "reconciliation",
         complete,
     );
-    const rolling = try j.position("rolling");
-    const older = try source.rowsFor(&row_buffer, .rolling, rolling, 0);
-    for (older) |row| try self.importRow(a, &batch, row, "reconciliation", complete);
-    try j.setPosition("rolling", if (older.len == 0) 0 else older[older.len - 1]);
+    // Backfill visits every older row. Start periodic edit reconciliation after
+    // it finishes, retaining recent and requested-chat checks during import.
+    if (complete) {
+        const rolling = try j.position("rolling");
+        const older = try source.rowsFor(&row_buffer, .rolling, rolling, 0);
+        for (older) |row| try self.importRow(a, &batch, row, "reconciliation", complete);
+        try j.setPosition("rolling", if (older.len == 0) 0 else older[older.len - 1]);
+    }
     // History requests schedule bounded reconciliation, serviced alongside live scans.
     const rq = try j.db.prepare("SELECT r.conversation_id,r.after_row,c.source_row FROM reconcile_chats r JOIN conversations c ON c.id=r.conversation_id ORDER BY r.rowid LIMIT 1");
     defer rq.close();
@@ -314,7 +326,10 @@ pub fn ingest(self: *Core, a: u.Allocator) IngestError!void {
     self.degraded = if (self.automation_ready) "" else self.automation_error;
     self.last_scan_ms = u.now();
     self.send_ready.notify(self.io);
-    self.ingest_pending = high > live or backfill > 0 or chats.len == 100 or try j.db.scalar("SELECT count(*) FROM reconcile_chats") > 0;
+    // The final import page still needs a prompt pass to publish complete chats.
+    self.ingest_pending = high > live or !complete or
+        chats.len == MessagesDb.row_batch_size or
+        try j.db.scalar("SELECT EXISTS(SELECT 1 FROM reconcile_chats)") != 0;
 }
 const ImportBatch = struct {
     source: adapter_api.Source,
