@@ -2549,7 +2549,10 @@ const App = struct {
             is_group = !chat.value.is_self and participants.len > 1;
             break;
         };
-        if (s.scroll < 54 and v.snapshot.more and !std.mem.startsWith(u8, s.key, "new:")) {
+        const empty_history = v.snapshot.messages.len == 0 and v.snapshot.pending.len == 0;
+        if (!(empty_history and v.loading_history) and s.scroll < 54 and
+            v.snapshot.more and !std.mem.startsWith(u8, s.key, "new:"))
+        {
             const y = r.y + 16 - @as(f32, @floatCast(s.scroll));
             if (s.button(.{
                 .x = r.x + r.width / 2 - 86,
@@ -2561,15 +2564,25 @@ const App = struct {
                 s.following = false;
             }
         }
-        if (v.snapshot.messages.len == 0 and v.snapshot.pending.len == 0) s.text.draw(
-            if (v.loading_history) "Loading history…" else if (v.online) "The start of something good.\nWrite your first message below." else "No cached messages in this conversation.",
-            r.x + 40,
-            r.y + 90,
-            17,
-            r.width - 80,
-            theme.colors.muted,
-            theme.colors.paper,
-        );
+        if (empty_history) {
+            if (v.loading_history) {
+                s.text.drawLineCentered(
+                    "Loading history…",
+                    r,
+                    17,
+                    theme.colors.muted,
+                    theme.colors.paper,
+                );
+            } else s.text.draw(
+                if (v.online) "The start of something good.\nWrite your first message below." else "No cached messages in this conversation.",
+                r.x + 40,
+                r.y + 90,
+                17,
+                r.width - 80,
+                theme.colors.muted,
+                theme.colors.paper,
+            );
+        }
         const visible = s.visibleHistory(rows, r.height);
         if (v.online and u.now() >= s.hydration_at) {
             // Visibility, not history size, bounds lazy metadata requests.
