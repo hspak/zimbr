@@ -357,6 +357,12 @@ fn module(
         "-Wextra",
         "-Werror",
     } });
+    m.addCSourceFile(.{ .file = b.path("src/relay/uploads.c"), .flags = &.{
+        "-std=c11",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+    } });
     if (openssl) |prefix| {
         m.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "include" }) });
         m.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib/libssl.a" }) });

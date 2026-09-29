@@ -15,8 +15,9 @@ means the implementation and its relevant automated checks have passed.
    attachment sends until the dispatch path is ready.
 2. **In progress: relay upload storage and transport.** The durable reservation
    ledger now enforces device ownership, metadata identity, quotas, exclusive
-   transfer leases, and pinning to send requests. Private streamed file I/O,
-   HTTP endpoints, integrity verification, and physical cleanup remain pending.
+   transfer leases, and pinning to send requests. Private streamed file I/O now
+   verifies length and SHA-256 before atomic publication. HTTP endpoints and
+   orchestration of recovery and physical cleanup remain pending.
 3. **Pending: relay dispatch and observation.** Pass staged files to Messages,
    retain per-part outcomes, correlate observed attachments conservatively, and
    preserve uncertainty through crashes and source resets.
