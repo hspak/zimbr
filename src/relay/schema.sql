@@ -14,6 +14,10 @@ CREATE TABLE IF NOT EXISTS reconcile_chats(conversation_id TEXT PRIMARY KEY,afte
 CREATE TABLE IF NOT EXISTS send_observations(request_id TEXT PRIMARY KEY REFERENCES send_requests(id),attempt_ms INTEGER NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS request_message ON send_requests(message_id) WHERE message_id IS NOT NULL;
 
+-- Outgoing bytes live in private files; this ledger owns their reservations.
+CREATE TABLE IF NOT EXISTS uploads(id TEXT PRIMARY KEY,epoch TEXT NOT NULL,owner TEXT NOT NULL,record TEXT NOT NULL,bytes INTEGER NOT NULL CHECK(bytes BETWEEN 0 AND 104857600),state TEXT NOT NULL CHECK(state IN ('reserved','receiving','ready','pinned','deleting')),lease TEXT NOT NULL DEFAULT '',created_ms INTEGER NOT NULL,request_id TEXT REFERENCES send_requests(id));
+CREATE INDEX IF NOT EXISTS upload_cleanup ON uploads(state,created_ms);
+
 -- Enrichment migrations are additive: epoch and send identities are retained.
 CREATE TABLE IF NOT EXISTS identities(id TEXT PRIMARY KEY,service TEXT NOT NULL,address TEXT NOT NULL,content TEXT NOT NULL,record TEXT NOT NULL,UNIQUE(service,address));
 CREATE TABLE IF NOT EXISTS contact_mappings(identity_id TEXT PRIMARY KEY REFERENCES identities(id),contact_id TEXT,source_version TEXT NOT NULL,normalization_version INTEGER NOT NULL);

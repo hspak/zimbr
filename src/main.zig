@@ -365,4 +365,5 @@ test {
     _ = Assets;
     _ = Menu;
     _ = Server;
+    _ = @import("relay.zig").uploads;
 }

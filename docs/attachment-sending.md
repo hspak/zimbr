@@ -13,9 +13,10 @@ means the implementation and its relevant automated checks have passed.
 1. **Complete: protocol contract.** Define bounded upload metadata and send
    attachment references, preserve text-request idempotency, and reject
    attachment sends until the dispatch path is ready.
-2. **Pending: relay upload storage and transport.** Persist upload reservations,
-   stream authenticated bytes into private files, verify length and SHA-256,
-   and implement retry, cancellation, quotas, and orphan cleanup.
+2. **In progress: relay upload storage and transport.** The durable reservation
+   ledger now enforces device ownership, metadata identity, quotas, exclusive
+   transfer leases, and pinning to send requests. Private streamed file I/O,
+   HTTP endpoints, integrity verification, and physical cleanup remain pending.
 3. **Pending: relay dispatch and observation.** Pass staged files to Messages,
    retain per-part outcomes, correlate observed attachments conservatively, and
    preserve uncertainty through crashes and source resets.
@@ -50,6 +51,13 @@ bounded streaming path. Upload IDs support retry without creating another file.
 Incomplete uploads cannot be dispatched. Completed files remain pinned while
 Messages may still need them; HTTP acceptance and AppleScript completion alone
 do not prove that Messages has finished reading a file.
+
+The relay reservation ledger allows at most 256 uploads and 2 GiB of declared
+bytes, including incomplete transfers. Unused reservations expire after 24
+hours or an epoch change. Retirement blocks further use immediately; quota is
+released only after physical cleanup. Each transfer receives a fresh lease token
+so late callbacks cannot publish or abandon a replacement transfer. Files pinned
+to a send remain protected through resets and uncertain outcomes.
 
 Text and files may become separate Messages records. The dispatch implementation
 must track each operation durably and represent partial or uncertain outcomes;

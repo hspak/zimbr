@@ -13,6 +13,7 @@ Record the implemented boundary, command, and observed result after each chunk.
 | --- | --- | --- |
 | Protocol, validation, and text idempotency | `zig build test -Doptimize=ReleaseSafe` | Passed with Zig 0.16.0 and OpenSSL 3.5 prefix |
 | Unavailable attachments cannot send only their caption | `python3 tests/attachment_sends.py` | Failed before the fix (202 acceptance); passed after the fix (400, unstarted, no queued send), with the same test |
+| Upload reservation ownership, quotas, leases, pinning rollback, restart, and epoch changes | `zig build test -Doptimize=ReleaseSafe` | Passed; exercises SQLite persistence and reopen, injected transaction failure, and stale transfer callbacks |
 | Upload streaming, integrity, quotas, and cleanup | To be added with upload implementation | Pending |
 | Attachment dispatch, correlation, partial failure, and restart | To be added with dispatch implementation | Pending |
 | Existing text sends, idempotency, recovery, and source resets | `python3 tests/integration.py` | Passed after protocol changes |
