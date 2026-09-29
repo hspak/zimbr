@@ -54,7 +54,7 @@ pub const EventNotificationError = RecordError || error{
     ResyncRequired,
     UnknownEvent,
 };
-pub const PersistSendError = ReadError || error{
+pub const PersistSendError = ReadError || t.ValidateError || error{
     InvalidDraft,
     InvalidRequest,
     InvalidTimestamp,

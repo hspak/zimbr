@@ -242,6 +242,7 @@ pub fn handle(self: *Server, a: u.Allocator, req: *Request, peer: *Tls.c.ZrTls) 
                     .send_direct = self.core.read_ready and self.core.automation_ready,
                     .reply_existing = self.core.read_ready and self.core.automation_ready,
                     .attachments = true,
+                    .send_attachments_v1 = false,
                     .group_creation = false,
                     .identity_directory_v1 = true,
                     .image_assets_v1 = true,
@@ -638,6 +639,11 @@ fn mapError(err: anytype) ErrorMapping {
             .code = "unsupported_target",
             .message = "Only explicit iMessage targets are supported.",
         },
+        error.UnsupportedAttachments => .{
+            .status = .bad_request,
+            .code = "unsupported_attachments",
+            .message = "This relay cannot send attachments.",
+        },
         error.RequestConflict => .{
             .status = .conflict,
             .code = "request_conflict",
@@ -653,7 +659,7 @@ fn mapError(err: anytype) ErrorMapping {
             .code = "resync_required",
             .message = "This event cursor has expired. Synchronize again.",
         },
-        error.BodyTooLarge, error.TextTooLarge => .{
+        error.BodyTooLarge, error.TextTooLarge, error.AttachmentTooLarge, error.TooManyAttachments => .{
             .status = .payload_too_large,
             .code = "invalid_request",
             .message = "The request exceeds the relay size limit.",

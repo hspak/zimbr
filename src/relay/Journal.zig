@@ -31,13 +31,14 @@ pub const MessageError = RecordError || error{
     WriteFailed,
 };
 pub const GetRouteError = ReadError || error{UnsupportedTarget};
-pub const AcceptError = ReadError || error{
+pub const AcceptError = ReadError || t.ValidateError || error{
     AdapterUnavailable,
     InvalidRequest,
     RequestConflict,
     ResyncRequired,
     TextTooLarge,
     UnsupportedTarget,
+    UnsupportedAttachments,
 };
 pub const ResetError = RecordError || error{RandomUnavailable};
 pub const CheckCursorError = ReadError || error{
@@ -331,6 +332,8 @@ pub fn getRoute(self: Journal, a: u.Allocator, target: t.Target) GetRouteError!R
 }
 pub fn accept(self: Journal, a: u.Allocator, input: t.SendInput, ready: bool) AcceptError!struct { record: []const u8, fresh: bool } {
     try t.validate(input);
+    // The text adapter must never dispatch a caption after discarding its files.
+    if (input.attachments.len != 0) return error.UnsupportedAttachments;
     try self.begin();
     errdefer self.rollback();
     if (!u.eq(input.server_epoch, try self.epoch(a))) return error.ResyncRequired;

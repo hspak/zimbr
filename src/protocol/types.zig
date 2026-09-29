@@ -1,5 +1,6 @@
 const std = @import("std");
 const u = @import("../common.zig");
+const attachments = @import("attachments.zig");
 pub const max_body = 64 * 1024;
 pub const max_text = 16 * 1024;
 pub const max_decode = 1024 * 1024;
@@ -232,6 +233,26 @@ pub const SendInput = struct {
     server_epoch: []const u8,
     target: Target,
     text: []const u8,
+    attachments: []const attachments.Upload = &.{},
+
+    /// Omit empty attachments to preserve persisted text-only idempotency payloads.
+    pub fn jsonStringify(self: SendInput, writer: *std.json.Stringify) std.json.Stringify.Error!void {
+        try writer.beginObject();
+        inline for (.{
+            "request_id",
+            "server_epoch",
+            "target",
+            "text",
+        }) |field| {
+            try writer.objectField(field);
+            try writer.write(@field(self, field));
+        }
+        if (self.attachments.len != 0) {
+            try writer.objectField("attachments");
+            try writer.write(self.attachments);
+        }
+        try writer.endObject();
+    }
 };
 pub const SendStatus = enum {
     queued,
@@ -247,6 +268,7 @@ pub const SendRequest = struct {
     revision: []const u8 = "0",
     target: Target,
     text: []const u8,
+    attachments: []const attachments.Upload = &.{},
     state: SendStatus = .queued,
     message_id: ?[]const u8 = null,
     // Presentation-only echo while the observation window is still open.
@@ -261,7 +283,7 @@ pub const SafeError = struct {
     outcome: enum { unstarted, uncertain } = .unstarted,
 };
 
-pub const ValidateError = error{
+pub const ValidateError = attachments.ValidateError || error{
     InvalidRequest,
     TextTooLarge,
     UnsupportedTarget,
@@ -291,7 +313,8 @@ pub fn validAddress(s: []const u8) bool {
 pub fn validate(v: SendInput) ValidateError!void {
     if (!validId(v.request_id) or !validId(v.server_epoch)) return error.InvalidRequest;
     if (v.text.len > max_text) return error.TextTooLarge;
-    if (v.text.len == 0 or !std.unicode.utf8ValidateSlice(v.text) or std.mem.indexOfScalar(
+    try attachments.validateSet(v.attachments);
+    if ((v.text.len == 0 and v.attachments.len == 0) or !std.unicode.utf8ValidateSlice(v.text) or std.mem.indexOfScalar(
         u8,
         v.text,
         0,
@@ -321,6 +344,63 @@ test "send input validation never guesses a service or address" {
     try std.testing.expect(!validAddress("4155550123"));
     try std.testing.expect(!validAddress("Alice"));
     try std.testing.expect(!validAddress("+00012345678"));
+}
+
+test "attachment-only sends validate without weakening text or target validation" {
+    const file: attachments.Upload = .{
+        .id = "ABEiM0RVZneImaq7zN3u_w",
+        .name = "photo.png",
+        .mime_type = "image/png",
+        .bytes = "4",
+        .sha256 = "0123456789abcdef" ** 4,
+    };
+    var input: SendInput = .{
+        .request_id = "aBEiM0RVZneImaq7zN3u_w",
+        .server_epoch = "bBEiM0RVZneImaq7zN3u_w",
+        .target = .{ .recipient = .{ .address = "test@example.invalid", .service = "imessage" } },
+        .text = "",
+    };
+    try std.testing.expectError(error.InvalidRequest, validate(input));
+    input.attachments = &.{file};
+    try validate(input);
+    input.text = "caption";
+    try validate(input);
+    input.text = "bad\x00caption";
+    try std.testing.expectError(error.InvalidRequest, validate(input));
+    input.text = "x" ** (max_text + 1);
+    try std.testing.expectError(error.TextTooLarge, validate(input));
+    input.text = "";
+    input.target.recipient.?.service = "sms";
+    try std.testing.expectError(error.UnsupportedTarget, validate(input));
+    input.target.recipient = null;
+    try std.testing.expectError(error.InvalidRequest, validate(input));
+}
+
+test "text sends retain legacy serialization and attachments survive round trips" {
+    const a = std.testing.allocator;
+    const legacy = "{\"request_id\":\"aBEiM0RVZneImaq7zN3u_w\",\"server_epoch\":\"bBEiM0RVZneImaq7zN3u_w\"," ++
+        "\"target\":{\"conversation_id\":null,\"recipient\":{\"address\":\"test@example.invalid\",\"service\":\"imessage\"}},\"text\":\"caption\"}";
+    const parsed = try std.json.parseFromSlice(SendInput, a, legacy, .{});
+    defer parsed.deinit();
+    const encoded = try u.json(a, parsed.value);
+    defer a.free(encoded);
+    try std.testing.expectEqualStrings(legacy, encoded);
+    var input = parsed.value;
+    input.attachments = &.{.{
+        .id = "ABEiM0RVZneImaq7zN3u_w",
+        .name = "photo.png",
+        .mime_type = "image/png",
+        .bytes = "4",
+        .sha256 = "0123456789abcdef" ** 4,
+    }};
+    const with_file = try u.json(a, input);
+    defer a.free(with_file);
+    const decoded = try std.json.parseFromSlice(SendInput, a, with_file, .{});
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 1), decoded.value.attachments.len);
+    try std.testing.expectEqualStrings("photo.png", decoded.value.attachments[0].name);
+    try std.testing.expectEqualStrings(input.attachments[0].sha256, decoded.value.attachments[0].sha256);
+    try validate(decoded.value);
 }
 test "cursor binds sequence to epoch without floating point" {
     const e = "EjRWeBI0EjQSNBI0VniQEg";
