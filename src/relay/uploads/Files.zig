@@ -5,6 +5,7 @@ const u = @import("../../common.zig");
 const attachments = @import("../../protocol.zig").attachments;
 const t = @import("../../protocol.zig").types;
 const uploads = @import("../uploads.zig");
+const Journal = @import("../Journal.zig");
 const c = @cImport({
     @cInclude("relay/media.h");
     @cInclude("relay/uploads.h");
@@ -18,18 +19,47 @@ pub const InitError = u.Allocator.Error || error{UploadStorageUnavailable};
 pub const BeginError = InitError || attachments.ValidateError;
 pub const OpenError = u.Allocator.Error || attachments.ValidateError || error{UploadFileUnavailable};
 pub const RemoveError = error{ InvalidRequest, UploadStorageUnavailable };
+pub const RecoverError = Journal.QueryError || RemoveError;
 
 /// Allocated paths belong to a and must outlive the returned descriptor owner.
 pub fn init(a: u.Allocator, data: []const u8) InitError!Files {
     const root = try std.fmt.allocPrintSentinel(a, "{s}/uploads", .{data}, 0);
     const directory = c.zr_media_directory(root, 1);
     if (directory < 0) return error.UploadStorageUnavailable;
+    errdefer _ = u.c.close(directory);
+    const parent = c.zr_media_directory(try a.dupeZ(u8, data), 0);
+    if (parent < 0) return error.UploadStorageUnavailable;
+    defer _ = u.c.close(parent);
+    if (u.c.fsync(parent) != 0) return error.UploadStorageUnavailable;
     return .{ .root = root, .directory = directory };
 }
 
 pub fn deinit(self: *Files) void {
     _ = u.c.close(self.directory);
     self.* = undefined;
+}
+
+/// Run before starting workers or accepting connections. Discard interrupted and
+/// orphan files, retain ready/pinned files, then release abandoned writer leases.
+pub fn recover(self: Files, j: Journal) RecoverError!void {
+    const scan = c.zr_media_scan(self.directory) orelse return error.UploadStorageUnavailable;
+    defer c.zr_media_scan_close(scan);
+    var name: [256]u8 = undefined;
+    while (true) {
+        const count = c.zr_media_scan_next(scan, &name, name.len);
+        if (count == 0) break;
+        if (count < 0) return error.UploadStorageUnavailable;
+        const id = name[0..@intCast(count)];
+        if (!t.validId(id)) continue;
+        const q = try j.db.prepare("SELECT state FROM uploads WHERE id=?");
+        defer q.close();
+        try q.bind(&.{.{ .text = id }});
+        if (try q.step()) {
+            if (u.eq(q.bytes(0), "ready") or u.eq(q.bytes(0), "pinned")) continue;
+        }
+        try self.remove(id);
+    }
+    try uploads.recover(j);
 }
 
 /// Assume lease exclusively owns this upload. Removes only that ID's previous

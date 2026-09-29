@@ -5,6 +5,7 @@ const t = @import("../../protocol.zig").types;
 const protocol = @import("../http2.zig");
 const Tls = @import("../Tls.zig");
 const Server = @import("../Server.zig");
+const upload_http = @import("uploads.zig");
 pub const Request = @import("Request.zig");
 const Connection = @This();
 
@@ -127,7 +128,12 @@ pub fn header(self: *Connection, id: i32, name: []const u8, value: []const u8) p
 pub fn head(self: *Connection, id: i32, _: bool) protocol.Error!void {
     const req = self.find(id) orelse return error.Protocol;
     if (req.head.target.len == 0) return error.Protocol;
-    if ((req.head.content_length orelse 0) > t.max_body) req.rejected = error.BodyTooLarge;
+    if (req.rejected == null and req.head.method == .PUT and std.mem.startsWith(u8, req.head.target, "/v1/uploads/")) {
+        req.upload_route = true;
+        upload_http.begin(self.server, req, self.peer) catch |err| {
+            req.rejected = err;
+        };
+    } else if ((req.head.content_length orelse 0) > t.max_body) req.rejected = error.BodyTooLarge;
     if (req.rejected != null) {
         req.ready = true;
         return;
@@ -139,6 +145,20 @@ pub fn head(self: *Connection, id: i32, _: bool) protocol.Error!void {
 
 pub fn body(self: *Connection, id: i32, bytes: []const u8) protocol.Error!void {
     const req = self.find(id) orelse return error.Protocol;
+    if (req.upload_route) {
+        if (req.rejected == null) if (req.upload) |*upload| {
+            if (upload.transfer) |*transfer| {
+                transfer.write(bytes) catch |err| {
+                    req.rejected = err;
+                    req.ready = true;
+                };
+                req.deadline = @min(req.upload_deadline, u.c.zr_monotonic_ms() + 30000);
+            }
+        };
+        // Return flow-control credit only after bounded bytes reach the file.
+        try self.engine.consume(id, bytes.len);
+        return;
+    }
     if (bytes.len > t.max_body - req.body.items.len) {
         req.rejected = error.BodyTooLarge;
         req.ready = true;

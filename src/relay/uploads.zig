@@ -29,6 +29,30 @@ pub const Lease = struct {
     file: attachments.Upload,
     token: []const u8,
 };
+/// An allocation-free copy retained when releasing a disconnected writer fails.
+pub const Release = struct {
+    id: [u.id_length]u8,
+    epoch: [u.id_length]u8,
+    token: [u.id_length]u8,
+
+    /// Assume lease was returned by claim, with canonical IDs.
+    pub fn init(lease: Lease) Release {
+        return .{
+            .id = lease.file.id[0..u.id_length].*,
+            .epoch = lease.server_epoch[0..u.id_length].*,
+            .token = lease.token[0..u.id_length].*,
+        };
+    }
+
+    /// Caller holds the journal mutex. Stale tokens cannot release a new writer.
+    pub fn apply(self: Release, j: Journal) Journal.QueryError!void {
+        try j.execute("UPDATE uploads SET state='reserved' WHERE id=? AND epoch=? AND lease=? AND state='receiving'", &.{
+            .{ .text = &self.id },
+            .{ .text = &self.epoch },
+            .{ .text = &self.token },
+        });
+    }
+};
 pub const Claim = union(enum) {
     complete: Record,
     write: Lease,
@@ -154,11 +178,7 @@ pub fn complete(j: Journal, a: u.Allocator, lease: Lease) CompleteError!void {
 /// Release an unfinished transfer after closing/removing its temporary files.
 /// A late release is harmless after completion or after another transfer starts.
 pub fn abandon(j: Journal, lease: Lease) Journal.QueryError!void {
-    try j.execute("UPDATE uploads SET state='reserved' WHERE id=? AND epoch=? AND lease=? AND state='receiving'", &.{
-        .{ .text = lease.file.id },
-        .{ .text = lease.server_epoch },
-        .{ .text = lease.token },
-    });
+    return Release.init(lease).apply(j);
 }
 
 /// Retire a reservation so no new writer or send can acquire it. Active writers

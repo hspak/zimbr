@@ -296,6 +296,12 @@ int zr_tls_valid(ZrTls *tls) {
     ZrTlsContext *ctx = SSL_CTX_get_app_data(SSL_get_SSL_CTX(tls->ssl));
     return valid_time(tls->peer) && valid_time(ctx->ca) && valid_time(SSL_get_certificate(tls->ssl));
 }
+int zr_tls_peer_fingerprint(ZrTls *tls, char out[65]) {
+    unsigned char digest[32]; unsigned int length = 0;
+    if (!zr_tls_valid(tls) || !X509_digest(tls->peer, EVP_sha256(), digest, &length) || length != 32) return -1;
+    for (size_t i = 0; i < 32; ++i) snprintf(out + i*2, 3, "%02x", digest[i]);
+    return 0;
+}
 int zr_tls_write(ZrTls *tls, const void *bytes, size_t length) {
     return zr_tls_write_deadline(tls, bytes, length, zr_monotonic_ms() + 10000);
 }

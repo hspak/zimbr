@@ -3,6 +3,7 @@ const std = @import("std");
 const u = @import("../../common.zig");
 const protocol = @import("../http2.zig");
 const Connection = @import("Connection.zig");
+const uploads = @import("../uploads.zig");
 const Request = @This();
 
 connection: *Connection,
@@ -17,10 +18,24 @@ offset: usize = 0,
 ready: bool = false,
 ended: bool = false,
 responded: bool = false,
-rejected: ?error{ BodyTooLarge, InvalidRequest } = null,
+rejected: ?RejectError = null,
 deadline: i64,
 events: ?Events = null,
 asset_permit: bool = false,
+upload_route: bool = false,
+upload_permit: bool = false,
+upload_deadline: i64 = 0,
+upload: ?struct {
+    lease: uploads.Lease,
+    transfer: ?uploads.Files.Transfer = null,
+} = null,
+
+pub const RejectError = uploads.ClaimError || uploads.Files.BeginError ||
+    uploads.Files.OpenError || uploads.Files.Transfer.SealError || error{
+    BodyTooLarge,
+    CertificateExpired,
+    RelayCacheResetRequired,
+};
 
 pub const Head = struct {
     method: std.http.Method = .GET,
@@ -74,6 +89,15 @@ pub fn respond(self: *Request, body: []const u8, options: RespondOptions) protoc
 }
 
 pub fn deinit(self: *Request) void {
+    if (self.upload) |*upload| {
+        // Files close before the lease is released for another writer.
+        if (upload.transfer) |*transfer| transfer.deinit();
+        const core = self.connection.server.core;
+        core.lock();
+        defer core.unlock();
+        core.releaseUpload(upload.lease);
+    }
+    if (self.upload_permit) _ = self.connection.server.uploads_active.fetchSub(1, .acq_rel);
     if (self.events != null) _ = self.connection.server.core.streams.fetchSub(1, .acq_rel);
     if (self.asset_permit) _ = self.connection.server.asset_responses.fetchSub(1, .acq_rel);
     self.batch.deinit();

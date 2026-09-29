@@ -13,11 +13,12 @@ means the implementation and its relevant automated checks have passed.
 1. **Complete: protocol contract.** Define bounded upload metadata and send
    attachment references, preserve text-request idempotency, and reject
    attachment sends until the dispatch path is ready.
-2. **In progress: relay upload storage and transport.** The durable reservation
+2. **Complete: relay upload storage and transport.** The durable reservation
    ledger now enforces device ownership, metadata identity, quotas, exclusive
    transfer leases, and pinning to send requests. Private streamed file I/O now
-   verifies length and SHA-256 before atomic publication. HTTP endpoints and
-   orchestration of recovery and physical cleanup remain pending.
+   verifies length and SHA-256 before atomic publication. Authenticated HTTP/2
+   endpoints, restart recovery, failed-lease recovery, physical cleanup, and
+   transport regression checks are complete.
 3. **Pending: relay dispatch and observation.** Pass staged files to Messages,
    retain per-part outcomes, correlate observed attachments conservatively, and
    preserve uncertainty through crashes and source resets.
@@ -59,6 +60,14 @@ hours or an epoch change. Retirement blocks further use immediately; quota is
 released only after physical cleanup. Each transfer receives a fresh lease token
 so late callbacks cannot publish or abandon a replacement transfer. Files pinned
 to a send remain protected through resets and uncertain outcomes.
+
+Binary transfer memory is independent of file size: the connection uses a
+16 KiB read buffer and the existing bounded HTTP/2 session. Files stream to disk
+without Base64 expansion or a whole-file allocation. Disk writes and final fsync
+run outside the journal mutex; flow-control credit follows consumed bytes. Four
+active uploads and separate idle/total deadlines bound resource use. A 9 MiB
+binary transfer and commands/SSE alongside an unfinished upload are exercised by
+the transport suite.
 
 Text and files may become separate Messages records. The dispatch implementation
 must track each operation durably and represent partial or uncertain outcomes;

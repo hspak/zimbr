@@ -12,6 +12,7 @@ const http2 = @import("http2.zig");
 const Request = Connection.Request;
 const Tls = @import("Tls.zig");
 const Assets = @import("Assets.zig");
+const upload_http = @import("Server/uploads.zig");
 const Server = @This();
 
 core: *Core,
@@ -19,11 +20,12 @@ tls: Tls,
 listening: ?*std.atomic.Value(bool) = null,
 handshakes: std.atomic.Value(usize) = .init(0),
 asset_responses: std.atomic.Value(usize) = .init(0),
+uploads_active: std.atomic.Value(usize) = .init(0),
 
 pub const RunError = std.Io.net.Ip6Address.ParseError || std.Io.net.IpAddress.ListenError ||
     std.Io.net.Server.AcceptError;
 
-pub const HandleError = http2.Error || Journal.AcceptError || Journal.CheckCursorError ||
+pub const HandleError = upload_http.Error || http2.Error || Journal.AcceptError || Journal.CheckCursorError ||
     Journal.ResetError || Assets.LookupError || Assets.EvictedError || enrichment.PageError || std.fmt.ParseIntError || error{
     BodyTooLarge,
     CertificateExpired,
@@ -114,6 +116,7 @@ pub fn handle(self: *Server, a: u.Allocator, req: *Request, peer: *Tls.c.ZrTls) 
     }
     if (req.rejected) |err| return err;
     if (Tls.c.zr_tls_valid(peer) == 0) return error.CertificateExpired;
+    if (req.upload_route) return upload_http.handle(self, a, req, peer);
     if ((req.head.content_length orelse 0) > t.max_body) return error.BodyTooLarge;
     if (req.head.method == .GET and ((req.head.content_length orelse 0) != 0 or req.body.items.len != 0)) return error.InvalidRequest;
     const target = try a.dupe(u8, req.head.target);
@@ -126,6 +129,8 @@ pub fn handle(self: *Server, a: u.Allocator, req: *Request, peer: *Tls.c.ZrTls) 
     self.core.unlock();
     if (reset_required and !resetting and !(req.head.method == .GET and u.eq(path, "/v1/status")))
         return error.RelayCacheResetRequired;
+    if (u.eq(path, "/v1/uploads") or std.mem.startsWith(u8, path, "/v1/uploads/"))
+        return upload_http.handle(self, a, req, peer);
     if (req.head.method == .GET and std.mem.startsWith(u8, path, "/v1/assets/")) {
         // Four media responses leave capacity for SSE and ordinary commands.
         if (self.asset_responses.fetchAdd(1, .acq_rel) >= 4) {
@@ -243,6 +248,7 @@ pub fn handle(self: *Server, a: u.Allocator, req: *Request, peer: *Tls.c.ZrTls) 
                     .reply_existing = self.core.read_ready and self.core.automation_ready,
                     .attachments = true,
                     .send_attachments_v1 = false,
+                    .attachment_uploads_v1 = self.core.upload_files != null,
                     .group_creation = false,
                     .identity_directory_v1 = true,
                     .image_assets_v1 = true,
@@ -643,6 +649,36 @@ fn mapError(err: anytype) ErrorMapping {
             .status = .bad_request,
             .code = "unsupported_attachments",
             .message = "This relay cannot send attachments.",
+        },
+        error.UploadNotFound => .{
+            .status = .not_found,
+            .code = "upload_not_found",
+            .message = "The upload does not exist for this device.",
+        },
+        error.UploadExpired => .{
+            .status = .gone,
+            .code = "upload_expired",
+            .message = "Create a new upload reservation.",
+        },
+        error.UploadQuota => .{
+            .status = .insufficient_storage,
+            .code = "upload_quota",
+            .message = "The relay upload storage is full.",
+        },
+        error.UploadBusy, error.UploadInUse, error.UploadLeaseExpired => .{
+            .status = .conflict,
+            .code = "upload_busy",
+            .message = "This upload is in use; check its current status.",
+        },
+        error.UploadHashMismatch, error.UploadLengthMismatch => .{
+            .status = .bad_request,
+            .code = "upload_integrity",
+            .message = "The file bytes do not match the upload reservation.",
+        },
+        error.UploadStorageUnavailable, error.UploadFileUnavailable => .{
+            .status = .service_unavailable,
+            .code = "upload_storage",
+            .message = "The relay upload files are unavailable.",
         },
         error.RequestConflict => .{
             .status = .conflict,

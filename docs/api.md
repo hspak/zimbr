@@ -22,6 +22,10 @@ for enrollment and an authenticated status example.
 | GET | `/v1/messages/:id/enrichment?section=...&revision=...&after=...` | Bounded overflow metadata and revision-bound `next` |
 | GET | `/v1/messages/:id` | Canonical message including inline enrichment |
 | POST | `/v1/messages` | Durable send request; 202 new, 200 retry |
+| POST | `/v1/uploads` | Reserve an outgoing file's metadata and bytes; 200 on exact retry |
+| PUT | `/v1/uploads/:id` | Stream and verify original bytes; 200 when complete |
+| GET | `/v1/uploads/:id` | This device's upload metadata and phase |
+| DELETE | `/v1/uploads/:id` | Retire an unused upload for cleanup; 204 |
 | GET | `/v1/send-requests/:id` | Current send request |
 | GET | `/v1/events?after=...` | SSE replay followed by live events |
 
@@ -34,6 +38,53 @@ unambiguous email. The adapter requires one enabled iMessage account and checks
 existing chats against that account. It never chooses SMS/RCS or creates a group.
 Unknown optional JSON fields are accepted. IDs are case-sensitive and must use
 canonical unpadded Base64url; hyphenated UUIDs and nonzero pad bits are rejected.
+
+## Outgoing file uploads
+
+`attachment_uploads_v1` advertises upload storage. Sending those files is a
+separate capability, `send_attachments_v1`, which remains false until attachment
+dispatch is implemented. The current send endpoint rejects nonempty attachment
+arrays; it never sends just their caption.
+
+Reserve with `POST /v1/uploads`, `Content-Type: application/json`, and:
+
+```json
+{
+  "server_epoch": "<current epoch>",
+  "file": {
+    "id": "<client-generated Base64url UUID>",
+    "name": "photo.png",
+    "mime_type": "image/png",
+    "bytes": "<canonical decimal byte count>",
+    "sha256": "<64 lowercase hexadecimal characters>"
+  }
+}
+```
+
+The response contains `server_epoch`, `file`, and `phase` (`reserved`,
+`receiving`, `ready`, or `pinned`). Upload IDs belong to the authenticated client
+certificate. Another enrolled device cannot inspect, overwrite, or cancel them.
+Reusing an ID with different metadata returns 409.
+
+PUT, GET, and DELETE require `Zimbr-Server-Epoch: <current epoch>`. PUT also
+requires `Content-Type: application/octet-stream` and an exact `Content-Length`,
+including `0` for empty files. Send raw original bytes, without JSON or Base64.
+The relay writes bounded chunks to private files and verifies both length and
+SHA-256 before publishing `ready`. Interrupted uploads return to `reserved`;
+restart discards their partial files. Retry from the beginning with the same ID.
+A PUT for an already completed upload returns its metadata without rewriting
+its bytes. GET resolves a lost upload response.
+
+DELETE is idempotent for absent/retired IDs. Active transfers return 409: cancel
+the HTTP stream first, then retry DELETE. Files pinned by a send cannot be
+cancelled. Cleanup removes retired files before releasing quota. Unused uploads
+expire after 24 hours or an epoch change. Pinned files remain protected across
+resets and uncertain send outcomes.
+
+Limits are 100 MiB per file, 256 reservations, 2 GiB reserved storage, and four
+active PUT requests. Uploads have a 30-second idle timeout and a 15-minute total
+deadline. Other command bodies retain their 64 KiB limit. These are application
+resource bounds, not a guarantee about files Messages can deliver.
 
 ## Pagination and synchronization
 

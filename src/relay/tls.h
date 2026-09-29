@@ -17,6 +17,8 @@ void zr_tls_context_free(ZrTlsContext *ctx);
 int zr_tls_info(ZrTlsContext *ctx, char *fingerprint, size_t capacity, int64_t *expires, int64_t *ca_expires);
 ZrTls *zr_tls_accept(ZrTlsContext *ctx, int fd);
 int zr_tls_valid(ZrTls *tls);
+/* SHA-256 of the authenticated peer certificate, as 64 lowercase hex bytes. */
+int zr_tls_peer_fingerprint(ZrTls *tls, char out[65]);
 /* Nonblocking plaintext read: -2 means retry, -1 failure, 0 EOF. */
 ptrdiff_t zr_tls_receive(ZrTls *tls, void *bytes, size_t length);
 int zr_tls_poll(ZrTls *tls, int timeout_ms);

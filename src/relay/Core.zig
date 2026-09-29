@@ -3,6 +3,7 @@ const log = std.log.scoped(.relay_core);
 
 const contacts = @import("adapter/contacts.zig");
 const Assets = @import("Assets.zig");
+const uploads = @import("uploads.zig");
 const Mutex = @import("Mutex.zig");
 const fake_adapter = @import("adapter/fake.zig");
 const options = @import("options");
@@ -25,6 +26,8 @@ contacts_phone_region: []const u8 = "",
 contacts_status: contacts.Status = .{},
 source_features: adapter_api.Source.Features = .{},
 assets_service: ?Assets = null,
+upload_files: ?uploads.Files = null,
+upload_releases: [uploads.max_reservations]?uploads.Release = @splat(null),
 assets_reason: []const u8 = "starting",
 mutex: Mutex = .init,
 read_ready: bool = false,
@@ -96,6 +99,7 @@ pub fn ingestLoop(self: *Core) void {
     defer u.c.zr_watch_close(watch);
     var settle = false;
     var maintenance: i64 = 0;
+    var upload_maintenance: i64 = 0;
     while (!self.stop.load(.acquire)) {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         self.lock();
@@ -131,6 +135,12 @@ pub fn ingestLoop(self: *Core) void {
         }
         const pending = self.read_ready and self.ingest_pending;
         self.unlock();
+        if (u.now() >= upload_maintenance) {
+            self.cleanupUploads(arena.allocator()) catch |err| {
+                log.warn("Upload cleanup delayed: {s}", .{@errorName(err)});
+            };
+            upload_maintenance = u.now() + 1000;
+        }
         arena.deinit();
         tick += 1;
         // Drain bounded backfill/live pages promptly. Notifications may precede
@@ -139,6 +149,49 @@ pub fn ingestLoop(self: *Core) void {
         const changed = u.c.zr_watch_wait(watch, if (pending) 1 else if (settle) 50 else 1000) != 0;
         settle = changed;
     }
+}
+fn cleanupUploads(self: *Core, a: u.Allocator) !void {
+    const files = self.upload_files orelse return;
+    var ids: [32][]const u8 = undefined;
+    var count: usize = 0;
+    {
+        self.lock();
+        defer self.unlock();
+        for (&self.upload_releases) |*slot| if (slot.*) |release| {
+            release.apply(self.journal) catch continue;
+            slot.* = null;
+        };
+        try uploads.expire(self.journal, u.now());
+        const q = try self.journal.db.prepare("SELECT id FROM uploads WHERE state='deleting' LIMIT 32");
+        defer q.close();
+        while (try q.step()) {
+            ids[count] = try q.text(a, 0);
+            count += 1;
+        }
+    }
+    // Only this worker reclaims retired directories; HTTP cancellation merely
+    // retires rows, preventing a cleanup race with recreation of the same ID.
+    for (ids[0..count]) |id| {
+        files.remove(id) catch continue;
+        self.lock();
+        defer self.unlock();
+        try uploads.purge(self.journal, id);
+    }
+}
+
+/// Caller holds the journal mutex and has already closed the transfer's files.
+/// Failed releases survive request destruction and retry in the cleanup worker.
+pub fn releaseUpload(self: *Core, lease: uploads.Lease) void {
+    const release = uploads.Release.init(lease);
+    release.apply(self.journal) catch {
+        for (&self.upload_releases) |*slot| if (slot.* == null) {
+            slot.* = release;
+            return;
+        };
+        // A failed release retains its reservation. Each ID has one writer and
+        // the queue can hold every reservation, so another entry cannot exist.
+        unreachable;
+    };
 }
 pub fn ingest(self: *Core, a: u.Allocator) IngestError!void {
     if (self.reset_required) return error.RelayCacheResetRequired;

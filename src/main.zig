@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const log = std.log.scoped(.relay);
 const options = @import("options");
 const source_probe = @import("relay.zig").adapter.enrichment_probe;
 const Sqlite = @import("relay.zig").Sqlite;
@@ -12,6 +13,7 @@ const Server = @import("relay.zig").Server;
 const Tls = @import("relay.zig").Tls;
 const contact_directory = @import("relay.zig").adapter.contacts;
 const Assets = @import("relay.zig").Assets;
+const uploads = @import("relay.zig").uploads;
 const Menu = @import("relay.zig").Menu;
 const settings = @import("relay.zig").settings;
 const adapter_api = if (options.fake) @import("relay.zig").adapter.fake else @import("relay.zig").adapter.macos;
@@ -280,6 +282,18 @@ const Service = struct {
             .automation_error = if (read_only) "read_only_mode" else "automation_unverified",
         };
         core.contacts_phone_region = tls.config.contacts_phone_region;
+        core.upload_files = upload_files: {
+            var files = uploads.Files.init(a, data) catch |err| {
+                log.warn("Attachment upload storage unavailable: {s}", .{@errorName(err)});
+                break :upload_files null;
+            };
+            files.recover(core.journal) catch |err| {
+                files.deinit();
+                log.warn("Attachment upload recovery unavailable: {s}", .{@errorName(err)});
+                break :upload_files null;
+            };
+            break :upload_files files;
+        };
         const attachment_root = if (comptime fake) try std.fmt.allocPrint(
             a,
             "{s}.attachments",
@@ -365,5 +379,5 @@ test {
     _ = Assets;
     _ = Menu;
     _ = Server;
-    _ = @import("relay.zig").uploads;
+    _ = uploads;
 }
