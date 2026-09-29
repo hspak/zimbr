@@ -6,6 +6,8 @@ const protocol = @import("../protocol.zig");
 const attachments = protocol.attachments;
 const Store = @import("Store.zig");
 pub const Files = @import("outgoing/Files.zig");
+pub const Preparation = @import("outgoing/Preparation.zig");
+pub const Upload = @import("outgoing/Upload.zig");
 
 pub const max_stored_files = 256;
 pub const max_stored_bytes = 2 * 1024 * 1024 * 1024;

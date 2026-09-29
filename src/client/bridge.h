@@ -46,7 +46,12 @@ int zc_url_open(const char *url);
 /* Transfers the completed response allocation to the caller; release with free().
    The returned bytes remain valid after ack and subsequent requests. */
 char *zc_net_take_body(ZcNet *net, size_t *length);
+char *zc_net_take_slot_body(ZcNet *net, int slot, size_t *length);
 void zc_net_ack(ZcNet *net, int stream);
+/* Slot 4 is an independent outgoing lane. Borrow fd until ack/cancellation.
+   Read at most 64 KiB per callback; no whole-file allocation or seek retries. */
+int zc_net_upload(ZcNet *, const char *path, const char *epoch, int fd, uint64_t length);
+uint64_t zc_net_upload_progress(ZcNet *);
 /* Two binary lanes (status/done/ack use slot lane+2). Caller owns the fd. */
 int zc_net_start_file(ZcNet *, int lane, const char *path, int fd, size_t expected);
 const char *zc_net_media_body(ZcNet *, int lane, size_t *length);

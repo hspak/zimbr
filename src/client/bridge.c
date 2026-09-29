@@ -28,9 +28,10 @@ struct Slot {
     int64_t last_rx; struct ZcNet *owner; ZcError error;
     char extensions[128], mime[64];
     int media, fd, extension_seen; size_t expected;
+    int upload; uint64_t sent, read_offset, upload_length; struct curl_slist *headers;
 };
 struct ZcNet {
-    CURLM *multi; struct curl_slist *headers; struct Slot slots[4];
+    CURLM *multi; struct curl_slist *headers; struct Slot slots[5];
     char *origin, *ca, *cert, *key; size_t ca_len, cert_len, key_len;
     X509 *root; ZcStreamFn fn; void *context;
 };
@@ -163,8 +164,12 @@ end:
 }
 static int64_t monotonic_ms(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return (int64_t)ts.tv_sec*1000+ts.tv_nsec/1000000; }
 static int progress(void *context, curl_off_t a, curl_off_t b, curl_off_t c, curl_off_t d) {
-    (void)a; (void)b; (void)c; (void)d;
+    (void)a; (void)b; (void)c;
     struct Slot *s=context;
+    if (s->upload) {
+        if (d>=0 && (uint64_t)d!=s->sent) { s->sent=(uint64_t)d; s->last_rx=monotonic_ms(); }
+        return monotonic_ms()-s->last_rx>30000;
+    }
     return s->stream && monotonic_ms()-s->last_rx>45000;
 }
 static size_t receive(char *data, size_t size, size_t count, void *context) {
@@ -184,7 +189,8 @@ static size_t receive(char *data, size_t size, size_t count, void *context) {
         if (status!=200) return n;
         return s->owner->fn(s->owner->context,data,n) ? n : 0;
     }
-    if (n>64*1024*1024-s->len) return 0;
+    size_t limit=s==&s->owner->slots[4] ? 512*1024 : 64*1024*1024;
+    if (n>limit-s->len) return 0;
     char *next=realloc(s->body,s->len+n+1); if (!next) return 0;
     s->body=next; memcpy(next+s->len,data,n); s->len+=n; next[s->len]=0; return n;
 }
@@ -242,11 +248,11 @@ static int require_http2(void *user, char *remote, char *local, int remote_port,
 static void clear_slot(ZcNet *n, int index) {
     struct Slot *s=&n->slots[index];
     if (s->easy) { curl_multi_remove_handle(n->multi,s->easy); curl_easy_cleanup(s->easy); }
-    free(s->body); memset(s,0,sizeof(*s));
+    curl_slist_free_all(s->headers); free(s->body); memset(s,0,sizeof(*s));
 }
 void zc_net_free(ZcNet *n) {
     if (!n) return;
-    for (int i=0;i<4;i++) clear_slot(n,i);
+    for (int i=0;i<5;i++) clear_slot(n,i);
     curl_slist_free_all(n->headers);
     if (n->multi) curl_multi_cleanup(n->multi);
     X509_free(n->root); free(n->origin);
@@ -285,9 +291,9 @@ oom: failure(error,ZC_CONFIG,"Transport allocation failed.");
 fail: zc_net_free(n); return NULL;
 }
 int zc_net_start(ZcNet *n, int stream, const char *path, const char *body, size_t body_length) {
-    if (stream<0 || stream>3 || n->slots[stream].easy || path[0]!='/' || path[1]=='/' || body_length>INT64_MAX) return 0;
+    if (stream<0 || stream>4 || n->slots[stream].easy || path[0]!='/' || path[1]=='/' || body_length>INT64_MAX) return 0;
     struct Slot *s=&n->slots[stream]; s->easy=curl_easy_init(); if (!s->easy) return 0;
-    s->owner=n; s->stream=stream==1; s->media=stream>=2; s->last_rx=monotonic_ms();
+    s->owner=n; s->stream=stream==1; s->media=stream==2 || stream==3; s->last_rx=monotonic_ms();
     char url[ZC_REQUEST_URL_CAPACITY];
     if (snprintf(url,sizeof(url),"%s%s",n->origin,path)>=(int)sizeof(url)) { clear_slot(n,stream); return 0; }
     CURLcode code;
@@ -334,6 +340,46 @@ int zc_net_start_file(ZcNet *n, int lane, const char *path, int fd, size_t expec
     n->slots[slot].fd=fd; n->slots[slot].expected=expected;
     return 1;
 }
+static size_t upload_read(char *buffer, size_t size, size_t count, void *context) {
+    struct Slot *s=context;
+    uint64_t remaining=s->upload_length-s->read_offset;
+    size_t length=size*count;
+    if (length>65536) length=65536;
+    if ((uint64_t)length>remaining) length=(size_t)remaining;
+    if (!length) return 0;
+    ssize_t read_count;
+    do { read_count=pread(s->fd,buffer,length,(off_t)s->read_offset); } while (read_count<0 && errno==EINTR);
+    if (read_count<=0) return CURL_READFUNC_ABORT;
+    s->read_offset+=(uint64_t)read_count;
+    return (size_t)read_count;
+}
+int zc_net_upload(ZcNet *n, const char *path, const char *epoch, int fd, uint64_t length) {
+    if (fd<0 || length>100*1024*1024 || strlen(epoch)!=22 || strspn(epoch,"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")!=22) return 0;
+    if (!zc_net_start(n,4,path,NULL,0)) return 0;
+    struct Slot *s=&n->slots[4];
+    if (s->done) return 1;
+    s->upload=1; s->fd=fd; s->upload_length=length;
+    char header[64]; snprintf(header,sizeof(header),"Zimbr-Server-Epoch: %s",epoch);
+    const char *headers[]={"Content-Type: application/octet-stream","Expect:",header};
+    for (size_t i=0;i<sizeof(headers)/sizeof(headers[0]);i++) {
+        struct curl_slist *next=curl_slist_append(s->headers,headers[i]);
+        if (!next) goto fail;
+        s->headers=next;
+    }
+#define UPLOAD_SET(option,value) do { if (curl_easy_setopt(s->easy,option,value)!=CURLE_OK) goto fail; } while (0)
+    UPLOAD_SET(CURLOPT_HTTPHEADER,s->headers);
+    UPLOAD_SET(CURLOPT_UPLOAD,1L);
+    UPLOAD_SET(CURLOPT_INFILESIZE_LARGE,(curl_off_t)length);
+    UPLOAD_SET(CURLOPT_READFUNCTION,upload_read); UPLOAD_SET(CURLOPT_READDATA,s);
+    UPLOAD_SET(CURLOPT_UPLOAD_BUFFERSIZE,65536L);
+    UPLOAD_SET(CURLOPT_TIMEOUT_MS,15L*60*1000);
+    UPLOAD_SET(CURLOPT_LOW_SPEED_TIME,30L);
+#undef UPLOAD_SET
+    return 1;
+fail:
+    clear_slot(n,4); return 0;
+}
+uint64_t zc_net_upload_progress(ZcNet *n) { return n->slots[4].sent; }
 const char *zc_net_media_body(ZcNet *n, int lane, size_t *length) {
     struct Slot *s=&n->slots[lane+2]; *length=s->body ? s->len : 0; return s->body;
 }
@@ -397,7 +443,10 @@ long zc_net_status(ZcNet *n, int stream) {
 void zc_net_error(ZcNet *n, int stream, ZcError *error) { *error=n->slots[stream].error; }
 const char *zc_net_extensions(ZcNet *n) { return n->slots[1].extensions; }
 char *zc_net_take_body(ZcNet *n, size_t *length) {
-    struct Slot *s=&n->slots[0];
+    return zc_net_take_slot_body(n,0,length);
+}
+char *zc_net_take_slot_body(ZcNet *n, int index, size_t *length) {
+    struct Slot *s=&n->slots[index];
     char *body=s->body; *length=s->len;
     s->body=NULL; s->len=0;
     return body;

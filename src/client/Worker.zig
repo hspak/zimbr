@@ -13,6 +13,7 @@ const Store = @import("Store.zig");
 const Sse = @import("Sse.zig");
 const Notification = @import("Notification.zig");
 const SharedSnapshot = @import("SharedSnapshot.zig");
+const outgoing = @import("outgoing.zig");
 const Worker = @This();
 
 io: std.Io,
@@ -36,6 +37,12 @@ status: []const u8 = "Opening cached messages…",
 online: bool = false,
 send_direct: bool = false,
 reply_existing: bool = false,
+send_attachments: bool = false,
+preparation: ?outgoing.Preparation = null,
+upload: ?outgoing.Upload = null,
+upload_retry_at: i64 = 0,
+upload_published_at: i64 = 0,
+attachment_error: []const u8 = "",
 dirty: bool = true,
 content_dirty: bool = true,
 shared: ?*SharedSnapshot = null,
@@ -106,6 +113,10 @@ pub const Command = struct {
     kind: enum {
         select,
         draft,
+        attach,
+        remove_attachment,
+        cancel_preparation,
+        cancel_upload,
         send,
         older,
         reconnect,
@@ -146,6 +157,8 @@ pub const RelayStatus = struct {
         state_reset_v1: bool = false,
         send_direct: bool,
         reply_existing: bool,
+        send_attachments_v1: bool = false,
+        attachment_uploads_v1: bool = false,
         read_history: bool = false,
         live_messages: bool = false,
         attachments: bool = false,
@@ -185,6 +198,10 @@ pub const View = struct {
     sync_activity: t.SyncActivity = .{},
     send_direct: bool,
     reply_existing: bool,
+    send_attachments: bool = false,
+    preparing_attachments: bool = false,
+    attachment_error: []const u8 = "",
+    upload: outgoing.Upload.Progress = .{},
     generation: u64,
     ack: u64,
     loading_history: bool = false,
@@ -317,6 +334,13 @@ fn work(s: *Worker) !void {
     defer a.free(path);
     s.store = try Store.open(path);
     defer s.store.close();
+    s.preparation = .{ .io = s.io, .data = s.config.data, .parent_wake = s.wake_pipe[1] };
+    s.preparation.?.start() catch |err| {
+        log.warn("Attachment storage unavailable: {s}", .{@errorName(err)});
+        s.preparation = null;
+        s.attachment_error = "Private attachment storage is unavailable.";
+    };
+    defer if (s.preparation) |*preparation| preparation.shutdown();
     s.selected = try s.store.get(a, "selected");
     {
         const stamp = try s.store.get(a, "server_checked_at");
@@ -325,6 +349,7 @@ fn work(s: *Worker) !void {
     }
     defer if (s.selected.len > 0) a.free(s.selected);
     defer {
+        s.stopUpload();
         if (s.net) |n| c.zc_net_free(n);
         s.sse.reset();
         a.free(s.job_key);
@@ -339,6 +364,7 @@ fn work(s: *Worker) !void {
     while (true) {
         s.expireContactSync(u.now());
         try s.expireUnknown();
+        try s.preparedFiles();
         try s.drain();
         if (s.reset == .idle) try s.resolveDirect();
         if (s.stop.load(.acquire)) break;
@@ -382,12 +408,14 @@ fn work(s: *Worker) !void {
                 s.dirty = true;
             }
             if (s.job == .idle and !s.auth_blocked and s.reset != .complete and u.now() >= s.retry_at) try s.schedule();
+            try s.uploadFiles();
         }
         if (s.dirty and u.now() - s.last_published >= 16) try s.publish();
         // Network activity and commands wake immediately; timers only bound
         // publication coalescing and maintenance, rather than every request.
         const now = u.now();
         var delay: i64 = if (s.dirty) @max(0, 16 - (now - s.last_published)) else 1000;
+        if (s.upload != null) delay = @min(delay, 100);
         delay = @min(delay, @max(0, s.expiry_at - now));
         if (s.contacts_sync_until != 0) delay = @min(delay, @max(0, s.contacts_sync_until - now));
         if (!s.auth_blocked and s.job == .idle and s.reset != .complete) {
@@ -570,6 +598,95 @@ fn expireUnknown(s: *Worker) !void {
 fn unresolved(s: *Worker) !bool {
     return try s.store.db.scalar("SELECT count(*) FROM outbox WHERE epoch=(SELECT value FROM meta WHERE key='epoch') AND record IS NULL AND state IN ('sending','unknown')") > 0;
 }
+fn preparedFiles(s: *Worker) !void {
+    const preparation = if (s.preparation) |*value| value else return;
+    while (preparation.take()) |task| {
+        defer task.destroy();
+        if (task.cancelled.load(.acquire)) {
+            if (task.file_id) |id| {
+                var arena = std.heap.ArenaAllocator.init(a);
+                defer arena.deinit();
+                try outgoing.removeDraft(s.store, arena.allocator(), task.key, &id);
+            }
+        } else if (task.failure) |err| {
+            s.attachment_error = switch (err) {
+                error.AttachmentTooLarge => "Attachments may use 100 MiB per file and 200 MiB per message.",
+                error.TooManyAttachments => "A message can contain at most 16 attachments.",
+                error.AttachmentStorageFull => "Local attachment storage is full. Remove unused files or completed drafts.",
+                error.AttachmentSourceChanged => "The file changed while being copied. Drop it again when it has finished changing.",
+                error.AttachmentSourceUnavailable => "Cannot read this file. Drop a local regular file, not a folder or symlink.",
+                error.AttachmentCanceled => "File preparation cancelled.",
+                error.InvalidRequest => "This filename cannot be sent. Rename the file and try again.",
+                error.OutOfMemory => return error.OutOfMemory,
+                else => "Could not save the attachment. Check available disk space and try again.",
+            };
+        }
+        s.content_dirty = true;
+        s.dirty = true;
+    }
+}
+
+fn stopUpload(s: *Worker) void {
+    if (s.upload) |*upload| upload.deinit(s.net.?);
+    s.upload = null;
+}
+
+fn attachmentsReady(s: *const Worker) bool {
+    return s.send_attachments and s.preparation != null and s.preparation.?.health.load(.acquire) == .ready;
+}
+
+fn uploadFiles(s: *Worker) !void {
+    const preparation = if (s.preparation) |*value| value else return;
+    if (s.reset != .idle or !s.online or s.auth_blocked) {
+        s.stopUpload();
+        return;
+    }
+    const net = s.net orelse return;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    if (s.upload) |*upload| {
+        if (!u.eq(upload.input.server_epoch, try s.store.get(ar, "epoch"))) {
+            s.stopUpload();
+            return;
+        }
+        const finished = upload.poll(net, s.store, preparation.files) catch |err| finished: {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            log.warn("Attachment upload delayed: {s}", .{@errorName(err)});
+            try s.store.outcome(upload.input.request_id, if (upload.may_submit) "failed" else "unknown", if (upload.may_submit)
+                "Could not verify the attachment upload. Originals are retained; review the files and connection."
+            else
+                "Submission response interrupted. Checking the original request ID; no automatic resend.");
+            break :finished true;
+        };
+        if (finished) {
+            const failure = upload.transport_error;
+            const status = upload.http_status;
+            s.stopUpload();
+            s.upload_retry_at = u.now() + 5000;
+            s.content_dirty = true;
+            s.dirty = true;
+            if (failure.kind != c.ZC_OK and failure.kind != c.ZC_HTTP or status == 401 or status == 403) {
+                s.transport_error = failure;
+                s.disconnected(status);
+            }
+        } else if (u.now() - s.upload_published_at >= 100) {
+            s.upload_published_at = u.now();
+            s.dirty = true;
+        }
+        return;
+    }
+    if (!s.attachmentsReady() or u.now() < s.upload_retry_at) return;
+    const q = try s.store.db.prepare("SELECT payload,state FROM outbox WHERE epoch=(SELECT value FROM meta WHERE key='epoch') AND record IS NULL AND state IN ('uploading','sending','unknown') AND json_array_length(payload,'$.attachments')>0 ORDER BY rowid LIMIT 1");
+    defer q.close();
+    if (try q.step()) {
+        s.upload = try outgoing.Upload.init(a, net, q.bytes(0), u.eq(q.bytes(1), "uploading"));
+        s.dirty = true;
+    }
+}
+fn unresolvedText(s: *Worker) !bool {
+    return try s.store.db.scalar("SELECT count(*) FROM outbox WHERE epoch=(SELECT value FROM meta WHERE key='epoch') AND record IS NULL AND state IN ('sending','unknown') AND coalesce(json_array_length(payload,'$.attachments'),0)=0") > 0;
+}
 fn schedule(s: *Worker) !void {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -600,8 +717,8 @@ fn schedule(s: *Worker) !void {
             s.need_sync = false;
             try s.request(.sync, "/v1/sync", .{}, null);
         } else try s.request(.status, "/v1/status", .{}, null);
-    } else if (try s.unresolved() and u.now() >= s.recovery_at) {
-        const q = try s.store.db.prepare("SELECT id FROM outbox WHERE epoch=(SELECT value FROM meta WHERE key='epoch') AND record IS NULL AND state IN ('sending','unknown') ORDER BY rowid LIMIT 1");
+    } else if (try s.unresolvedText() and u.now() >= s.recovery_at) {
+        const q = try s.store.db.prepare("SELECT id FROM outbox WHERE epoch=(SELECT value FROM meta WHERE key='epoch') AND record IS NULL AND state IN ('sending','unknown') AND coalesce(json_array_length(payload,'$.attachments'),0)=0 ORDER BY rowid LIMIT 1");
         defer q.close();
         if (try q.step()) {
             try s.setJobKey(q.bytes(0));
@@ -639,7 +756,7 @@ fn schedule(s: *Worker) !void {
         try s.request(.status, "/v1/status", .{}, null);
     } else if (u.now() >= s.recovery_at) {
         s.recovery_at = u.now() + 5000;
-        const q = try s.store.db.prepare("SELECT id,rowid FROM outbox WHERE epoch=? AND state IN ('sending','unknown','queued','dispatching','submitted') AND rowid>? ORDER BY rowid LIMIT 1");
+        const q = try s.store.db.prepare("SELECT id,rowid FROM outbox WHERE epoch=? AND state IN ('sending','unknown','queued','dispatching','submitted') AND (record IS NOT NULL OR coalesce(json_array_length(payload,'$.attachments'),0)=0) AND rowid>? ORDER BY rowid LIMIT 1");
         defer q.close();
         try q.bind(&.{ .{ .text = try s.store.get(ar, "epoch") }, .{ .int = s.recover_row } });
         if (try q.step()) {
@@ -942,6 +1059,7 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
             }
             s.send_direct = v.capabilities.send_direct;
             s.reply_existing = v.capabilities.reply_existing;
+            s.send_attachments = v.capabilities.send_attachments_v1 and v.capabilities.attachment_uploads_v1;
             s.status_at = u.now() + @as(i64, if (v.sync_activity.active()) 1000 else 5000);
             if (!u.eq(v.server_epoch, try s.store.get(ar, "epoch")) or !u.eq(
                 try s.store.get(ar, "bootstrapped"),
@@ -1169,6 +1287,7 @@ fn drain(s: *Worker) !void {
                     "unknown",
                     "Relay reset requested; the original send may already have reached Messages.",
                 );
+                s.stopUpload();
                 if (s.net) |n| c.zc_net_free(n);
                 s.net = null;
                 s.job = .idle;
@@ -1249,6 +1368,38 @@ fn drain(s: *Worker) !void {
                 try q.bind(&.{.{ .text = cmd.key }});
                 if (!try q.step()) s.content_dirty = true;
             },
+            .attach => {
+                if (cmd.key.len == 0 or cmd.text.len == 0 or cmd.text.len > 4096) continue;
+                if (s.preparation) |*preparation| {
+                    if (preparation.health.load(.acquire) != .failed) {
+                        preparation.push(try s.store.threadKey(ar, cmd.key), cmd.text) catch |err| {
+                            if (err == error.OutOfMemory) return err;
+                            s.attachment_error = "Too many files are being prepared. Wait, then try again.";
+                            continue;
+                        };
+                        s.attachment_error = "";
+                    } else s.attachment_error = "Attachment preparation is unavailable. Restart the client.";
+                } else s.attachment_error = "Private attachment storage is unavailable.";
+            },
+            .remove_attachment => {
+                try outgoing.removeDraft(s.store, ar, cmd.key, cmd.text);
+                if (s.preparation) |*preparation| preparation.wake();
+                s.content_dirty = true;
+                s.attachment_error = "";
+            },
+            .cancel_preparation => if (s.preparation) |*preparation| {
+                preparation.cancel(try s.store.threadKey(ar, cmd.key));
+            },
+            .cancel_upload => {
+                const q = try s.store.db.prepare("SELECT state FROM outbox WHERE id=? AND record IS NULL");
+                defer q.close();
+                try q.bind(&.{.{ .text = cmd.key }});
+                if (try q.step() and u.eq(q.bytes(0), "uploading")) {
+                    if (s.upload) |upload| if (u.eq(upload.input.request_id, cmd.key)) s.stopUpload();
+                    try s.store.outcome(cmd.key, "cancelled", "Upload cancelled before submission. The original files are retained on this device.");
+                    s.content_dirty = true;
+                } else s.attachment_error = "This request may already have been submitted. Check its status before sending again.";
+            },
             .viewed => {
                 s.viewed = u.eq(cmd.text, "yes");
                 if (s.viewed) {
@@ -1287,6 +1438,8 @@ fn drain(s: *Worker) !void {
                 s.backoff = 1000;
                 s.status_at = 0;
                 s.online = false;
+                s.stopUpload();
+                s.upload_retry_at = 0;
                 if (s.net) |n| {
                     c.zc_net_free(n);
                     s.net = null;
@@ -1300,7 +1453,12 @@ fn drain(s: *Worker) !void {
             },
             .send => {
                 s.content_dirty = true;
-                if (!s.online or s.stop.load(.acquire)) {
+                const files = try outgoing.draft(s.store, ar, cmd.key);
+                const preparing = if (s.preparation) |*preparation| preparation.busy("") else false;
+                if (preparing) {
+                    try s.store.saveDraft(cmd.key, cmd.text);
+                    s.attachment_error = "Wait for file preparation to finish before sending.";
+                } else if (!s.online or s.stop.load(.acquire)) {
                     try s.store.saveDraft(cmd.key, cmd.text);
                     s.status = "Offline · message kept as a draft";
                 } else if (try s.unresolved()) {
@@ -1313,7 +1471,7 @@ fn drain(s: *Worker) !void {
                         cmd.key,
                     );
                     const direct = target.recipient != null;
-                    if ((direct and !s.send_direct) or (!direct and !s.reply_existing)) {
+                    if ((direct and !s.send_direct) or (!direct and !s.reply_existing) or (files.len != 0 and !s.attachmentsReady())) {
                         s.status = "Sending unavailable · message kept as a draft";
                         try s.store.saveDraft(cmd.key, cmd.text);
                     } else {
@@ -1322,10 +1480,13 @@ fn drain(s: *Worker) !void {
                             .server_epoch = try s.store.get(ar, "epoch"),
                             .target = target,
                             .text = cmd.text,
+                            .attachments = files,
                         };
                         try s.store.persistSend(ar, cmd.key, input);
-                        try s.setJobKey(input.request_id);
-                        try s.request(.send, "/v1/messages", .{}, try u.json(ar, input));
+                        if (files.len == 0) {
+                            try s.setJobKey(input.request_id);
+                            try s.request(.send, "/v1/messages", .{}, try u.json(ar, input));
+                        } else s.upload_retry_at = 0;
                     }
                 }
                 s.ack += 1;
@@ -1357,6 +1518,7 @@ fn resolveDirect(s: *Worker) !void {
     }
     if (!std.mem.startsWith(u8, s.selected, "new:")) return;
     if ((try s.store.draft(ar, s.selected)).len > 0) return;
+    if ((try outgoing.draft(s.store, ar, s.selected)).len != 0) return;
     const q = try s.store.db.prepare("SELECT m.chat FROM outbox o JOIN records m ON m.kind='message' AND m.id=json_extract(o.record,'$.message_id') WHERE o.draft_key=? AND o.epoch=? LIMIT 1");
     defer q.close();
     try q.bind(&.{ .{ .text = s.selected }, .{ .text = try s.store.get(ar, "epoch") } });
@@ -1413,6 +1575,9 @@ fn publish(s: *Worker) !void {
         .online = s.online,
         .send_direct = s.send_direct,
         .reply_existing = s.reply_existing,
+        .send_attachments = s.attachmentsReady(),
+        .preparing_attachments = if (s.preparation) |*preparation| preparation.busy("") else false,
+        .attachment_error = try arena.allocator().dupe(u8, s.attachment_error),
         .generation = s.generation,
         .ack = s.ack,
         .reset = s.reset,
@@ -1421,6 +1586,12 @@ fn publish(s: *Worker) !void {
     };
     const ar = arena.allocator();
     v.snapshot.draft = try s.store.draft(ar, s.selected);
+    v.snapshot.draft_attachments = try outgoing.draft(s.store, ar, s.selected);
+    if (s.upload) |*upload| {
+        v.upload = upload.progress(s.net.?);
+        v.upload.request_id = try ar.dupe(u8, v.upload.request_id);
+        v.upload.filename = try ar.dupe(u8, v.upload.filename);
+    }
     const server = try s.store.get(ar, "relay_status");
     const expiring = s.identity.expires_at > 0 and s.identity.expires_at - @divTrunc(u.now(), 1000) <= 30 * 86400;
     if (expiring and s.online) v.status = try std.fmt.allocPrint(

@@ -29,10 +29,12 @@ means the implementation and its relevant automated checks have passed.
    and follows receipt changes. Safe reclamation releases unstarted parts and
    independently observed deliveries. Automated checks pass; native file sending
    still requires Mac acceptance.
-4. **In progress: client attachment drafts and upload worker.** Private local
+4. **Complete: client attachment drafts and upload worker.** Private local
    snapshots and transactional draft/outbox ownership pass automated storage
-   validation. Background preparation, uploads with progress, and recovery
-   without duplicate sends remain to be connected to the worker.
+   validation. A separate preparation worker and outgoing HTTP/2 lane now stage
+   files, report progress, and recover original request IDs without replaying
+   submissions. Automated worker and transport checks pass; these operations
+   are ready for composer integration.
 5. **Pending: composer integration.** Accept Wayland file drops, show removable
    attachments and thumbnails, allow attachment-only sends, and surface errors
    and cancellation.
@@ -141,6 +143,31 @@ The new cases exercise original-byte preservation, cancellation, unsafe sources,
 crash orphans, quotas, merged drafts, empty files, transaction rollback, invalid
 delivery updates, and retention across relay resets. Existing text-send and
 unknown-send expiry checks remain intact.
+
+The worker exposes preparation, draft removal, preparation cancellation, and
+pre-submission upload cancellation. File work uses a separate cache connection;
+the outgoing request slot keeps live events, commands, history, and incoming
+images responsive. Upload reads use at most 64 KiB per callback and responses
+have a 512 KiB cap. Cancellation retains the local outbox originals for review;
+unused relay reservations follow their normal 24-hour expiry.
+
+Each upload attempt first looks up the immutable request ID. Before submission,
+it may retry reservations and transfers with the same upload IDs, reusing bytes
+the relay already verified. Submission intent is persisted before starting the
+POST. A lost response or restart from that point permits only request lookup;
+a missing request becomes unconfirmed and is not automatically submitted again.
+Epoch changes hold old requests and preserve their originals.
+
+`python3 tests/client_attachments.py -v` passed nine production-worker cases,
+including 9 MiB and empty files, corrupted originals, offline removal, live
+events during a held upload, cancellation, lost upload responses, lost accepted
+and unaccepted send responses, restart after relay cleanup, and epoch changes.
+The private-storage readiness case failed before the send-gate fix and passed
+unchanged afterward. Existing client integration, transport fault, and media
+transport suites also passed.
+The final worker build passed 139 client tests, including completion of queued
+preparations when the file worker cannot open its cache connection. Both the
+desktop client and headless client executable built successfully.
 
 Browser image offers and clipboard image bytes require additional input support;
 the first input path handles local file-manager drops. Upload and dispatch are

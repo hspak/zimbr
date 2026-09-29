@@ -133,6 +133,11 @@ fn control(init: std.process.Init, worker: *Worker) !void {
                 .selected_title = selected_title,
                 .directory_revision = v.snapshot.directory.fingerprint(),
                 .ack = v.ack,
+                .draft_attachments = v.snapshot.draft_attachments,
+                .send_attachments = v.send_attachments,
+                .preparing_attachments = v.preparing_attachments,
+                .attachment_error = v.attachment_error,
+                .upload = v.upload,
                 .diagnostics = v.diagnostics,
             });
             _ = u.c.write(1, raw.ptr, raw.len);
