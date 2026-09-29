@@ -32,6 +32,13 @@ pub fn validate(file: Upload) ValidateError!u64 {
         return error.InvalidRequest;
     for (file.name) |ch| if (ch < 32 or ch == 127 or ch == '/' or ch == '\\')
         return error.InvalidRequest;
+    var codepoints = std.unicode.Utf8View.initUnchecked(file.name).iterator();
+    while (codepoints.nextCodepoint()) |cp| switch (cp) {
+        // Filenames are shown before sending. Reject hidden line breaks and
+        // direction overrides that can disguise the basename or its extension.
+        0x80...0x9f, 0x061c, 0x200e, 0x200f, 0x2028...0x202e, 0x2066...0x2069 => return error.InvalidRequest,
+        else => {},
+    };
     if (!validMime(file.mime_type) or file.sha256.len != 64) return error.InvalidRequest;
     for (file.sha256) |ch| if (!std.ascii.isDigit(ch) and (ch < 'a' or ch > 'f'))
         return error.InvalidRequest;
@@ -159,4 +166,35 @@ test "attachment sets bound count and aggregate size and reject repeated upload 
     try std.testing.expectError(error.AttachmentTooLarge, validateSet(files[0..3]));
     files[2].bytes = "0";
     try validateSet(files[0..3]);
+}
+
+test "attachment names reject invisible controls but preserve ordinary Unicode" {
+    var file: Upload = .{
+        .id = "ABEiM0RVZneImaq7zN3u_w",
+        .name = "",
+        .mime_type = "application/octet-stream",
+        .bytes = "0",
+        .sha256 = "0" ** 64,
+    };
+    for ([_][]const u8{
+        "photo\u{85}.png",
+        "photo\u{9b}.png",
+        "photo\u{2028}.png",
+        "photo\u{2029}.png",
+        "photo\u{202e}gnp.exe",
+        "photo\u{2066}.png",
+        "photo\u{61c}.png",
+    }) |name| {
+        file.name = name;
+        try std.testing.expectError(error.InvalidRequest, validate(file));
+    }
+    for ([_][]const u8{
+        "صورة.png",
+        "résumé 👩‍💻.txt",
+        "re\u{301}sume\u{301}.txt",
+        "quote'; DROP TABLE uploads;--.txt",
+    }) |name| {
+        file.name = name;
+        try std.testing.expectEqual(@as(u64, 0), try validate(file));
+    }
 }

@@ -6,11 +6,40 @@ compromised relay. This follows the [OWASP input validation guidance](https://ch
 
 ## Relay
 
+- SQLite queries use bound parameters for external values, including message
+  text, addresses, and attachment metadata. The shared relay/client wrapper
+  rejects embedded NULs in SQL and trailing statements in prepared queries.
+  Bindings require the complete parameter set, reject values above 2 MiB before
+  converting lengths to C integers, and clear all parameters on failure.
+  Every connection enables defensive mode and disables trusted schema behavior,
+  following [SQLite's hardening guidance](https://sqlite.org/security.html).
+  Engine limits also cap SQL at 64 KiB, parameters at 128, expression depth at
+  100, trigger depth at 16, and attached databases at zero. These are additional
+  defenses; SQL source must still be trusted application code.
+- HTTP/2 request and response arenas, including SSE batches, share a 128 MiB
+  allocation budget across all connections. This bounds memory retained by
+  many slow readers even when each response is individually legal. Exhaustion
+  fails the operation; if an error response cannot be allocated, the stream is
+  reset. Connection teardown, stream resets, and existing deadlines release
+  capacity. This budget covers arena allocations, not total process memory;
+  TLS, SQLite, workers, and HTTP/2 engine storage have separate costs.
 - Send bodies retain the 64 KiB limit and typed validation. Before JSON parsing,
   an allocation-free scan caps nesting at 32 containers and complexity at 8,192
   tokens, including unknown fields. The media type must be `application/json`;
   parameters such as `charset=utf-8` remain supported. Duplicate known fields
   fail typed parsing. Rejected requests do not create send records.
+- Outgoing attachments are limited to 16 files, 100 MiB per file, and 200 MiB
+  per send. Reservations share a 256-entry / 2 GiB quota and unused entries
+  expire after 24 hours. Only four upload streams can be active, with a
+  30-second idle deadline and a 15-minute total deadline. Bytes are streamed
+  to private regular files and verified against the reserved length and SHA-256
+  before publication; incorrect, interrupted, or unpublished files are removed.
+  Device ownership is checked independently of caller-supplied metadata.
+- Upload basenames must be valid UTF-8 of at most 255 bytes, with no path
+  separators, NULs, ASCII/C1 controls, Unicode line separators, or directional
+  controls that can disguise an extension. Ordinary international text,
+  combining marks, and emoji remain supported. Client preparation and relay
+  acceptance share this validation; neither rewrites a rejected filename.
 - Incoming text is read with a byte-bounded SQLite BLOB projection. SQLite text
   slicing must not hide a NUL and its suffix. Invalid UTF-8 or embedded NULs in
   plain/attributed text produce a malformed placeholder; more than 64 KiB of
@@ -66,6 +95,11 @@ transport, and local-only preview artwork policy remain relevant defenses.
 ```sh
 zig build test fake-relay client-probe -Dopenssl-prefix=/absolute/openssl-3.5
 python3 tests/message_security.py
+python3 tests/input_security.py
+python3 tests/attachment_uploads.py
+python3 tests/attachment_sends.py
+python3 tests/client_attachments.py
+python3 tests/relay_http2.py
 python3 tests/links.py
 python3 tests/assets.py
 python3 tests/integration.py
@@ -78,3 +112,10 @@ attachment floods, aliased plist offsets, shared artwork expansion, deep/wide
 JSON, rejected sends, valid Unicode/idempotency, client transaction rollback,
 duplicate/invalid metadata pagination, and large reaction groups. Native macOS
 Messages and ImageIO acceptance still require validation on a Mac.
+
+The attachment security suite additionally checks malformed UTF-8 and escaped
+surrogates, invisible filename controls, traversal attempts, integer overflow,
+duplicate fields, metadata floods, and literal SQL/shell metacharacters through
+dispatch. Slow-reader tests exhaust the shared arena budget and verify recovery
+after closing streams. Existing upload tests cover hash/length failures, ownership,
+concurrency, timeouts, crash recovery, and unsafe storage roots.

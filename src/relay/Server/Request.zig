@@ -8,8 +8,8 @@ const Request = @This();
 
 connection: *Connection,
 id: i32,
-arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator),
-batch: std.heap.ArenaAllocator = .init(std.heap.page_allocator),
+arena: std.heap.ArenaAllocator,
+batch: std.heap.ArenaAllocator,
 head: Head = .{},
 headers: std.ArrayList(std.http.Header) = .empty,
 body: std.ArrayList(u8) = .empty,

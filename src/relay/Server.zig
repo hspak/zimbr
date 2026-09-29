@@ -13,6 +13,7 @@ const Request = Connection.Request;
 const Tls = @import("Tls.zig");
 const Assets = @import("Assets.zig");
 const upload_http = @import("Server/uploads.zig");
+const Memory = @import("Server/Memory.zig");
 const Server = @This();
 
 core: *Core,
@@ -21,6 +22,7 @@ listening: ?*std.atomic.Value(bool) = null,
 handshakes: std.atomic.Value(usize) = .init(0),
 asset_responses: std.atomic.Value(usize) = .init(0),
 uploads_active: std.atomic.Value(usize) = .init(0),
+memory: Memory = .{ .backing = std.heap.page_allocator, .limit = 128 * 1024 * 1024 },
 
 pub const RunError = std.Io.net.Ip6Address.ParseError || std.Io.net.IpAddress.ListenError ||
     std.Io.net.Server.AcceptError;
@@ -99,9 +101,9 @@ pub fn respondError(self: *Server, req: *Request, err: anytype) http2.Error!void
     _ = self;
     if (req.responded) return req.connection.engine.reset(req.id);
     const mapping = mapError(err);
-    const body = try u.json(req.arena.allocator(), .{
+    const body = u.json(req.arena.allocator(), .{
         .error_info = t.SafeError{ .code = mapping.code, .message = mapping.message },
-    });
+    }) catch return req.connection.engine.reset(req.id);
     try respond(req, body, mapping.status);
 }
 /// Dispatches a complete bounded request on its connection owner.
@@ -726,4 +728,5 @@ fn mapError(err: anytype) ErrorMapping {
 
 test {
     _ = @import("http2.zig");
+    _ = Connection;
 }

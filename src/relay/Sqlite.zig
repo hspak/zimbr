@@ -6,6 +6,9 @@ const Sqlite = @This();
 handle: *c.sqlite3,
 cache: *Cache,
 
+const max_value_bytes = 2 * 1024 * 1024;
+const max_sql_bytes = 64 * 1024;
+
 // Fixed-size, connection-owned cache. Checked-out statements are removed so
 // nested uses of the same SQL always get independent cursors and bindings.
 const Cache = struct {
@@ -47,8 +50,19 @@ fn openFlags(path: [:0]const u8, readonly: bool, threading: c_int) OpenError!Sql
         if (db) |d| _ = c.sqlite3_close(d);
         return error.DatabaseUnavailable;
     }
+    errdefer _ = c.sqlite3_close(db);
+    // Bound the engine as well as callers. Zimbr never attaches databases or
+    // needs schema text to invoke application-defined functions.
+    if (c.sqlite3_db_config(db, c.SQLITE_DBCONFIG_DEFENSIVE, @as(c_int, 1), @as(?*c_int, null)) != c.SQLITE_OK or
+        c.sqlite3_db_config(db, c.SQLITE_DBCONFIG_TRUSTED_SCHEMA, @as(c_int, 0), @as(?*c_int, null)) != c.SQLITE_OK)
+        return error.DatabaseUnavailable;
     _ = c.sqlite3_busy_timeout(db, 1000);
-    _ = c.sqlite3_limit(db, c.SQLITE_LIMIT_LENGTH, 2 * 1024 * 1024);
+    _ = c.sqlite3_limit(db, c.SQLITE_LIMIT_LENGTH, max_value_bytes);
+    _ = c.sqlite3_limit(db, c.SQLITE_LIMIT_SQL_LENGTH, max_sql_bytes);
+    _ = c.sqlite3_limit(db, c.SQLITE_LIMIT_ATTACHED, 0);
+    _ = c.sqlite3_limit(db, c.SQLITE_LIMIT_VARIABLE_NUMBER, 128);
+    _ = c.sqlite3_limit(db, c.SQLITE_LIMIT_EXPR_DEPTH, 100);
+    _ = c.sqlite3_limit(db, c.SQLITE_LIMIT_TRIGGER_DEPTH, 16);
     return .{ .handle = db.?, .cache = cache };
 }
 pub fn close(self: Sqlite) void {
@@ -58,10 +72,16 @@ pub fn close(self: Sqlite) void {
     std.heap.c_allocator.destroy(self.cache);
     _ = c.sqlite3_close(self.handle);
 }
+/// Execute trusted application SQL. Bind all external values through Statement.
 pub fn exec(self: Sqlite, sql: [:0]const u8) ExecError!void {
+    if (sql.len > max_sql_bytes or std.mem.indexOfScalar(u8, sql, 0) != null)
+        return error.DatabaseFailure;
     if (c.sqlite3_exec(self.handle, sql, null, null, null) != c.SQLITE_OK) return error.DatabaseFailure;
 }
+/// Prepare exactly one trusted statement. User input belongs in bind parameters.
 pub fn prepare(self: Sqlite, sql: [:0]const u8) PrepareError!Statement {
+    if (sql.len > max_sql_bytes or std.mem.indexOfScalar(u8, sql, 0) != null)
+        return error.SchemaUnsupported;
     // Schema/PRAGMA preparation can itself have side effects. Cache only DML.
     const reusable = sql.len <= 4096 and (std.mem.startsWith(u8, sql, "SELECT ") or
         std.mem.startsWith(u8, sql, "INSERT ") or std.mem.startsWith(u8, sql, "UPDATE ") or
@@ -83,21 +103,26 @@ pub fn prepare(self: Sqlite, sql: [:0]const u8) PrepareError!Statement {
         }
     };
     var stmt: ?*c.sqlite3_stmt = null;
+    var tail: [*c]const u8 = null;
     switch (c.sqlite3_prepare_v3(
         self.handle,
         sql,
         -1,
         if (reusable) c.SQLITE_PREPARE_PERSISTENT else 0,
         &stmt,
-        null,
+        &tail,
     )) {
         c.SQLITE_OK => {},
         c.SQLITE_BUSY, c.SQLITE_LOCKED => return error.DatabaseBusy,
         c.SQLITE_PERM, c.SQLITE_AUTH, c.SQLITE_CANTOPEN => return error.DatabaseUnavailable,
         else => return error.SchemaUnsupported,
     }
+    const prepared = stmt orelse return error.SchemaUnsupported;
+    errdefer _ = c.sqlite3_finalize(prepared);
+    if (std.mem.trim(u8, std.mem.span(tail), " \t\r\n").len != 0)
+        return error.SchemaUnsupported;
     return .{
-        .handle = stmt.?,
+        .handle = prepared,
         .cache = if (reusable) self.cache else null,
         .slot = slot,
     };
@@ -138,8 +163,18 @@ pub const Statement = struct {
         cache.slots[s.slot] = s.handle;
     }
     pub const BindError = error{DatabaseFailure};
-    /// Borrow text and blob bytes until the statement is closed or rebound.
+    /// Replace all bindings, borrowing text and blob bytes until close or rebind.
+    /// On error every parameter is cleared; incomplete parameter sets are rejected.
     pub fn bind(s: Statement, values: []const Parameter) BindError!void {
+        // Validate before narrowing lengths to SQLite's signed C integers or
+        // borrowing any new memory. A failed rebind must not retain old inputs.
+        _ = c.sqlite3_clear_bindings(s.handle);
+        if (values.len != c.sqlite3_bind_parameter_count(s.handle)) return error.DatabaseFailure;
+        for (values) |v| switch (v) {
+            .text, .blob => |input| if (input.len > max_value_bytes) return error.DatabaseFailure,
+            .int, .null_value => {},
+        };
+        errdefer _ = c.sqlite3_clear_bindings(s.handle);
         for (values, 1..) |v, i| {
             const rc = switch (v) {
                 .text => |t| c.sqlite3_bind_text(
@@ -251,7 +286,7 @@ test "failed partial bindings cannot leak into a later cached query or connectio
     const query = "SELECT ?";
     const secret = try std.testing.allocator.dupe(u8, "private\x00blob");
     var statement = try db.prepare(query);
-    // The first parameter binds borrowed memory before the second fails.
+    // An invalid parameter set must not retain borrowed memory.
     try std.testing.expectError(
         error.DatabaseFailure,
         statement.bind(&.{ .{ .blob = secret }, .{ .int = 2 } }),
@@ -267,5 +302,56 @@ test "failed partial bindings cannot leak into a later cached query or connectio
     try independent.bind(&.{.{ .text = "other connection" }});
     try std.testing.expect(try independent.step());
     try std.testing.expectEqualStrings("other connection", independent.bytes(0));
+    try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(statement.handle, 0));
+}
+
+test "database connections reject attachment and schema tampering" {
+    const db = try open(":memory:", false);
+    defer db.close();
+    try db.exec("CREATE TABLE keep(id INTEGER PRIMARY KEY)");
+    try std.testing.expectError(error.DatabaseFailure, db.exec("ATTACH ':memory:' AS other"));
+    try db.exec("PRAGMA writable_schema=ON");
+    try std.testing.expectError(error.DatabaseFailure, db.exec("DELETE FROM sqlite_schema"));
+    try std.testing.expectEqual(@as(i64, 1), try db.scalar("SELECT count(*) FROM sqlite_schema WHERE name='keep'"));
+    try std.testing.expectEqual(@as(i64, 0), try db.scalar("PRAGMA trusted_schema"));
+}
+
+test "prepared statements reject trailing SQL and embedded NULs" {
+    const db = try open(":memory:", false);
+    defer db.close();
+    for ([_][:0]const u8{
+        "SELECT 1; SELECT 2",
+        "SELECT 1\x00; SELECT 2",
+        "",
+        "-- comment only",
+    }) |sql| {
+        if (db.prepare(sql)) |statement| {
+            statement.close();
+            return error.TestUnexpectedResult;
+        } else |err| try std.testing.expectEqual(error.SchemaUnsupported, err);
+    }
+    try std.testing.expectEqual(@as(i64, 1), try db.scalar("SELECT 1; \n\t"));
+}
+
+test "rejected rebindings clear secrets and bound values remain literal" {
+    const db = try open(":memory:", false);
+    defer db.close();
+    const statement = try db.prepare("SELECT ?, ?");
+    defer statement.close();
+    const literal = "'); DROP TABLE example;--\x00hidden\xff";
+    try statement.bind(&.{ .{ .text = literal }, .{ .blob = literal } });
+    try std.testing.expect(try statement.step());
+    try std.testing.expectEqualStrings(literal, statement.bytes(0));
+    try std.testing.expectEqualStrings(literal, statement.bytes(1));
+    _ = c.sqlite3_reset(statement.handle);
+    try std.testing.expectError(error.DatabaseFailure, statement.bind(&.{.{ .text = "replacement" }}));
+    try std.testing.expect(try statement.step());
+    try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(statement.handle, 0));
+    try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(statement.handle, 1));
+    _ = c.sqlite3_reset(statement.handle);
+    const large = try std.testing.allocator.alloc(u8, max_value_bytes + 1);
+    defer std.testing.allocator.free(large);
+    try std.testing.expectError(error.DatabaseFailure, statement.bind(&.{ .{ .text = "secret" }, .{ .blob = large } }));
+    try std.testing.expect(try statement.step());
     try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(statement.handle, 0));
 }

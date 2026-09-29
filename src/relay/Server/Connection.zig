@@ -92,6 +92,8 @@ pub fn begin(self: *Connection, id: i32, trailers: bool) protocol.Error!void {
         req.* = .{
             .connection = self,
             .id = id,
+            .arena = .init(self.server.memory.allocator()),
+            .batch = .init(self.server.memory.allocator()),
             .deadline = u.c.zr_monotonic_ms() + 10000,
         };
         slot.* = req;
@@ -202,4 +204,34 @@ pub fn closed(self: *Connection, id: i32, _: u32) void {
         slot.* = null;
         return;
     };
+}
+
+test "stalled request arenas share a ceiling across connections and release capacity" {
+    var server: Server = .{ .core = undefined, .tls = undefined };
+    var first: Connection = .{ .server = &server, .peer = undefined, .idle_deadline = 0 };
+    var second: Connection = .{ .server = &server, .peer = undefined, .idle_deadline = 0 };
+    defer {
+        for ([_]*Connection{ &first, &second }) |connection_owner| {
+            for (connection_owner.requests) |slot| if (slot) |req| connection_owner.closed(req.id, 0);
+        }
+    }
+    var exhausted = false;
+    for (0..8) |i| {
+        const connection_owner = if (i % 2 == 0) &first else &second;
+        const id: i32 = @intCast(i * 2 + 1);
+        try connection_owner.begin(id, false);
+        const req = connection_owner.find(id).?;
+        const allocator = if (i % 2 == 0) req.arena.allocator() else req.batch.allocator();
+        _ = allocator.alloc(u8, 32 * 1024 * 1024) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            exhausted = true;
+            break;
+        };
+    }
+    try std.testing.expect(exhausted);
+    for ([_]*Connection{ &first, &second }) |connection_owner| {
+        for (connection_owner.requests) |slot| if (slot) |req| connection_owner.closed(req.id, 0);
+    }
+    try first.begin(31, false);
+    _ = try first.find(31).?.arena.allocator().alloc(u8, 32 * 1024 * 1024);
 }
