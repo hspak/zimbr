@@ -49,6 +49,7 @@ class ClientAttachments(unittest.TestCase):
         relay_tls.RelayTls.tearDown(self)
 
     def launch(self, port=None):
+        self.command_serial = 0
         self.probe = Probe([str(BIN), '--control', '--data-dir', str(self.client),
                             *self.tls.client_args(port=port)], self.client_log)
         self.probe.until(lambda v: v.get('online') and v.get('send_attachments'), timeout=15)
@@ -121,9 +122,11 @@ class ClientAttachments(unittest.TestCase):
         source = self.root / name
         source.write_bytes(data)
         before = self.rows('SELECT count(*) FROM outgoing_files')[0][0]
-        self.probe.command(kind='attach', key=key, text=str(source))
+        self.command_serial += 1
+        self.probe.command(kind='attach', key=key, text=str(source), serial=self.command_serial)
         wait(lambda: self.rows('SELECT count(*) FROM outgoing_files')[0][0] == before + 1)
-        self.probe.until(lambda v: not v.get('preparing_attachments'), timeout=10)
+        self.probe.until(lambda v: not v.get('preparing_attachments') and
+                         v.get('command_serial', 0) >= self.command_serial, timeout=10)
         record = json.loads(self.rows('SELECT record FROM outgoing_files ORDER BY rowid DESC LIMIT 1')[0][0])
         self.assertEqual(record['sha256'], hashlib.sha256(data).hexdigest())
         self.assertEqual((self.client / 'outgoing' / record['id']).read_bytes(), data)

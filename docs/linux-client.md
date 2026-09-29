@@ -145,9 +145,11 @@ and **Copy to draft** stay in the header so they cannot move the message body.
 Hover over a shortened status or error to read its details.
 Pending and uncertain sends stay in the timeline at their original send time;
 older cached sends use an estimated position from nearby history.
-Unknown pending sends are removed from the client five minutes after that time,
+Unknown text-only pending sends are removed from the client five minutes after that time,
 and status polling for them stops. Expiry continues offline and across restarts;
 messages already found in Messages history remain visible.
+Attachment requests retain partial or uncertain outcomes for review. Their
+summary disappears after every delivered part is present in the history.
 
 The compact composer grows from one to three text lines, then scrolls for longer
 drafts. Send stays the same size at the bottom right, and the input's bottom
@@ -219,6 +221,34 @@ immediately. Sending again after an uncertain result can
 create a duplicate. A relay epoch reset preserves drafts and outbox identities;
 orphaned drafts remain discoverable as **Recovered draft**. Local unread markers
 do not change Apple's read receipts.
+
+## Sending files
+
+Open a sendable conversation, then drag local files from a file manager into the
+window. Review the attachment cards above the composer; use the arrows to move
+between files and **Remove** to leave one out. You can send files with a caption
+or leave the text empty. Send waits for preparation and requires a relay that
+advertises attachment sending.
+
+The client saves private copies, so later changes to the source files do not
+change the draft. Preparation and image decoding run in the background. PNG and
+JPEG previews work offline within the decoder's size limits; other files still
+send as ordinary attachments. Directories and symlinks are rejected. Each send
+allows up to 16 files, 100 MiB per file, and 200 MiB combined. These are application
+limits, not a guarantee that iMessage accepts every file. Browser image offers
+and pasted image bytes are not supported by this first input path.
+
+**Cancel** stops unfinished preparation. Once you press Send, history displays
+upload progress and **Cancel upload** until submission may have begun. Caption
+and files can become separate Messages records, so history retains individual
+file outcomes. Uncertain submissions are checked by their original request ID
+and never automatically sent again.
+
+Failed or cancelled uploads retain their local originals. **Copy caption** copies
+only the text into an empty draft; drop files into that draft for a new send.
+Check the earlier outcomes before doing so, especially after a partial or
+uncertain send. Removing a draft attachment and confirmed delivery reclaim
+local originals; resetting local data also clears retained outgoing files.
 
 ## Contacts and media
 

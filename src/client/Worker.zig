@@ -43,6 +43,7 @@ upload: ?outgoing.Upload = null,
 upload_retry_at: i64 = 0,
 upload_published_at: i64 = 0,
 attachment_error: []const u8 = "",
+command_serial: u64 = 0,
 dirty: bool = true,
 content_dirty: bool = true,
 shared: ?*SharedSnapshot = null,
@@ -131,6 +132,8 @@ pub const Command = struct {
     key: []const u8 = "",
     text: []const u8 = "",
     recipient: []const u8 = "",
+    // Optional GUI ordering token; publication acknowledges processed commands.
+    serial: u64 = 0,
 };
 pub const Readiness = struct {
     ready: bool = false,
@@ -200,6 +203,8 @@ pub const View = struct {
     reply_existing: bool,
     send_attachments: bool = false,
     preparing_attachments: bool = false,
+    preparing_draft: bool = false,
+    command_serial: u64 = 0,
     attachment_error: []const u8 = "",
     upload: outgoing.Upload.Progress = .{},
     generation: u64,
@@ -281,6 +286,7 @@ pub fn push(s: *Worker, cmd: Command) PushError!void {
         .key = key,
         .text = text,
         .recipient = recipient,
+        .serial = cmd.serial,
     });
     s.wake();
 }
@@ -1274,6 +1280,8 @@ fn drain(s: *Worker) !void {
         var arena = std.heap.ArenaAllocator.init(a);
         defer arena.deinit();
         const ar = arena.allocator();
+        s.command_serial = @max(s.command_serial, cmd.serial);
+        if (cmd.serial != 0) s.dirty = true;
         if (s.reset != .idle and cmd.kind != .reset and cmd.kind != .reconnect and cmd.kind != .draft) continue;
         if ((cmd.kind == .select or cmd.kind == .older) and (s.job == .hydrate or s.job == .enrichment or s.job == .preview or s.job == .identities or (cmd.kind == .select and s.job == .history))) {
             c.zc_net_cancel_request(s.net.?);
@@ -1577,6 +1585,8 @@ fn publish(s: *Worker) !void {
         .reply_existing = s.reply_existing,
         .send_attachments = s.attachmentsReady(),
         .preparing_attachments = if (s.preparation) |*preparation| preparation.busy("") else false,
+        .preparing_draft = if (s.preparation) |*preparation| preparation.busy(s.selected) else false,
+        .command_serial = s.command_serial,
         .attachment_error = try arena.allocator().dupe(u8, s.attachment_error),
         .generation = s.generation,
         .ack = s.ack,

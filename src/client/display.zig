@@ -71,6 +71,7 @@ pub fn pendingStatus(
     sent_at: []const u8,
     now_ms: i64,
 ) []const u8 {
+    if (std.mem.eql(u8, state, "uploading")) return if (detail.len > 0) detail else "Uploading attachments…";
     const uncertain = std.mem.eql(u8, state, "unknown") or std.mem.eql(u8, state, "unconfirmed");
     // Relay phases can change before the echo arrives. Keep their presentation
     // stable until the send fails or needs recovery, including uncertain details.
@@ -83,12 +84,66 @@ pub fn pendingStatus(
         u8,
         state,
         "sending",
-    )) "Saving / submitting…" else state;
+    )) "Saving / submitting…" else if (std.mem.eql(u8, state, "cancelled")) "Upload cancelled" else state;
     return if (detail.len > 0) std.fmt.allocPrint(a, "{s} · {s}", .{ status, label(a, detail) }) catch status else status;
 }
 
 pub fn canCopyPending(state: []const u8, sent_at: []const u8, now_ms: i64) bool {
-    return std.mem.eql(u8, state, "failed") or !deferUnknown(sent_at, now_ms);
+    if (std.mem.eql(u8, state, "uploading") or std.mem.eql(u8, state, "delivered")) return false;
+    return std.mem.eql(u8, state, "failed") or std.mem.eql(u8, state, "cancelled") or !deferUnknown(sent_at, now_ms);
+}
+
+pub fn attachmentStatus(send_request: ?t.SendRequest, id: []const u8) []const u8 {
+    const request = send_request orelse return "Saved on this device";
+    for (request.parts) |part| if (part.attachment_id != null and std.mem.eql(u8, part.attachment_id.?, id)) {
+        return switch (part.state) {
+            .queued => "Waiting to send",
+            .dispatching => "Submitting…",
+            .invoked => "Awaiting confirmation",
+            .submitted => "Sent",
+            .delivered => "Delivered",
+            .failed => "Failed",
+            .unknown => "Uncertain · check before sending again",
+            .skipped => "Not sent",
+        };
+    };
+    return "Saved on this device";
+}
+
+pub fn captionMayHaveSent(send_request: ?t.SendRequest, state: []const u8) bool {
+    if (std.mem.eql(u8, state, "uploading") or std.mem.eql(u8, state, "cancelled")) return false;
+    if (send_request) |request| if (request.parts.len > 0) {
+        for (request.parts) |part| if (part.kind == .text) return switch (part.state) {
+            .queued, .failed, .skipped => false,
+            .dispatching, .invoked, .submitted, .delivered, .unknown => true,
+        };
+        return false;
+    };
+    return !std.mem.eql(u8, state, "failed");
+}
+
+test "caption recovery distinguishes partial dispatch from cancelled or rejected uploads" {
+    try std.testing.expect(!captionMayHaveSent(null, "cancelled"));
+    try std.testing.expect(!captionMayHaveSent(null, "failed"));
+    try std.testing.expect(captionMayHaveSent(null, "unconfirmed"));
+    var parts = [_]t.SendPart{
+        .{ .kind = .text, .state = .delivered },
+        .{ .kind = .attachment, .attachment_id = "file", .state = .failed },
+    };
+    const request: t.SendRequest = .{
+        .request_id = "request",
+        .server_epoch = "epoch",
+        .target = .{ .conversation_id = "chat" },
+        .text = "Caption",
+        .state = .failed,
+        .parts = &parts,
+    };
+    try std.testing.expect(captionMayHaveSent(request, "failed"));
+    try std.testing.expectEqualStrings("Failed", attachmentStatus(request, "file"));
+    parts[0].state = .failed;
+    parts[1].state = .skipped;
+    try std.testing.expect(!captionMayHaveSent(request, "failed"));
+    try std.testing.expectEqualStrings("Not sent", attachmentStatus(request, "file"));
 }
 
 test "unknown delivery status waits thirty seconds while confirmed outcomes appear immediately" {

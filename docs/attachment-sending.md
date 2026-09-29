@@ -35,10 +35,11 @@ means the implementation and its relevant automated checks have passed.
    files, report progress, and recover original request IDs without replaying
    submissions. Automated worker and transport checks pass; these operations
    are ready for composer integration.
-5. **In progress: composer integration.** Multipart history and the bounded
-   Wayland file-drop backend are validated. Connect drops to removable composer
-   attachments and thumbnails, allow attachment-only sends, and surface errors
-   and cancellation.
+5. **Complete: composer integration.** Local file drops populate removable
+   attachment cards with background thumbnails. The composer supports
+   attachment-only sends, preparation and upload cancellation, progress, and
+   individual file outcomes. Automated input and GUI checks pass, apart from
+   the separately verified baseline software-renderer antialiasing assertion.
 6. **Pending: end-to-end validation and documentation.** Exercise the actual
    client and synthetic relay together, then record outstanding Mac acceptance
    checks separately.
@@ -209,6 +210,27 @@ production-worker case covering deleted sources, PNG/JPEG, unsupported files,
 oversized dimensions and symlink rejection, and the existing authenticated
 media transport suite. The GUI texture handoff check passed; 106 of 107 GUI
 checks passed with the same baseline software-renderer antialiasing failure.
+
+The composer now consumes the native dropped-file list and queues private
+preparation. A fixed-height card with previous/next controls keeps all 16 files
+reviewable without growing the composer over the history. Removal and drop
+commands carry an acknowledgment token; Send stays disabled until the displayed
+draft reflects them and preparation finishes. Offline files remain drafts, and
+attachment sends require the relay capability and local storage readiness.
+
+Pending history shows filename/size cards, upload progress and cancellation,
+and each file's observed status. Copying an earlier multipart send is explicitly
+**Copy caption**: it preserves the earlier files and does not silently queue
+another upload. Files for a new send must be dropped into its draft. Caption
+recovery warns when an earlier text operation may have reached Messages; a
+cancelled pre-submission upload does not trigger that warning.
+
+Composer validation passed 142 client tests, both client builds and all ten
+production-worker attachment cases. The native callback GUI scenario exercises
+Unicode drops, attachment paging/removal, capability and preparation gates,
+attachment-only Enter, upload cancellation, and caption copying. The minimum-size
+layout was captured and reviewed. The GUI suite passed 108 of 109 checks with
+the previously documented baseline antialiasing failure remaining.
 
 Browser image offers and clipboard image bytes require additional input support;
 the first input path handles local file-manager drops. Upload and dispatch are

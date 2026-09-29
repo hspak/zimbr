@@ -8,6 +8,7 @@ const clay = @import("zclay");
 const client_options = @import("client_options");
 const u = @import("common.zig");
 const t = @import("protocol.zig").types;
+const outgoing_attachments = @import("protocol.zig").attachments;
 const Settings = @import("client.zig").Settings;
 const Config = @import("client.zig").Config;
 const Store = @import("client.zig").Store;
@@ -18,6 +19,7 @@ const MessageSelection = @import("client.zig").MessageSelection;
 const MessageHistory = @import("client.zig").MessageHistory;
 const Text = @import("client.zig").Text;
 const display = @import("client.zig").display;
+const drop = @import("client.zig").drop;
 const message_content = @import("client.zig").content;
 const link_targets = @import("client.zig").links;
 const Media = @import("client.zig").Media;
@@ -264,6 +266,8 @@ const App = struct {
     send_wait: bool = false,
     send_ack: u64 = 0,
     duplicate_risk: bool = false,
+    files_serial: u64 = 0,
+    attachment_index: usize = 0,
     scroll: f64 = 0,
     sidebar_scroll: f32 = 0,
     sidebar_bar: Scrollbar = .{},
@@ -644,6 +648,7 @@ const App = struct {
             )) s.images.contextChanged(v.snapshot.directory.available);
         };
         if (s.draft_dirty and u.now() - s.draft_at > 300) try s.saveDraft();
+        s.handleDrops();
         const reading = s.readingConversation();
         if (s.was_reading == null or reading != s.was_reading.?) {
             s.worker.push(.{ .kind = .viewed, .text = if (reading) "yes" else "no" }) catch return;
@@ -854,7 +859,11 @@ const App = struct {
     fn canSend(s: *App) bool {
         if (s.pending_key != null or s.settings.visible) return false;
         const v = s.view orelse return false;
-        if (!v.online or s.send_wait or s.key.len == 0 or !u.eq(s.loaded_key, s.key) or std.mem.trim(
+        if (!v.online or s.send_wait or v.preparing_attachments or s.filesPending() or
+            s.key.len == 0 or !u.eq(s.loaded_key, s.key)) return false;
+        const files = s.draftFiles();
+        if (files.len > 0 and !v.send_attachments) return false;
+        if (files.len == 0 and std.mem.trim(
             u8,
             s.composer.text.items,
             " \r\n\t",
@@ -865,6 +874,47 @@ const App = struct {
             return v.reply_existing and chat.value.sendable;
         };
         return false;
+    }
+    fn draftFiles(s: *const App) []const outgoing_attachments.Upload {
+        const v = s.view orelse return &.{};
+        return if (u.eq(s.key, v.snapshot.selected)) v.snapshot.draft_attachments else &.{};
+    }
+    fn filesPending(s: *const App) bool {
+        return if (s.view) |v| v.command_serial < s.files_serial else false;
+    }
+    fn fileCommand(
+        s: *App,
+        kind: @FieldType(Worker.Command, "kind"),
+        key: []const u8,
+        text: []const u8,
+    ) !void {
+        const serial = @max(s.files_serial, if (s.view) |v| v.command_serial else 0) + 1;
+        try s.worker.push(.{
+            .kind = kind,
+            .key = key,
+            .text = text,
+            .serial = serial,
+        });
+        s.files_serial = serial;
+    }
+    fn handleDrops(s: *App) void {
+        if (drop.rejected()) s.info("Drop up to 16 local files with valid, complete filenames.");
+        if (!rl.isFileDropped()) return;
+        const files = rl.loadDroppedFiles();
+        defer rl.unloadDroppedFiles(files);
+        if (s.pending_key != null or s.settings.visible or s.new_mode or s.show_details or
+            s.viewer_message.len > 0 or s.detail_body != null or s.send_wait or s.key.len == 0 or
+            !u.eq(s.key, s.loaded_key) or s.readOnlyChat())
+        {
+            s.info("Select a sendable conversation before dropping files.");
+            return;
+        }
+        s.attachment_index = s.draftFiles().len;
+        for (0..files.count) |i| s.fileCommand(.attach, s.key, std.mem.span(files.paths[i])) catch {
+            s.info("Could not queue every file. Review the attachments, then drop the missing files again.");
+            return;
+        };
+        s.focus = .composer;
     }
     fn send(s: *App) !void {
         if (!s.canSend()) {
@@ -2252,7 +2302,15 @@ const App = struct {
         }
         for (snapshot.pending, rows[count..][0..snapshot.pending.len], 0..) |p, *row, i| {
             const text = display.message(ar, p.input.text);
-            const message = pendingMessage(p);
+            var message = pendingMessage(p);
+            const files = try ar.alloc(t.Attachment, p.input.attachments.len);
+            for (files, p.input.attachments) |*item, file| item.* = .{
+                .id = file.id,
+                .name = file.name,
+                .mime_type = file.mime_type,
+                .bytes = file.bytes,
+            };
+            message.attachments = files;
             const blocks = try message_content.prepare(ar, message);
             const key = std.hash.Wyhash.hash(0, if (blocks.len == 0) text else try u.json(ar, message));
             row.* = .{
@@ -2711,7 +2769,13 @@ const App = struct {
                     .width = 34,
                     .height = 34,
                 }, "You", style, 17);
-                const status = display.pendingStatus(ar, p.state, p.detail, p.sent_at, status_now);
+                const status = if (u.eq(p.state, "uploading") and u.eq(v.upload.request_id, p.input.request_id))
+                    std.fmt.allocPrint(ar, "Uploading {d}% · {s}", .{
+                        if (v.upload.total == 0) 0 else @min(100, v.upload.bytes * 100 / v.upload.total),
+                        display.label(ar, v.upload.filename),
+                    }) catch "Uploading…"
+                else
+                    display.pendingStatus(ar, p.state, p.detail, p.sent_at, status_now);
                 if (s.drawMessageHeader(
                     "You",
                     localTime(ar, p.sent_at, false),
@@ -2733,18 +2797,22 @@ const App = struct {
                 if (row.blocks.len == 0) {
                     s.drawMessageText(row, p.input.text, body, foreground, theme.colors.paper);
                 } else s.drawBlocks(row, pendingMessage(p), body, foreground, theme.colors.paper, ar);
-                if (needs_recovery and s.button(.{
+                const can_cancel = p.input.attachments.len > 0 and u.eq(p.state, "uploading");
+                if ((can_cancel or (needs_recovery and p.input.text.len > 0)) and s.button(.{
                     .x = x + inner - recovery_width,
                     .y = y - 3,
                     .width = recovery_width,
                     .height = 22,
-                }, "Copy to draft", false)) {
-                    if (s.readOnlyChat()) s.info("This conversation is read-only.") else if (s.composer.text.items.len > 0) s.info("Your composer has a draft. Save or clear it before copying another message.") else {
+                }, if (can_cancel) "Cancel upload" else if (p.input.attachments.len > 0) "Copy caption" else "Copy to draft", false)) {
+                    if (can_cancel) {
+                        s.fileCommand(.cancel_upload, p.input.request_id, "") catch s.info("Could not cancel the upload. Check its status.");
+                    } else if (s.readOnlyChat()) s.info("This conversation is read-only.") else if (s.composer.text.items.len > 0 or s.draftFiles().len > 0 or v.preparing_attachments or s.filesPending()) s.info("Your composer has a draft. Save or clear it before copying another message.") else {
                         s.composer.set(p.input.text) catch {};
                         s.draft_dirty = true;
                         s.draft_at = 0;
                         s.focus = .composer;
-                        s.duplicate_risk = u.eq(p.state, "unknown") or u.eq(p.state, "unconfirmed");
+                        s.duplicate_risk = display.captionMayHaveSent(p.record, p.state);
+                        if (p.input.attachments.len > 0) s.info("Caption copied. Files remain with the earlier send; drop files into this draft to attach them.");
                     }
                 }
             }
@@ -3106,6 +3174,14 @@ const App = struct {
                     }
                 },
                 .attachment => |item| {
+                    if (row.pending) {
+                        const p = s.view.?.snapshot.pending[row.source_index];
+                        for (p.input.attachments) |file| if (u.eq(file.id, item.id)) {
+                            s.drawLocalFile(file, r, display.attachmentStatus(p.record, file.id), bg, ar);
+                            break;
+                        };
+                        continue;
+                    }
                     if (item.image) |asset| {
                         const size = imageSize(asset, r.width);
                         const image_r = rl.Rectangle{
@@ -3564,6 +3640,113 @@ const App = struct {
             background,
         );
     }
+    fn attachmentsHeight(s: *const App) f32 {
+        if (s.key.len == 0 or s.new_mode) return 0;
+        const preparing = if (s.view) |v| v.preparing_draft else false;
+        return (if (s.draftFiles().len > 0) @as(f32, 80) else 0) +
+            (if (preparing or s.filesPending()) @as(f32, 28) else 0);
+    }
+    fn drawDraftFiles(s: *App, bounds: rl.Rectangle, ar: u.Allocator) void {
+        var top = bounds.y;
+        const preparing = if (s.view) |v| v.preparing_draft else false;
+        if (preparing or s.filesPending()) {
+            s.text.drawLine(
+                if (preparing) "Preparing files…" else "Updating attachments…",
+                bounds.x,
+                top + 3,
+                12,
+                bounds.width - 86,
+                theme.colors.muted,
+                theme.colors.paper,
+            );
+            if (preparing and s.button(.{
+                .x = bounds.x + bounds.width - 78,
+                .y = top,
+                .width = 78,
+                .height = 22,
+            }, "Cancel", false)) s.fileCommand(.cancel_preparation, s.key, "") catch s.info("Could not cancel file preparation.");
+            top += 28;
+        }
+        const files = s.draftFiles();
+        if (files.len == 0) return;
+        s.attachment_index = @min(s.attachment_index, files.len - 1);
+        s.text.drawLine(
+            std.fmt.allocPrint(ar, "Attachment {d} of {d}", .{ s.attachment_index + 1, files.len }) catch "Attachments",
+            bounds.x,
+            top + 3,
+            12,
+            bounds.width - 80,
+            theme.colors.muted,
+            theme.colors.paper,
+        );
+        if (files.len > 1) {
+            if (s.button(.{
+                .x = bounds.x + bounds.width - 66,
+                .y = top,
+                .width = 30,
+                .height = 22,
+            }, "←", false)) s.attachment_index = (s.attachment_index + files.len - 1) % files.len;
+            if (s.button(.{
+                .x = bounds.x + bounds.width - 30,
+                .y = top,
+                .width = 30,
+                .height = 22,
+            }, "→", false)) s.attachment_index = (s.attachment_index + 1) % files.len;
+        }
+        const file = files[s.attachment_index];
+        const card = rl.Rectangle{
+            .x = bounds.x,
+            .y = top + 25,
+            .width = bounds.width - 82,
+            .height = 48,
+        };
+        s.drawLocalFile(file, card, "Saved in draft", theme.colors.paper, ar);
+        if (!s.send_wait and s.button(.{
+            .x = bounds.x + bounds.width - 76,
+            .y = card.y + 10,
+            .width = 76,
+            .height = 28,
+        }, "Remove", false)) s.fileCommand(.remove_attachment, s.key, file.id) catch s.info("Could not remove the attachment.");
+    }
+    fn drawLocalFile(
+        s: *App,
+        file: outgoing_attachments.Upload,
+        bounds: rl.Rectangle,
+        status: []const u8,
+        background: rl.Color,
+        ar: u.Allocator,
+    ) void {
+        const thumb = rl.Rectangle{
+            .x = bounds.x,
+            .y = bounds.y,
+            .width = 48,
+            .height = 48,
+        };
+        shapes.drawRectangle(thumb, 0.12, theme.colors.incoming);
+        s.text.drawLine("File", thumb.x + 10, thumb.y + 16, 11, 38, theme.colors.muted, theme.colors.incoming);
+        if (std.mem.startsWith(u8, file.mime_type, "image/")) if (s.media) |media| {
+            if (s.images.getLocal(media, file)) |entry| if (entry.availableTexture()) |texture|
+                ImageCache.draw(texture, thumb);
+        };
+        s.text.drawLine(
+            display.label(ar, file.name),
+            bounds.x + 58,
+            bounds.y + 3,
+            14,
+            @max(1, bounds.width - 58),
+            theme.colors.ink,
+            background,
+        );
+        s.text.drawLine(
+            std.fmt.allocPrint(ar, "{s} bytes · {s}", .{ file.bytes, status }) catch status,
+            bounds.x + 58,
+            bounds.y + 27,
+            11,
+            @max(1, bounds.width - 58),
+            theme.colors.muted,
+            background,
+        );
+    }
     fn composerHeight(s: *App) f32 {
         const one_line = s.text.height("Ag", 16, 400);
         var height = one_line;
@@ -3585,7 +3768,7 @@ const App = struct {
             height = std.math.clamp(content_height, one_line, s.text.height("Ag\nAg\nAg", 16, 400));
         }
         // Round up so fractional layout arithmetic cannot scroll a fitting draft.
-        return @ceil(height) + 22 + layout.composer_top_padding + layout.footer_height;
+        return @ceil(height) + 22 + layout.composer_top_padding + layout.footer_height + s.attachmentsHeight();
     }
     fn composerBox(r: rl.Rectangle) rl.Rectangle {
         return .{
@@ -3637,7 +3820,16 @@ const App = struct {
         // Draw footer feedback first so the input always appears above it.
         s.drawNotice(r, ar);
         if (s.key.len == 0 or s.new_mode) return;
-        const box = composerBox(r);
+        var box = composerBox(r);
+        const files_height = s.attachmentsHeight();
+        if (files_height > 0) s.drawDraftFiles(.{
+            .x = box.x,
+            .y = box.y,
+            .width = box.width,
+            .height = files_height,
+        }, ar);
+        box.y += files_height;
+        box.height -= files_height;
         const read_only = s.readOnlyChat();
         if (!read_only) {
             var footer = composerFooter(r);
@@ -3652,7 +3844,13 @@ const App = struct {
                     theme.colors.danger,
                 );
             } else if (u.now() >= s.notice_until) {
-                const hint = if (s.enter_to_send) "Enter to send · Shift+Enter for a new line" else "Ctrl+Enter to send · Enter for a new line";
+                const hint = if (s.view != null and s.view.?.attachment_error.len > 0)
+                    s.view.?.attachment_error
+                else if (s.draftFiles().len > 0 and s.view != null and !s.view.?.send_attachments)
+                    "Attachment sending is unavailable · files are kept in this draft"
+                else if (s.view != null and s.view.?.preparing_attachments)
+                    "Wait for file preparation before sending"
+                else if (s.enter_to_send) "Enter to send · Shift+Enter for a new line · drop files to attach" else "Ctrl+Enter to send · Enter for a new line · drop files to attach";
                 s.drawFooterLabel(hint, footer, theme.colors.muted);
             }
         }
@@ -6897,4 +7095,173 @@ test "Wayland drop backend preserves local filenames and never truncates rejecte
     callback(window, 1, &invalid);
     try std.testing.expect(!rl.isFileDropped());
     try std.testing.expect(@import("client.zig").drop.rejected());
+}
+
+test "composer consumes file drops and waits for reviewed attachments before an attachment-only send" {
+    const reset_context: *const fn (?*clay.Context) callconv(.c) void = @ptrCast(&clay.setCurrentContext);
+    reset_context(null);
+    rl.setTraceLogLevel(.none);
+    rl.setConfigFlags(.{ .window_highdpi = true, .msaa_4x_hint = true });
+    rl.initWindow(780, 560, "Attachment composer");
+    defer rl.closeWindow();
+    rl.setExitKey(.null);
+    rl.pollInputEvents();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    defer reset_context(null);
+    _ = clay.initialize(
+        .init(try arena.allocator().alloc(u8, clay.minMemorySize())),
+        .{ .w = 780, .h = 560 },
+        .{ .error_handler_function = clayError },
+    );
+    const key = "new:peer@example.invalid";
+    const files = [_]outgoing_attachments.Upload{
+        .{
+            .id = "ABEiM0RVZneImaq7zN3u_w",
+            .name = "photo 👋.png",
+            .mime_type = "image/png",
+            .bytes = "71",
+            .sha256 = "0" ** 64,
+        },
+        .{
+            .id = "BBEiM0RVZneImaq7zN3u_w",
+            .name = "empty.txt",
+            .mime_type = "text/plain",
+            .bytes = "0",
+            .sha256 = "1" ** 64,
+        },
+    };
+    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "" } };
+    defer worker.shutdown();
+    const view = try a.create(Worker.View);
+    view.* = .{
+        .arena = .init(a),
+        .snapshot = .{
+            .chats = &.{},
+            .messages = &.{},
+            .pending = &.{},
+            .selected = key,
+            .draft = "",
+            .epoch = "epoch",
+            .more = false,
+        },
+        .status = "Connected",
+        .online = true,
+        .send_direct = true,
+        .reply_existing = true,
+        .send_attachments = true,
+        .generation = 1,
+        .ack = 0,
+    };
+    var app = App{
+        .worker = &worker,
+        .view = view,
+        .key = try a.dupe(u8, key),
+        .loaded_key = try a.dupe(u8, key),
+    };
+    defer app.deinit();
+    app.draw(WindowMetrics.current().scale);
+    const empty_height = app.composerHeight();
+    const window = glfwGetCurrentContext() orelse return error.TestUnexpectedResult;
+    const callback = glfwSetDropCallback(window, null) orelse return error.TestUnexpectedResult;
+    defer _ = glfwSetDropCallback(window, callback);
+    const paths = [_][*c]const u8{ "/tmp/photo 👋.png", "/tmp/empty.txt" };
+    callback(window, paths.len, &paths);
+    try app.update();
+    try std.testing.expect(!rl.isFileDropped() and app.filesPending() and !app.canSend());
+    var count: usize = 0;
+    for (worker.commands.items) |command| if (command.kind == .attach) {
+        try std.testing.expectEqualStrings(key, command.key);
+        try std.testing.expectEqualStrings(std.mem.span(paths[count]), command.text);
+        count += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 2), count);
+    view.command_serial = app.files_serial;
+    view.preparing_attachments = true;
+    view.preparing_draft = true;
+    try std.testing.expect(!app.canSend());
+    view.snapshot.draft_attachments = &files;
+    view.preparing_attachments = false;
+    view.preparing_draft = false;
+    try std.testing.expect(app.canSend());
+    try std.testing.expectEqual(empty_height + 80, app.composerHeight());
+    app.draw(WindowMetrics.current().scale);
+    if (u.c.getenv("ZIMBR_GUI_SCREENSHOT")) |path| {
+        const shot = try captureTestFrame(&app, WindowMetrics.current().scale);
+        defer rl.unloadImage(shot);
+        try std.testing.expect(rl.exportImage(shot, std.mem.span(path)));
+    }
+    const areas = layout.frame(780, 560, app.composerHeight());
+    const box = App.composerBox(areas.composer);
+    clickTestFrame(&app, box.x + box.width - 15, box.y + 11);
+    try std.testing.expectEqual(@as(usize, 1), app.attachment_index);
+    clickTestFrame(&app, box.x + box.width - 38, box.y + 49);
+    const removal = worker.commands.items[worker.commands.items.len - 1];
+    try std.testing.expectEqual(.remove_attachment, removal.kind);
+    try std.testing.expectEqualStrings(files[1].id, removal.text);
+    try std.testing.expect(!app.canSend());
+    view.snapshot.draft_attachments = files[0..1];
+    view.command_serial = app.files_serial;
+    view.online = false;
+    try std.testing.expect(!app.canSend());
+    view.online = true;
+    view.send_attachments = false;
+    try std.testing.expect(!app.canSend());
+    view.send_attachments = true;
+    try std.testing.expect(app.canSend());
+    testKey(.left_control, false);
+    testKey(.right_control, false);
+    testKey(.enter, true);
+    try app.update();
+    testKey(.enter, false);
+    const send_command = worker.commands.items[worker.commands.items.len - 1];
+    try std.testing.expectEqual(.send, send_command.kind);
+    try std.testing.expectEqualStrings(key, send_command.key);
+    try std.testing.expectEqualStrings("", send_command.text);
+    try std.testing.expect(app.send_wait and !app.canSend());
+
+    app.send_wait = false;
+    view.snapshot.draft_attachments = &.{};
+    var pending = [_]Store.Pending{.{
+        .input = .{
+            .request_id = "request",
+            .server_epoch = "epoch",
+            .target = .{ .recipient = .{ .address = "peer@example.invalid", .service = "imessage" } },
+            .text = "Caption",
+            .attachments = &files,
+        },
+        .state = "uploading",
+        .detail = "",
+        .record = null,
+        .sent_at = "2026-01-01T00:00:00Z",
+    }};
+    view.snapshot.pending = &pending;
+    view.upload = .{
+        .request_id = "request",
+        .filename = files[0].name,
+        .bytes = 35,
+        .total = 71,
+        .phase = "transfer",
+    };
+    view.generation += 1;
+    app.draw(WindowMetrics.current().scale);
+    try std.testing.expectEqual(@as(usize, 3), app.history_rows[0].blocks.len);
+    try std.testing.expect(!display.canCopyPending("uploading", pending[0].sent_at, u.now()));
+    const history = layout.frame(780, 560, app.composerHeight()).history;
+    const action_x = history.x + 66 + App.historyTextWidth(history) - 59;
+    const action_y = history.y + @as(f32, @floatCast(app.history_rows[0].top - app.scroll)) + 8;
+    clickTestFrame(&app, action_x, action_y);
+    const cancellation = worker.commands.items[worker.commands.items.len - 1];
+    try std.testing.expectEqual(.cancel_upload, cancellation.kind);
+    try std.testing.expectEqualStrings("request", cancellation.key);
+    try std.testing.expectEqualStrings("", app.composer.text.items);
+    view.command_serial = app.files_serial;
+    pending[0].state = "cancelled";
+    view.generation += 1;
+    app.draw(WindowMetrics.current().scale);
+    clickTestFrame(&app, action_x, action_y);
+    try std.testing.expectEqualStrings("Caption", app.composer.text.items);
+    try std.testing.expect(!app.duplicate_risk);
+    try std.testing.expectEqual(@as(usize, 0), app.draftFiles().len);
+    try std.testing.expectEqual(@as(usize, 2), pending[0].input.attachments.len);
 }
