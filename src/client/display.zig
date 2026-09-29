@@ -72,8 +72,9 @@ pub fn pendingStatus(
     now_ms: i64,
 ) []const u8 {
     const uncertain = std.mem.eql(u8, state, "unknown") or std.mem.eql(u8, state, "unconfirmed");
-    // Details can also describe uncertainty; defer the entire warning.
-    if (uncertain and deferUnknown(sent_at, now_ms)) return "Sending…";
+    // Relay phases can change before the echo arrives. Keep their presentation
+    // stable until the send fails or needs recovery, including uncertain details.
+    if (!std.mem.eql(u8, state, "delivered") and !canCopyPending(state, sent_at, now_ms)) return "Sending…";
     const status = if (uncertain) "Uncertain · not automatically resent" else if (std.mem.eql(
         u8,
         state,
@@ -164,11 +165,15 @@ test "pending uncertainty and its details share a grace period based on the orig
             "Failed · Rejected",
             pendingStatus(a, "failed", "Rejected", stamp, sent_ms),
         );
-        try std.testing.expectEqualStrings(
-            "Saving / submitting…",
-            pendingStatus(a, "sending", "", stamp, sent_ms),
-        );
-        try std.testing.expectEqualStrings("queued", pendingStatus(a, "queued", "", stamp, sent_ms));
+        for ([_][]const u8{
+            "sending",
+            "queued",
+            "dispatching",
+            "submitted",
+        }) |state| {
+            try std.testing.expectEqualStrings("Sending…", pendingStatus(a, state, "", stamp, sent_ms));
+        }
+        try std.testing.expectEqualStrings("delivered", pendingStatus(a, "delivered", "", stamp, sent_ms));
     }
     try std.testing.expectEqualStrings(
         "Uncertain · not automatically resent",

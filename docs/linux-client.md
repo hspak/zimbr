@@ -140,6 +140,9 @@ See [group delivery status](group-delivery.md) for the data and API limitations.
 Unknown delivery states and uncertain-send warnings appear only after 30 seconds
 from the send time; pending sends show “Sending…” during this grace period.
 Confirmed failures appear immediately.
+Pending and confirmed messages use the same spacing and text layout. Send status
+and **Copy to draft** stay in the header so they cannot move the message body.
+Hover over a shortened status or error to read its details.
 Pending and uncertain sends stay in the timeline at their original send time;
 older cached sends use an estimated position from nearby history.
 Unknown pending sends are removed from the client five minutes after that time,

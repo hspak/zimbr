@@ -10,6 +10,7 @@ const t = @import("../protocol.zig").types;
 const Sqlite = @import("../relay.zig").Sqlite;
 const Directory = @import("IdentityDirectory.zig");
 const display = @import("display.zig");
+const bridge = @import("c.zig").api;
 const Store = @This();
 pub const recent_history_limit = 100;
 
@@ -797,9 +798,8 @@ pub fn snapshotWithMessages(
             (try std.json.parseFromSlice(t.Message, a, ms.bytes(0), .{ .ignore_unknown_fields = true, .allocate = .alloc_always })).value,
         );
     }
-    // The observed echo supplies the sole visible status, including while the
-    // relay finishes checking a provisional match. Keep the durable request
-    // unchanged so withdrawing the hint restores its unresolved bubble.
+    const visible_messages = shared_messages orelse messages.items;
+    const epoch = try s.get(a, "epoch");
     const ps = try s.db.prepare(thread_cte ++ "SELECT payload,state,detail,record,sent_at FROM outbox WHERE draft_key IN (SELECT id FROM members) AND NOT EXISTS(SELECT 1 FROM records m WHERE m.kind='message' AND m.id=" ++ echo_id_sql ++ ") ORDER BY rowid");
     defer ps.close();
     try ps.bind(&.{.{ .text = selected }});
@@ -825,15 +825,73 @@ pub fn snapshotWithMessages(
     }
     return .{
         .chats = chats.items,
-        .messages = shared_messages orelse messages.items,
-        .pending = pending.items,
+        .messages = visible_messages,
+        .pending = try s.pendingWithoutEchoes(a, selected, epoch, visible_messages, pending.items),
         .selected = try a.dupe(u8, selected),
         .draft = try s.draft(a, selected),
-        .epoch = try s.get(a, "epoch"),
+        .epoch = epoch,
         .more = (try s.nextPage(a, selected)) != null,
         .directory = try s.directory(a),
     };
 }
+
+fn pendingWithoutEchoes(
+    s: Store,
+    a: u.Allocator,
+    selected: []const u8,
+    epoch: []const u8,
+    messages: []const t.Message,
+    pending: []Pending,
+) ReadError![]const Pending {
+    if (pending.len == 0 or messages.len == 0) return pending;
+    // Reserve authoritative and provisional links before pairing unlinked sends.
+    // A message already accounting for one request cannot hide another one.
+    var used_echoes: std.StringHashMapUnmanaged(void) = .empty;
+    defer used_echoes.deinit(a);
+    const linked = try s.db.prepare(thread_cte ++ "SELECT " ++ echo_id_sql ++ " FROM outbox WHERE draft_key IN (SELECT id FROM members) AND " ++ echo_id_sql ++ " IS NOT NULL");
+    defer linked.close();
+    try linked.bind(&.{.{ .text = selected }});
+    while (try linked.step()) try used_echoes.put(a, try linked.text(a, 0), {});
+
+    // A message can arrive before its request update, or remain unlinked when
+    // repeated sends are ambiguous. Pair visible echoes one-to-one for display
+    // only; never confirm, discard, or otherwise change the durable requests.
+    var count: usize = 0;
+    for (pending) |p| {
+        if (pendingEcho(p, epoch, messages, used_echoes)) |id| {
+            try used_echoes.put(a, id, {});
+        } else {
+            pending[count] = p;
+            count += 1;
+        }
+    }
+    return pending[0..count];
+}
+
+fn pendingEcho(
+    p: Pending,
+    epoch: []const u8,
+    messages: []const t.Message,
+    used_echoes: std.StringHashMapUnmanaged(void),
+) ?[]const u8 {
+    if (!u.eq(p.input.server_epoch, epoch) or u.eq(p.state, "failed")) return null;
+    if (p.record) |record| if (record.message_id != null or record.candidate_message_id != null) return null;
+    var sent_ms: i64 = undefined;
+    if (bridge.zc_timestamp_ms(p.sent_at.ptr, p.sent_at.len, &sent_ms) == 0) return null;
+    for (messages) |m| {
+        if (m.direction != .outgoing or !u.eq(m.service, "imessage") or
+            m.kind != .text or !u.eq(m.text orelse "", p.input.text) or
+            used_echoes.contains(m.id)) continue;
+        var message_ms: i64 = undefined;
+        if (bridge.zc_timestamp_ms(m.timestamp.ptr, m.timestamp.len, &message_ms) == 0) continue;
+        // Allow the relay's small timestamp tolerance and the local send grace
+        // period, without matching old identical history.
+        if (message_ms < sent_ms - 2000 or message_ms > sent_ms + display.unknown_grace_ms) continue;
+        return m.id;
+    }
+    return null;
+}
+
 pub const echo_id_sql = "coalesce(json_extract(outbox.record,'$.message_id'),CASE WHEN outbox.state='unknown' AND outbox.epoch=(SELECT value FROM meta WHERE key='epoch') THEN json_extract(outbox.record,'$.candidate_message_id') END)";
 const enriched_record = "coalesce((SELECT e.record FROM enrichment_cache e WHERE e.message_id=records.id AND e.revision=records.revision),record)";
 const enrichment_serial = "coalesce((SELECT e.serial FROM enrichment_cache e WHERE e.message_id=records.id AND e.revision=records.revision),0)";

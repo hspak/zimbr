@@ -978,6 +978,207 @@ test "provisional outgoing echoes replace uncertainty without confirming or disc
     try std.testing.expectEqual(@as(usize, 1), reset.pending.len);
     try std.testing.expectEqual(@as(usize, 0), reset.messages.len);
 }
+test "outgoing messages replace pending placeholders before send correlation arrives" {
+    const t = @import("protocol.zig").types;
+    const SharedSnapshot = @import("client.zig").SharedSnapshot;
+    const store = try Store.open(":memory:");
+    defer store.close();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    try store.beginSync(epoch, epoch ++ ":0");
+    const input = t.SendInput{
+        .request_id = epoch,
+        .server_epoch = epoch,
+        .target = .{ .recipient = .{ .address = "test@example.invalid", .service = "imessage" } },
+        .text = "Repeated reply 👋",
+    };
+    try store.persistSend(ar, "c1", input);
+    const sending = try SharedSnapshot.create(store, "c1", 1, null);
+    defer sending.release();
+    try std.testing.expectEqual(@as(usize, 1), sending.snapshot.pending.len);
+    try std.testing.expectEqual(@as(usize, 0), sending.snapshot.messages.len);
+
+    var echo = (try std.json.parseFromSlice(t.Message, ar, message, .{})).value;
+    echo.direction = .outgoing;
+    echo.observed_status = .delivered;
+    echo.text = input.text;
+    echo.timestamp = sending.snapshot.pending[0].sent_at;
+    _ = try store.upsert(ar, "message", try u.json(ar, echo));
+    const observed = try SharedSnapshot.create(store, "c1", 2, sending);
+    defer observed.release();
+    try std.testing.expectEqual(@as(usize, 1), observed.snapshot.messages.len);
+    try std.testing.expectEqual(@as(usize, 0), observed.snapshot.pending.len);
+    try std.testing.expectEqual(@as(usize, 0), (try store.snapshot(ar, "c1")).pending.len);
+    try std.testing.expectEqual(@as(i64, 1), try store.db.scalar(
+        "SELECT count(*) FROM outbox WHERE state='sending' AND record IS NULL",
+    ));
+
+    var second = input;
+    second.request_id = "IjRWeBI0EjQSNBI0VniQEg";
+    try store.persistSend(ar, "c1", second);
+    var request = t.SendRequest{
+        .request_id = input.request_id,
+        .server_epoch = epoch,
+        .target = input.target,
+        .text = input.text,
+        .revision = "3",
+        .state = .unknown,
+    };
+    _ = try store.upsert(ar, "request", try u.json(ar, request));
+    const repeated = try SharedSnapshot.create(store, "c1", 3, observed);
+    defer repeated.release();
+    try std.testing.expectEqual(@as(usize, 1), repeated.snapshot.messages.len);
+    try std.testing.expectEqual(@as(usize, 1), repeated.snapshot.pending.len);
+    try std.testing.expectEqualStrings(second.request_id, repeated.snapshot.pending[0].input.request_id);
+
+    echo.id = "m2";
+    echo.timestamp = repeated.snapshot.pending[0].sent_at;
+    _ = try store.upsert(ar, "message", try u.json(ar, echo));
+    const both = try SharedSnapshot.create(store, "c1", 4, repeated);
+    defer both.release();
+    try std.testing.expectEqual(@as(usize, 2), both.snapshot.messages.len);
+    try std.testing.expectEqual(@as(usize, 0), both.snapshot.pending.len);
+
+    // Late authoritative links take priority over the temporary display pairing.
+    request.revision = "4";
+    request.state = .delivered;
+    request.message_id = "m2";
+    _ = try store.upsert(ar, "request", try u.json(ar, request));
+    try std.testing.expectEqual(@as(usize, 0), (try store.snapshot(ar, "c1")).pending.len);
+    try store.db.exec("DELETE FROM records WHERE kind='message' AND id='m1'");
+    const remaining = try SharedSnapshot.create(store, "c1", 5, both);
+    defer remaining.release();
+    try std.testing.expectEqual(@as(usize, 1), remaining.snapshot.messages.len);
+    try std.testing.expectEqual(@as(usize, 1), remaining.snapshot.pending.len);
+    try std.testing.expectEqualStrings(second.request_id, remaining.snapshot.pending[0].input.request_id);
+    try std.testing.expectEqual(@as(i64, 2), try store.db.scalar("SELECT count(*) FROM outbox"));
+}
+
+test "live message replaces dispatching placeholder before the next request event" {
+    const t = @import("protocol.zig").types;
+    const SharedSnapshot = @import("client.zig").SharedSnapshot;
+    const store = try Store.open(":memory:");
+    defer store.close();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    try store.beginSync(epoch, epoch ++ ":0");
+    const input = t.SendInput{
+        .request_id = epoch,
+        .server_epoch = epoch,
+        .target = .{ .recipient = .{ .address = "test@example.invalid", .service = "imessage" } },
+        .text = "Quick reply",
+    };
+    try store.persistSend(ar, "c1", input);
+    const request = t.SendRequest{
+        .request_id = input.request_id,
+        .server_epoch = epoch,
+        .target = input.target,
+        .text = input.text,
+        .revision = "1",
+        .state = .dispatching,
+    };
+    try store.event(ar, try u.json(ar, .{
+        .cursor = epoch ++ ":1",
+        .sequence = "1",
+        .type = "send_request.updated",
+        .origin = "live",
+        .record = request,
+    }), epoch ++ ":1", "send_request.updated", "c1");
+    const dispatching = try SharedSnapshot.create(store, "c1", 1, null);
+    defer dispatching.release();
+    try std.testing.expectEqual(@as(usize, 0), dispatching.snapshot.messages.len);
+    try std.testing.expectEqual(@as(usize, 1), dispatching.snapshot.pending.len);
+    try std.testing.expectEqualStrings("dispatching", dispatching.snapshot.pending[0].state);
+
+    var echo = (try std.json.parseFromSlice(t.Message, ar, message, .{})).value;
+    echo.direction = .outgoing;
+    echo.observed_status = .sent;
+    echo.text = input.text;
+    echo.timestamp = dispatching.snapshot.pending[0].sent_at;
+    try store.event(ar, try u.json(ar, .{
+        .cursor = epoch ++ ":2",
+        .sequence = "2",
+        .type = "message.upsert",
+        .origin = "live",
+        .record = echo,
+    }), epoch ++ ":2", "message.upsert", "c1");
+    const observed = try SharedSnapshot.create(store, "c1", 2, dispatching);
+    defer observed.release();
+    try std.testing.expectEqual(@as(usize, 1), observed.snapshot.messages.len);
+    try std.testing.expectEqualStrings(input.text, observed.snapshot.messages[0].text.?);
+    try std.testing.expectEqual(@as(usize, 0), observed.snapshot.pending.len);
+    try std.testing.expectEqual(@as(i64, 1), try store.db.scalar(
+        "SELECT count(*) FROM outbox WHERE state='dispatching' AND json_extract(record,'$.message_id') IS NULL",
+    ));
+}
+
+test "placeholder echo matching preserves unrelated messages and unresolved sends" {
+    const t = @import("protocol.zig").types;
+    const store = try Store.open(":memory:");
+    defer store.close();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    try store.beginSync(epoch, epoch ++ ":0");
+    const input = t.SendInput{
+        .request_id = epoch,
+        .server_epoch = epoch,
+        .target = .{ .recipient = .{ .address = "test@example.invalid", .service = "imessage" } },
+        .text = "Same reply",
+    };
+    const base = t.Message{
+        .id = "echo",
+        .revision = "1",
+        .conversation_id = "c1",
+        .sender = "test@example.invalid",
+        .direction = .outgoing,
+        .service = "imessage",
+        .timestamp = "2026-01-01T00:00:00Z",
+        .kind = .text,
+        .text = input.text,
+        .decoding = .plain,
+        .observed_status = .delivered,
+    };
+    for (0..11) |scenario| {
+        try store.db.exec("DELETE FROM outbox; DELETE FROM records");
+        try store.persistSend(ar, "c1", input);
+        try store.db.exec("UPDATE outbox SET sent_at='2026-01-01T00:00:00Z'");
+        var echo = base;
+        switch (scenario) {
+            0 => echo.direction = .incoming,
+            1 => echo.conversation_id = "other-chat",
+            2 => echo.service = "sms",
+            3 => echo.text = "Different reply",
+            4 => echo.timestamp = "2025-12-31T23:59:57Z",
+            5 => echo.timestamp = "2026-01-01T00:00:31Z",
+            6 => try store.outcome(input.request_id, "failed", "Rejected"),
+            7 => try store.db.exec("UPDATE outbox SET sent_at=''"),
+            8 => {
+                const request = t.SendRequest{
+                    .request_id = input.request_id,
+                    .server_epoch = epoch,
+                    .target = input.target,
+                    .text = input.text,
+                    .state = .unknown,
+                    .candidate_message_id = "not-cached-yet",
+                };
+                _ = try store.upsert(ar, "request", try u.json(ar, request));
+            },
+            9 => try store.beginSync("IjRWeBI0EjQSNBI0VniQEg", "IjRWeBI0EjQSNBI0VniQEg:0"),
+            10 => echo.kind = .system,
+            else => unreachable,
+        }
+        _ = try store.upsert(ar, "message", try u.json(ar, echo));
+        const snapshot = try store.snapshot(ar, "c1");
+        try std.testing.expectEqual(@as(usize, 1), snapshot.pending.len);
+        try std.testing.expectEqualStrings(input.request_id, snapshot.pending[0].input.request_id);
+        try std.testing.expectEqual(@as(usize, if (scenario == 1) 0 else 1), snapshot.messages.len);
+        if (scenario == 9) try store.beginSync(epoch, epoch ++ ":0");
+    }
+}
+
 test "failed cursor commit rolls back a new message and unread marker" {
     const s = try Store.open(":memory:");
     defer s.close();

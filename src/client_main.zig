@@ -2156,6 +2156,10 @@ const App = struct {
             theme.colors.line,
         );
     }
+    const message_padding = 22 + layout.message_spacing;
+    const recovery_width: f32 = 118;
+    const recovery_slot = recovery_width + 8;
+
     const HistoryRow = struct {
         id: []const u8,
         text: []const u8,
@@ -2235,22 +2239,25 @@ const App = struct {
                 .text = text,
                 .key = key,
                 .measured = s.heights.get(key),
-                .padding = 22 + layout.message_spacing,
+                .padding = message_padding,
                 .source_index = i,
                 .blocks = prepared.blocks,
             };
         }
         for (snapshot.pending, rows[count..][0..snapshot.pending.len], 0..) |p, *row, i| {
             const text = display.message(ar, p.input.text);
-            const key = std.hash.Wyhash.hash(0, text);
+            const message = pendingMessage(p);
+            const blocks = try message_content.prepare(ar, message);
+            const key = std.hash.Wyhash.hash(0, if (blocks.len == 0) text else try u.json(ar, message));
             row.* = .{
                 .id = p.input.request_id,
                 .text = text,
                 .key = key,
                 .measured = s.heights.get(key),
-                .padding = 74,
+                .padding = message_padding,
                 .pending = true,
                 .source_index = i,
+                .blocks = blocks,
             };
         }
         const active_rows = rows[0 .. count + snapshot.pending.len];
@@ -2283,6 +2290,19 @@ const App = struct {
             if (!valid) s.message_selection.clear();
         }
         return active_rows;
+    }
+    fn pendingMessage(p: Store.Pending) t.Message {
+        return .{
+            .id = p.input.request_id,
+            .sender = "",
+            .direction = .outgoing,
+            .service = "imessage",
+            .timestamp = p.sent_at,
+            .kind = .text,
+            .text = p.input.text,
+            .decoding = .plain,
+            .observed_status = .unknown,
+        };
     }
     fn historyLimit(s: *App, viewport: f32) f64 {
         // Keep short histories at the bottom too, so expanding older rows
@@ -2604,7 +2624,7 @@ const App = struct {
         }
         // Reevaluate on idle redraws too, even when the snapshot is unchanged.
         const status_now = u.now();
-        var delivery_hover: ?rl.Rectangle = null;
+        var message_hint: ?MessageHint = null;
         for (rows[visible.start..visible.end]) |row| {
             if (row.pending) continue;
             const m = v.snapshot.messages[row.source_index];
@@ -2646,11 +2666,11 @@ const App = struct {
                     .{
                         .x = x,
                         .y = y,
-                        .width = inner,
+                        .width = inner - (if (outgoing) recovery_slot else @as(f32, 0)),
                     },
                     if (outgoing) theme.colors.ink else style.label,
                     bg,
-                )) |check_bounds| delivery_hover = check_bounds;
+                )) |hint| message_hint = hint;
                 if (row.blocks.len == 0) {
                     s.drawMessageText(row, m.text orelse text, .{
                         .x = x,
@@ -2663,7 +2683,7 @@ const App = struct {
                     .y = y + 22,
                     .width = inner,
                     .height = h,
-                }, bg, ar);
+                }, theme.colors.ink, bg, ar);
             }
         }
         for (rows[visible.start..visible.end]) |row| {
@@ -2672,37 +2692,46 @@ const App = struct {
             const h = row.measured.?;
             const y = r.y + @as(f32, @floatCast(row.top - s.scroll));
             const x = r.x + 66;
+            const needs_recovery = display.canCopyPending(p.state, p.sent_at, status_now);
+            const style: theme.Participant = if (needs_recovery)
+                .{ .bubble = theme.colors.incoming, .label = theme.colors.muted }
+            else
+                .{ .bubble = theme.colors.selected, .label = theme.colors.focus };
+            const foreground = if (needs_recovery) theme.colors.muted else theme.colors.ink;
             if (y + row.height() >= r.y and y < r.y + r.height) {
                 s.drawAvatar(.{
                     .x = r.x + 20,
                     .y = y,
                     .width = 34,
                     .height = 34,
-                }, "You", .{ .bubble = theme.colors.incoming, .label = theme.colors.muted }, 17);
+                }, "You", style, 17);
                 const status = display.pendingStatus(ar, p.state, p.detail, p.sent_at, status_now);
-                _ = s.drawMessageHeader(
+                if (s.drawMessageHeader(
                     "You",
                     localTime(ar, p.sent_at, false),
                     .{ .label = status },
                     .{
                         .x = x,
                         .y = y,
-                        .width = inner,
+                        .width = inner - recovery_slot,
                     },
-                    theme.colors.muted,
+                    foreground,
                     theme.colors.paper,
-                );
-                s.drawMessageText(row, p.input.text, .{
+                )) |hint| message_hint = hint;
+                const body = rl.Rectangle{
                     .x = x,
                     .y = y + 22,
                     .width = inner,
                     .height = h,
-                }, theme.colors.muted, theme.colors.paper);
-                if (display.canCopyPending(p.state, p.sent_at, status_now) and s.button(.{
-                    .x = x + inner - 118,
-                    .y = y + h + 24,
-                    .width = 118,
-                    .height = 27,
+                };
+                if (row.blocks.len == 0) {
+                    s.drawMessageText(row, p.input.text, body, foreground, theme.colors.paper);
+                } else s.drawBlocks(row, pendingMessage(p), body, foreground, theme.colors.paper, ar);
+                if (needs_recovery and s.button(.{
+                    .x = x + inner - recovery_width,
+                    .y = y - 3,
+                    .width = recovery_width,
+                    .height = 22,
                 }, "Copy to draft", false)) {
                     if (s.readOnlyChat()) s.info("This conversation is read-only.") else if (s.composer.text.items.len > 0) s.info("Your composer has a draft. Save or clear it before copying another message.") else {
                         s.composer.set(p.input.text) catch {};
@@ -2735,7 +2764,7 @@ const App = struct {
             s.new_messages = false;
             s.worker.push(.{ .kind = .viewed, .text = "yes" }) catch {};
         };
-        if (delivery_hover) |bounds| s.drawGroupDeliveryTooltip(bounds, clip);
+        if (message_hint) |hint| s.drawMessageHint(hint, clip);
     }
     fn drawPeerAvatar(
         s: *App,
@@ -3021,6 +3050,7 @@ const App = struct {
         row: HistoryRow,
         m: t.Message,
         bounds: rl.Rectangle,
+        foreground: rl.Color,
         bg: rl.Color,
         ar: u.Allocator,
     ) void {
@@ -3048,7 +3078,7 @@ const App = struct {
                         .y = r.y,
                         .width = r.width,
                         .height = text_h,
-                    }, theme.colors.ink, bg);
+                    }, foreground, bg);
                     const links = link_targets.inText(ar, block.source_text orelse value) catch &.{};
                     for (links, 0..) |link, i| {
                         const link_r = rl.Rectangle{
@@ -3345,7 +3375,9 @@ const App = struct {
         );
         endClip();
     }
-    // Return hovered checkmark bounds so the hint can be drawn after all rows.
+    const MessageHint = struct { bounds: rl.Rectangle, text: []const u8 };
+
+    // Return hover details so they can be drawn above the completed timeline.
     fn drawMessageHeader(
         s: *App,
         name: []const u8,
@@ -3354,7 +3386,7 @@ const App = struct {
         r: struct { x: f32, y: f32, width: f32 },
         foreground: rl.Color,
         background: rl.Color,
-    ) ?rl.Rectangle {
+    ) ?MessageHint {
         const name_width = @min(r.width * 0.55, s.text.lineSize(name, 14, r.width * 0.55).x);
         // Use a common pixel origin and a fixed font reference. Centering each
         // string's ink moves dates when names or months contain descenders/emoji.
@@ -3372,12 +3404,8 @@ const App = struct {
         );
         const stamp_x = r.x + name_width + 6;
         const meta_width = @max(1, r.width - name_width - 6);
-        const reserved: f32 = switch (status) {
-            .none => 0,
-            .checks => 28,
-            .label => |label| @min(meta_width / 2, s.text.lineSize(label, 11, meta_width).x + 8),
-        };
-        const stamp_width = @max(1, meta_width - reserved);
+        // Status length must not change the timestamp's width or position.
+        const stamp_width = @max(1, meta_width - 28);
         const size = s.text.lineSize(stamp, 11, stamp_width);
         const stamp_offset = cap_center - s.text.lineCapCenterY(stamp, 11, stamp_width);
         const stamp_y = (top_pixels + @round(stamp_offset * s.text.scale)) / s.text.scale;
@@ -3395,7 +3423,10 @@ const App = struct {
                     .width = 26,
                     .height = 18,
                 };
-                if (checks == .group_sent and hover(bounds)) return bounds;
+                if (checks == .group_sent and hover(bounds)) return .{
+                    .bounds = bounds,
+                    .text = "Sent · group delivery receipts unavailable.",
+                };
             },
             .label => |label| {
                 const width = @max(1, r.x + r.width - status_x);
@@ -3409,6 +3440,14 @@ const App = struct {
                     theme.colors.muted,
                     background,
                 );
+                const bounds = rl.Rectangle{
+                    .x = status_x,
+                    .y = r.y,
+                    .width = width,
+                    .height = 20,
+                };
+                if (hover(bounds) and s.text.lineSize(label, 11, width + 32).x > width)
+                    return .{ .bounds = bounds, .text = label };
             },
         }
         return null;
@@ -3437,11 +3476,12 @@ const App = struct {
             },
         }
     }
-    fn drawGroupDeliveryTooltip(s: *App, anchor: rl.Rectangle, viewport: rl.Rectangle) void {
-        const label = "Sent · group delivery receipts unavailable.";
-        const size = s.text.lineSize(label, 12, @max(1, viewport.width - 32));
+    fn drawMessageHint(s: *App, hint: MessageHint, viewport: rl.Rectangle) void {
+        const anchor = hint.bounds;
+        const label = hint.text;
+        const size = s.text.lineSize(label, 12, @max(1, @min(420, viewport.width - 32)));
         const width = size.x + 20;
-        const height = size.y + 12;
+        const height = @min(s.text.height(label, 12, size.x) + 12, viewport.height - 12);
         const above = anchor.y - height - 6;
         const bounds = rl.Rectangle{
             .x = std.math.clamp(anchor.x, viewport.x + 6, viewport.x + viewport.width - width - 6),
@@ -3455,7 +3495,9 @@ const App = struct {
         };
         shapes.drawRectangle(bounds, 0.2, theme.colors.incoming);
         shapes.drawRectangleLines(bounds, 0.2, 1, theme.colors.line);
-        s.text.drawLineCentered(label, bounds, 12, theme.colors.ink, theme.colors.incoming);
+        beginClip(bounds);
+        s.text.draw(label, bounds.x + 10, bounds.y + 6, 12, size.x, theme.colors.ink, theme.colors.incoming);
+        endClip();
     }
     fn historyTextWidth(r: rl.Rectangle) f32 {
         return @max(80, r.width - 90);
@@ -4430,7 +4472,7 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     clickTestFrame(&app, word_x, word_y);
     try std.testing.expectEqualStrings("message", app.message_selection.selected());
 
-    // An uncertain send stays before a newer reply and retains its recovery action.
+    // An uncertain send stays before a newer reply and retains recovery in its header.
     group_messages[group_messages.len - 1].timestamp = "2026-01-01T00:02:00Z";
     var pending = [_]Store.Pending{.{
         .input = .{
@@ -4457,7 +4499,7 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     clickTestFrame(
         &app,
         areas.history.x + 66 + App.historyTextWidth(areas.history) - 59,
-        areas.history.y + @as(f32, @floatCast(pending_row.top - app.scroll)) + pending_row.measured.? + 37,
+        areas.history.y + @as(f32, @floatCast(pending_row.top - app.scroll)) + 8,
     );
     try std.testing.expectEqualStrings(pending[0].input.text, app.composer.text.items);
     try std.testing.expect(app.duplicate_risk);
@@ -4536,9 +4578,14 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
         const recent_row = app.history_rows[app.history_rows.len - 1];
         try std.testing.expect(recent_row.pending);
         const copy_x = areas.history.x + 66 + App.historyTextWidth(areas.history) - 59;
-        const copy_y = areas.history.y + @as(f32, @floatCast(recent_row.top - app.scroll)) + recent_row.measured.? + 37;
+        const copy_y = areas.history.y + @as(f32, @floatCast(recent_row.top - app.scroll)) + 8;
         const recent = try captureTestFrame(&app, scale);
         defer rl.unloadImage(recent);
+        try std.testing.expectEqual(theme.colors.selected, rl.getImageColor(
+            recent,
+            @intFromFloat((areas.history.x + 37) * scale),
+            @intFromFloat((areas.history.y + @as(f32, @floatCast(recent_row.top - app.scroll)) + 4) * scale),
+        ));
         try std.testing.expectEqual(theme.colors.paper, rl.getImageColor(
             recent,
             @intFromFloat(copy_x * scale),
@@ -4551,10 +4598,17 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     view.generation += 1;
     app.draw(scale);
     const failed_row = app.history_rows[app.history_rows.len - 1];
+    const failed = try captureTestFrame(&app, scale);
+    defer rl.unloadImage(failed);
+    try std.testing.expectEqual(theme.colors.incoming, rl.getImageColor(
+        failed,
+        @intFromFloat((areas.history.x + 37) * scale),
+        @intFromFloat((areas.history.y + @as(f32, @floatCast(failed_row.top - app.scroll)) + 4) * scale),
+    ));
     clickTestFrame(
         &app,
         areas.history.x + 66 + App.historyTextWidth(areas.history) - 59,
-        areas.history.y + @as(f32, @floatCast(failed_row.top - app.scroll)) + failed_row.measured.? + 37,
+        areas.history.y + @as(f32, @floatCast(failed_row.top - app.scroll)) + 8,
     );
     try std.testing.expectEqualStrings(pending[0].input.text, app.composer.text.items);
     try std.testing.expect(!app.duplicate_risk);
@@ -5084,6 +5138,128 @@ test "shared message presentations survive replaced views and refresh edited tex
     }
 }
 
+test "send status and echo transitions preserve message positions and heights" {
+    const reset_context: *const fn (?*clay.Context) callconv(.c) void = @ptrCast(&clay.setCurrentContext);
+    reset_context(null);
+    const SharedSnapshot = @import("client.zig").SharedSnapshot;
+    const fixture = struct {
+        fn draw(app: *App, store: Store, generation: u64, scale: f32) !void {
+            const shared = try SharedSnapshot.create(
+                store,
+                "chat",
+                generation,
+                if (app.view) |old| old.shared else null,
+            );
+            errdefer shared.release();
+            const view = try a.create(Worker.View);
+            view.* = .{
+                .arena = .init(a),
+                .snapshot = shared.snapshot,
+                .shared = shared,
+                .content_generation = generation,
+                .status = "Offline",
+                .online = false,
+                .send_direct = false,
+                .reply_existing = false,
+                .generation = generation,
+                .ack = 0,
+            };
+            if (app.view) |old| old.destroy();
+            app.view = view;
+            app.draw(scale);
+        }
+
+        fn expectPositions(app: *App, positions: [2]f64, height: f64) !void {
+            try std.testing.expectEqual(@as(usize, 2), app.history_rows.len);
+            try std.testing.expectEqual(height, app.content_height);
+            for (app.history_rows, positions) |row, expected| {
+                try std.testing.expectApproxEqAbs(expected, row.top - app.scroll, 0.000001);
+            }
+        }
+    };
+    rl.setTraceLogLevel(.none);
+    rl.initWindow(780, 560, "Zimbr send geometry checks");
+    defer rl.closeWindow();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    defer reset_context(null);
+    const ar = arena.allocator();
+    _ = clay.initialize(
+        .init(try ar.alloc(u8, clay.minMemorySize())),
+        .{ .w = 780, .h = 560 },
+        .{ .error_handler_function = clayError },
+    );
+    const epoch = "EjRWeBI0EjQSNBI0VniQEg";
+    for ([_]f32{ 1, 1.25, 2 }) |scale| for ([_][]const u8{
+        "A short reply",
+        "A wrapped reply 👋 " ** 12,
+        "A link: https://example.invalid/page\nAnd another line",
+    }) |body| {
+        const store = try Store.open(":memory:");
+        defer store.close();
+        try store.beginSync(epoch, epoch ++ ":0");
+        var message = t.Message{
+            .id = "previous",
+            .revision = "1",
+            .conversation_id = "chat",
+            .sender = "peer",
+            .direction = .incoming,
+            .service = "imessage",
+            .timestamp = "2026-01-01T00:00:00Z",
+            .kind = .text,
+            .text = "The preceding message must stay put too.",
+            .decoding = .plain,
+            .observed_status = .received,
+        };
+        _ = try store.upsert(ar, "message", try u.json(ar, message));
+        try store.persistSend(ar, "chat", .{
+            .request_id = epoch,
+            .server_epoch = epoch,
+            .target = .{ .recipient = .{ .address = "peer@example.invalid", .service = "imessage" } },
+            .text = body,
+        });
+        const sent_at = (try store.snapshot(ar, "chat")).pending[0].sent_at;
+        var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
+        defer worker.shutdown();
+        var app = App{ .worker = &worker, .key = try a.dupe(u8, "chat") };
+        defer app.deinit();
+        var generation: u64 = 1;
+        try fixture.draw(&app, store, generation, scale);
+        try std.testing.expectEqual(@as(usize, 2), app.history_rows.len);
+        const positions = [2]f64{
+            app.history_rows[0].top - app.scroll,
+            app.history_rows[1].top - app.scroll,
+        };
+        const height = app.content_height;
+        for ([_][]const u8{
+            "queued",
+            "dispatching",
+            "unknown",
+            "failed",
+            "unconfirmed",
+        }) |state| {
+            try store.outcome(epoch, state, "A long error explanation that must stay out of message layout. " ** 12);
+            generation += 1;
+            try fixture.draw(&app, store, generation, scale);
+            try fixture.expectPositions(&app, positions, height);
+        }
+        try store.outcome(epoch, "unknown", "");
+        message.id = "echo";
+        message.direction = .outgoing;
+        message.text = body;
+        message.timestamp = sent_at;
+        inline for (.{ .sent, .delivered, .failed }) |status| {
+            generation += 1;
+            message.revision = try std.fmt.allocPrint(ar, "{d}", .{generation});
+            message.observed_status = status;
+            _ = try store.upsert(ar, "message", try u.json(ar, message));
+            try fixture.draw(&app, store, generation, scale);
+            try std.testing.expect(!app.history_rows[1].pending);
+            try fixture.expectPositions(&app, positions, height);
+        }
+    };
+}
+
 test "history larger than the old cache limit renders newest first and settles" {
     var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/zimbr-history-test" } };
     defer worker.shutdown();
@@ -5364,6 +5540,67 @@ fn captureTestFrame(app: *App, scale: f32) !rl.Image {
     const shot = app.captured orelse return error.ScreenshotFailed;
     app.captured = null;
     return shot;
+}
+
+test "message header keeps sender and timestamp pixels stable across send statuses" {
+    rl.setTraceLogLevel(.none);
+    rl.initWindow(640, 480, "Zimbr status geometry checks");
+    defer rl.closeWindow();
+    const target = try rl.loadRenderTexture(512, 128);
+    defer rl.unloadRenderTexture(target);
+    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
+    defer worker.shutdown();
+    var app = App{ .worker = &worker };
+    defer app.deinit();
+    for ([_]f32{
+        1,
+        1.25,
+        1.5,
+        2,
+    }) |scale| {
+        var reference: ?rl.Image = null;
+        defer if (reference) |shot| rl.unloadImage(shot);
+        const stamp = "Sep 25 · 16:00";
+        for ([_]display.MessageStatus{
+            .none,
+            .{ .label = "Sending…" },
+            .{ .checks = .sent },
+            .{ .checks = .delivered },
+            .{ .label = "Failed · A long error must not squeeze the timestamp or move its text." },
+        }) |status| {
+            app.text.nextFrame(scale);
+            rl.beginTextureMode(target);
+            rl.clearBackground(rl.Color.black);
+            rl.beginMode2D(.{
+                .offset = .{ .x = 0, .y = 0 },
+                .target = .{ .x = 0, .y = 0 },
+                .rotation = 0,
+                .zoom = scale,
+            });
+            _ = app.drawMessageHeader("You", stamp, status, .{
+                .x = 10,
+                .y = 10,
+                .width = 160,
+            }, rl.Color.white, rl.Color.black);
+            rl.endMode2D();
+            rl.endTextureMode();
+            var shot = try rl.loadImageFromTexture(target.texture);
+            rl.imageFlipVertical(&shot);
+            if (reference) |before| {
+                defer rl.unloadImage(shot);
+                const right = 10 + app.text.lineSize("You", 14, 110).x + 6 +
+                    app.text.lineSize(stamp, 11, 160).x;
+                for (0..@as(usize, @intFromFloat(32 * scale))) |y| {
+                    for (0..@as(usize, @intFromFloat(right * scale))) |x| {
+                        try std.testing.expectEqual(
+                            rl.getImageColor(before, @intCast(x), @intCast(y)),
+                            rl.getImageColor(shot, @intCast(x), @intCast(y)),
+                        );
+                    }
+                }
+            } else reference = shot;
+        }
+    }
 }
 
 test "message dates keep font alignment across glyphs and fractional row positions" {
