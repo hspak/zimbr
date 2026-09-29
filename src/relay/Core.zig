@@ -18,13 +18,14 @@ const reactions = @import("reactions.zig");
 const Signal = @import("../Signal.zig");
 const adapter_api = if (options.fake) fake_adapter else macos_adapter;
 const fake = options.fake;
-const observation_window_ms = 10000;
+const observation_window_ms = sends.observation_window_ms;
 const initial_import_limit = 1000;
 const Core = @This();
 
 io: std.Io,
 journal: Journal,
 source_path: [:0]const u8,
+attachment_root: []const u8 = "",
 contacts_phone_region: []const u8 = "",
 contacts_status: contacts.Status = .{},
 source_features: adapter_api.Source.Features = .{},
@@ -736,6 +737,9 @@ fn rejectQueued(self: *Core, a: u.Allocator, value: t.SendRequest, code: []const
 }
 fn reconcile(self: *Core, a: u.Allocator, batch: *ImportBatch, complete: bool) !void {
     const j = self.journal;
+    const parts = try j.db.prepare("SELECT m.source_row FROM send_parts p JOIN send_requests r ON r.id=p.request_id JOIN messages m ON m.id=p.message_id LEFT JOIN send_part_observations o ON o.request_id=p.request_id AND o.position=p.position WHERE p.state='submitted' AND r.epoch=(SELECT epoch FROM relay_meta) ORDER BY coalesce(o.attempt_ms,0) LIMIT 100");
+    defer parts.close();
+    while (try parts.step()) try self.importRow(a, batch, parts.int(0), "reconciliation", complete);
     const s = try j.db.prepare("SELECT r.record,r.dispatch_ms,r.source_floor,r.mode,r.route FROM send_requests r LEFT JOIN send_observations o ON o.request_id=r.id WHERE r.state IN ('submitted','unknown') AND r.dispatch_ms IS NOT NULL AND r.epoch=(SELECT epoch FROM relay_meta) ORDER BY coalesce(o.attempt_ms,0),r.dispatch_ms LIMIT 100");
     defer s.close();
     const Pending = struct {
@@ -830,14 +834,14 @@ fn reconcile(self: *Core, a: u.Allocator, batch: *ImportBatch, complete: bool) !
             unique = !try competing.step();
         }
         if (unique) {
-            const parts = try j.db.prepare("SELECT 1 FROM send_parts p JOIN send_requests r ON r.id=p.request_id JOIN messages m ON m.id=? JOIN conversations c ON c.id=m.conversation_id WHERE r.epoch=? AND p.state IN ('dispatching','invoked','unknown','submitted') AND p.message_id IS NULL AND json_extract(r.record,'$.parts['||p.position||'].kind')='text' AND m.source_row>p.source_floor AND m.text=json_extract(r.record,'$.text') AND m.date_ns BETWEEN (p.dispatch_ms-2000-978307200000)*1000000 AND (p.dispatch_ms+?-978307200000)*1000000 AND ((p.mode='chat' AND c.route=p.route) OR (p.mode='direct' AND (SELECT count(*) FROM participants WHERE conversation_id=c.id)=1 AND EXISTS(SELECT 1 FROM participants WHERE conversation_id=c.id AND address=p.route))) LIMIT 1");
-            defer parts.close();
-            try parts.bind(&.{
+            const competing_parts = try j.db.prepare("SELECT 1 FROM send_parts p JOIN send_requests r ON r.id=p.request_id JOIN messages m ON m.id=? JOIN conversations c ON c.id=m.conversation_id WHERE r.epoch=? AND p.state IN ('dispatching','invoked','unknown','submitted') AND p.message_id IS NULL AND json_extract(r.record,'$.parts['||p.position||'].kind')='text' AND m.source_row>p.source_floor AND m.text=json_extract(r.record,'$.text') AND m.date_ns BETWEEN (p.dispatch_ms-2000-978307200000)*1000000 AND (p.dispatch_ms+?-978307200000)*1000000 AND ((p.mode='chat' AND c.route=p.route) OR (p.mode='direct' AND (SELECT count(*) FROM participants WHERE conversation_id=c.id)=1 AND EXISTS(SELECT 1 FROM participants WHERE conversation_id=c.id AND address=p.route))) LIMIT 1");
+            defer competing_parts.close();
+            try competing_parts.bind(&.{
                 .{ .text = mid.? },
                 .{ .text = v.server_epoch },
                 .{ .int = observation_window_ms },
             });
-            unique = !try parts.step();
+            unique = !try competing_parts.step();
         }
         const candidate = if (unique) mid else null;
         if (!unique or u.now() < p.time + observation_window_ms) {

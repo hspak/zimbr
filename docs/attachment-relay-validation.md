@@ -19,15 +19,30 @@ Record the implemented boundary, command, and observed result after each chunk.
 | Upload streaming, integrity, ownership, active limits, timeout, restart, reset, cancellation, and cleanup | `python3 tests/attachment_uploads.py` | Passed: 12 production mTLS/HTTP2 cases, including a 9 MiB binary file, empty files, unsafe storage isolation, and failed publication |
 | Failed disconnected-writer release recovers without restart | `python3 tests/attachment_uploads.py AttachmentUploads.test_failed_lease_release_recovers_without_restarting_the_relay` | Same regression failed before retry handling and passed after; an injected SQLite failure no longer leaves the upload permanently receiving |
 | Attachment dispatch, original copies, direct/group routing, partial failure, result-commit failure, restart, and reset | `python3 tests/attachment_sends.py -v` | Passed: 10 cases through the production HTTP/2 server and synthetic Messages adapter; the original caption-loss regression remains unchanged |
-| Multipart correlation and safe reclamation | To be added with observation implementation | Pending |
+| Multipart correlation and safe reclamation | `python3 tests/attachment_observation.py -v` | Passed: 16 production HTTP/2 cases covering byte identity, ambiguity, source changes, partial outcomes, late receipts, restart, and atomic cleanup |
+| Undecodable outgoing records block uniqueness | `python3 tests/attachment_observation.py AttachmentObservation.test_malformed_outgoing_records_cannot_disappear_from_the_uniqueness_check` | Same regression failed before the guard and passed after; a malformed possible echo cannot disappear from correlation |
+| Observed failure reports a failed request while retaining the original | `python3 tests/attachment_observation.py AttachmentObservation.test_observed_failure_is_reported_without_releasing_or_resending_the_file` | Same regression failed before aggregate outcome handling and passed after |
+| A staged original cannot prove an independent Messages copy | `python3 tests/attachment_observation.py AttachmentObservation.test_source_path_to_the_staged_original_is_not_an_independent_copy` | Same regression failed before file-identity checking and passed after, including relay storage nested under the Messages attachment root |
 | Multipart acceptance and recovery journal | `zig build test -Doptimize=ReleaseSafe` | Passed: atomic pinning, incomplete and foreign uploads, injected part-write rollback, ordered caption/file parts, exact retries, partial outcomes, restart between/during operations, and source-reset holds |
-| Existing text sends, idempotency, recovery, and source resets | `python3 tests/integration.py` | Passed after multipart dispatch and correlation exclusions |
+| Existing text sends, idempotency, recovery, and source resets | `python3 tests/integration.py` | Passed after multipart observation and safe reclamation |
 | HTTP/2 stream isolation | `python3 tests/relay_http2.py` | Passed: all seven existing transport regressions |
 
 Use Zig from `.zigversion`. Build `fake-relay` before the Python suites. Supply
 `-Dopenssl-prefix=/absolute/openssl-3.5` when the system OpenSSL is not 3.5.
 Build caches can be redirected with `ZIG_LOCAL_CACHE_DIR` and
 `ZIG_GLOBAL_CACHE_DIR` when the normal cache is unavailable.
+
+The observation chunk passed 202 Zig tests with one unavailable-platform skip.
+The dispatch suite passed all 10 cases and the upload suite passed all 12 cases.
+Retention assertions now expect proven unstarted successors to retire; their
+coverage still requires uncertain attempted originals to remain pinned across
+restart and source reset.
+
+Observation tests include a 9 MiB original, an empty file, changed bytes after a
+cached proof, missing and unsafe source paths, delayed attachment joins, and an
+injected cleanup transaction failure. Discovery refuses to confirm after its
+4,096-row budget is exceeded. Already confirmed submissions still follow a late
+delivery receipt after that history bound and after Messages evicts its copy.
 
 The native script passes the private absolute filename as a literal argument,
 coerces it to an alias before setting its dispatch flag, and uses the same

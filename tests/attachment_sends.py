@@ -127,7 +127,7 @@ class AttachmentSends(unittest.TestCase):
         self.send(outgoing, 200)
         self.assertEqual(self.source_rows(), [('Once', None, None)])
         with closing(sqlite3.connect(self.root/'data/relay.db')) as db:
-            self.assertEqual(db.execute("SELECT count(*) FROM uploads WHERE state='pinned'").fetchone()[0], 2)
+            self.assertEqual(db.execute("SELECT count(*) FROM uploads WHERE state='pinned'").fetchone()[0], 1)
 
     def test_result_commit_failure_preserves_the_completed_file_without_replay(self):
         outgoing = self.outgoing([self.upload(b'one', 'fake-stall.bin'), self.upload(b'two')])

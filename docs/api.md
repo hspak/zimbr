@@ -57,10 +57,15 @@ confirm submission or delivery. An uncertain or failed operation skips its
 unstarted successors; exact request retries retain all outcomes. Text-only
 requests keep their existing single-message tracking and have an empty array.
 
-Attachment dispatch is implemented, but multipart Messages observation is still
-being added. Successful parts currently remain `invoked` and their request stays
-uncertain. Their uploads remain pinned; delivery and safe reclamation will
-require source observation. Native Mac file sending still requires the checks
+File correlation requires a unique outgoing record in the expected conversation
+and dispatch window, with matching filename, length, and SHA-256. The relay
+verifies an independent file inside Messages' attachment storage; the staged
+original itself cannot satisfy that proof. A provisional `candidate_message_id`
+may appear early and can be withdrawn. Confirmation waits for the complete
+10-second observation window and rejects competing requests, duplicate echoes,
+incomplete source records, and changed files. Ambiguous sends remain uncertain.
+All parts must be delivered for the request to be delivered; mixed outcomes
+remain individually visible. Native Mac file sending still requires the checks
 in [attachment relay validation](attachment-relay-validation.md).
 
 Reserve with `POST /v1/uploads`, `Content-Type: application/json`, and:
@@ -95,8 +100,11 @@ its bytes. GET resolves a lost upload response.
 DELETE is idempotent for absent/retired IDs. Active transfers return 409: cancel
 the HTTP stream first, then retry DELETE. Files pinned by a send cannot be
 cancelled. Cleanup removes retired files before releasing quota. Unused uploads
-expire after 24 hours or an epoch change. Pinned files remain protected across
-resets and uncertain send outcomes.
+expire after 24 hours or an epoch change. Confirmed unstarted parts release
+their uploads, including skipped parts after a reset. Attempted files remain
+pinned until an independently verified message receives a delivery receipt.
+Unknown outcomes and observed failures retain their originals. Exact request
+retries still return the recorded outcome after upload cleanup.
 
 Limits are 100 MiB per file, 256 reservations, 2 GiB reserved storage, and four
 active PUT requests. Uploads have a 30-second idle timeout and a 15-minute total

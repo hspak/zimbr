@@ -242,6 +242,16 @@ pub fn purge(j: Journal, id: []const u8) Journal.QueryError!void {
     try j.execute("DELETE FROM uploads WHERE id=? AND state='deleting'", &.{.{ .text = id }});
 }
 
+/// Retire a pinned original in the caller's transaction only after proving that
+/// its part was never invoked, or that Messages delivered an independent copy.
+/// Physical cleanup remains owned by the existing retirement worker.
+pub fn releasePart(j: Journal, request_id: []const u8, upload_id: []const u8) Journal.QueryError!void {
+    try j.execute("UPDATE uploads SET state='deleting' WHERE id=? AND request_id=? AND state='pinned'", &.{
+        .{ .text = upload_id },
+        .{ .text = request_id },
+    });
+}
+
 fn checkEpoch(j: Journal, a: u.Allocator, epoch: []const u8) (Journal.ReadError || error{ InvalidRequest, ResyncRequired })!void {
     if (!t.validId(epoch)) return error.InvalidRequest;
     if (!u.eq(epoch, try j.epoch(a))) return error.ResyncRequired;

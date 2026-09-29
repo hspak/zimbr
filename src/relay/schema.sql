@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS send_parts(request_id TEXT NOT NULL REFERENCES send_r
 CREATE INDEX IF NOT EXISTS part_state ON send_parts(state);
 CREATE UNIQUE INDEX IF NOT EXISTS part_message ON send_parts(message_id) WHERE message_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS send_owners(request_id TEXT PRIMARY KEY REFERENCES send_requests(id),owner TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS send_part_observations(request_id TEXT NOT NULL,position INTEGER NOT NULL,attempt_ms INTEGER NOT NULL,PRIMARY KEY(request_id,position),FOREIGN KEY(request_id,position) REFERENCES send_parts(request_id,position));
 
 -- Outgoing bytes live in private files; this ledger owns their reservations.
 CREATE TABLE IF NOT EXISTS uploads(id TEXT PRIMARY KEY,epoch TEXT NOT NULL,owner TEXT NOT NULL,record TEXT NOT NULL,bytes INTEGER NOT NULL CHECK(bytes BETWEEN 0 AND 104857600),state TEXT NOT NULL CHECK(state IN ('reserved','receiving','ready','pinned','deleting')),lease TEXT NOT NULL DEFAULT '',created_ms INTEGER NOT NULL,request_id TEXT REFERENCES send_requests(id));

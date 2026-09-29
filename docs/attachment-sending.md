@@ -19,13 +19,15 @@ means the implementation and its relevant automated checks have passed.
    verifies length and SHA-256 before atomic publication. Authenticated HTTP/2
    endpoints, restart recovery, failed-lease recovery, physical cleanup, and
    transport regression checks are complete.
-3. **In progress: relay dispatch and observation.** Atomic acceptance now pins
+3. **Complete: relay dispatch and observation.** Atomic acceptance now pins
    every completed upload and journals ordered caption/file operations. Exact
    retries retain their outcomes. Recovery holds an interrupted operation and
    skips its unstarted successors. Authenticated HTTP acceptance and sequential
    text/file dispatch now run through the sender; synthetic tests verify original
-   bytes, ordering, partial failure, interruption, and exact retries. Conservative
-   source correlation and safe reclamation remain pending. Native file sending
+   bytes, ordering, partial failure, interruption, and exact retries. Correlation
+   verifies independent original bytes, checks uniqueness and competing sends,
+   and follows receipt changes. Safe reclamation releases unstarted parts and
+   independently observed deliveries. Automated checks pass; native file sending
    still requires Mac acceptance.
 4. **Pending: client attachment drafts and upload worker.** Snapshot local files,
    persist drafts and outbox ownership, upload with progress, and recover without
@@ -63,8 +65,9 @@ The relay reservation ledger allows at most 256 uploads and 2 GiB of declared
 bytes, including incomplete transfers. Unused reservations expire after 24
 hours or an epoch change. Retirement blocks further use immediately; quota is
 released only after physical cleanup. Each transfer receives a fresh lease token
-so late callbacks cannot publish or abandon a replacement transfer. Files pinned
-to a send remain protected through resets and uncertain outcomes.
+so late callbacks cannot publish or abandon a replacement transfer. Originals
+for attempted parts remain protected through resets and uncertain outcomes.
+Proven unstarted parts can be retired without waiting for Messages.
 
 Binary transfer memory is independent of file size: the connection uses a
 16 KiB read buffer and the existing bounded HTTP/2 session. Files stream to disk
@@ -88,6 +91,25 @@ durable successful invocations can resume at the next queued part; a crash
 during invocation makes that part uncertain and holds its successors. Exact
 request retries never replay attempted parts. Aggregate delivery requires every
 part to be delivered; partial requests expose the individual outcomes.
+
+Observation runs on a separate worker. It compares stable source snapshots,
+checks filename and length, and hashes source bytes in 64 KiB chunks outside
+the journal mutex. The source file must be inside Messages' attachment root
+and have a different file identity from the staged original. A bounded cache
+of 512 file fingerprints avoids rehashing unchanged bytes; each observation
+pass hashes at most 200 MiB. Missing, changed, unsafe, or undecodable source
+records prevent confirmation. Duplicate content and overlapping requests cannot
+claim the same echo. Source transformations can therefore leave sends uncertain.
+
+Discovery examines at most 4,096 source rows after the dispatch boundary and
+64 scoped outgoing records. Exceeding either bound keeps the outcome uncertain,
+and old unconfirmed parts retry every 30 seconds. A confirmed association follows
+its source message identity for later receipts even after newer history exceeds
+the discovery budget or Messages evicts its local copy. Discovery alone retains
+the original; a delivery receipt retires it in the same transaction as the send
+update. Failed transactions preserve both the previous outcome and the original.
+Existing cleanup removes retired files before releasing quota, while durable
+request identities continue to answer retries after the files are gone.
 
 Local drafts own private copies so a moved, changed, or deleted source file does
 not alter an already staged attachment. Draft removal, outbox transfer, restart,

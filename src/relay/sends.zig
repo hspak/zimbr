@@ -3,6 +3,8 @@
 const std = @import("std");
 const u = @import("../common.zig");
 const t = @import("../protocol.zig").types;
+pub const observation = @import("sends/observation.zig");
+pub const observation_window_ms = 10000;
 
 pub const Outcome = union(enum) {
     invoked,
@@ -94,6 +96,29 @@ fn skipQueued(v: *t.SendRequest, code: []const u8) void {
     }
 }
 
+/// Record a uniquely matched outgoing message. Assume a first attachment match
+/// has verified independent original bytes in Messages' attachment storage.
+/// Assert automation has ended for this part. A reported failure holds any
+/// remaining unstarted operations.
+pub fn observe(v: *t.SendRequest, position: usize, message_id: []const u8, status: enum { submitted, delivered, failed }) void {
+    const part = &v.parts[position];
+    std.debug.assert(part.state == .invoked or part.state == .unknown or part.state == .submitted);
+    part.message_id = message_id;
+    part.candidate_message_id = null;
+    part.state = switch (status) {
+        .submitted => .submitted,
+        .delivered => .delivered,
+        .failed => .failed,
+    };
+    part.error_info = if (status == .failed) .{
+        .code = "observed_failure",
+        .message = "Messages reported failure for this part.",
+        .outcome = .uncertain,
+    } else null;
+    if (status == .failed) skipQueued(v, "preceding_part_stopped");
+    summarize(v);
+}
+
 /// Recompute the request outcome from its ordered parts, without claiming
 /// delivery from automation success or hiding a partially completed request.
 pub fn summarize(v: *t.SendRequest) void {
@@ -102,16 +127,21 @@ pub fn summarize(v: *t.SendRequest) void {
     var dispatching = false;
     var stopped = false;
     var attempted = false;
+    var unresolved_or_successful = false;
     var observed: usize = 0;
     var delivered: usize = 0;
     var uncertain: ?t.SafeError = null;
     for (v.parts) |part| switch (part.state) {
         .queued => queued = true,
         .dispatching => dispatching = true,
-        .invoked => attempted = true,
+        .invoked => {
+            attempted = true;
+            unresolved_or_successful = true;
+        },
         .submitted, .delivered => {
             observed += 1;
             attempted = true;
+            unresolved_or_successful = true;
             if (part.state == .delivered) delivered += 1;
         },
         .failed, .skipped => {
@@ -122,6 +152,7 @@ pub fn summarize(v: *t.SendRequest) void {
         },
         .unknown => {
             attempted = true;
+            unresolved_or_successful = true;
             uncertain = part.error_info;
         },
     };
@@ -131,10 +162,15 @@ pub fn summarize(v: *t.SendRequest) void {
     if (dispatching) {
         v.state = .dispatching;
     } else if (stopped) {
-        v.state = if (attempted) .unknown else .failed;
+        v.state = if (unresolved_or_successful) .unknown else .failed;
         v.error_info = .{
-            .code = if (attempted) "partial_send" else "dispatch_unstarted",
-            .message = if (attempted) "Some parts were attempted; review their individual outcomes." else "No part of this request was sent.",
+            .code = if (unresolved_or_successful) "partial_send" else if (attempted) "observed_failure" else "dispatch_unstarted",
+            .message = if (unresolved_or_successful)
+                "Some parts were attempted; review their individual outcomes."
+            else if (attempted)
+                "Messages reported failure for every attempted part."
+            else
+                "No part of this request was sent.",
             .outcome = if (attempted) .uncertain else .unstarted,
         };
     } else if (queued) {
@@ -233,4 +269,34 @@ test "attachment-only operations stop on failure and never confuse invocation wi
     try testing.expectEqualStrings("partial_send", v.error_info.?.code);
     try testing.expectEqual(.invoked, v.parts[0].state);
     try testing.expectEqual(.failed, v.parts[1].state);
+}
+
+test "an observed earlier failure preserves an active part and skips unstarted successors" {
+    var parts = [_]t.SendPart{
+        .{ .kind = .text, .state = .invoked },
+        .{
+            .kind = .attachment,
+            .attachment_id = "active",
+            .state = .dispatching,
+        },
+        .{ .kind = .attachment, .attachment_id = "unstarted" },
+    };
+    var request: t.SendRequest = .{
+        .request_id = "request",
+        .server_epoch = "epoch",
+        .target = .{},
+        .text = "caption",
+        .parts = &parts,
+    };
+    observe(&request, 0, "message", .failed);
+    try std.testing.expectEqual(.dispatching, request.state);
+    try std.testing.expectEqual(.failed, parts[0].state);
+    try std.testing.expectEqualStrings("message", parts[0].message_id.?);
+    try std.testing.expectEqual(.uncertain, parts[0].error_info.?.outcome);
+    try std.testing.expectEqual(.dispatching, parts[1].state);
+    try std.testing.expectEqual(.skipped, parts[2].state);
+    finish(&request, 1, .invoked);
+    try std.testing.expectEqual(.unknown, request.state);
+    try std.testing.expectEqualStrings("partial_send", request.error_info.?.code);
+    try std.testing.expectEqual(@as(?usize, null), next(request));
 }

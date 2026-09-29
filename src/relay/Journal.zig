@@ -418,12 +418,19 @@ pub fn updateRequest(self: Journal, a: u.Allocator, value: t.SendRequest) ReadEr
         if (v.message_id) |m| .{ .text = m } else .null_value,
         .{ .text = v.request_id },
     });
-    for (v.parts, 0..) |part, ordinal| try self.execute("INSERT INTO send_parts(request_id,position,state,message_id) VALUES(?,?,?,?) ON CONFLICT(request_id,position) DO UPDATE SET state=excluded.state,message_id=excluded.message_id", &.{
-        .{ .text = v.request_id },
-        .{ .int = @intCast(ordinal) },
-        .{ .text = @tagName(part.state) },
-        if (part.message_id) |id| .{ .text = id } else .null_value,
-    });
+    for (v.parts, 0..) |part, ordinal| {
+        try self.execute("INSERT INTO send_parts(request_id,position,state,message_id) VALUES(?,?,?,?) ON CONFLICT(request_id,position) DO UPDATE SET state=excluded.state,message_id=excluded.message_id", &.{
+            .{ .text = v.request_id },
+            .{ .int = @intCast(ordinal) },
+            .{ .text = @tagName(part.state) },
+            if (part.message_id) |id| .{ .text = id } else .null_value,
+        });
+        if (part.kind == .attachment and (part.state == .failed or part.state == .skipped)) {
+            if (part.error_info) |err| if (err.outcome == .unstarted) {
+                try uploads.releasePart(self, v.request_id, part.attachment_id.?);
+            };
+        }
+    }
     try self.event(seq, "send_request.updated", record_json, "reconciliation");
     return record_json;
 }
@@ -1217,7 +1224,8 @@ test "attachment acceptance pins every file and records every part atomically" {
         try testing.expectEqual(.skipped, part.state);
         try testing.expectEqual(.unstarted, part.error_info.?.outcome);
     }
-    try testing.expectEqual(@as(i64, 2), try j.db.scalar("SELECT count(*) FROM uploads WHERE state='pinned'"));
+    try testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM uploads WHERE state='pinned'"));
+    try testing.expectEqual(@as(i64, 2), try j.db.scalar("SELECT count(*) FROM uploads WHERE state='deleting'"));
 }
 
 test "restart preserves completed parts and holds interrupted and unstarted parts" {
@@ -1301,12 +1309,14 @@ test "restart preserves completed parts and holds interrupted and unstarted part
     try testing.expectEqual(.unstarted, v.parts[2].error_info.?.outcome);
     try testing.expectEqual(@as(?usize, null), sends.next(v));
     try testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM send_parts WHERE state IN ('queued','dispatching')"));
-    try testing.expectEqual(@as(i64, 2), try j.db.scalar("SELECT count(*) FROM uploads WHERE state='pinned'"));
+    try testing.expectEqual(@as(i64, 1), try j.db.scalar("SELECT count(*) FROM uploads WHERE state='pinned'"));
+    try testing.expectEqual(uploads.Phase.pinned, (try uploads.lookup(j, a, "device", input.server_epoch, files[0].id)).phase);
+    try testing.expectError(error.UploadExpired, uploads.lookup(j, a, "device", input.server_epoch, files[1].id));
     try j.begin();
     try j.reset(a);
     try j.commit();
     try testing.expectError(error.ResyncRequired, j.acceptAttachments(a, input, true, "device"));
-    try testing.expectEqual(@as(i64, 2), try j.db.scalar("SELECT count(*) FROM uploads WHERE state='pinned'"));
+    try testing.expectEqual(@as(i64, 1), try j.db.scalar("SELECT count(*) FROM uploads WHERE state='pinned'"));
 }
 
 test "directory tombstones preserve identity and legacy streams skip extension events" {

@@ -14,6 +14,7 @@ const Tls = @import("relay.zig").Tls;
 const contact_directory = @import("relay.zig").adapter.contacts;
 const Assets = @import("relay.zig").Assets;
 const uploads = @import("relay.zig").uploads;
+const sends = @import("relay.zig").sends;
 const Menu = @import("relay.zig").Menu;
 const settings = @import("relay.zig").settings;
 const adapter_api = if (options.fake) @import("relay.zig").adapter.fake else @import("relay.zig").adapter.macos;
@@ -304,6 +305,7 @@ const Service = struct {
             .{home},
         );
         core.assets_service = Assets.init(a, self.io, data, attachment_root) catch null;
+        core.attachment_root = attachment_root;
         core.assets_reason = if (core.assets_service != null) "" else "image_service_unavailable";
         core.journal.changed = .{ .signal = &core.changed, .io = self.io };
         core.reset_required = !t.validId(try core.journal.epoch(a));
@@ -323,6 +325,8 @@ const Service = struct {
         ingestion.detach();
         const contacts = try std.Thread.spawn(.{}, contact_directory.loop, .{core});
         contacts.detach();
+        const observation = try std.Thread.spawn(.{}, sends.observation.loop, .{core});
+        observation.detach();
         if (core.assets_service != null) {
             const media = try std.Thread.spawn(.{}, Assets.loop, .{core});
             media.detach();
