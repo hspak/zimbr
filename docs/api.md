@@ -59,11 +59,13 @@ requests keep their existing single-message tracking and have an empty array.
 
 File correlation requires a unique outgoing record in the expected conversation
 and dispatch window, with matching filename, length, and SHA-256. The relay
-verifies an independent file inside Messages' attachment storage; the staged
-original itself cannot satisfy that proof. A provisional `candidate_message_id`
-may appear early and can be withdrawn. Confirmation waits for the complete
-10-second observation window and rejects competing requests, duplicate echoes,
-incomplete source records, and changed files. Ambiguous sends remain uncertain.
+verifies length and SHA-256 from an independent file inside Messages' attachment
+storage; Messages' reported attachment size can differ from the actual file and
+does not filter candidates. The staged original itself cannot satisfy that proof.
+A provisional `candidate_message_id` may appear early and can be withdrawn.
+Confirmation waits for the complete 10-second observation window and rejects
+competing requests, duplicate echoes, incomplete source records, and changed
+files. Ambiguous sends remain uncertain.
 All parts must be delivered for the request to be delivered; mixed outcomes
 remain individually visible. Native Mac file sending still requires the checks
 in [attachment relay validation](attachment-relay-validation.md).

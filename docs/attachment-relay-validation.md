@@ -19,7 +19,7 @@ Record the implemented boundary, command, and observed result after each chunk.
 | Upload streaming, integrity, ownership, active limits, timeout, restart, reset, cancellation, and cleanup | `python3 tests/attachment_uploads.py` | Passed: 12 production mTLS/HTTP2 cases, including a 9 MiB binary file, empty files, unsafe storage isolation, and failed publication |
 | Failed disconnected-writer release recovers without restart | `python3 tests/attachment_uploads.py AttachmentUploads.test_failed_lease_release_recovers_without_restarting_the_relay` | Same regression failed before retry handling and passed after; an injected SQLite failure no longer leaves the upload permanently receiving |
 | Attachment dispatch, original copies, direct/group routing, partial failure, result-commit failure, restart, and reset | `python3 tests/attachment_sends.py -v` | Passed: 10 cases through the production HTTP/2 server and synthetic Messages adapter; the original caption-loss regression remains unchanged |
-| Multipart correlation and safe reclamation | `python3 tests/attachment_observation.py -v` | Passed: 17 production HTTP/2 cases covering byte identity, ambiguity, source changes, partial outcomes, late receipts, restart, atomic cleanup, and handoff preview retention |
+| Multipart correlation and safe reclamation | `python3 tests/attachment_observation.py -v` | Passed: 19 production HTTP/2 cases covering byte identity, ambiguity, source changes, partial outcomes, late receipts, restart, atomic cleanup, handoff preview retention, and inaccurate size metadata in self conversations |
 | Undecodable outgoing records block uniqueness | `python3 tests/attachment_observation.py AttachmentObservation.test_malformed_outgoing_records_cannot_disappear_from_the_uniqueness_check` | Same regression failed before the guard and passed after; a malformed possible echo cannot disappear from correlation |
 | Observed failure reports a failed request while retaining the original | `python3 tests/attachment_observation.py AttachmentObservation.test_observed_failure_is_reported_without_releasing_or_resending_the_file` | Same regression failed before aggregate outcome handling and passed after |
 | A staged original cannot prove an independent Messages copy | `python3 tests/attachment_observation.py AttachmentObservation.test_source_path_to_the_staged_original_is_not_an_independent_copy` | Same regression failed before file-identity checking and passed after, including relay storage nested under the Messages attachment root |
@@ -30,6 +30,8 @@ Record the implemented boundary, command, and observed result after each chunk.
 | Native AppleScript payload binding under the installed Messages dictionary | `python3 tests/mac_send_script.py -v` on macOS | Passed: four tests covering compilation, literal Unicode text, file aliases, and missing-file rejection. The same text/file operand regression failed before the fix in all four direct/chat modes and passed unchanged afterward. No Messages sends or account/chat queries execute. |
 | Messages-readable handoff and preview after upload cleanup | `python3 tests/attachment_observation.py AttachmentObservation.test_handoff_is_readable_by_messages_and_preview_survives_upload_cleanup -v` | The same regression failed before production handoff staging and passed unchanged afterward. Covers separate original bytes, delivery, preview generation, cleanup, restart, and exact retry without replay. |
 | Handoff integrity and ownership | `zig build test -Doptimize=ReleaseSafe` | Passed: independent inode, unchanged original offset, retained bytes after original deletion, unstarted cleanup, wrong hash, symlink rejection, and no replacement of an existing copy. |
+| Self-send confirmation when Messages reports a different attachment size | `python3 tests/attachment_observation.py AttachmentObservation.test_self_send_confirms_actual_bytes_despite_different_reported_size -v` | The same test failed before the fix and passed unchanged afterward. Covers a recognized self thread, caption, delivered outgoing image, shared incoming attachment, original retirement, and exact retry after restart without replay. |
+| Reported size cannot hide a duplicate outgoing file | `python3 tests/attachment_observation.py AttachmentObservation.test_different_reported_size_cannot_hide_an_identical_outgoing_echo -v` | The same test failed before the fix and passed unchanged afterward. A duplicate with different size metadata withdraws the provisional match and keeps the original pinned. |
 
 Use Zig from `.zigversion`. Build `fake-relay` before the Python suites. Supply
 `-Dopenssl-prefix=/absolute/openssl-3.5` when the system OpenSSL is not 3.5.
@@ -98,10 +100,30 @@ checks passed. A further native check could not run because the Mac connection
 timed out; the corrected handoff still needs actual Messages acceptance below.
 No real messages were sent during this validation.
 
-An affected relay must be rebuilt and restarted because it embeds the script.
-Previously attempted requests remain uncertain and are not automatically replayed
-or declared delivered. Preserve their originals and review actual message history
-before deliberately creating another send.
+Subsequent user verification confirmed that the handoff fix sends successfully
+in a self conversation, though the request remained unconfirmed. Read-only
+diagnostics found a delivered outgoing record with the expected filename and
+exact original file bytes, alongside its incoming self-copy.
+Messages' reported attachment size differed from the file's actual length, so
+metadata filtering discarded the outgoing record before hashing it.
+
+Discovery now selects file candidates by name and proves length and SHA-256 from
+the independent file itself. The same rule applies to possible duplicates and
+unresolved records with multiple attachments. Incoming self-copies remain excluded
+by direction; self threads do not receive a shortcut around byte verification or
+uniqueness. Existing unconfirmed requests are rechecked without another send.
+
+Confirmation validation passed 212 Zig tests with one unavailable-platform skip,
+all 19 observation cases, all 10 dispatch cases, and all 10 client attachment
+worker cases. Both new regressions failed before the fix and passed unchanged
+afterward. Formatting and diff checks passed. Native reconciliation with this
+change remains to be checked after rebuilding and restarting the Mac relay.
+
+An affected relay must be rebuilt and restarted to apply these changes.
+Previously attempted requests are never automatically replayed. Confirmation
+still requires a matching observed message; requests without a match remain
+uncertain and retain their originals. Review actual message history before
+deliberately creating another send.
 
 ## Remaining real Messages acceptance
 

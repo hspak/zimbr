@@ -109,13 +109,17 @@ request retries never replay attempted parts. Aggregate delivery requires every
 part to be delivered; partial requests expose the individual outcomes.
 
 Observation runs on a separate worker. It compares stable source snapshots,
-checks filename and length, and hashes source bytes in 64 KiB chunks outside
-the journal mutex. The source file must be inside Messages' attachment root
-and have a different file identity from the staged original. A bounded cache
-of 512 file fingerprints avoids rehashing unchanged bytes; each observation
-pass hashes at most 200 MiB. Missing, changed, unsafe, or undecodable source
+checks filename and actual file length, and hashes source bytes in 64 KiB chunks
+outside the journal mutex. Messages' reported attachment size can differ from
+the file on disk and cannot exclude a possible match or duplicate. The source
+file must be inside Messages' attachment root and have a different file identity
+from the staged original. A bounded cache of 512 file fingerprints avoids
+rehashing unchanged bytes; each observation pass hashes at most 200 MiB.
+Missing, changed, unsafe, or undecodable source
 records prevent confirmation. Duplicate content and overlapping requests cannot
 claim the same echo. Source transformations can therefore leave sends uncertain.
+Incoming copies in self conversations do not compete with outgoing records;
+the outgoing record still requires byte verification and the normal receipt checks.
 
 Discovery examines at most 4,096 source rows after the dispatch boundary and
 64 scoped outgoing records. Exceeding either bound keeps the outcome uncertain,

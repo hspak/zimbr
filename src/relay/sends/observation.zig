@@ -165,14 +165,16 @@ fn snapshot(core: *Core, a: u.Allocator, work: Work) !?Snapshot {
         }
         var filename: ?[]const u8 = null;
         if (file) |expected| {
+            // Messages' total_bytes can differ from the original file's length.
+            // Select by name here; prove length and content from the file below.
             if (message.value.attachments.len != 1) {
                 for (message.value.attachments) |attachment| {
-                    if (u.eq(attachment.name, expected.name) and u.eq(attachment.bytes, expected.bytes)) complete = false;
+                    if (u.eq(attachment.name, expected.name)) complete = false;
                 }
                 continue;
             }
             const attachment = message.value.attachments[0];
-            if (!u.eq(attachment.name, expected.name) or !u.eq(attachment.bytes, expected.bytes)) continue;
+            if (!u.eq(attachment.name, expected.name)) continue;
             if (message.attachment_sources.len != 1) {
                 complete = false;
                 continue;
@@ -266,7 +268,8 @@ fn step(core: *Core, a: u.Allocator, cache: *Cache) !bool {
                 complete = false;
                 continue;
             };
-            if (!u.eq(&std.fmt.bytesToHex(verified.digest, .lower), expected.sha256)) continue;
+            if (verified.fingerprint.bytes != try protocol.attachments.validate(expected) or
+                !u.eq(&std.fmt.bytesToHex(verified.digest, .lower), expected.sha256)) continue;
             proof = verified;
         }
         matches += 1;

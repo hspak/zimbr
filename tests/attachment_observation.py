@@ -122,6 +122,68 @@ class AttachmentObservation(unittest.TestCase):
                     for mid in (one, two)]
         self.assertEqual(rows, [self.before+1, self.before+2])
 
+    def test_self_send_confirms_actual_bytes_despite_different_reported_size(self):
+        self.stop()
+        with closing(sqlite3.connect(self.source)) as db:
+            for name, kind in [('style', 'INTEGER'), ('account_id', 'TEXT'),
+                               ('chat_identifier', 'TEXT'), ('last_addressed_handle', 'TEXT'),
+                               ('room_name', 'TEXT')]:
+                db.execute(f'ALTER TABLE chat ADD COLUMN {name} {kind}')
+            for row, peer, local in [(5, 'self@example.invalid', '+14155550124'),
+                                     (6, '+14155550124', 'self@example.invalid')]:
+                db.execute('INSERT INTO handle VALUES(?,?,?)', (row, peer, 'iMessage'))
+                db.execute('INSERT INTO chat VALUES(?,?,?,?,?,?,?,?,?)',
+                           (row, f'iMessage;-;self-{row}', 'iMessage', '', 45,
+                            'self-account', peer, local, ''))
+                db.execute('INSERT INTO chat_handle_join VALUES(?,?)', (row, row))
+            db.commit()
+        self.start()
+        chats = [chat for chat in self.get('/v1/conversations')['conversations'] if chat['is_self']]
+        self.assertEqual(len(chats), 2)
+        self.assertEqual(chats[0]['thread_id'], chats[1]['thread_id'])
+        content = b'ZIMBR-IMAGE-' + b'x' * (3549-len(b'ZIMBR-IMAGE-'))
+        upload = self.upload(content, 'self.png', 'image/png')
+        outgoing = self.outgoing([upload], 'To myself', target={
+            'recipient': {'address': 'self@example.invalid', 'service': 'imessage'}})
+        self.send(outgoing); self.settled(outgoing)
+        with closing(sqlite3.connect(self.source)) as db:
+            sent, attachment = db.execute('SELECT message_id,attachment_id FROM message_attachment_join '
+                                          'WHERE message_id>?', (self.before,)).fetchone()
+            db.execute('UPDATE attachment SET total_bytes=6300 WHERE ROWID=?', (attachment,))
+            received = add_message(db, text='', chat=6, handle_id=6, is_from_me=0, is_delivered=1)
+            db.execute('INSERT INTO message_attachment_join VALUES(?,?)', (received, attachment))
+            db.commit()
+        confirmed = self.confirmed(outgoing)
+        message = self.get('/v1/messages/'+confirmed['parts'][1]['message_id'])
+        self.assertEqual(message['direction'], 'outgoing')
+        self.assertEqual(message['attachments'][0]['bytes'], '6300')
+        with closing(sqlite3.connect(self.root/'data/relay.db')) as db:
+            row = db.execute('SELECT source_row FROM messages WHERE id=?', (message['id'],)).fetchone()[0]
+            self.assertEqual(row, sent)
+            self.assertNotEqual(row, received)
+        self.wait(lambda: not self.local(upload).exists())
+        rows = self.source_rows()
+        self.assertEqual(Path(rows[1][2]).read_bytes(), content)
+        self.stop(); self.start()
+        self.assertEqual(self.send(outgoing, 200)['state'], 'delivered')
+        self.assertEqual(self.source_rows(), rows)
+
+    def test_different_reported_size_cannot_hide_an_identical_outgoing_echo(self):
+        upload = self.upload(b'same', 'same.bin')
+        outgoing = self.outgoing([upload])
+        self.send(outgoing); self.settled(outgoing)
+        self.wait(lambda: self.record(outgoing)['parts'][0]['candidate_message_id'] is not None)
+        duplicate = self.echo(name='same.bin', contents=b'same')
+        with closing(sqlite3.connect(self.source)) as db:
+            db.execute('UPDATE attachment SET total_bytes=99 WHERE ROWID IN '
+                       '(SELECT attachment_id FROM message_attachment_join WHERE message_id=?)',
+                       (duplicate,))
+            db.commit()
+        self.wait(lambda: self.record(outgoing)['parts'][0]['candidate_message_id'] is None)
+        time.sleep(11)
+        self.assertIsNone(self.record(outgoing)['parts'][0]['message_id'])
+        self.assertTrue(self.local(upload).exists())
+
     def test_identical_files_remain_ambiguous_across_retry_and_restart(self):
         files = [self.upload(b'same', 'same.bin'), self.upload(b'same', 'same.bin')]
         outgoing = self.outgoing(files)
