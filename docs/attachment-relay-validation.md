@@ -15,17 +15,28 @@ Record the implemented boundary, command, and observed result after each chunk.
 | Unavailable attachments cannot send only their caption | `python3 tests/attachment_sends.py` | Failed before the fix (202 acceptance); passed after the fix (400, unstarted, no queued send), with the same test |
 | Upload reservation ownership, quotas, leases, pinning rollback, restart, and epoch changes | `zig build test -Doptimize=ReleaseSafe` | Passed; exercises SQLite persistence and reopen, injected transaction failure, and stale transfer callbacks |
 | Private file streaming and publication | `zig build test -Doptimize=ReleaseSafe` | Passed; binary chunks, short/excess bodies, wrong hashes, empty files, basename collisions, symlink rejection, and unpublished-file cleanup |
+| Relative upload roots produce absolute automation paths | `zig build test -Doptimize=ReleaseSafe` | Same test failed before root resolution and passed after; the native file argument no longer depends on the caller supplying an absolute data directory |
 | Upload streaming, integrity, ownership, active limits, timeout, restart, reset, cancellation, and cleanup | `python3 tests/attachment_uploads.py` | Passed: 12 production mTLS/HTTP2 cases, including a 9 MiB binary file, empty files, unsafe storage isolation, and failed publication |
 | Failed disconnected-writer release recovers without restart | `python3 tests/attachment_uploads.py AttachmentUploads.test_failed_lease_release_recovers_without_restarting_the_relay` | Same regression failed before retry handling and passed after; an injected SQLite failure no longer leaves the upload permanently receiving |
-| Attachment dispatch, correlation, partial failure, and restart | To be added with dispatch implementation | Pending |
+| Attachment dispatch, original copies, direct/group routing, partial failure, result-commit failure, restart, and reset | `python3 tests/attachment_sends.py -v` | Passed: 10 cases through the production HTTP/2 server and synthetic Messages adapter; the original caption-loss regression remains unchanged |
+| Multipart correlation and safe reclamation | To be added with observation implementation | Pending |
 | Multipart acceptance and recovery journal | `zig build test -Doptimize=ReleaseSafe` | Passed: atomic pinning, incomplete and foreign uploads, injected part-write rollback, ordered caption/file parts, exact retries, partial outcomes, restart between/during operations, and source-reset holds |
-| Existing text sends, idempotency, recovery, and source resets | `python3 tests/integration.py` | Passed after protocol and upload transport changes |
+| Existing text sends, idempotency, recovery, and source resets | `python3 tests/integration.py` | Passed after multipart dispatch and correlation exclusions |
 | HTTP/2 stream isolation | `python3 tests/relay_http2.py` | Passed: all seven existing transport regressions |
 
 Use Zig from `.zigversion`. Build `fake-relay` before the Python suites. Supply
 `-Dopenssl-prefix=/absolute/openssl-3.5` when the system OpenSSL is not 3.5.
 Build caches can be redirected with `ZIG_LOCAL_CACHE_DIR` and
 `ZIG_GLOBAL_CACHE_DIR` when the normal cache is unavailable.
+
+The native script passes the private absolute filename as a literal argument,
+coerces it to an alias before setting its dispatch flag, and uses the same
+account and chat checks as text sending. Apple's
+[file-reference guide](https://developer.apple.com/library/archive/documentation/LanguagesUtilities/Conceptual/MacAutomationScriptingGuide/ReferenceFilesandFolders.html)
+documents POSIX-file-to-alias conversion. That does not establish current
+Messages behavior: script compilation, file acceptance, copy timing, and delivery
+remain native acceptance checks below. Synthetic copies exercise the journal
+boundary, not Apple's implementation.
 
 ## Real Mac acceptance: not yet run
 

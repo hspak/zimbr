@@ -23,11 +23,21 @@ pub const RecoverError = Journal.QueryError || RemoveError;
 
 /// Allocated paths belong to a and must outlive the returned descriptor owner.
 pub fn init(a: u.Allocator, data: []const u8) InitError!Files {
-    const root = try std.fmt.allocPrintSentinel(a, "{s}/uploads", .{data}, 0);
+    const parent_path = parent_path: {
+        if (std.fs.path.isAbsolute(data)) break :parent_path try std.fs.path.resolve(a, &.{data});
+        var cwd: [std.fs.max_path_bytes]u8 = undefined;
+        const current = u.c.getcwd(&cwd, cwd.len) orelse return error.UploadStorageUnavailable;
+        break :parent_path try std.fs.path.resolve(a, &.{ std.mem.span(current), data });
+    };
+    defer a.free(parent_path);
+    const parent_name = try a.dupeZ(u8, parent_path);
+    defer a.free(parent_name);
+    const root = try std.fmt.allocPrintSentinel(a, "{s}/uploads", .{parent_path}, 0);
+    errdefer a.free(root);
     const directory = c.zr_media_directory(root, 1);
     if (directory < 0) return error.UploadStorageUnavailable;
     errdefer _ = u.c.close(directory);
-    const parent = c.zr_media_directory(try a.dupeZ(u8, data), 0);
+    const parent = c.zr_media_directory(parent_name, 0);
     if (parent < 0) return error.UploadStorageUnavailable;
     defer _ = u.c.close(parent);
     if (u.c.fsync(parent) != 0) return error.UploadStorageUnavailable;
@@ -172,6 +182,25 @@ pub const Transfer = struct {
         self.* = undefined;
     }
 };
+
+test "automation paths remain absolute when upload storage uses a relative path" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const relative = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var files = try Files.init(a, relative);
+    defer files.deinit();
+    const filename = try files.path(a, .{
+        .id = try u.id(a),
+        .name = "file.bin",
+        .mime_type = "application/octet-stream",
+        .bytes = "0",
+        .sha256 = "0" ** 64,
+    });
+    try std.testing.expect(std.fs.path.isAbsolute(filename));
+}
 
 test "upload storage verifies chunked original bytes and retains only published files" {
     var tmp = std.testing.tmpDir(.{});

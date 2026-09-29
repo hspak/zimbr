@@ -22,8 +22,11 @@ means the implementation and its relevant automated checks have passed.
 3. **In progress: relay dispatch and observation.** Atomic acceptance now pins
    every completed upload and journals ordered caption/file operations. Exact
    retries retain their outcomes. Recovery holds an interrupted operation and
-   skips its unstarted successors. Passing files to Messages and conservative
-   source correlation remain pending; the HTTP send capability stays disabled.
+   skips its unstarted successors. Authenticated HTTP acceptance and sequential
+   text/file dispatch now run through the sender; synthetic tests verify original
+   bytes, ordering, partial failure, interruption, and exact retries. Conservative
+   source correlation and safe reclamation remain pending. Native file sending
+   still requires Mac acceptance.
 4. **Pending: client attachment drafts and upload worker.** Snapshot local files,
    persist drafts and outbox ownership, upload with progress, and recover without
    duplicating sends.

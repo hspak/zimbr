@@ -5,9 +5,15 @@ pub const Source = @import("MessagesDb.zig");
 const u = @import("../../common.zig");
 const Db = @import("../Sqlite.zig");
 const Journal = @import("../Journal.zig");
+const uploads = @import("../uploads.zig");
+const attachments = @import("../../protocol.zig").attachments;
+const c = @cImport({
+    @cInclude("errno.h");
+    @cInclude("relay/media.h");
+});
 pub const open = Source.open;
 
-pub const DispatchError = Db.QueryError || u.Allocator.Error || error{
+pub const DispatchError = Db.QueryError || uploads.Files.BeginError || uploads.Files.Transfer.SealError || error{
     NotAFixture,
     RandomUnavailable,
     Rejected,
@@ -15,6 +21,31 @@ pub const DispatchError = Db.QueryError || u.Allocator.Error || error{
 };
 
 pub fn dispatch(a: u.Allocator, path: [:0]const u8, route: Journal.Route, text: []const u8) DispatchError!void {
+    return dispatchImpl(a, path, route, text, null);
+}
+
+/// Copy bytes from the caller-owned descriptor into the synthetic Messages
+/// attachment root. The real Messages database is never opened for writing.
+pub fn dispatchFile(
+    a: u.Allocator,
+    path: [:0]const u8,
+    route: Journal.Route,
+    file: attachments.Upload,
+    fd: c_int,
+) DispatchError!void {
+    if (u.eq(file.name, "fake-stall.bin")) {
+        var delay: u.c.struct_timespec = .{ .tv_sec = 3, .tv_nsec = 0 };
+        _ = u.c.nanosleep(&delay, null);
+    }
+    if (u.eq(file.name, "fake-reject.bin")) return error.Rejected;
+    if (u.eq(file.name, "fake-unknown.bin")) return error.Uncertain;
+    try dispatchImpl(a, path, route, "", .{ .file = file, .fd = fd });
+    if (u.eq(file.name, "fake-uncertain-after.bin")) return error.Uncertain;
+}
+
+const File = struct { file: attachments.Upload, fd: c_int };
+
+fn dispatchImpl(a: u.Allocator, path: [:0]const u8, route: Journal.Route, text: []const u8, file: ?File) DispatchError!void {
     if (u.eq(text, "[fake:stall]")) {
         var delay: u.c.struct_timespec = .{ .tv_sec = 3, .tv_nsec = 0 };
         _ = u.c.nanosleep(&delay, null);
@@ -26,6 +57,39 @@ pub fn dispatch(a: u.Allocator, path: [:0]const u8, route: Journal.Route, text: 
     const guard = try db.prepare("SELECT value FROM zimbr_fixture WHERE key='synthetic'");
     defer guard.close();
     if (!try guard.step() or !u.eq(guard.bytes(0), "yes")) return error.NotAFixture;
+    var storage: ?uploads.Files = null;
+    defer if (storage) |*files| files.deinit();
+    var transfer: ?uploads.Files.Transfer = null;
+    defer if (transfer) |*pending| pending.deinit();
+    const filename: ?[]const u8 = if (file) |input| filename: {
+        // Only the optional attachment-send fixture adds these source columns.
+        const available = db.prepare("SELECT filename FROM attachment LIMIT 0") catch return error.Rejected;
+        available.close();
+        const root = try std.fmt.allocPrintSentinel(a, "{s}.attachments", .{path}, 0);
+        const root_fd = c.zr_media_directory(root, 1);
+        if (root_fd < 0) return error.UploadStorageUnavailable;
+        _ = u.c.close(root_fd);
+        storage = try uploads.Files.init(a, root);
+        var copy = input.file;
+        copy.id = try u.id(a);
+        transfer = try storage.?.begin(a, .{
+            .server_epoch = try u.id(a),
+            .token = try u.id(a),
+            .file = copy,
+        });
+        var buffer: [64 * 1024]u8 = undefined;
+        while (true) {
+            const count = u.c.read(input.fd, &buffer, buffer.len);
+            if (count == 0) break;
+            if (count < 0) {
+                if (std.c._errno().* == c.EINTR) continue;
+                return error.UploadStorageUnavailable;
+            }
+            try transfer.?.write(buffer[0..@intCast(count)]);
+        }
+        try transfer.?.seal();
+        break :filename try storage.?.path(a, copy);
+    } else null;
     try db.exec("BEGIN IMMEDIATE");
     errdefer db.exec("ROLLBACK") catch {};
     const q = try db.prepare(if (u.eq(route.mode, "chat")) "SELECT ROWID FROM chat WHERE guid=?" else "SELECT c.ROWID FROM chat c JOIN chat_handle_join j ON j.chat_id=c.ROWID JOIN handle h ON h.ROWID=j.handle_id WHERE h.id=? AND c.service_name='iMessage' AND (SELECT count(*) FROM chat_handle_join WHERE chat_id=c.ROWID)=1 LIMIT 1");
@@ -39,10 +103,10 @@ pub fn dispatch(a: u.Allocator, path: [:0]const u8, route: Journal.Route, text: 
         try h.bind(&.{.{ .text = route.destination }});
         _ = try h.step();
         const hid = u.c.sqlite3_last_insert_rowid(db.handle);
-        const c = try db.prepare("INSERT INTO chat(guid,service_name,display_name) VALUES(?,'iMessage','')");
-        defer c.close();
-        try c.bind(&.{.{ .text = try std.fmt.allocPrint(a, "iMessage;-;{s}", .{route.destination}) }});
-        _ = try c.step();
+        const conversation = try db.prepare("INSERT INTO chat(guid,service_name,display_name) VALUES(?,'iMessage','')");
+        defer conversation.close();
+        try conversation.bind(&.{.{ .text = try std.fmt.allocPrint(a, "iMessage;-;{s}", .{route.destination}) }});
+        _ = try conversation.step();
         chat = u.c.sqlite3_last_insert_rowid(db.handle);
         const j = try db.prepare("INSERT INTO chat_handle_join VALUES(?,?)");
         defer j.close();
@@ -62,7 +126,25 @@ pub fn dispatch(a: u.Allocator, path: [:0]const u8, route: Journal.Route, text: 
     defer join.close();
     try join.bind(&.{ .{ .int = chat }, .{ .int = mid } });
     _ = try join.step();
+    if (file) |input| {
+        const attachment = try db.prepare("INSERT INTO attachment(guid,transfer_name,mime_type,total_bytes,filename) VALUES(?,?,?,?,?)");
+        defer attachment.close();
+        try attachment.bind(&.{
+            .{ .text = try sourceGuid(a) },
+            .{ .text = input.file.name },
+            .{ .text = input.file.mime_type },
+            .{ .int = @intCast(try attachments.validate(input.file)) },
+            .{ .text = filename.? },
+        });
+        _ = try attachment.step();
+        const aid = u.c.sqlite3_last_insert_rowid(db.handle);
+        const link = try db.prepare("INSERT INTO message_attachment_join(message_id,attachment_id) VALUES(?,?)");
+        defer link.close();
+        try link.bind(&.{ .{ .int = mid }, .{ .int = aid } });
+        _ = try link.step();
+    }
     try db.exec("COMMIT");
+    if (transfer) |*pending| pending.publish();
 }
 
 fn sourceGuid(a: u.Allocator) u.IdError![]const u8 {

@@ -41,20 +41,27 @@ canonical unpadded Base64url; hyphenated UUIDs and nonzero pad bits are rejected
 
 ## Outgoing file uploads
 
-`attachment_uploads_v1` advertises upload storage. Sending those files is a
-separate capability, `send_attachments_v1`, which remains false until attachment
-dispatch is implemented. The current send endpoint rejects nonempty attachment
-arrays; it never sends just their caption.
+`attachment_uploads_v1` advertises upload storage. `send_attachments_v1` requires
+upload storage and a ready Messages adapter. Send a nonempty `attachments` array
+of completed upload metadata alongside the usual message fields. Empty text is
+allowed when at least one file is present. Acceptance validates and pins every
+upload atomically; missing, incomplete, or foreign uploads reject the whole
+request without queuing its caption.
 
-The attachment-send journal is implemented behind that capability gate. Its
-`parts` array contains an optional text operation followed by each file in input
-order. Each part has `kind`, `attachment_id` for files, `state`, optional
+The send request's `parts` array contains an optional text operation followed by
+each file in input order. Each part has `kind`, `attachment_id` for files, `state`, optional
 `message_id`/`candidate_message_id`, and `error_info`. Part states are `queued`,
 `dispatching`, `invoked`, `submitted`, `delivered`, `failed`, `unknown`, and
 `skipped`. `invoked` records automation returning successfully and does not
 confirm submission or delivery. An uncertain or failed operation skips its
 unstarted successors; exact request retries retain all outcomes. Text-only
 requests keep their existing single-message tracking and have an empty array.
+
+Attachment dispatch is implemented, but multipart Messages observation is still
+being added. Successful parts currently remain `invoked` and their request stays
+uncertain. Their uploads remain pinned; delivery and safe reclamation will
+require source observation. Native Mac file sending still requires the checks
+in [attachment relay validation](attachment-relay-validation.md).
 
 Reserve with `POST /v1/uploads`, `Content-Type: application/json`, and:
 

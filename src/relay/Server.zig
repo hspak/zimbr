@@ -184,6 +184,10 @@ pub fn handle(self: *Server, a: u.Allocator, req: *Request, peer: *Tls.c.ZrTls) 
         }).value;
     } else if (req.head.method != .GET) return error.NotFound;
     if (Tls.c.zr_tls_valid(peer) == 0) return error.CertificateExpired;
+    var owner: [65]u8 = undefined;
+    if (input) |v| if (v.attachments.len != 0) {
+        if (Tls.c.zr_tls_peer_fingerprint(peer, &owner) != 0) return error.CertificateExpired;
+    };
     var response: []const u8 = undefined;
     var status: std.http.Status = .ok;
     {
@@ -223,11 +227,13 @@ pub fn handle(self: *Server, a: u.Allocator, req: *Request, peer: *Tls.c.ZrTls) 
                 });
             }
         } else if (input) |v| {
-            const accepted = try j.accept(
-                a,
-                v,
-                self.core.read_ready and self.core.automation_ready and u.now() - self.core.last_scan_ms < 5000,
-            );
+            const ready = self.core.read_ready and self.core.automation_ready and u.now() - self.core.last_scan_ms < 5000;
+            const accepted = if (v.attachments.len == 0) try j.accept(a, v, ready) else accepted: {
+                break :accepted j.acceptAttachments(a, v, ready and self.core.upload_files != null, owner[0..64]) catch |err| switch (err) {
+                    error.UploadNotFound, error.UploadExpired, error.UploadNotReady => return error.InvalidRequest,
+                    else => return err,
+                };
+            };
             if (accepted.fresh) self.core.send_ready.notify(self.core.io);
             response = accepted.record;
             status = if (accepted.fresh) .accepted else .ok;
@@ -247,7 +253,7 @@ pub fn handle(self: *Server, a: u.Allocator, req: *Request, peer: *Tls.c.ZrTls) 
                     .send_direct = self.core.read_ready and self.core.automation_ready,
                     .reply_existing = self.core.read_ready and self.core.automation_ready,
                     .attachments = true,
-                    .send_attachments_v1 = false,
+                    .send_attachments_v1 = self.core.upload_files != null and self.core.read_ready and self.core.automation_ready,
                     .attachment_uploads_v1 = self.core.upload_files != null,
                     .group_creation = false,
                     .identity_directory_v1 = true,

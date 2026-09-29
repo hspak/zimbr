@@ -4,8 +4,11 @@ const log = std.log.scoped(.relay_core);
 const contacts = @import("adapter/contacts.zig");
 const Assets = @import("Assets.zig");
 const uploads = @import("uploads.zig");
+const sends = @import("sends.zig");
 const Mutex = @import("Mutex.zig");
 const fake_adapter = @import("adapter/fake.zig");
+const macos_adapter = @import("adapter/macos.zig");
+const Sqlite = @import("Sqlite.zig");
 const options = @import("options");
 const u = @import("../common.zig");
 const t = @import("../protocol.zig").types;
@@ -13,7 +16,7 @@ const Journal = @import("Journal.zig");
 const MessagesDb = @import("adapter/MessagesDb.zig");
 const reactions = @import("reactions.zig");
 const Signal = @import("../Signal.zig");
-const adapter_api = if (options.fake) fake_adapter else @import("adapter/macos.zig");
+const adapter_api = if (options.fake) fake_adapter else macos_adapter;
 const fake = options.fake;
 const observation_window_ms = 10000;
 const initial_import_limit = 1000;
@@ -535,7 +538,7 @@ pub fn senderLoop(self: *Core) void {
         if (!dispatched) self.send_ready.wait(self.io, observed, 1000);
     }
 }
-const Work = struct { v: t.SendRequest, route: Journal.Route };
+const Work = struct { v: t.SendRequest, route: Journal.Route, part: ?usize };
 fn prepareSend(self: *Core, a: u.Allocator) !?Work {
     self.lock();
     defer self.unlock();
@@ -577,22 +580,48 @@ fn prepareSend(self: *Core, a: u.Allocator) !?Work {
     };
     try j.begin();
     errdefer j.rollback();
-    v.state = .dispatching;
+    const part = if (v.parts.len != 0) sends.next(v).? else null;
+    if (part) |position| sends.start(&v, position) else v.state = .dispatching;
     _ = try j.updateRequest(a, v);
-    try j.execute("UPDATE send_requests SET dispatch_ms=?,source_floor=?,mode=?,route=? WHERE id=?", &.{
+    const boundary: [5]Sqlite.Parameter = .{
         .{ .int = u.now() },
         .{ .int = high },
         .{ .text = r.mode },
         .{ .text = r.destination },
         .{ .text = v.request_id },
-    });
+    };
+    if (part) |position| {
+        try j.execute("UPDATE send_parts SET dispatch_ms=?,source_floor=?,mode=?,route=? WHERE request_id=? AND position=?", &(boundary ++ [_]Sqlite.Parameter{.{ .int = @intCast(position) }}));
+    } else try j.execute("UPDATE send_requests SET dispatch_ms=?,source_floor=?,mode=?,route=? WHERE id=?", &boundary);
     try j.commit();
-    return .{ .v = v, .route = r };
+    return .{ .v = v, .route = r, .part = part };
 }
 fn dispatchOne(self: *Core, a: u.Allocator) !bool {
     const work = (try self.prepareSend(a)) orelse return false;
     const started = u.c.zr_monotonic_ms();
     var v = work.v;
+    if (work.part) |position| {
+        const outcome = try self.invokePart(a, work, position);
+        self.lock();
+        defer self.unlock();
+        const j = self.journal;
+        if (!u.eq(v.server_epoch, try j.epoch(a))) return true;
+        // Observation can advance an earlier part while automation is running.
+        // Apply only this result to the latest record, never to the old snapshot.
+        v = try std.json.parseFromSliceLeaky(t.SendRequest, a, (try j.getRecord(a, .request, v.request_id)).?, .{});
+        sends.finish(&v, position, outcome);
+        try j.begin();
+        errdefer j.rollback();
+        _ = try j.updateRequest(a, v);
+        try j.commit();
+        log.info("send request={s} part={d} state={s} duration_ms={d}", .{
+            v.request_id,
+            position,
+            @tagName(v.parts[position].state),
+            u.c.zr_monotonic_ms() - started,
+        });
+        return true;
+    }
     if (comptime fake) {
         fake_adapter.dispatch(a, self.source_path, work.route, v.text) catch |err| {
             v.state = if (err == error.Rejected) .failed else .unknown;
@@ -630,10 +659,76 @@ fn dispatchOne(self: *Core, a: u.Allocator) !bool {
     });
     return true;
 }
+
+fn invokePart(self: *Core, a: u.Allocator, work: Work, position: usize) !sends.Outcome {
+    const files = self.upload_files orelse return .{ .unstarted = "upload_storage_unavailable" };
+    // Check every staged file before starting the first operation, including a
+    // caption. A missing original must not silently become a text-only request.
+    if (position == 0) for (work.v.attachments) |file| {
+        const fd = files.open(a, file) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            return .{ .unstarted = "upload_file_unavailable" };
+        };
+        _ = u.c.close(fd);
+    };
+    const part = work.v.parts[position];
+    switch (part.kind) {
+        .text => return self.invokeText(a, work.route, work.v.text),
+        .attachment => {
+            const file = for (work.v.attachments) |file| {
+                if (u.eq(file.id, part.attachment_id.?)) break file;
+            } else unreachable; // Accepted parts refer to exactly one pinned upload.
+            const fd = files.open(a, file) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                return .{ .unstarted = "upload_file_unavailable" };
+            };
+            defer _ = u.c.close(fd);
+            if (comptime fake) {
+                fake_adapter.dispatchFile(a, self.source_path, work.route, file, fd) catch |err| {
+                    if (err == error.OutOfMemory) return err;
+                    return if (err == error.Rejected) .{ .unstarted = "dispatch_unstarted" } else .{ .uncertain = "automation_uncertain" };
+                };
+            } else {
+                const mode = if (u.eq(work.route.mode, "direct")) "direct-file" else "chat-file";
+                adapter_api.automation(a, mode, work.route.destination, try files.path(a, file)) catch |err| {
+                    if (err == error.OutOfMemory) return err;
+                    return automationOutcome(err);
+                };
+            }
+            return .invoked;
+        },
+    }
+}
+
+fn invokeText(self: *Core, a: u.Allocator, route: Journal.Route, text: []const u8) !sends.Outcome {
+    if (comptime fake) {
+        fake_adapter.dispatch(a, self.source_path, route, text) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            return if (err == error.Rejected) .{ .unstarted = "dispatch_unstarted" } else .{ .uncertain = "automation_uncertain" };
+        };
+    } else {
+        adapter_api.automation(a, route.mode, route.destination, text) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            return automationOutcome(err);
+        };
+    }
+    return .invoked;
+}
+
+fn automationOutcome(err: macos_adapter.AutomationError) sends.Outcome {
+    const code = macos_adapter.automationReason(err);
+    return if (err == error.AutomationUncertain) .{ .uncertain = code } else .{ .unstarted = code };
+}
 fn rejectQueued(self: *Core, a: u.Allocator, value: t.SendRequest, code: []const u8) !void {
     var v = value;
-    v.state = .failed;
-    v.error_info = .{ .code = code, .message = "The saved target is no longer available." };
+    if (v.parts.len != 0) {
+        const position = sends.next(v).?;
+        sends.start(&v, position);
+        sends.finish(&v, position, .{ .unstarted = code });
+    } else {
+        v.state = .failed;
+        v.error_info = .{ .code = code, .message = "The saved target is no longer available." };
+    }
     try self.journal.begin();
     errdefer self.journal.rollback();
     _ = try self.journal.updateRequest(a, v);
@@ -703,7 +798,7 @@ fn reconcile(self: *Core, a: u.Allocator, batch: *ImportBatch, complete: bool) !
         // Publish a provisional echo for display as soon as it is observed.
         // Confirmation still waits for the complete observation window, and a
         // later second candidate withdraws the hint without confirming the send.
-        const q = try j.db.prepare("SELECT m.id,m.status FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE m.source_row>? AND m.direction='outgoing' AND c.service='imessage' AND m.text=? AND m.date_ns BETWEEN ? AND ? AND ((?='chat' AND c.route=?) OR (?='direct' AND (SELECT count(*) FROM participants WHERE conversation_id=c.id)=1 AND EXISTS(SELECT 1 FROM participants WHERE conversation_id=c.id AND address=?))) AND NOT EXISTS(SELECT 1 FROM send_requests WHERE message_id=m.id) LIMIT 2");
+        const q = try j.db.prepare("SELECT m.id,m.status FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE m.source_row>? AND m.direction='outgoing' AND c.service='imessage' AND m.text=? AND m.date_ns BETWEEN ? AND ? AND ((?='chat' AND c.route=?) OR (?='direct' AND (SELECT count(*) FROM participants WHERE conversation_id=c.id)=1 AND EXISTS(SELECT 1 FROM participants WHERE conversation_id=c.id AND address=?))) AND NOT EXISTS(SELECT 1 FROM send_requests WHERE message_id=m.id) AND NOT EXISTS(SELECT 1 FROM send_parts WHERE message_id=m.id) LIMIT 2");
         defer q.close();
         const start = (p.time - 2000 - 978307200000) * 1000000;
         const end = (p.time + observation_window_ms - 978307200000) * 1000000;
@@ -733,6 +828,16 @@ fn reconcile(self: *Core, a: u.Allocator, batch: *ImportBatch, complete: bool) !
                 .{ .int = observation_window_ms },
             });
             unique = !try competing.step();
+        }
+        if (unique) {
+            const parts = try j.db.prepare("SELECT 1 FROM send_parts p JOIN send_requests r ON r.id=p.request_id JOIN messages m ON m.id=? JOIN conversations c ON c.id=m.conversation_id WHERE r.epoch=? AND p.state IN ('dispatching','invoked','unknown','submitted') AND p.message_id IS NULL AND json_extract(r.record,'$.parts['||p.position||'].kind')='text' AND m.source_row>p.source_floor AND m.text=json_extract(r.record,'$.text') AND m.date_ns BETWEEN (p.dispatch_ms-2000-978307200000)*1000000 AND (p.dispatch_ms+?-978307200000)*1000000 AND ((p.mode='chat' AND c.route=p.route) OR (p.mode='direct' AND (SELECT count(*) FROM participants WHERE conversation_id=c.id)=1 AND EXISTS(SELECT 1 FROM participants WHERE conversation_id=c.id AND address=p.route))) LIMIT 1");
+            defer parts.close();
+            try parts.bind(&.{
+                .{ .text = mid.? },
+                .{ .text = v.server_epoch },
+                .{ .int = observation_window_ms },
+            });
+            unique = !try parts.step();
         }
         const candidate = if (unique) mid else null;
         if (!unique or u.now() < p.time + observation_window_ms) {
