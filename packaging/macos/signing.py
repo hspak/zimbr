@@ -112,12 +112,15 @@ def setup(directory):
         from cryptography.hazmat.primitives.asymmetric import rsa
         from cryptography.hazmat.primitives.serialization import pkcs12
         from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+        # RSA-3072 with the conventional 65537 exponent supports the local macOS signing identity.
         key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
         subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, NAME)])
         now = datetime.datetime.now(datetime.timezone.utc)
         cert = (x509.CertificateBuilder().subject_name(subject).issuer_name(subject)
                 .public_key(key.public_key()).serial_number(x509.random_serial_number())
                 .not_valid_before(now-datetime.timedelta(minutes=5))
+                # A ten-year local signing identity preserves app identity across routine relay
+                # updates.
                 .not_valid_after(now+datetime.timedelta(days=3650))
                 .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
                 .add_extension(x509.KeyUsage(digital_signature=True, content_commitment=False,
@@ -125,10 +128,13 @@ def setup(directory):
                     key_cert_sign=False, crl_sign=False, encipher_only=False, decipher_only=False), critical=True)
                 .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CODE_SIGNING]), critical=True)
                 .sign(key, hashes.SHA256()))
+        # Use a random 256-bit one-use password for the temporary PKCS#12 export.
         password = secrets.token_hex(32)
         # Apple's PKCS#12 importer supports this interoperable export format.
         # The temporary archive is encrypted and removed once imported.
         encryption = (serialization.PrivateFormat.PKCS12.encryption_builder()
+                      # 50,000 KDF rounds adds password-guessing cost while keeping local key import
+                      # practical.
                       .kdf_rounds(50000).key_cert_algorithm(pkcs12.PBES.PBESv1SHA1And3KeyTripleDESCBC)
                       .hmac_hash(hashes.SHA1()).build(password.encode()))
         archive = pkcs12.serialize_key_and_certificates(NAME.encode(), key, cert, None, encryption)
@@ -159,6 +165,7 @@ def setup(directory):
                  '-x', '-T', '/usr/bin/codesign'], secret=password)
         run(['/usr/bin/security', 'set-key-partition-list', '-S', 'apple-tool:,apple:', '-s',
              '-k', password, keychain], secret=password)
+        # Relock the temporary signing keychain after five minutes of inactivity.
         run(['/usr/bin/security', 'set-keychain-settings', '-lut', '300', keychain])
         # Trust only this user's code-signing policy, not TLS or other policies.
         valid = run(['/usr/bin/security', 'find-identity', '-v', '-p', 'codesigning', keychain])

@@ -17,8 +17,11 @@ static int writeAll(int fd, const void *bytes, size_t length) {
 }
 int main(int argc, char **argv) {
     if (argc != 2) return 5;
+    // 128-pixel avatars, 1024-pixel inline photos, and 2560-pixel viewer images bound decode
+    // output.
     int edge = !strcmp(argv[1], "avatar") ? 128 : !strcmp(argv[1], "inline_image") ? 1024 : !strcmp(argv[1], "viewer") ? 2560 : 0;
     if (!edge) return 5;
+    // Match the 15-second parent deadline and 8 MiB encoded derivative limit in kernel limits.
     struct rlimit cpu = {15, 15}, file = {8 * 1024 * 1024, 8 * 1024 * 1024};
     if (setrlimit(RLIMIT_CPU, &cpu) || setrlimit(RLIMIT_FSIZE, &file)) return 5;
     // The parent enforces 512 MiB resident memory and a 15-second wall bound.
@@ -40,6 +43,7 @@ int main(int argc, char **argv) {
         uint64_t width = [properties[(__bridge NSString *)kCGImagePropertyPixelWidth] unsignedLongLongValue];
         uint64_t height = [properties[(__bridge NSString *)kCGImagePropertyPixelHeight] unsignedLongLongValue];
         if (!width || !height) { CFRelease(source); return 5; }
+        // Reject sources above 100 megapixels before ImageIO allocates a full decode.
         if (width > 100000000 || height > 100000000 || width * height > 100000000) { CFRelease(source); return 4; }
         NSDictionary *options = @{
             (__bridge NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
@@ -60,6 +64,7 @@ int main(int argc, char **argv) {
         if (!destination) { CGImageRelease(image); return 5; }
         // Only fresh image pixels and encoder quality are supplied: EXIF/GPS,
         // comments, source paths, and all other original metadata are omitted.
+        // JPEG quality 0.85 trades some fidelity for smaller inline/viewer derivatives.
         NSDictionary *encoding = @{(__bridge NSString *)kCGImageDestinationLossyCompressionQuality: @0.85};
         CGImageDestinationAddImage(destination, image, (__bridge CFDictionaryRef)encoding);
         CGImageRelease(image);

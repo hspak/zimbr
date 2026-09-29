@@ -1,4 +1,5 @@
 #define _DARWIN_C_SOURCE
+// Expose the POSIX.1-2008 descriptor and clock interfaces used by the platform shim.
 #define _POSIX_C_SOURCE 200809L
 #include "platform.h"
 #include <stdio.h>
@@ -55,9 +56,12 @@ int zr_timestamp(int64_t ns, char *out, size_t cap) {
     int64_t sec = ns / 1000000000;
     int64_t rem = ns % 1000000000;
     if (rem < 0) { --sec; rem += 1000000000; }
+    // Apple's 2001-01-01 epoch starts 978,307,200 seconds after the Unix epoch.
     time_t unix_sec = (time_t)(sec + 978307200);
     struct tm t;
+    // tm_year counts from 1900; cap output at year 9999 for four-digit wire timestamps.
     if (!gmtime_r(&unix_sec, &t) || t.tm_year < 0 || t.tm_year > 8099) return -1;
+    // Fit the four-digit UTC date/time prefix plus NUL before adding fractional seconds.
     char date[32];
     if (!strftime(date, sizeof(date), "%Y-%m-%dT%H:%M:%S", &t)) return -1;
     int n = snprintf(out, cap, "%s.%09lldZ", date, (long long)rem);
@@ -109,6 +113,7 @@ int zr_read_secret(const char *path, char *out, size_t cap) {
     return n >= 0 && (size_t)n < cap ? (int)n : -1;
 }
 void zr_socket_timeout(int fd) {
+    // Bound blocking socket operations to ten seconds so a peer cannot hold a worker forever.
     struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
@@ -137,6 +142,7 @@ int zr_spawn(const char *script, const char *mode, const char *route, const char
     int rc = posix_spawn(&pid, argv[0], &actions, NULL, argv, environ);
     posix_spawn_file_actions_destroy(&actions); close(output[1]);
     if (rc) { close(output[0]); return -2; }
+    // Poll the AppleScript child every 20 ms to bound response latency without busy waiting.
     struct timespec start, now, pause = { .tv_sec = 0, .tv_nsec = 20000000 };
     clock_gettime(CLOCK_MONOTONIC, &start);
     char result[129] = {0}; size_t used = 0;
@@ -190,9 +196,11 @@ struct ZrWatch {
     int fd;
     char paths[4][PATH_MAX];
 #ifdef __APPLE__
+    // Watch the parent directory, main database, WAL, and rollback journal independently.
     int files[4];
     dev_t devices[4];
     ino_t inodes[4];
+    // Track one snapshot for each SQLite file, excluding the parent directory.
     struct stat snapshots[3];
     int present[3];
 #elif defined(__linux__)
@@ -264,6 +272,7 @@ int zr_watch_wait(ZrWatch *w, int timeout_ms) {
     if (left < 0) left = 0;
 #ifdef __APPLE__
     if (watch_refresh(w)) return 1;
+    // Drain multiple changes across the four watched descriptors in one bounded batch.
     struct kevent events[8];
     struct timespec timeout = { .tv_sec = left/1000, .tv_nsec = (left%1000)*1000000L };
     int n = kevent(w->fd, NULL, 0, events, 8, &timeout);
@@ -277,6 +286,7 @@ int zr_watch_wait(ZrWatch *w, int timeout_ms) {
         IN_MODIFY | IN_CLOSE_WRITE | IN_CREATE | IN_MOVED_TO | IN_MOVED_FROM | IN_DELETE | IN_DELETE_SELF | IN_MOVE_SELF);
     struct pollfd p = { .fd = w->fd, .events = POLLIN };
     if (poll(&p, 1, left) <= 0) return 0;
+    // 8 KiB drains several filesystem events per read while preserving native event alignment.
     union { struct inotify_event align; char bytes[8192]; } buffer;
     int changed = 0;
     ssize_t n;

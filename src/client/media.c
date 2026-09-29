@@ -15,10 +15,13 @@
 #include <limits.h>
 #include <time.h>
 
+// Match the relay's 8 MiB derivative cap before allocating encoded bytes.
 #define ENCODED_LIMIT (8u*1024*1024)
+// 32 MiB bounds RGBA expansion independently of compressed file size.
 #define PIXEL_LIMIT (32u*1024*1024)
 static int cache_name(const char *name) {
     size_t n=strlen(name);
+    // Cache keys are 64 hex digits; temporaries are tmp- plus 32 random hex digits.
     if (n!=64 && n!=36) return 0;
     size_t start=0;
     if (n==36) { if (strncmp(name,"tmp-",4)) return 0; start=4; }
@@ -35,6 +38,7 @@ int zc_cache_open(const char *path) {
 }
 int zc_cache_temp(int dir, char *name, size_t size) {
     if (size<37) return -1;
+    // 128 random bits make temporary-name collisions unlikely without a shared counter.
     unsigned char random[16];
     if (getrandom(random,sizeof(random),0)!=(ssize_t)sizeof(random)) return -1;
     memcpy(name,"tmp-",4);
@@ -49,6 +53,7 @@ int zc_cache_install(int dir, const char *temporary, const char *key, int fd) {
 void zc_cache_remove(int dir, const char *name) {
     if (cache_name(name)) unlinkat(dir,name,0);
 }
+// The largest accepted filename is a 64-character digest plus NUL.
 struct Entry { char name[65]; off_t bytes; struct timespec used; };
 static int oldest(const void *aa, const void *bb) {
     const struct Entry *a=aa,*b=bb;
@@ -82,11 +87,13 @@ int zc_cache_prune(int dir, size_t budget, size_t max_entries, int startup, ZcCa
             bytes+=(size_t)st.st_size;
             continue;
         }
+        // Match Media's entry cap so pruning cannot allocate an unlimited directory listing.
         if (count==8192) {
             if (unlinkat(dir,entry->d_name,0)) ok=0;
             continue;
         }
         if (count==capacity) {
+            // Start at 64 entries and double to amortize growth for small and large caches.
             size_t next_capacity=capacity ? capacity*2 : 64;
             struct Entry *next=realloc(entries,next_capacity*sizeof(*entries));
             if (!next) { ok=0; break; }
@@ -113,6 +120,7 @@ int zc_cache_prune(int dir, size_t budget, size_t max_entries, int startup, ZcCa
     return 1;
 }
 static int dimensions(int w, int h) {
+    // 2560 matches the largest viewer derivative; four bytes per pixel accounts for RGBA.
     return w>0 && h>0 && w<=2560 && h<=2560 && (uint64_t)w*h*4<=PIXEL_LIMIT;
 }
 static int decode_png(const unsigned char *bytes, size_t length, ZcPixels *output) {
@@ -138,6 +146,7 @@ static int decode_jpeg(const unsigned char *bytes, size_t length, ZcPixels *outp
     error.base.error_exit=jpeg_failure; error.base.output_message=jpeg_silent;
     if (setjmp(error.jump)) { jpeg_destroy_decompress(&image); return 0; }
     jpeg_create_decompress(&image);
+    // Limit libjpeg working memory to the same 32 MiB scale as decoded pixels.
     image.mem->max_memory_to_use=32*1024*1024;
     jpeg_mem_src(&image,bytes,(unsigned long)length);
     int ok=0;
@@ -156,6 +165,7 @@ static int decode_jpeg(const unsigned char *bytes, size_t length, ZcPixels *outp
     output->bytes=(size_t)output->width*output->height*4;
     output->data=malloc(output->bytes); if (!output->data) goto end;
 #ifndef JCS_ALPHA_EXTENSIONS
+    // One maximum-width RGB scanline; alpha is added when copying into RGBA output.
     unsigned char line[2560*3];
 #endif
     while (image.output_scanline<image.output_height) {
@@ -204,6 +214,7 @@ int zc_image_read_fd(int fd, ZcPixels *output) {
     unsigned char extra;
     if (pread(fd,&extra,1,(off_t)used)!=0) goto end;
     int decoded=0;
+    // Dispatch only on PNG's eight-byte signature or JPEG's SOI/marker prefix.
     if (!memcmp(bytes,"\x89PNG\r\n\x1a\n",8)) decoded=decode_png(bytes,used,output);
     else if (bytes[0]==0xff && bytes[1]==0xd8 && bytes[2]==0xff) decoded=decode_jpeg(bytes,used,output);
     if (!decoded) goto end;

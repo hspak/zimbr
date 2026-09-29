@@ -15,6 +15,7 @@ pub fn save(
     expected: ?[]const u8,
     bytes: []const u8,
 ) SaveError!SaveResult {
+    // Match the native config reader's 64 KiB buffer, including its terminator space.
     if (bytes.len >= 65536) return error.ConfigurationWriteDenied;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();

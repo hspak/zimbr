@@ -1,8 +1,13 @@
 .{
     .name = .zimbr,
+    // Keep Zig's package identity stable across releases and dependency consumers.
     .fingerprint = 0x9aa1f6bc7ed51f5b,
+    // Shared release identity consumed by the binaries and packaging tools.
     .version = "0.2.0",
+    // The build and std.Io APIs require the toolchain pinned in .zigversion.
     .minimum_zig_version = "0.16.0",
+    // Pin exact source revisions and content hashes so builds and local dependency patches agree.
+    // Lazy fetching avoids downloading platform-specific libraries for unrelated build steps.
     .dependencies = .{
         .nghttp2 = .{
             .url = "https://github.com/nghttp2/nghttp2/releases/download/v1.70.0/nghttp2-1.70.0.tar.xz",

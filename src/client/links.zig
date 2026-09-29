@@ -9,6 +9,7 @@ pub fn parse(a: std.mem.Allocator, value: []const u8) std.mem.Allocator.Error!?T
     if (!url_policy.safe(value)) return null;
     const url = try a.dupeZ(u8, value);
     errdefer a.free(url);
+    // Room for a DNS/IP host and NUL, with margin beyond the DNS text-name limit.
     var host: [512]u8 = undefined;
     if (c.zc_url_host(url, &host, host.len) == 0) {
         a.free(url);
@@ -41,6 +42,7 @@ pub fn inText(a: std.mem.Allocator, value: []const u8) std.mem.Allocator.Error![
     while (spans.next()) |span| {
         var words = std.mem.tokenizeAny(u8, span, " \r\n\t<>\"");
         while (words.next()) |word| {
+            // Show at most 32 detected links per message to bound card/action construction.
             if (result.items.len == 32) return result.toOwnedSlice(a);
             const trimmed = if (word.len > 2 and word[0] == '(' and word[word.len - 1] == ')') word[1 .. word.len - 1] else word;
             if (try parse(a, trimmed)) |link| {

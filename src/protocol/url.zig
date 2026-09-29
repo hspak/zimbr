@@ -20,6 +20,7 @@ test "escaped components cannot inject path or query delimiters" {
 }
 
 pub fn safe(url: []const u8) bool {
+    // A 4 KiB cap allows ordinary links while bounding parser and stored-preview work.
     if (url.len == 0 or url.len > 4096 or !std.unicode.utf8ValidateSlice(url)) return false;
     for (url) |byte| if (byte <= 32 or byte == 127 or byte == '\\') return false;
     var codepoints = (std.unicode.Utf8View.init(url) catch return false).iterator();

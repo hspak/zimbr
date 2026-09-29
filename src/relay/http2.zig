@@ -16,9 +16,13 @@ pub const Error = std.mem.Allocator.Error || error{
 };
 
 pub const Limits = struct {
+    // General engine default; the server overrides this with its smaller request-slot count.
     streams: u32 = 100,
+    // 16 KiB accommodates API headers while limiting decompressed HPACK input.
     header_bytes: u32 = 16 * 1024,
+    // 64 KiB bounds unconsumed body bytes per stream while allowing chunked progress.
     stream_window: u32 = 64 * 1024,
+    // 1 MiB caps nghttp2's connection-local allocations independently of request arenas.
     session_bytes: usize = 1024 * 1024,
 };
 
@@ -74,8 +78,13 @@ pub fn Session(comptime Handler: type) type {
             try check(c.nghttp2_option_new(&options));
             defer c.nghttp2_option_del(options);
             c.nghttp2_option_set_no_auto_window_update(options, 1);
+            // Eight CONTINUATION frames bounds work on fragmented header blocks.
             c.nghttp2_option_set_max_continuations(options, 8);
+            // Cap queued acknowledgements at 128 so a control-frame flood cannot grow output
+            // indefinitely.
             c.nghttp2_option_set_max_outbound_ack(options, 128);
+            // Allow a burst of 100 resets, replenished at ten per second, to bound reset-flood
+            // work.
             c.nghttp2_option_set_stream_reset_rate_limit(options, 100, 10);
             var memory = self.memory.callbacks();
             var handle: ?*c.nghttp2_session = null;
@@ -154,8 +163,10 @@ pub fn Session(comptime Handler: type) type {
         ) Error!void {
             if (status < 200 or status > 599) return error.InvalidOperation;
             if (headers.len > 63) return error.HeaderListTooLarge;
+            // HTTP status codes serialize as exactly three decimal digits.
             var code: [3]u8 = undefined;
             _ = std.fmt.bufPrint(&code, "{d}", .{status}) catch unreachable;
+            // Bound response header staging on the stack; includes the :status pseudo-header.
             var fields: [64]c.nghttp2_nv = undefined;
             fields[0] = field(":status", &code);
             for (headers, 1..) |entry, index| {
@@ -254,6 +265,7 @@ pub fn Session(comptime Handler: type) type {
                 name_len,
                 value_len,
             ) catch return self.failed(id, error.HeaderListTooLarge);
+            // HTTP/2 header-list accounting adds 32 bytes of overhead per name/value pair.
             const charge = std.math.add(
                 usize,
                 size,

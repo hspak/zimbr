@@ -70,6 +70,7 @@ const states = [_][]const u8{
     "oversized",
 };
 pub const Report = struct {
+    // Inspect 100 recent examples per category to bound a read-only diagnostic run.
     sample_limit: usize = 100,
     url_samples: usize = 0,
     binary_plists: usize = 0,
@@ -267,6 +268,7 @@ pub fn run(a: u.Allocator, source: Source) RunError!Report {
             var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena.deinit();
             report.reaction_samples += 1;
+            // Fit any signed 64-bit associated-message code as decimal without allocation.
             var buffer: [32]u8 = undefined;
             if (!bump(report.reaction_types, try std.fmt.bufPrint(&buffer, "{d}", .{q.int(0)}))) _ = bump(
                 report.reaction_types,

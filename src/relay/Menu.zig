@@ -146,10 +146,12 @@ fn describe(
 ) Health {
     if (!listening) return .{ .summary = "Starting listener…", .warning = false };
     if (!read_ready) return .{ .summary = "Messages unavailable", .warning = true };
+    // Report a scan delayed after five seconds, matching the dispatch freshness threshold.
     if (now_ms - last_scan_ms >= 5000) return .{ .summary = "Message sync delayed", .warning = true };
     if (!automation_ready) return .{ .summary = "Running · Sending unavailable", .warning = true };
     const remaining = expires_unix - @divTrunc(now_ms, 1000);
     if (remaining <= 0) return .{ .summary = "Certificate expired", .warning = true };
+    // Warn a month before certificate expiry so renewal can happen before service stops.
     if (remaining <= 30 * 86400) return .{ .summary = "Running · Certificate expiring", .warning = true };
     return .{ .summary = "Running · Messages available", .warning = false };
 }
@@ -176,6 +178,7 @@ test "menu distinguishes delayed ingestion and unavailable sending from healthy 
 test "menu reports startup failures through its native callback without a running core" {
     var menu: Menu = .{ .config_path = "/unused/relay.json", .data_path = "/unused" };
     const bridge = menu.callbacks();
+    // Match the native menu's status buffer to exercise the actual callback capacity.
     var buffer: [8192]u8 = undefined;
     const starting_length = bridge.status.?(bridge.relay, &buffer, buffer.len);
     try std.testing.expect(starting_length > 0);

@@ -45,6 +45,7 @@ int zr_upload_write(int fd, const void *bytes, size_t length) {
 }
 static int regular_file(int fd, uint64_t length) {
     struct stat st;
+    // Mirror the shared 100 MiB upload cap at the native descriptor boundary.
     return length <= 100 * 1024 * 1024 && !fstat(fd, &st) && S_ISREG(st.st_mode) &&
         st.st_uid == getuid() && st.st_nlink == 1 && !(st.st_mode & 077) &&
         st.st_size >= 0 && (uint64_t)st.st_size == length;
@@ -86,6 +87,8 @@ int zr_upload_remove(int root, const char *id) {
         if (!entry) { if (errno) result = -1; break; }
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
         /* Ordinary uploads have at most a partial file and a final file. */
+        // A reservation contains only a few files; cap cleanup to avoid traversing arbitrary
+        // directories.
         if (++count > 16 || unlinkat(fd, entry->d_name, 0)) { result = -1; break; }
     }
     closedir(dir);

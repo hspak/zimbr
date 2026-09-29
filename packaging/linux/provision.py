@@ -100,6 +100,7 @@ def client_profile(obj):
         raise ValueError('Client SAN must be exactly one explicit device DNS name')
     device_name(sans[0].value)
     pub = obj.public_key()
+    # Mirror the Mac enrollment minimums: P-256 EC or RSA-2048.
     if not ((isinstance(pub, ec.EllipticCurvePublicKey) and pub.key_size >= 256) or
             (isinstance(pub, rsa.RSAPublicKey) and pub.key_size >= 2048)):
         raise ValueError('Unsupported or weak client public key')
@@ -134,6 +135,7 @@ def request(args, *, quiet=False):
             except FileNotFoundError:
                 continue
             raise ValueError(f'{name} already exists; use a new directory for renewal')
+        # Generate a compact P-256 client key accepted by both endpoint TLS stacks.
         key = ec.generate_private_key(ec.SECP256R1())
         csr = client_request(key, device_san, args.label)
         write_new(fd, 'client-key.pem', key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
@@ -211,6 +213,7 @@ def setup(args):
                                     input=json.dumps({'schema': 1, 'csr': csr_bytes.decode('ascii'),
                                                       'name': name, 'label': args.label}),
                                     stdout=subprocess.PIPE, text=True, check=True)
+            # Bound SSH enrollment responses to 64 KiB before parsing credentials and configuration.
             if len(result.stdout) > 65536:
                 raise ValueError('Enrollment response is too large')
             response = json.loads(result.stdout)
@@ -244,6 +247,7 @@ def import_certificate(args, *, quiet=False):
             raise ValueError('Import exactly one CA and one client certificate, never private keys')
         ca, cert = x509.load_pem_x509_certificate(ca_data), x509.load_pem_x509_certificate(cert_data)
         expected = args.ca_sha256.lower().replace(':', '')
+        # SHA-256 fingerprints contain exactly 64 hexadecimal characters.
         if len(expected) != 64 or ca.fingerprint(hashes.SHA256()).hex() != expected:
             raise ValueError('CA SHA-256 does not match the independently authenticated fingerprint')
         if not ca.extensions.get_extension_for_class(x509.BasicConstraints).value.ca:

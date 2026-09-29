@@ -79,6 +79,8 @@ class Credentials:
         self.context.load_cert_chain(files['client_cert_file'], files['client_key_file'])
         self.context.set_alpn_protocols(['h2'])
 
+    # Twenty seconds gives interactive admin requests room to finish while bounding an unreachable
+    # relay.
     def connection(self, timeout=20):
         from http2 import Connection as Http2Connection
         return Http2Connection(self.endpoint.hostname, self.endpoint.port or 443,

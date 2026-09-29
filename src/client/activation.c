@@ -49,6 +49,7 @@ int zc_activation_wait(int timeout_ms) {
                             {wake_pipe[0], POLLIN, 0}};
     (void)poll(fds, 2, timeout_ms);
     if (!(fds[1].revents & POLLIN)) return 0;
+    // Drain wake tokens in small batches; their count carries no payload information.
     char bytes[128];
     while (read(wake_pipe[0], bytes, sizeof(bytes)) > 0) {}
     return 1;

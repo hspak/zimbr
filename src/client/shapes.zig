@@ -32,6 +32,7 @@ pub fn drawRectangleLines(bounds: rl.Rectangle, roundness: f32, thickness: f32, 
         .{ .x = right, .y = bottom },
         .{ .x = left, .y = bottom },
     };
+    // Quarter-circle starts follow the top-left, top-right, bottom-right, bottom-left corners.
     const angles = [_]f32{
         180,
         270,
@@ -82,6 +83,7 @@ pub fn drawRectangleDots(bounds: rl.Rectangle, roundness: f32, thickness: f32, c
     const vertical = bounds.height - 2 * radius;
     const arc = std.math.pi / 2.0 * path_radius;
     const perimeter = 2 * (horizontal + vertical) + 4 * arc;
+    // Three stroke widths between dot centers keeps gaps visible; retain at least four dots.
     const count = @max(4, @ceil(perimeter / (3 * thickness)));
     const spacing = perimeter / count;
     const centers = [_]rl.Vector2{
@@ -141,9 +143,12 @@ fn cornerSegments(radius: f32, dpi: rl.Vector2) i32 {
 
 /// Two rotating arrows, with time supplied by the frame clock in seconds.
 pub fn drawRefresh(center: rl.Vector2, seconds: f64, color: rl.Color) void {
+    // 300 degrees per second completes a turn in 1.2 seconds for a gentle activity indicator.
     const rotation: f32 = @floatCast(@mod(seconds, 1.2) * 300);
     for ([_]f32{ 0, 180 }) |offset| {
+        // Two 135-degree arcs leave gaps for arrowheads instead of forming a solid ring.
         const end = rotation + offset + 135;
+        // A 1.5-pixel stroke at radius six fits the status line; 20 segments smooth each arc.
         rl.drawRing(center, 4.5, 6, rotation + offset, end, 20, color);
         const angle = std.math.degreesToRadians(end);
         const radial = rl.Vector2{ .x = @cos(angle), .y = @sin(angle) };

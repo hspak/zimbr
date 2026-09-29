@@ -321,6 +321,7 @@ fn removeSidecars(dir: std.Io.Dir, io: std.Io, name: []const u8) std.Io.Dir.Dele
         "-shm",
         "-journal",
     }) |suffix| {
+        // Fit client.db or the bounded temporary basename plus a SQLite sidecar suffix.
         var buffer: [128]u8 = undefined;
         // Only client.db and the bounded temporary name above are passed here.
         const path = std.fmt.bufPrint(&buffer, "{s}{s}", .{ name, suffix }) catch unreachable;
@@ -343,6 +344,7 @@ pub fn validate(s: Config) ValidateError!void {
     }
 }
 fn validText(value: []const u8) bool {
+    // Bound configured paths and origins to 4 KiB before passing them to native APIs.
     return value.len > 0 and value.len <= 4096 and std.unicode.utf8ValidateSlice(value) and
         std.mem.indexOfAny(u8, value, "\x00\r\n") == null;
 }

@@ -111,6 +111,7 @@ pub fn poll(self: *Upload, net: *c.ZcNet, store: Store, files: Files) Error!bool
         );
         return true;
     }
+    // 512 KiB and 32,768 tokens bound reservation responses before typed parsing.
     try protocol.json.check(raw, 512 * 1024, 32768);
     const a = self.arena.allocator();
     switch (self.phase) {

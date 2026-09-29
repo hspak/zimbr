@@ -12,6 +12,7 @@ const Connection = @This();
 server: *Server,
 peer: *Tls.c.ZrTls,
 engine: protocol.Session(Connection) = undefined,
+// Sixteen slots allow multiplexed events, metadata, and files with bounded per-peer storage.
 requests: [16]?*Request = @splat(null),
 accepted: usize = 0,
 last_id: i32 = 0,
@@ -29,6 +30,7 @@ pub fn run(self: *Connection) RunError!void {
             std.heap.page_allocator.destroy(req);
         };
     }
+    // 16 KiB matches a normal HTTP/2 DATA payload and keeps each receive buffer small.
     var input: [16384]u8 = undefined;
     while (!self.server.core.stop.load(.acquire) and Tls.c.zr_tls_valid(self.peer) != 0) {
         const now = u.c.zr_monotonic_ms();
@@ -62,7 +64,9 @@ pub fn run(self: *Connection) RunError!void {
             sent += bytes.len;
         }
         if (!self.engine.wantsRead()) return;
+        // Allow ten idle seconds between requests before reclaiming the connection.
         if (active) self.idle_deadline = now + 10000 else if (now >= self.idle_deadline) return;
+        // Poll every 50 ms when idle; after 256 KiB of output, service input immediately.
         const ready = if (sent >= 256 * 1024) 1 else Tls.c.zr_tls_poll(self.peer, 50);
         if (ready < 0) return error.ReadFailed;
         if (ready > 0) {
@@ -85,6 +89,7 @@ fn find(self: *Connection, id: i32) ?*Request {
 pub fn begin(self: *Connection, id: i32, trailers: bool) protocol.Error!void {
     // The API has no trailer fields; rejecting them avoids ambiguous request metadata.
     if (trailers) return error.Protocol;
+    // Rotate a connection after 64 total streams to bound long-lived engine state.
     if (self.accepted >= 64) return error.RefusedStream;
     for (&self.requests) |*slot| {
         if (slot.* != null) continue;
@@ -94,6 +99,7 @@ pub fn begin(self: *Connection, id: i32, trailers: bool) protocol.Error!void {
             .id = id,
             .arena = .init(self.server.memory.allocator()),
             .batch = .init(self.server.memory.allocator()),
+            // Give ordinary requests ten seconds; uploads install their own longer deadlines.
             .deadline = u.c.zr_monotonic_ms() + 10000,
         };
         slot.* = req;

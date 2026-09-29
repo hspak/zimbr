@@ -7,7 +7,9 @@ const Scrollbar = @This();
 dragging: bool = false,
 grab: f32 = 0,
 
+// A 16-pixel target is easier to grab than the narrow visible thumb.
 pub const gutter: f32 = 16;
+// A 25% multiplier makes wheel navigation cover more content per notch.
 pub const wheel_scale: f32 = 1.25;
 
 pub const Input = struct {
@@ -39,6 +41,7 @@ pub fn geometry(viewport: rl.Rectangle, content: f64, offset: f64) ?Geometry {
     return .{
         .track = track,
         .thumb = .{
+            // Center a six-pixel thumb in the 16-pixel hit target.
             .x = track.x + 5,
             .y = track.y + (track.height - height) * @as(
                 f32,
@@ -83,6 +86,7 @@ pub fn update(s: *Scrollbar, viewport: rl.Rectangle, content: f64, offset: f64, 
 pub fn draw(s: Scrollbar, viewport: rl.Rectangle, content: f64, offset: f64) void {
     const g = geometry(viewport, content, offset) orelse return;
     shapes.drawRectangle(.{
+        // Center the four-pixel rail beneath the six-pixel thumb.
         .x = g.track.x + 6,
         .y = g.track.y,
         .width = 4,

@@ -133,6 +133,7 @@ static NSString *explanation(NSString *code, NSString *name) {
     self.normalImage.size = NSMakeSize(18, 18);
     self.normalImage.template = YES;
     NSImage *base = self.normalImage;
+    // Fit the menu-bar glyph and a narrow warning badge within the 18-point status height.
     self.warningImage = [NSImage imageWithSize:NSMakeSize(25, 18) flipped:NO drawingHandler:^BOOL(NSRect rect) {
         (void)rect;
         [base drawInRect:NSMakeRect(0, 0, 18, 18)];
@@ -163,6 +164,7 @@ static NSString *explanation(NSString *code, NSString *name) {
         name:reopenNotification(self.bundleIdentifier) object:self.configPath suspensionBehavior:NSNotificationSuspensionBehaviorDeliverImmediately];
     // Readiness often settles within a second; don't leave the initial snapshot
     // on screen until the slower steady-state timer fires.
+    // A quarter-second initial refresh shows startup progress promptly.
     [self scheduleRefresh:0.25];
     __weak ZrMenuController *weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
@@ -203,6 +205,7 @@ static NSString *explanation(NSString *code, NSString *name) {
     if (self.statusPending) return;
     self.statusPending = YES;
     dispatch_async(self.work, ^{
+        // 8 KiB bounds the relay status JSON copied into the menu process.
         char buffer[8192];
         int length = self.bridge.status(self.bridge.relay, buffer, sizeof(buffer));
         NSDictionary *status = length < 0 ? nil : [NSJSONSerialization JSONObjectWithData:
@@ -212,6 +215,7 @@ static NSString *explanation(NSString *code, NSString *name) {
             self.latestStatus = status;
             self.summary.title = status[@"summary"] ?: @"Status unavailable";
             NSString *detail = explanation(status[@"detail"] ?: @"Open Logs for details.", self.appName);
+            // Keep menu details to 72 characters so diagnostics do not create an oversized menu.
             self.detail.title = detail.length > 72 ? [[detail substringToIndex:71] stringByAppendingString:@"…"] : detail;
             self.detail.hidden = detail.length == 0;
             self.detail.toolTip = detail;
@@ -243,9 +247,11 @@ static NSString *explanation(NSString *code, NSString *name) {
 
 - (void)addField:(NSString *)key label:(NSString *)label stack:(NSStackView *)stack {
     NSTextField *caption = [NSTextField labelWithString:label];
+    // Align field labels in a 145-point column wide enough for the settings captions.
     [caption.widthAnchor constraintEqualToConstant:145].active = YES;
     NSTextField *field = [NSTextField textFieldWithString:@""];
     field.placeholderString = [key isEqualToString:@"contacts_phone_region"] ? @"Optional, e.g. US" : @"";
+    // Leave a readable 430-point entry area for hostnames and configuration values.
     [field.widthAnchor constraintEqualToConstant:430].active = YES;
     [field setAccessibilityLabel:label];
     field.identifier = key;
@@ -259,6 +265,7 @@ static NSString *explanation(NSString *code, NSString *name) {
 }
 
 - (void)buildWindow {
+    // Fit the label/input columns, explanatory text, and actions in a compact settings window.
     self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 660, 350)
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
     self.window.title = [self.appName stringByAppendingString:@" Settings"];
@@ -315,6 +322,7 @@ static NSString *explanation(NSString *code, NSString *name) {
     [self setEditingBusy:YES];
     self.notice.stringValue = @"Loading settings…";
     dispatch_async(self.work, ^{
+        // Match the native and Zig settings readers' 64 KiB configuration cap.
         char buffer[65536];
         int length = self.bridge.read_config(self.bridge.relay, buffer, sizeof(buffer));
         NSData *bytes = length < 0 ? nil : [NSData dataWithBytes:buffer length:(NSUInteger)length];
@@ -377,6 +385,7 @@ static NSString *explanation(NSString *code, NSString *name) {
     [self setEditingBusy:YES];
     self.notice.stringValue = @"Validating settings and credentials…";
     dispatch_async(self.work, ^{
+        // Match the bounded native TLS diagnostic capacity used by the CLI.
         char diagnostic[256] = {0};
         // NSData may return NULL for an empty file; distinguish that from an absent file.
         const char *expected = original ? (original.length ? original.bytes : "") : NULL;

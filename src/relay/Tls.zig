@@ -39,6 +39,7 @@ pub const InfoError = u.Allocator.Error || error{CertificateUnavailable};
 
 /// The caller owns the returned bytes; failure releases temporary allocations.
 pub fn readPrivate(a: u.Allocator, path: []const u8) ReadPrivateError![]const u8 {
+    // 64 KiB covers PEM/config files while bounding private-file reads.
     const buffer = try a.alloc(u8, 65536);
     errdefer a.free(buffer);
     const terminated_path = try a.dupeZ(u8, path);
@@ -99,11 +100,14 @@ pub fn loadBytes(a: u.Allocator, path: []const u8, bytes: []const u8) LoadError!
         if (err == error.OutOfMemory) return error.OutOfMemory;
         return error.InvalidDeviceAllowlist;
     };
+    // Match the native TLS allowlist's 256 slots; each entry stores a 32-byte SHA-256 digest.
     if (devices.len > 256) return error.TooManyDevices;
     var fingerprints: [256][32]u8 = undefined;
     var count: usize = 0;
     for (devices, 0..) |device, i| {
+        // SHA-256 fingerprints use 64 hex digits; cap display labels at 128 bytes.
         if (device.sha256.len != 64 or device.label.len == 0 or device.label.len > 128) return error.InvalidDeviceAllowlist;
+        // Decode each allowlist entry into its full 256-bit fingerprint.
         var decoded: [32]u8 = undefined;
         _ = std.fmt.hexToBytes(&decoded, device.sha256) catch return error.InvalidDeviceFingerprint;
         for (devices[0..i]) |previous| if (std.ascii.eqlIgnoreCase(previous.sha256, device.sha256)) return error.DuplicateDeviceFingerprint;
@@ -112,6 +116,7 @@ pub fn loadBytes(a: u.Allocator, path: []const u8, bytes: []const u8) LoadError!
             count += 1;
         }
     }
+    // Keep native TLS diagnostics bounded; longer messages are truncated by the C helper.
     var diagnostic: [256]u8 = @splat(0);
     const ctx = c.zr_tls_context(
         try std.fmt.allocPrintSentinel(a, "{s}/server.pem", .{directory}, 0),
@@ -147,6 +152,7 @@ pub const Info = struct {
     expiry_warning: bool,
 };
 pub fn info(self: Tls, a: u.Allocator) InfoError!Info {
+    // Reserve 64 hexadecimal SHA-256 characters and the native C terminator.
     var fingerprint: [65]u8 = undefined;
     var expires: i64 = 0;
     var ca_expires: i64 = 0;

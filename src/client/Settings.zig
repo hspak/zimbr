@@ -6,6 +6,7 @@ const Editor = @import("Editor.zig");
 const c = @import("c.zig").api;
 const Settings = @This();
 
+// One editor each for the relay URL, CA, client certificate, and client key.
 fields: [4]Editor = @splat(.{}),
 enter_to_send: bool = true,
 visible: bool = false,

@@ -4,6 +4,7 @@ const u = @import("common.zig");
 const t = @import("protocol.zig").types;
 const Store = @import("client.zig").Store;
 const SharedSnapshot = @import("client.zig").SharedSnapshot;
+// Fifteen measured runs gives a middle sample and a conservative upper-tail sample cheaply.
 const samples = 15;
 
 fn clock() f64 {
@@ -36,8 +37,11 @@ fn stats(values: *[samples]f64) struct { p50_ms: f64, p95_ms: f64 } {
 }
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    // Default to 25,000 messages to expose full-history costs beyond the recent-page cache.
     const count = if (args.len > 1) try std.fmt.parseInt(usize, args[1], 10) else 25000;
+    // 1 KiB bodies make storage costs visible without hitting the maximum message size.
     const bytes = if (args.len > 2) try std.fmt.parseInt(usize, args[2], 10) else 1024;
+    // Cap synthetic setup at 200,000 messages so accidental arguments cannot exhaust the host.
     if (count == 0 or count > 200000 or bytes == 0 or bytes > t.max_text) return error.InvalidFixtureSize;
     const body = try init.arena.allocator().alloc(u8, bytes);
     @memset(body, 'x');

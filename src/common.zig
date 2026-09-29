@@ -9,15 +9,19 @@ pub const c = @cImport({
 
 pub const IdError = Allocator.Error || error{RandomUnavailable};
 pub const TimestampError = Allocator.Error || error{InvalidTimestamp};
+// UUID identifiers carry 128 bits; Base64url determines the encoded width.
 pub const id_length = std.base64.url_safe_no_pad.Encoder.calcSize(16);
+// Preserve all 256 SHA-256 bits rather than truncating opaque source identities.
 pub const hash_id_length = std.base64.url_safe_no_pad.Encoder.calcSize(32);
 
 pub fn json(a: Allocator, v: anytype) Allocator.Error![]const u8 {
     return std.json.Stringify.valueAlloc(a, v, .{});
 }
 pub fn id(a: Allocator) IdError![]const u8 {
+    // A UUID occupies exactly 16 bytes.
     var b: [16]u8 = undefined;
     if (c.zr_random(&b, b.len) != 0) return error.RandomUnavailable;
+    // Set the UUID v4 version nibble and RFC variant bits without changing other entropy.
     b[6] = (b[6] & 15) | 64;
     b[8] = (b[8] & 63) | 128;
     return a.dupe(u8, &encodeId(b));
@@ -30,6 +34,7 @@ pub fn encodeId(bytes: [16]u8) [id_length]u8 {
 }
 /// Hash an opaque source identifier and encode the complete SHA-256 digest.
 pub fn hashId(bytes: []const u8) [hash_id_length]u8 {
+    // SHA-256 produces a 32-byte digest.
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
     var result: [hash_id_length]u8 = undefined;
@@ -40,6 +45,7 @@ pub fn decimal(a: Allocator, n: i64) Allocator.Error![]const u8 {
     return std.fmt.allocPrint(a, "{d}", .{n});
 }
 pub fn timestamp(a: Allocator, n: i64) TimestampError![]const u8 {
+    // Leave room for the native UTC timestamp, fractional seconds, and terminating NUL.
     var buf: [48]u8 = undefined;
     const len = c.zr_timestamp(n, &buf, buf.len);
     if (len < 0) return error.InvalidTimestamp;

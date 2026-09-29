@@ -4,6 +4,7 @@ const t = @import("../../protocol.zig").types;
 const plist = @import("plist.zig");
 pub const safeUrl = @import("../../protocol.zig").url.safe;
 const V = plist.Node;
+// Messages uses this bundle identifier to mark URL balloon payloads.
 pub const provider = "com.apple.messages.URLBalloonProvider";
 pub const Artwork = struct {
     preview_id: []const u8,
@@ -73,12 +74,14 @@ fn parse(a: u.Allocator, bytes: []const u8) Failure!Result {
             .part_id = id,
             .original_url = original,
             .metadata_url = final,
+            // Bound card text separately: 2 KiB title, 4 KiB summary, and 512-byte site name.
             .title = try field(metadata, "title", 2048),
             .summary = try field(metadata, "summary", 4096),
             .site_name = try field(metadata, "siteName", 512),
             .state = if (placeholder != null and placeholder.? == .boolean and placeholder.?.boolean) .pending else .complete,
         });
         // Leave room for both eventual asset descriptors in overflow pages.
+        // Leave 8 KiB of the 32 KiB metadata page for its envelope and other fields.
         if ((try u.json(a, previews.items[previews.items.len - 1])).len > 24 * 1024) return error.Oversized;
         for ([_][]const u8{ "image", "icon" }, 0..) |key, role| if (metadata.get(key)) |image| {
             if (image == .none) continue;
@@ -134,6 +137,7 @@ fn urlField(value: V, key: []const u8) Failure!?[]const u8 {
     if (item == .dict) item = item.get(key) orelse item.get("URL") orelse return error.Malformed;
     if (item == .none) return null;
     const url = item.text() orelse return error.Malformed;
+    // Match the shared URL validation limit before retaining preview links.
     if (url.len > 4096) return error.Oversized;
     return if (safeUrl(url)) url else null;
 }
@@ -170,6 +174,7 @@ const Archive = struct {
     visits: usize = 0,
     expanded_bytes: usize = 0,
     fn charge(self: *Archive, bytes: usize) Failure!void {
+        // Allow four input budgets of expansion while rejecting amplified archive references.
         const maximum = 4 * t.max_decode;
         if (bytes > maximum - self.expanded_bytes) return error.Oversized;
         self.expanded_bytes += bytes;

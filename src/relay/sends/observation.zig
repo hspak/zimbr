@@ -16,7 +16,9 @@ const c = @cImport({
     @cInclude("relay/media.h");
 });
 
+// Inspect 64 send candidates per pass to keep observation work bounded.
 const max_rows = 64;
+// Stop after 4,096 source rows so a busy conversation cannot cause an unbounded scan.
 const max_source_rows = 4096;
 const hash_budget = protocol.attachments.max_send_bytes;
 const Hash = std.crypto.hash.sha2.Sha256;
@@ -45,6 +47,7 @@ const Snapshot = struct {
 };
 const Proof = struct { digest: [32]u8, fingerprint: c.ZrMediaFingerprint };
 const Cache = struct {
+    // Retain 512 verified file hashes to avoid repeatedly reading the same attachment bytes.
     entries: [512]?Proof = @splat(null),
     next: usize = 0,
 
@@ -67,6 +70,7 @@ pub fn loop(core: *Core) void {
     while (!core.stop.load(.acquire)) {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         const worked = step(core, arena.allocator(), &cache) catch |err| worked: {
+            // Report persistent observation failures at most once a minute to avoid log flooding.
             if (u.now() - last_error > 60000) {
                 log.warn("Multipart observation delayed: {s}", .{@errorName(err)});
                 last_error = u.now();
@@ -74,6 +78,7 @@ pub fn loop(core: *Core) void {
             break :worked false;
         };
         arena.deinit();
+        // A quarter-second idle poll keeps send feedback responsive without a busy loop.
         if (!worked) core.sleep(250);
     }
 }
@@ -81,6 +86,7 @@ pub fn loop(core: *Core) void {
 fn prepare(core: *Core, a: u.Allocator) !?Work {
     core.lock();
     defer core.unlock();
+    // Only match against a source scan from the last five seconds.
     if (!core.read_ready or core.reset_required or u.now() - core.last_scan_ms > 5000) return null;
     const j = core.journal;
     const q = try j.db.prepare("SELECT r.record,p.position,p.dispatch_ms,p.source_floor,p.mode,p.route FROM send_parts p JOIN send_requests r ON r.id=p.request_id LEFT JOIN send_part_observations o ON o.request_id=p.request_id AND o.position=p.position WHERE p.state IN ('invoked','unknown','submitted') AND p.dispatch_ms IS NOT NULL AND r.epoch=(SELECT epoch FROM relay_meta) AND coalesce(o.attempt_ms,0)<? ORDER BY coalesce(o.attempt_ms,0),p.dispatch_ms,p.position LIMIT 1");
@@ -96,6 +102,7 @@ fn prepare(core: *Core, a: u.Allocator) !?Work {
         .route = try q.text(a, 5),
         .source_identity = (try j.progress(a, "identity")) orelse return null,
     };
+    // After a minute without an echo, switch to roughly 30-second retries to reduce rescans.
     const old_unconfirmed = work.request.parts[work.position].message_id == null and u.now() - work.time > 60000;
     const next_attempt = u.now() + if (old_unconfirmed) @as(i64, 29000) else 0;
     try j.execute("INSERT INTO send_part_observations VALUES(?,?,?) ON CONFLICT(request_id,position) DO UPDATE SET attempt_ms=excluded.attempt_ms", &.{
@@ -132,6 +139,8 @@ fn snapshot(core: *Core, a: u.Allocator, work: Work) !?Snapshot {
     defer q.close();
     try q.bind(&.{
         .{ .int = work.floor },
+        // Allow two seconds of skew, then convert Unix milliseconds to Apple's 2001 epoch
+        // nanoseconds.
         .{ .int = (work.time - 2000 - 978307200000) * 1000000 },
         .{ .int = (work.time + sends.observation_window_ms - 978307200000) * 1000000 },
         .{ .text = work.mode },
@@ -149,6 +158,7 @@ fn snapshot(core: *Core, a: u.Allocator, work: Work) !?Snapshot {
     while (try q.step()) {
         if (rows == max_rows) return null;
         rows += 1;
+        // Retain ordinary decode scratch space but release memory from unusually large candidates.
         _ = scratch.reset(.{ .retain_with_limit = 256 * 1024 });
         const row_a = scratch.allocator();
         const message = (try source.message(row_a, q.int(0))) orelse return null;
@@ -229,6 +239,7 @@ fn hashFile(core: *Core, a: u.Allocator, cache: *Cache, file: protocol.attachmen
     if (cache.get(&before)) |proof| return proof;
     if (before.bytes > budget.*) return null;
     budget.* -= before.bytes;
+    // 64 KiB batches file hashing without allocating space for an entire attachment.
     var buffer: [64 * 1024]u8 = undefined;
     var hash: Hash = .init(.{});
     var remaining = before.bytes;

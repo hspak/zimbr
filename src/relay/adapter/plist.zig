@@ -3,7 +3,9 @@
 const std = @import("std");
 const u = @import("../../common.zig");
 const max_bytes = @import("../../protocol.zig").types.max_decode;
+// 8,192 objects accommodates keyed archives while bounding object-table allocation.
 pub const max_objects = 8192;
+// 32 levels bounds recursive traversal of untrusted plist graphs.
 pub const max_depth = 32;
 pub const Node = union(enum) {
     none,
@@ -37,6 +39,7 @@ pub fn parse(a: u.Allocator, bytes: []const u8) Failure!Node {
     return xml.parse();
 }
 fn unsigned(bytes: []const u8) Failure!u64 {
+    // The supported plist integers fit in u64, so at most eight big-endian bytes are legal.
     if (bytes.len == 0 or bytes.len > 8) return error.Malformed;
     var n: u64 = 0;
     for (bytes) |byte| n = (n << 8) | byte;
@@ -55,11 +58,15 @@ const Binary = struct {
     // hashing of the same large string under many different object indices.
     work: usize = 0,
     fn charge(self: *Binary, bytes: usize) Failure!void {
+        // Allow bounded revisits up to eight input budgets, then reject alias-amplified parsing
+        // work.
         if (bytes > max_bytes * 8 - self.work) return error.Oversized;
         self.work += bytes;
     }
     fn parse(a: u.Allocator, bytes: []const u8) Failure!Node {
+        // Binary plists need the eight-byte bplist00 header and a 32-byte trailer.
         if (bytes.len < 40) return error.Malformed;
+        // The trailer stores widths at 6/7, then 64-bit count, root, and table offsets at 8/16/24.
         const trailer = bytes[bytes.len - 32 ..];
         const count = try unsigned(trailer[8..16]);
         const root = try unsigned(trailer[16..24]);
@@ -93,6 +100,7 @@ const Binary = struct {
         return bytes;
     }
     fn size(self: *Binary, position: *usize, small: u8) Failure!usize {
+        // A low nibble of 15 means the length follows as an integer object.
         if (small != 15) return small;
         const tag = (try self.take(position, 1))[0];
         if (tag >> 4 != 1 or tag & 15 > 3) return error.Malformed;
@@ -107,12 +115,16 @@ const Binary = struct {
     }
     fn object(self: *Binary, index: usize, depth: usize) Failure!Node {
         if (depth >= max_depth) return error.Oversized;
+        // Marks distinguish unseen (0), visiting (1), and decoded (2) objects to reject cycles.
         if (self.marks[index] == 1) return error.Malformed;
         if (self.marks[index] == 2) return self.values[index];
         self.marks[index] = 1;
         var position = self.offsets[index];
         const tag = (try self.take(&position, 1))[0];
+        // Binary plist tags use the high nibble for type and the low nibble for size/length.
         const small = tag & 15;
+        // Format tags: simple=0, integer=1, real/date=2/3, data/ASCII/UTF-16=4/5/6,
+        // UID=8, array=10, dictionary=13; simple false/true are 8/9.
         const value: Node = switch (tag >> 4) {
             0 => switch (small) {
                 0 => .none,
@@ -140,7 +152,9 @@ const Binary = struct {
                     if (!std.unicode.utf8ValidateSlice(bytes)) return error.Malformed;
                     break :object .{ .string = bytes };
                 }
+                // Each UTF-16 code unit can expand to at most three UTF-8 bytes.
                 self.allocated += length * 3;
+                // Cap decoded storage at twice the encoded-byte budget to limit expansion.
                 if (self.allocated > max_bytes * 2) return error.Oversized;
                 const units = try self.a.alloc(u16, length);
                 for (units, 0..) |*unit, i| unit.* = std.mem.readInt(
@@ -162,6 +176,7 @@ const Binary = struct {
                 const length = try self.size(&position, small);
                 if (length > max_objects) return error.Oversized;
                 self.allocated += length * @sizeOf(Entry);
+                // Cap decoded storage at twice the encoded-byte budget to limit expansion.
                 if (self.allocated > max_bytes * 2) return error.Oversized;
                 const dict = tag >> 4 == 13;
                 const refs = try self.take(
@@ -290,7 +305,9 @@ const Xml = struct {
                 entity[1..],
                 10,
             ) catch return error.Malformed else return error.Unsupported;
+            // XML permits tab, LF, and CR (9/10/13), but no other C0 control characters.
             if (character == 0 or (character < 32 and character != 9 and character != 10 and character != 13)) return error.Malformed;
+            // One Unicode scalar requires at most four UTF-8 bytes.
             var buffer: [4]u8 = undefined;
             const n = std.unicode.utf8Encode(character, &buffer) catch return error.Malformed;
             try result.appendSlice(self.a, buffer[0..n]);

@@ -6,7 +6,9 @@
  * calls: an absent or stalled daemon must not stall rendering or message sync. */
 #define SERVICE "org.freedesktop.Notifications"
 #define OBJECT "/org/freedesktop/Notifications"
+// Match the worker and avatar-wait queues so notification bookkeeping stays bounded.
 #define LIMIT 64
+// Match the relay's 128-pixel avatar derivative; larger images add no notification detail.
 #define IMAGE_EDGE 128
 typedef struct {
     char *chat, *summary, *body, *token;
@@ -186,6 +188,7 @@ ZcNotifications *zc_notifications_new(ZcNotificationAction action, void *context
 }
 void zc_notifications_poll(void) {
     /* Bound dispatch work even if a bus peer produces a signal storm. */
+    // Process at most 64 queued D-Bus callbacks per GUI tick to preserve input responsiveness.
     for (int i = 0; i < 64 && g_main_context_iteration(NULL, FALSE); ++i) {}
 }
 void zc_notifications_dismiss(ZcNotifications *n, const char *chat) {

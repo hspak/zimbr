@@ -2,6 +2,7 @@ const std = @import("std");
 const rl = @import("raylib");
 pub fn color(hex: u32) rl.Color {
     return .{
+        // Palette literals use 0xRRGGBBAA; shifts and 8-bit masks extract each channel.
         .r = @intCast(hex >> 24),
         .g = @intCast((hex >> 16) & 255),
         .b = @intCast((hex >> 8) & 255),
@@ -31,18 +32,25 @@ pub const Palette = struct {
     success: rl.Color,
 };
 pub const colors = Palette{
+    // Near-white, muted, and disabled lavender establish the text-emphasis hierarchy.
     .ink = color(0xf1eef6ff),
     .muted = color(0xb8b1c4ff),
     .disabled = color(0x817a8eff),
     // The logo's illuminated lavender carries actions and interaction feedback.
     .accent = color(0xc4a3e6ff),
+    // Lighten the action tint on hover while retaining the same hue.
     .accent_hover = color(0xd5b9efff),
+    // Dark violet keeps labels distinct on the pale accent fill.
     .on_accent = color(0x241b30ff),
+    // A pale lavender outline distinguishes keyboard focus from surrounding surfaces.
     .focus = color(0xd0b6eaff),
     // Periwinkle from the participant palette keeps file drops in the same color family.
     .drop = color(0xb6c3eeff),
+    // Dark periwinkle gives the pale drop outline a related background.
     .drop_surface = color(0x30324aff),
+    // A brighter violet surface separates selected rows from the sidebar.
     .selected = color(0x393148ff),
+    // Use the accent hue at partial opacity so selected text remains readable.
     .selection = color(0xc4a3e650),
     // Graphite surfaces share a violet undertone, with the rail deepest in the stack.
     .rail = color(0x141219ff),
@@ -63,6 +71,7 @@ pub const read_only_avatar = Participant{
     .bubble = color(0x302d36ff),
     .label = color(0xa39baeff),
 };
+// Eight muted hue pairs distinguish nearby senders; dark bubbles pair with light labels.
 const participant_colors = [_]Participant{
     .{ .bubble = color(0x30324aff), .label = color(0xb6c3eeff) },
     .{ .bubble = color(0x382d47ff), .label = color(0xd2b6edff) },

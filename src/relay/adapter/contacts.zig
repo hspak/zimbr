@@ -11,6 +11,7 @@ const t = @import("../../protocol.zig").types;
 const Journal = @import("../Journal.zig");
 const Assets = @import("../Assets.zig");
 const native = !options.fake and builtin.os.tag == .macos;
+// Version persisted address keys so normalization changes can trigger a rebuild.
 pub const normalization_version = 1;
 extern fn zr_contacts_status() c_int;
 extern fn zr_contacts_raw_status() c_int;
@@ -138,6 +139,7 @@ pub const CompleteError = Journal.QueryError || std.json.ParseError(std.json.Sca
 fn emailKey(a: u.Allocator, address: []const u8, fold_local: bool) !?[]const u8 {
     if (address.len > 254 or std.mem.indexOfScalar(u8, address, 0) != null) return null;
     if (comptime native) {
+        // Leave room for Unicode normalization/case folding of the 254-byte email input.
         var out: [1024]u8 = undefined;
         const n = zr_contacts_email_key(
             try a.dupeZ(u8, address),
@@ -164,6 +166,7 @@ fn emailKey(a: u.Allocator, address: []const u8, fold_local: bool) !?[]const u8 
 pub fn phoneKey(a: u.Allocator, address: []const u8, region: []const u8) PhoneKeyError![]const u8 {
     if (comptime native) {
         if (std.mem.indexOfScalar(u8, address, 0) != null) return error.InvalidContacts;
+        // Fit a normalized phone key or bounded exact-match fallback, including its prefix.
         var out: [512]u8 = undefined;
         const n = zr_contacts_phone_key(
             try a.dupeZ(u8, address),
@@ -188,6 +191,7 @@ pub fn validateRegion(a: u.Allocator, region: []const u8) ValidateRegionError!vo
 }
 pub fn suggestedRegion(a: u.Allocator) u.Allocator.Error!?[]const u8 {
     if (comptime !native) return null;
+    // A suggested country code is short; 16 bytes includes the native terminator and margin.
     var out: [16]u8 = undefined;
     const n = zr_contacts_suggest_region(&out, out.len);
     return if (n < 0) null else try a.dupe(u8, out[0..@intCast(n)]);
@@ -209,6 +213,7 @@ pub fn pumpMain() void {
     if (comptime native) zr_contacts_pump_main();
 }
 pub fn permissionProbeExit() noreturn {
+    // Reserve exit codes 100-104 for permission status, separate from ordinary process failures.
     std.process.exit(if (comptime native) @intCast(100 + zr_contacts_raw_status()) else 104);
 }
 pub fn readerProbeExit() noreturn {
@@ -277,6 +282,7 @@ pub fn thumbnail(a: u.Allocator, core: *Core, photo: PhotoSource, output: c_int)
     if (observed.permission != .authorized or observed.failed or observed.generation != photo.generation) return -7;
     for (observed.contacts) |contact| if (u.eq(contact.id, photo.contact_id)) {
         const bytes = contact.thumbnail orelse return -2;
+        // Match the derivative byte budget when accepting a contact thumbnail.
         if (bytes.len > 8 * 1024 * 1024) return -4;
         var offset: usize = 0;
         while (offset < bytes.len) {
@@ -326,6 +332,7 @@ fn snapshot(
     }
     // Fake relay only: explicit synthetic fixture adjacent to its required DB.
     const path = try std.fmt.allocPrint(a, "{s}.contacts.json", .{core.source_path});
+    // Cap the complete contact snapshot at 32 MiB before JSON decoding.
     const bytes = std.Io.Dir.cwd().readFileAlloc(core.io, path, a, .limited(32 * 1024 * 1024)) catch |err| {
         if (err == error.FileNotFound) return .{ .permission = .unavailable, .generation = 0 };
         return err;
@@ -515,6 +522,7 @@ pub fn loop(core: *Core) void {
         generation = observed.generation;
         old_permission = observed.permission;
         query_failed = failed;
+        // Retry failed snapshots after 30 seconds; refresh healthy contacts every 15 minutes.
         if (needs_refresh) next_refresh = u.now() + if (failed) @as(i64, 30000) else 15 * 60 * 1000;
         core.lock();
         const remaining = j.db.scalar("SELECT count(*) FROM identity_work") catch |err| remaining: {
@@ -539,6 +547,7 @@ pub fn loop(core: *Core) void {
                 log.err("Contact photo processing failed: {s}", .{@errorName(err)});
             };
         }
+        // Drain ready contact work with 10 ms yields, and poll idle/failed work once a second.
         core.sleep(if (remaining > 0 and !failed) 10 else 1000);
     }
 }

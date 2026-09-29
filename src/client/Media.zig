@@ -17,7 +17,9 @@ const asset_path_capacity = capacity: {
         variant_length = @max(variant_length, name.len);
     break :capacity "/v1/assets///".len + 2 * t.id_length + variant_length + 1;
 };
+// 512 MiB retains recently viewed media without allowing unlimited cache growth.
 pub const disk_budget = 512 * 1024 * 1024;
+// 64 MiB bounds GPU image storage separately from compressed files on disk.
 pub const texture_budget = 64 * 1024 * 1024;
 
 io: std.Io,
@@ -35,6 +37,7 @@ generation: u64 = 0,
 epoch: []const u8 = "",
 chat: []const u8 = "",
 credential_generation: u64 = 0,
+// A full SHA-256 trust-root digest isolates cached media between credential contexts.
 ca_digest: [32]u8 = @splat(0),
 online: bool = false,
 avatars: bool = true,
@@ -42,6 +45,7 @@ evict_avatars: bool = false,
 dir: c_int = -1,
 
 pub const Result = struct {
+    // Media keys are 64 hexadecimal SHA-256 characters plus a C terminator.
     key: [64:0]u8,
     generation: u64,
     pixels: c.ZcPixels = std.mem.zeroes(c.ZcPixels),
@@ -54,6 +58,7 @@ pub const Result = struct {
         denied,
     } = .failed,
     retry_at: i64 = 0,
+    // Bound copied display diagnostics to 128 bytes while preserving C string termination.
     reason: [128:0]u8 = @splat(0),
     pub fn destroy(r: *Result) void {
         c.zc_pixels_free(&r.pixels);
@@ -66,11 +71,13 @@ const Request = struct {
     variant: @FieldType(t.AssetRef, "variant"),
     retired: bool,
     expected_bytes: usize,
+    // Media keys are 64 hexadecimal SHA-256 characters plus a C terminator.
     key: [64:0]u8,
     generation: u64,
     wanted_at: i64,
     local: bool = false,
     fd: c_int = -1,
+    // The native tmp- plus 32-hex-digit name fits within the cache-key-sized storage.
     temporary: [64:0]u8 = @splat(0),
     fn destroy(r: *Request, dir: c_int) void {
         if (r.fd >= 0) _ = u.c.close(r.fd);
@@ -181,8 +188,10 @@ pub fn key(s: *Media, asset: t.AssetRef) [64:0]u8 {
         hash.update(part);
         hash.update(&.{0});
     }
+    // SHA-256 output is 32 bytes, rendered as two hex digits per byte.
     var digest: [32]u8 = undefined;
     hash.final(&digest);
+    // One variant nibble plus 63 digest nibbles; the sentinel supports native file APIs.
     var output: [64:0]u8 = undefined;
     const hex = "0123456789abcdef";
     for (digest, 0..) |byte, i| {
@@ -211,8 +220,10 @@ pub fn localKey(s: *Media, file: attachments.Upload) [64:0]u8 {
         hash.update(part);
         hash.update(&.{0});
     }
+    // SHA-256 output is 32 bytes, rendered as two hex digits per byte.
     var digest: [32]u8 = undefined;
     hash.final(&digest);
+    // One local-preview nibble plus 63 digest nibbles; the sentinel supports native file APIs.
     var output: [64:0]u8 = undefined;
     @memcpy(output[0..64], &std.fmt.bytesToHex(digest, .lower));
     output[0] = 'd';
@@ -273,6 +284,7 @@ fn enqueue(s: *Media, request_value: Request) u.Allocator.Error!void {
         return;
     };
     if (s.result) |r| if (r.generation == s.generation and u.eq(&r.key, &cache_key)) return;
+    // 128 queued requests absorbs visible-row bursts while bounding stale offscreen work.
     if (s.queue.items.len >= 128) return;
     const r = try a.create(Request);
     errdefer a.destroy(r);
@@ -348,9 +360,13 @@ fn work(s: *Media) !void {
     }
     // Leave room for both 8 MiB download lanes and trim in batches near the cap.
     var disk = DiskCache.init(s.dir, .{
+        // Reserve 16 MiB below the disk cap for in-flight downloads.
         .bytes = disk_budget - 16 * 1024 * 1024,
+        // Reclaim 64 MiB of headroom per trim to avoid pruning after every download.
         .trim_bytes = disk_budget - 64 * 1024 * 1024,
+        // Bound directory scans even when many cached images are tiny.
         .entries = 8192,
+        // Remove 512 entries per full-directory trim to give the cache growth headroom.
         .trim_entries = 7680,
     });
     while (!s.stop.load(.acquire)) {
@@ -371,6 +387,7 @@ fn work(s: *Media) !void {
             net_generation = generation;
         }
         for (&s.active, 0..) |*active, lane| if (active.*) |r| {
+            // Drop media no longer requested for two seconds so scrolling reprioritizes downloads.
             if (u.now() - r.wanted_at > 2000) {
                 log.debug("Image {s}: transfer cancelled after leaving view", .{r.key});
                 if (net) |n| c.zc_net_ack(n, @intCast(lane + 2));
@@ -442,6 +459,8 @@ fn work(s: *Media) !void {
                                     result.state = .pending;
                                     result.retry_at = u.now() + @as(
                                         i64,
+                                        // Keep server-directed retries between two and 30 seconds
+                                        // to avoid spins or long stalls.
                                         @intCast(std.math.clamp(data.value.retry_after orelse 2, 2, 30)),
                                     ) * 1000;
                                     setReason(result, "Preparing image…");
@@ -457,6 +476,7 @@ fn work(s: *Media) !void {
                             }
                         }
                     } else if (status == 503 or status == 0 or failure.curl_code != 0 or status >= 500) {
+                        // Give transient network/service failures five seconds to recover.
                         result.retry_at = u.now() + 5000;
                         setReason(result, "Image transfer interrupted · retrying");
                     }
@@ -543,6 +563,7 @@ fn work(s: *Media) !void {
                 result.destroy();
             }
         }
+        // Recheck download demand every 50 ms while still responding immediately to wakeups.
         _ = c.zc_net_wait(net, s.wake_pipe[0], 50);
     }
 }
@@ -646,6 +667,7 @@ test "media cache validates files and pixels, installs atomically, and evicts pr
         96,
         130,
     };
+    // The native tmp- plus 32-hex-digit name fits within the cache-key-sized storage.
     var temporary: [64:0]u8 = @splat(0);
     const fd = c.zc_cache_temp(dir, &temporary, temporary.len);
     try std.testing.expect(fd >= 0);

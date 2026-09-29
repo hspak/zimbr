@@ -9,6 +9,7 @@ const ImageCache = @This();
 const a = std.heap.c_allocator;
 const log = std.log.scoped(.client_images);
 
+// Use the complete 64-character Media key so distinct cached representations remain separate.
 entries: std.AutoHashMapUnmanaged([64]u8, Entry) = .empty,
 bytes: usize = 0,
 frame: u64 = 0,
@@ -22,6 +23,7 @@ pub const Entry = struct {
     retry_at: i64 = 0,
     attempts: u8 = 0,
     requested: bool = false,
+    // Match Media.Result's bounded, NUL-terminated diagnostic text.
     reason: [128:0]u8 = @splat(0),
     refresh_owner: bool = false,
     pub fn availableTexture(entry: Entry) ?rl.Texture2D {
@@ -81,6 +83,7 @@ pub fn accept(s: *ImageCache, result: *const Media.Result) void {
             entry.attempts = 0;
             s.bytes += bytes;
         } else if (entry.retry_at != 0) {
+            // Retry image failures from two seconds up to 30 seconds, doubling between attempts.
             const delay = @min(
                 @as(i64, 30000),
                 @as(i64, 2000) << @intCast(@min(entry.attempts -| 1, 4)),
@@ -95,6 +98,7 @@ pub fn nextFrame(s: *ImageCache) void {
     s.changed = false;
     // Bound tiny-image textures and failure metadata as well as pixel bytes.
     // This runs before drawing, so no evicted texture is queued in a GL batch.
+    // Trim to 896 entries, leaving 128 slots below the hard cap for this frame's new requests.
     while (s.entries.count() > 896) {
         var oldest: ?[64]u8 = null;
         var stamp: u64 = std.math.maxInt(u64);
@@ -132,6 +136,7 @@ fn makeRoom(s: *ImageCache, bytes: usize) void {
 pub fn get(s: *ImageCache, media: *Media, asset: t.AssetRef) ?*Entry {
     if (!media.avatars and asset.variant == .avatar) return null;
     const cache_key = media.key(asset);
+    // Bound tiny textures and failure entries even when their pixel-byte cost is negligible.
     if (s.entries.count() >= 1024 and !s.entries.contains(cache_key)) return null;
     const value = s.entries.getOrPut(a, cache_key) catch return null;
     if (!value.found_existing) value.value_ptr.* = .{};
@@ -165,6 +170,7 @@ pub fn retry(entry: *Entry) void {
 /// capacity or allocation prevents caching; decoding failure remains an entry.
 pub fn getLocal(s: *ImageCache, media: *Media, file: attachments.Upload) ?*Entry {
     const cache_key = media.localKey(file);
+    // Bound tiny textures and failure entries even when their pixel-byte cost is negligible.
     if (s.entries.count() >= 1024 and !s.entries.contains(cache_key)) return null;
     const value = s.entries.getOrPut(a, cache_key) catch return null;
     if (!value.found_existing) value.value_ptr.* = .{};
@@ -213,6 +219,7 @@ pub fn drawAvatar(texture: ?rl.Texture2D, bounds: rl.Rectangle, tint: rl.Color) 
     const inner = @max(0, radius - 1 / @max(1, rl.getWindowScaleDPI().x));
     var transparent = tint;
     transparent.a = 0;
+    // 64 radial segments keep avatars smooth at ordinary and high display scales.
     const segments = 64;
     rl.gl.rlSetTexture(if (texture) |photo| photo.id else rl.gl.rlGetTextureIdDefault());
     rl.gl.rlBegin(rl.gl.rl_triangles);

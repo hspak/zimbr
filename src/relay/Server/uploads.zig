@@ -23,6 +23,7 @@ pub fn begin(server: *Server, req: *Request, peer: *Tls.c.ZrTls) Request.RejectE
     const id = try uploadId(req.head.target);
     const epoch = try requestEpoch(req);
     const files = server.core.upload_files orelse return error.UploadStorageUnavailable;
+    // A SHA-256 certificate fingerprint is 64 hex characters plus the C terminator.
     var owner: [65]u8 = undefined;
     if (Tls.c.zr_tls_peer_fingerprint(peer, &owner) != 0) return error.CertificateExpired;
     if (server.uploads_active.fetchAdd(1, .acq_rel) >= 4) {
@@ -54,13 +55,16 @@ pub fn begin(server: *Server, req: *Request, peer: *Tls.c.ZrTls) Request.RejectE
         },
     }
     const now = u.c.zr_monotonic_ms();
+    // Allow up to 15 minutes for a large file over a slow connection.
     req.upload_deadline = now + 15 * 60 * 1000;
+    // Abort a stalled upload after 30 seconds even within its overall deadline.
     req.deadline = now + 30000;
 }
 
 /// Finish a body or serve a small upload command. The connection owns this call.
 pub fn handle(server: *Server, a: u.Allocator, req: *Request, peer: *Tls.c.ZrTls) Error!void {
     if (server.core.upload_files == null) return error.UploadStorageUnavailable;
+    // A SHA-256 certificate fingerprint is 64 hex characters plus the C terminator.
     var owner: [65]u8 = undefined;
     if (Tls.c.zr_tls_peer_fingerprint(peer, &owner) != 0) return error.CertificateExpired;
     if (req.head.method == .PUT) {
@@ -89,6 +93,7 @@ pub fn handle(server: *Server, a: u.Allocator, req: *Request, peer: *Tls.c.ZrTls
     if (req.head.method == .POST and u.eq(req.head.target, "/v1/uploads")) {
         if (!std.ascii.eqlIgnoreCase(req.head.content_type orelse "", "application/json"))
             return error.InvalidRequest;
+        // Reservation metadata is shallow; 256 tokens bounds work before typed decoding.
         json_bounds.check(req.body.items, t.max_body, 256) catch return error.InvalidRequest;
         const value = std.json.parseFromSliceLeaky(struct {
             server_epoch: []const u8,

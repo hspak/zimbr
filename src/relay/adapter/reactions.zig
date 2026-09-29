@@ -12,6 +12,7 @@ pub const Observation = struct {
     event: t.ReactionEvent,
 };
 pub fn candidate(code: i64) bool {
+    // Messages reserves 1000 for associated content and 2000/3000 ranges for reaction add/remove.
     return code == 1000 or (code >= 2000 and code < 4000);
 }
 pub fn decode(
@@ -27,6 +28,7 @@ pub fn decode(
         .operation = .unknown,
         .resolution = .unsupported,
     } };
+    // Subtract the add/remove range base to recover the shared reaction-kind index.
     const base = if (code >= 3000) code - 3000 else code - 2000;
     if (base >= 0 and base <= 6) {
         value.event.operation = if (code >= 3000) .remove else .add;
@@ -50,6 +52,7 @@ pub fn decode(
             value.event.key = keys[@intCast(base)];
             value.event.emoji = symbols[@intCast(base)];
         } else if (emoji.len > 0 and emoji.len <= 256 and std.unicode.utf8ValidateSlice(emoji)) {
+            // 256 bytes accommodates multi-scalar emoji while bounding untrusted reaction labels.
             // Preserve the entire supplied sequence, including ZWJ, selectors,
             // skin modifiers, and flags; no byte/codepoint truncation.
             for (emoji) |byte| if (byte < 32 or byte == 127) return value;
@@ -92,6 +95,7 @@ pub fn decode(
 }
 
 fn validGuid(guid: []const u8) bool {
+    // Messages GUIDs use the 8-4-4-4-12 hexadecimal UUID spelling, including four hyphens.
     if (guid.len != 36) return false;
     for (guid, 0..) |ch, i| {
         if (i == 8 or i == 13 or i == 18 or i == 23) {

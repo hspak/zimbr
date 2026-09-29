@@ -2,7 +2,9 @@
 const std = @import("std");
 const t = @import("../protocol.zig").types;
 const bridge = @import("c.zig").api;
+// Limit preview shaping to 4 KiB; copying still exposes the complete message.
 pub const max_bytes = 4096;
+// 64 lines prevents a single multiline preview from dominating layout work.
 pub const max_lines = 64;
 pub const shortened = "\n… Preview shortened · select and Ctrl+C to copy full text";
 pub const unavailable = "Text preview unavailable · select and Ctrl+C to copy";
@@ -32,6 +34,7 @@ pub fn syncLabel(activity: t.SyncActivity, buffer: *[96]u8) []const u8 {
     return buffer[0 .. end + "…".len];
 }
 
+// Allow 30 seconds for an uncertain send to be reconciled before showing recovery actions.
 pub const unknown_grace_ms = 30_000;
 pub const MessageStatus = union(enum) {
     none,
@@ -292,6 +295,7 @@ pub fn prefix(value: []const u8, limit: usize, lines: usize) []const u8 {
     return value[0..end];
 }
 
+// U+FFFC is the attributed-text object replacement character, not user-visible text.
 pub const object_marker = "\u{fffc}";
 
 /// Attachment anchors are structural text, not a user-visible caption. Keep

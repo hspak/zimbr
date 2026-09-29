@@ -14,6 +14,7 @@ const bridge = @import("c.zig").api;
 const outgoing = @import("outgoing.zig");
 const attachments = @import("../protocol.zig").attachments;
 const Store = @This();
+// Keep 100 recent messages ready for display; older history is loaded on demand.
 pub const recent_history_limit = 100;
 
 db: Sqlite,

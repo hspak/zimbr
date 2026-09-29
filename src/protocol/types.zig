@@ -1,19 +1,32 @@
 const std = @import("std");
 const u = @import("../common.zig");
 const attachments = @import("attachments.zig");
+// 64 KiB bounds request parsing while leaving room for text and attachment metadata.
 pub const max_body = 64 * 1024;
+// 16 KiB keeps a single outgoing text within the bounded request envelope.
 pub const max_text = 16 * 1024;
+// 1 MiB admits attributed message archives while bounding decoder memory and work.
 pub const max_decode = 1024 * 1024;
+// 200 records amortizes round trips without allowing unbounded database batches.
 pub const max_page = 200;
+// 50 records gives callers a modest first page when they omit a limit.
 pub const default_page = 50;
+// Keep the existing v1 wire contract; optional capabilities negotiate additions.
 pub const api_version = "1";
 pub const id_length = u.id_length;
+// 32 KiB keeps inline metadata from dominating message and event payloads.
 pub const max_enrichment = 32 * 1024;
+// Match the inline metadata budget so continuation pages stay equally bounded.
 pub const max_metadata_page = 32 * 1024;
+// 8 MiB caps aggregate history even when each record meets its individual limit.
 pub const max_history_bytes = 8 * 1024 * 1024;
+// Show a useful attachment batch inline; larger sets use metadata pagination.
 pub const max_inline_attachments = 32;
+// Four rich cards cover short messages without crowding out other metadata.
 pub const max_inline_previews = 4;
+// Allow group reactions while bounding per-message serialization work.
 pub const max_inline_reactions = 128;
+// Allow mixed text/file runs while bounding inline layout metadata.
 pub const max_inline_parts = 128;
 
 /// Background work currently running or ready to run; excludes blocked retries.
@@ -313,13 +326,17 @@ pub const ParseCursorError = error{ InvalidRequest, ResyncRequired };
 /// Accept only canonical Base64url encodings of 16-byte IDs, including zero pad bits.
 pub fn validId(s: []const u8) bool {
     if (s.len != id_length) return false;
+    // Decode compact IDs to their full 128-bit UUID before checking canonical encoding.
     var bytes: [16]u8 = undefined;
     std.base64.url_safe_no_pad.Decoder.decode(&bytes, s) catch return false;
     return true;
 }
 pub fn validAddress(s: []const u8) bool {
+    // A bare email needs at least a@b; the 254-byte cap also bounds routing identifiers.
     if (s.len < 3 or s.len > 254) return false;
     if (s[0] == '+') {
+        // Accept + followed by 7-15 digits to exclude short codes and overlong international
+        // numbers.
         if (s.len < 8 or s.len > 16 or s[1] == '0') return false;
         for (s[1..]) |ch| if (!std.ascii.isDigit(ch)) return false;
         return true;

@@ -281,6 +281,7 @@ pub fn prioritize(j: Journal, cid: []const u8) Journal.QueryError!void {
     );
 }
 pub fn trackedRows(a: u.Allocator, j: Journal, source: Source) TrackedRowsError![]i64 {
+    // Revisit 50 source reactions per scan to bound reconciliation work.
     const q = try j.db.prepare("SELECT source,source_row,conversation_id,target_guid,observation FROM reaction_sources WHERE retired=0 ORDER BY check_ms,source LIMIT 50");
     defer q.close();
     const Tracked = struct {
@@ -330,11 +331,13 @@ pub fn trackedRows(a: u.Allocator, j: Journal, source: Source) TrackedRowsError!
     return rows.toOwnedSlice(a);
 }
 fn hash(a: u.Allocator, bytes: []const u8) ![]const u8 {
+    // Keep the full SHA-256 reaction fingerprint for change detection.
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
     return a.dupe(u8, &std.fmt.bytesToHex(digest, .lower));
 }
 pub fn project(a: u.Allocator, j: Journal) ProjectError!void {
+    // Apply at most 50 pending reaction targets per pass so message ingestion can continue.
     const q = try j.db.prepare("SELECT conversation_id,target_guid FROM reaction_work WHERE attempt_ms<=? ORDER BY attempt_ms,rowid LIMIT 50");
     defer q.close();
     try q.bind(&.{.{ .int = u.now() }});
@@ -348,6 +351,8 @@ pub fn project(a: u.Allocator, j: Journal) ProjectError!void {
         const parent = try message(a, j, target.guid);
         if (parent == null) {
             try j.execute("UPDATE reaction_work SET attempt_ms=? WHERE conversation_id=? AND target_guid=?", &.{
+                // Retry unresolved reaction targets after 30 seconds to avoid repeatedly scanning
+                // missing messages.
                 .{ .int = u.now() + 30000 },
                 .{ .text = target.cid },
                 .{ .text = target.guid },

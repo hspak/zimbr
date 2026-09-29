@@ -20,7 +20,9 @@ const max_inline_items = @max(
 );
 pub const Prepared = struct {
     value: t.Message,
+    // One slot for attachments, previews, reactions, and parts, in MetadataSection order.
     sections: [4]?[]const []const u8,
+    // Keep a complete SHA-256 digest for each of the four independently replaceable sections.
     hashes: [4]?[32]u8,
     changed: bool,
 };
@@ -120,6 +122,7 @@ pub fn prepare(a: u.Allocator, j: Journal, value: t.Message, previous: ?t.Messag
         .hashes = @splat(null),
         .changed = false,
     };
+    // Track serialized sizes for the same four metadata sections before choosing inline counts.
     var inline_sizes: [4][max_inline_items]usize = undefined;
     inline for (comptime std.meta.tags(Section), 0..) |section, index| {
         const list: ?[]const Item(section) = switch (section) {
@@ -135,6 +138,8 @@ pub fn prepare(a: u.Allocator, j: Journal, value: t.Message, previous: ?t.Messag
                 const json = try u.json(a, item);
                 // Each item must fit an overflow page on its own. Adapters bound
                 // their strings; callers cannot create an unpageable record.
+                // Reserve 1 KiB for the page envelope and continuation token around each metadata
+                // item.
                 if (json.len > t.max_metadata_page - 1024) return error.MetadataItemTooLarge;
                 if (position < max_inline_items) inline_sizes[index][position] = json.len;
                 hash.update(json);
@@ -179,6 +184,7 @@ fn inlineMessage(value: t.Message, sizes: *const [4][max_inline_items]usize) !t.
     metadata.previews.complete = false;
     metadata.reactions.complete = false;
     metadata.parts.complete = false;
+    // Count serialized bytes in 256-byte batches instead of retaining the whole envelope.
     var buffer: [256]u8 = undefined;
     var counter = std.Io.Writer.Discarding.init(&buffer);
     try std.json.Stringify.value(.{

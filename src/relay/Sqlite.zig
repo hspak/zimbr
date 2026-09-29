@@ -6,12 +6,15 @@ const Sqlite = @This();
 handle: *c.sqlite3,
 cache: *Cache,
 
+// 2 MiB leaves room for decoded records while bounding SQLite value allocations.
 const max_value_bytes = 2 * 1024 * 1024;
+// 64 KiB accommodates schema/migration SQL without accepting unlimited statement text.
 const max_sql_bytes = 64 * 1024;
 
 // Fixed-size, connection-owned cache. Checked-out statements are removed so
 // nested uses of the same SQL always get independent cursors and bindings.
 const Cache = struct {
+    // 256 direct-mapped slots retain recurring queries with a fixed per-connection cost.
     slots: [256]?*c.sqlite3_stmt = @splat(null),
 };
 
@@ -56,12 +59,16 @@ fn openFlags(path: [:0]const u8, readonly: bool, threading: c_int) OpenError!Sql
     if (c.sqlite3_db_config(db, c.SQLITE_DBCONFIG_DEFENSIVE, @as(c_int, 1), @as(?*c_int, null)) != c.SQLITE_OK or
         c.sqlite3_db_config(db, c.SQLITE_DBCONFIG_TRUSTED_SCHEMA, @as(c_int, 0), @as(?*c_int, null)) != c.SQLITE_OK)
         return error.DatabaseUnavailable;
+    // Wait up to a second for short transactions, then let callers retry rather than stall.
     _ = c.sqlite3_busy_timeout(db, 1000);
     _ = c.sqlite3_limit(db, c.SQLITE_LIMIT_LENGTH, max_value_bytes);
     _ = c.sqlite3_limit(db, c.SQLITE_LIMIT_SQL_LENGTH, max_sql_bytes);
     _ = c.sqlite3_limit(db, c.SQLITE_LIMIT_ATTACHED, 0);
+    // 128 bindings covers application batches while bounding statement complexity.
     _ = c.sqlite3_limit(db, c.SQLITE_LIMIT_VARIABLE_NUMBER, 128);
+    // 100 expression levels allows the nested history queries but limits recursion.
     _ = c.sqlite3_limit(db, c.SQLITE_LIMIT_EXPR_DEPTH, 100);
+    // Sixteen trigger levels bounds recursive work beyond the application's shallow triggers.
     _ = c.sqlite3_limit(db, c.SQLITE_LIMIT_TRIGGER_DEPTH, 16);
     return .{ .handle = db.?, .cache = cache };
 }
@@ -83,6 +90,7 @@ pub fn prepare(self: Sqlite, sql: [:0]const u8) PrepareError!Statement {
     if (sql.len > max_sql_bytes or std.mem.indexOfScalar(u8, sql, 0) != null)
         return error.SchemaUnsupported;
     // Schema/PRAGMA preparation can itself have side effects. Cache only DML.
+    // Only cache short recurring queries so large SQL cannot occupy every retained slot.
     const reusable = sql.len <= 4096 and (std.mem.startsWith(u8, sql, "SELECT ") or
         std.mem.startsWith(u8, sql, "INSERT ") or std.mem.startsWith(u8, sql, "UPDATE ") or
         std.mem.startsWith(u8, sql, "DELETE ") or std.mem.startsWith(u8, sql, "WITH "));

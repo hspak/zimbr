@@ -64,15 +64,18 @@ def launch_agent(app, data, home, profile=PROFILES['dev']):
 
 def wait_exit(pid):
     if not pid: return
+    # Allow 15 seconds for the old process to exit before replacing its files.
     deadline = time.monotonic()+15
     while time.monotonic() < deadline:
         try: os.kill(pid, 0)
         except ProcessLookupError: return
+        # Poll exit at 100 ms intervals to avoid a busy loop during shutdown.
         time.sleep(.1)
     raise RuntimeError('Previous relay process has not exited; installation stopped')
 
 
 def wait_listener(service, cfg):
+    # Give launchd 30 seconds to bring up the configured listener before declaring failure.
     deadline = time.monotonic()+30
     while time.monotonic() < deadline:
         pid = service_pid(service)
@@ -81,6 +84,8 @@ def wait_listener(service, cfg):
             host = cfg['listen_address']
             if ':' in host: host = '['+host+']'
             if f'{host}:{cfg["port"]} (LISTEN)' in result.stdout: return pid
+        # Poll listener readiness five times per second without repeatedly running lsof at full
+        # speed.
         time.sleep(.2)
     subprocess.run(['launchctl', 'bootout', service], capture_output=True)
     raise RuntimeError('Configured TLS listener did not start; relay left stopped for repair')

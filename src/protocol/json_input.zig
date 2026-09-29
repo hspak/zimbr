@@ -1,6 +1,7 @@
 //! Allocation-free bounds before the JSON parser sees untrusted input. This
 //! checks structure, not the JSON grammar; the typed parser still validates it.
 const std = @import("std");
+// 32 levels leaves room for nested metadata while bounding the parser's stack.
 pub const max_depth = 32;
 
 /// Decode T once while retaining its exact wire representation for persistence.

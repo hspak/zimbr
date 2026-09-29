@@ -54,6 +54,7 @@ pub fn deinit(self: *Files) void {
 pub fn recover(self: Files, j: Journal) RecoverError!void {
     const scan = c.zr_media_scan(self.directory) orelse return error.UploadStorageUnavailable;
     defer c.zr_media_scan_close(scan);
+    // A filesystem basename needs at most 255 bytes plus its C terminator.
     var name: [256]u8 = undefined;
     while (true) {
         const count = c.zr_media_scan_next(scan, &name, name.len);
@@ -95,6 +96,7 @@ fn beginTransfer(self: Files, a: u.Allocator, lease: uploads.Lease, replace: boo
         lease.token,
         if (u.eq(lease.file.name, try std.fmt.allocPrint(a, ".tmp-{s}", .{lease.token}))) "-partial" else "",
     }, 0);
+    // Upload verification retains all 32 bytes of SHA-256.
     var digest: [32]u8 = undefined;
     _ = std.fmt.hexToBytes(&digest, lease.file.sha256) catch return error.InvalidRequest;
     if (replace and c.zr_upload_remove(self.directory, id) != 0) return error.UploadStorageUnavailable;
@@ -147,6 +149,7 @@ pub const Transfer = struct {
     name: [:0]const u8,
     temporary: [:0]const u8,
     expected: u64,
+    // Store the complete SHA-256 result for comparison with reservation metadata.
     digest: [32]u8,
     received: u64 = 0,
     hash: std.crypto.hash.sha2.Sha256 = .init(.{}),
@@ -225,6 +228,7 @@ test "upload storage verifies chunked original bytes and retains only published 
     var files = try Files.init(a, std.mem.span(data));
     defer files.deinit();
     const bytes = "original\x00binary\xffcontents";
+    // Upload verification retains all 32 bytes of SHA-256.
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
     const lease: uploads.Lease = .{
@@ -291,6 +295,7 @@ test "upload storage rejects wrong hashes and cleans sealed files without ledger
         defer transfer.deinit();
         try std.testing.expectError(error.UploadHashMismatch, transfer.seal());
     }
+    // Upload verification retains all 32 bytes of SHA-256.
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash("", &digest, .{});
     lease.file.sha256 = try a.dupe(u8, &std.fmt.bytesToHex(&digest, .lower));

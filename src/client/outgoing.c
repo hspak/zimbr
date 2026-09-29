@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 static int valid_id(const char *id) {
+    // An unpadded Base64url UUID occupies exactly 22 characters.
     if (strlen(id)!=22) return 0;
     for (const char *p=id;*p;p++)
         if (!((*p>='a' && *p<='z') || (*p>='A' && *p<='Z') ||

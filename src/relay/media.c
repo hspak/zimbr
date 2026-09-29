@@ -55,6 +55,7 @@ int zr_media_fingerprint(int fd, ZrMediaFingerprint *out) {
     struct stat st;
     if (fstat(fd, &st)) return -1;
     if (!S_ISREG(st.st_mode) || st.st_uid != getuid() || st.st_nlink != 1 || st.st_size < 0) return -3;
+    // Match Assets.max_source before handing an original to the decoder.
     if ((uint64_t)st.st_size > 100 * 1024 * 1024) return -4;
     memset(out, 0, sizeof(*out));
     out->device = st.st_dev; out->inode = st.st_ino; out->bytes = (uint64_t)st.st_size;
@@ -158,6 +159,7 @@ int zr_media_convert(const char *helper, int source, int output, const char *var
         close(pipefd[0]); close(pipefd[1]); return -1;
     }
     // High duplicates avoid collisions with the fixed helper descriptors.
+    // Keep duplicated descriptors above the helper's reserved stdin/stdout/metadata slots.
     int input = fcntl(source, F_DUPFD_CLOEXEC, 10), result = fcntl(output, F_DUPFD_CLOEXEC, 10);
     int meta = fcntl(pipefd[1], F_DUPFD_CLOEXEC, 10);
     close(pipefd[1]);
@@ -206,11 +208,13 @@ int zr_media_convert(const char *helper, int source, int output, const char *var
         }
 #ifdef __APPLE__
         struct proc_taskinfo task;
+        // Kill decoders above 512 MiB RSS so a compressed image cannot exhaust the relay host.
         if (proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &task, sizeof(task)) == sizeof(task) && task.pti_resident_size > 512ULL * 1024 * 1024) {
             timeout = 2; break;
         }
 #endif
         if (monotonic_ms() >= deadline) { timeout = 1; break; }
+        // Check child completion and resource limits every 10 ms without busy waiting.
         poll(NULL, 0, 10);
     }
     if (timeout) { kill(pid, SIGKILL); while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {} close(pipefd[0]); return timeout == 2 ? -4 : -6; }
@@ -219,8 +223,10 @@ int zr_media_convert(const char *helper, int source, int output, const char *var
     }
     // Nonblocking even if another process retained a metadata writer.
     ssize_t n = read(pipefd[0], info, sizeof(*info)); close(pipefd[0]);
+    // 128 suits avatars, 1024 inline photos, and 2560 the viewer; mirror image-helper.m.
     unsigned edge = !strcmp(variant, "avatar") ? 128 : !strcmp(variant, "inline_image") ? 1024 : !strcmp(variant, "viewer") ? 2560 : 0;
     if (n != sizeof(*info) || !info->width || !info->height || info->width > edge || info->height > edge ||
+        // Enforce the client's 32 MiB RGBA and 8 MiB encoded limits before publishing derivatives.
         (uint64_t)info->width * info->height * 4 > 32 * 1024 * 1024 || !info->bytes || info->bytes > 8 * 1024 * 1024 || info->png > 1 || info->still > 1) return -5;
     if (zr_media_fingerprint(source, &after) || !zr_media_same(&before, &after)) return -7;
     struct stat encoded;

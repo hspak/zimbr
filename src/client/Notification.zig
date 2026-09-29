@@ -38,10 +38,12 @@ pub fn create(store: Store, message: t.Message) CreateError!*Notification {
         )).value;
         title = directory.conversation(ar, chat);
     }
+    // A one-line, 256-byte title fits desktop notification headers without unbounded shaping.
     const summary = try ar.dupeZ(
         u8,
         display.prefix(if (title.len > 0) title else "New message", 256, 1),
     );
+    // Limit the alert body to 1 KiB/four lines; opening the conversation reveals the full message.
     const body = try ar.dupeZ(u8, display.prefix(display.summary(ar, message), 1024, 4));
     const chat = try ar.dupeZ(u8, try store.threadKey(ar, message.conversation_id));
     const result = try a.create(Notification);

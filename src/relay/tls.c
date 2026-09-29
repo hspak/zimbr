@@ -1,5 +1,6 @@
 #define _DARWIN_C_SOURCE
 #define _DEFAULT_SOURCE
+// Expose the POSIX.1-2008 file and clock APIs used by credential handling.
 #define _POSIX_C_SOURCE 200809L
 #include "tls.h"
 #include "platform.h"
@@ -17,6 +18,7 @@
 #if OPENSSL_VERSION_MAJOR != 3 || OPENSSL_VERSION_MINOR != 5
 #error "The relay requires OpenSSL 3.5 LTS (use -Dopenssl-prefix for the target)."
 #endif
+// Match Tls.zig's 256-device cap; each allowlist entry is a full 32-byte SHA-256 digest.
 struct ZrTlsContext { SSL_CTX *ssl; unsigned char fingerprints[256][32]; size_t count; X509 *ca; };
 struct ZrTls { SSL *ssl; X509 *peer; int fd; };
 
@@ -83,6 +85,7 @@ static int config_matches(int dir, const char *leaf, const char *expected, size_
     int fd = private_open_at(dir, leaf);
     if (fd == -2) return expected ? -2 : 0;
     if (fd < 0) return -1;
+    // Match the 64 KiB configuration limit used by the Zig settings API.
     char current[65536];
     int n = private_read(fd, current, sizeof(current));
     if (n < 0) return -1;
@@ -96,8 +99,10 @@ int zr_tls_replace_config(const char *path, const char *expected, size_t expecte
     if (dir < 0) return -1;
     int result = config_matches(dir, leaf, expected, expected_length);
     if (result) { close(dir); return result; }
+    // Use 128 bits of randomness for collision-resistant atomic-replacement filenames.
     unsigned char random[16];
     if (zr_random(random, sizeof(random))) { close(dir); return -1; }
+    // Fit the fixed prefix, 32 random hex characters, and terminating NUL.
     char temporary[64] = ".relay-settings-";
     for (size_t i = 0; i < sizeof(random); ++i)
         snprintf(temporary + sizeof(".relay-settings-") - 1 + i * 2, 3, "%02x", random[i]);
@@ -126,9 +131,11 @@ done:
     return result;
 }
 static BIO *private_bio(const char *path, const char *kind) {
+    // Bound PEM reads to the same 64 KiB private-file budget as configuration.
     char bytes[65536];
     int n = zr_tls_read_file(path, bytes, sizeof(bytes));
     if (n <= 0) return NULL;
+    // 80 bytes leaves room for BEGIN/END wrappers around the supported PEM labels.
     char begin[80], end[80];
     snprintf(begin, sizeof(begin), "-----BEGIN %s-----", kind);
     snprintf(end, sizeof(end), "-----END %s-----", kind);
@@ -161,6 +168,7 @@ static int leaf_purpose(X509 *cert, int nid) {
     return ok;
 }
 static int enrolled(ZrTlsContext *ctx, X509 *cert) {
+    // Certificate fingerprints retain the complete 32-byte SHA-256 digest.
     unsigned char digest[32]; unsigned int length = 0;
     if (!X509_digest(cert, EVP_sha256(), digest, &length) || length != 32) return 0;
     for (size_t i = 0; i < ctx->count; ++i) if (CRYPTO_memcmp(digest, ctx->fingerprints[i], 32) == 0) return 1;
@@ -180,6 +188,7 @@ static int verify_peer(int verified, X509_STORE_CTX *store) {
 static int alpn(SSL *ssl, const unsigned char **out, unsigned char *outlen,
                 const unsigned char *in, unsigned int len, void *arg) {
     (void)ssl; (void)arg;
+    // ALPN encodes h2 as a two-byte protocol name prefixed by its one-byte length.
     static const unsigned char http[] = "\x02h2";
     if (SSL_select_next_proto((unsigned char **)out, outlen, http, sizeof(http)-1, in, len) != OPENSSL_NPN_NEGOTIATED)
         return SSL_TLSEXT_ERR_ALERT_FATAL;
@@ -249,6 +258,7 @@ static int64_t expiry(X509 *cert) {
     return (int64_t)time(NULL) + (int64_t)days * 86400 + seconds;
 }
 int zr_tls_info(ZrTlsContext *ctx, char *fingerprint, size_t capacity, int64_t *expires, int64_t *ca_expires) {
+    // Certificate fingerprints retain the complete 32-byte SHA-256 digest.
     unsigned char digest[32]; unsigned int length;
     X509 *cert = SSL_CTX_get0_certificate(ctx->ssl);
     if (capacity < 65 || !X509_digest(cert, EVP_sha256(), digest, &length) || length != 32) return -1;
@@ -277,6 +287,7 @@ ZrTls *zr_tls_accept(ZrTlsContext *ctx, int fd) {
     if (!tls) return NULL;
     tls->fd = fd; tls->ssl = SSL_new(ctx->ssl);
     if (!tls->ssl || !SSL_set_fd(tls->ssl, fd)) goto fail;
+    // Five seconds bounds unauthenticated handshake socket and CPU occupancy.
     int64_t deadline = zr_monotonic_ms() + 5000;
     for (;;) {
         ERR_clear_error(); int rc = SSL_accept(tls->ssl);
@@ -297,12 +308,14 @@ int zr_tls_valid(ZrTls *tls) {
     return valid_time(tls->peer) && valid_time(ctx->ca) && valid_time(SSL_get_certificate(tls->ssl));
 }
 int zr_tls_peer_fingerprint(ZrTls *tls, char out[65]) {
+    // Certificate fingerprints retain the complete 32-byte SHA-256 digest.
     unsigned char digest[32]; unsigned int length = 0;
     if (!zr_tls_valid(tls) || !X509_digest(tls->peer, EVP_sha256(), digest, &length) || length != 32) return -1;
     for (size_t i = 0; i < 32; ++i) snprintf(out + i*2, 3, "%02x", digest[i]);
     return 0;
 }
 int zr_tls_write(ZrTls *tls, const void *bytes, size_t length) {
+    // Give ordinary writes ten seconds before reclaiming a stalled peer.
     return zr_tls_write_deadline(tls, bytes, length, zr_monotonic_ms() + 10000);
 }
 int zr_tls_write_deadline(ZrTls *tls, const void *bytes, size_t length, int64_t deadline) {
@@ -333,6 +346,7 @@ int zr_tls_poll(ZrTls *tls, int timeout_ms) {
 }
 void zr_tls_free(ZrTls *tls) {
     if (!tls) return;
+    // Allow a brief close-notify exchange without delaying connection teardown.
     int64_t deadline = zr_monotonic_ms() + 200;
     for (;;) {
         ERR_clear_error(); int rc = SSL_shutdown(tls->ssl);

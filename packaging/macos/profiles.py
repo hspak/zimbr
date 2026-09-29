@@ -30,5 +30,7 @@ class Profile:
             raise ValueError(f'Relay binary does not match the {self.name} profile; rebuild with -Dprofile={self.name}')
 
 
+# Release uses port 8731; dev uses the adjacent 8732 so both profiles can run together.
+# Distinct bundle IDs and directories also keep macOS permissions and runtime state separate.
 PROFILES = {name: Profile(**fields) for name, fields in
             json.loads(Path(__file__).with_name('profiles.json').read_text()).items()}

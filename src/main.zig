@@ -50,6 +50,7 @@ fn run(init: std.process.Init) !void {
     var source: []const u8 = try std.fmt.allocPrint(a, "{s}/Library/Messages/chat.db", .{home});
     var source_explicit = false;
     var config_path: ?[]const u8 = null;
+    // Match Core's replay retention default while allowing the CLI to override it.
     var event_limit: i64 = 100000;
     var check_automation = false;
     var request_contacts = false;

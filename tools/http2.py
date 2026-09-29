@@ -93,6 +93,7 @@ class Response:
 
 
 class Connection:
+    # Use HTTPS's default port and a 20-second bound for administrative network operations.
     def __init__(self, host, port=443, *, context, timeout=20):
         self.host, self.port = host, port
         self.context, self.timeout = context, timeout
@@ -127,6 +128,7 @@ class Connection:
             self.sock.sendall(data)
 
     def _receive(self):
+        # Receive in 64 KiB batches to amortize TLS reads without retaining an unlimited chunk.
         data = self.sock.recv(65536)
         if not data:
             for response in self.responses.values():

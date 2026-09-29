@@ -19,6 +19,7 @@ const Signal = @import("../Signal.zig");
 const adapter_api = if (options.fake) fake_adapter else macos_adapter;
 const fake = options.fake;
 const observation_window_ms = sends.observation_window_ms;
+// Import 1,000 recent messages first so initial availability does not wait for all history.
 const initial_import_limit = 1000;
 const Core = @This();
 
@@ -43,6 +44,7 @@ last_scan_ms: i64 = 0,
 stop: std.atomic.Value(bool) = .init(false),
 connections: std.atomic.Value(usize) = .init(0),
 streams: std.atomic.Value(usize) = .init(0),
+// Retain 100,000 events for reconnect replay while bounding the journal's growth.
 event_limit: i64 = 100000,
 changed: Signal = .{},
 send_ready: Signal = .{},
@@ -135,6 +137,7 @@ pub fn ingestLoop(self: *Core) void {
         }
         if (u.now() >= maintenance) {
             self.journal.prune(self.event_limit) catch {};
+            // Prune once a minute to amortize journal maintenance.
             maintenance = u.now() + 60000;
         }
         const pending = self.read_ready and self.ingest_pending;
@@ -143,6 +146,7 @@ pub fn ingestLoop(self: *Core) void {
             self.cleanupUploads(arena.allocator()) catch |err| {
                 log.warn("Upload cleanup delayed: {s}", .{@errorName(err)});
             };
+            // Reclaim expired uploads promptly without querying for cleanup on every scan.
             upload_maintenance = u.now() + 1000;
         }
         arena.deinit();
@@ -150,12 +154,15 @@ pub fn ingestLoop(self: *Core) void {
         // Drain bounded backfill/live pages promptly. Notifications may precede
         // SQLite's commit, so take one short settling pass, then keep the full
         // periodic scan as recovery for missed/coalesced filesystem events.
+        // Drain pending work promptly, settle bursts for 50 ms, and poll idle watches once a
+        // second.
         const changed = u.c.zr_watch_wait(watch, if (pending) 1 else if (settle) 50 else 1000) != 0;
         settle = changed;
     }
 }
 fn cleanupUploads(self: *Core, a: u.Allocator) !void {
     const files = self.upload_files orelse return;
+    // Delete at most 32 uploads per maintenance pass to limit lock hold time.
     var ids: [32][]const u8 = undefined;
     var count: usize = 0;
     {
@@ -289,6 +296,7 @@ pub fn ingest(self: *Core, a: u.Allocator) IngestError!void {
         try j.setPosition("backfill", backfill);
     }
     // Retry unresolved source rows independently of insertion progress, fairly.
+    // Revisit 50 pending messages per scan so decoding retries do not monopolize ingestion.
     var pending_rows: [50]i64 = undefined;
     const pending = try j.db.prepare("SELECT source_row FROM pending_source ORDER BY attempt_ms,source_row LIMIT ?");
     defer pending.close();
@@ -428,6 +436,7 @@ fn importRow(
     // Conversation IDs/maps alone need to live for the batch's duration.
     // Reuse pages across rows, but do not retain an unusually large decoded
     // attachment/archive for the rest of the batch.
+    // Keep 256 KiB of reusable scratch space; release unusually large record allocations.
     defer _ = batch.scratch.reset(.{ .retain_with_limit = 256 * 1024 });
     const a = batch.scratch.allocator();
     const source = batch.source;
@@ -543,6 +552,7 @@ const Work = struct { v: t.SendRequest, route: Journal.Route, part: ?usize };
 fn prepareSend(self: *Core, a: u.Allocator) !?Work {
     self.lock();
     defer self.unlock();
+    // Refuse dispatch against observations older than five seconds to avoid stale routing.
     if (!self.read_ready or !self.automation_ready or u.now() - self.last_scan_ms > 5000) return null;
     const j = self.journal;
     const s = try j.db.prepare("SELECT record,epoch FROM send_requests WHERE state='queued' ORDER BY accepted_ms,id LIMIT 1");
@@ -812,6 +822,8 @@ fn reconcile(self: *Core, a: u.Allocator, batch: *ImportBatch, complete: bool) !
         // later second candidate withdraws the hint without confirming the send.
         const q = try j.db.prepare("SELECT m.id,m.status FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE m.source_row>? AND m.direction='outgoing' AND c.service='imessage' AND m.text=? AND m.date_ns BETWEEN ? AND ? AND ((?='chat' AND c.route=?) OR (?='direct' AND (SELECT count(*) FROM participants WHERE conversation_id=c.id)=1 AND EXISTS(SELECT 1 FROM participants WHERE conversation_id=c.id AND address=?))) AND NOT EXISTS(SELECT 1 FROM send_requests WHERE message_id=m.id) AND NOT EXISTS(SELECT 1 FROM send_parts WHERE message_id=m.id) LIMIT 2");
         defer q.close();
+        // Allow two seconds of timestamp skew; convert Unix milliseconds to Apple's 2001 epoch
+        // nanoseconds.
         const start = (p.time - 2000 - 978307200000) * 1000000;
         const end = (p.time + observation_window_ms - 978307200000) * 1000000;
         try q.bind(&.{

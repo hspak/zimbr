@@ -143,6 +143,7 @@ pub fn setProgress(self: Journal, key: []const u8, value: []const u8) Db.QueryEr
     );
 }
 pub fn setPosition(self: Journal, key: []const u8, n: i64) QueryError!void {
+    // A signed 64-bit decimal, including its sign, fits in 20 bytes.
     var buffer: [20]u8 = undefined;
     const value = std.fmt.bufPrint(&buffer, "{d}", .{n}) catch unreachable;
     try self.setProgress(key, value);
@@ -236,6 +237,7 @@ pub fn sourceMessage(
     value: t.Message,
     origin: []const u8,
 ) SourceMessageError!void {
+    // Hash serialized records in 4 KiB batches without allocating the full JSON fingerprint input.
     var buffer: [4096]u8 = undefined;
     var hash: std.Io.Writer.Hashing(std.crypto.hash.sha2.Sha256) = .init(&buffer);
     try std.json.Stringify.value(.{
@@ -253,6 +255,8 @@ pub fn sourceMessage(
     }
     try self.message(a, source, row, date, value, origin);
     try self.execute("INSERT OR REPLACE INTO source_message_cache VALUES(?,?,?)", &.{
+        // 4,096 direct-mapped slots bound the source fingerprint cache while retaining recent
+        // records.
         .{ .int = @intCast(std.hash.Wyhash.hash(0, source) % 4096) },
         .{ .text = source },
         .{ .blob = &fingerprint },
@@ -505,6 +509,7 @@ pub fn prune(self: Journal, count_limit: i64) Db.QueryError!void {
     errdefer self.rollback();
     const s = try self.db.prepare("SELECT coalesce(max(sequence),0) FROM events WHERE created_ms<? OR sequence<=(SELECT sequence FROM relay_meta)-?");
     defer s.close();
+    // Keep at most a week of replay events in addition to the configured count bound.
     try s.bind(&.{ .{ .int = u.now() - 7 * 24 * 60 * 60 * 1000 }, .{ .int = count_limit } });
     _ = try s.step();
     const cut = s.int(0);
@@ -576,6 +581,7 @@ pub fn pageContent(
     var items: [t.max_page]Json = undefined;
     var count: usize = 0;
     var next_key: ?[]const u8 = null;
+    // Reserve a 20-digit sort key, separator, and compact message ID for pagination.
     var cursor_buffer: [20 + 1 + t.id_length]u8 = undefined;
     var last: []const u8 = "";
     var byte_count: usize = 0;
@@ -636,6 +642,7 @@ pub fn events(self: Journal, a: u.Allocator, after: i64) EventsError![]const Fra
     return self.eventsWithIdentities(a, after, false);
 }
 pub fn eventsWithIdentities(self: Journal, a: u.Allocator, after: i64, identities: bool) EventsError![]const Frame {
+    // Batch up to 100 events per replay query to bound work while holding the journal lock.
     const s = try self.db.prepare("SELECT sequence,type,record,origin FROM events WHERE sequence>? ORDER BY sequence LIMIT 100");
     defer s.close();
     try s.bind(&.{.{ .int = after }});
@@ -650,6 +657,7 @@ pub fn eventsWithIdentities(self: Journal, a: u.Allocator, after: i64, identitie
             try items.append(a, .{ .sequence = seq, .frame = "" });
             continue;
         }
+        // Cap event batches near 512 KiB while always allowing one record to make progress.
         if (byte_count + s.bytes(2).len > 512 * 1024 and items.items.len > 0) break;
         byte_count += s.bytes(2).len;
         const cur = try t.cursor(a, e, seq);
@@ -818,6 +826,7 @@ pub fn backfillIdentities(self: Journal, a: u.Allocator) BackfillIdentitiesError
     const key = "identity_backfill_v1";
     const after = (try self.progress(a, key)) orelse "";
     if (u.eq(after, "complete")) return;
+    // Backfill 100 records at a time so enrichment migration yields between batches.
     const s = try self.db.prepare("SELECT id,record FROM messages WHERE id>? ORDER BY id LIMIT 100");
     defer s.close();
     try s.bind(&.{.{ .text = after }});

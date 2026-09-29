@@ -77,11 +77,14 @@ def bootstrap(args):
         subprocess.run([str(relay), 'check-config', '--config', str(config_path)], check=True)
         service = relay.parent.parent/'Resources'/(profile.command + '-service')
         subprocess.run([str(service), 'start'], check=True, stdout=subprocess.DEVNULL)
+        # Give the started relay up to 30 seconds to become reachable during setup.
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             pid = pid_of_service(profile)
             if pid and listener_ready(config, pid):
                 break
+            # Check startup five times per second to balance readiness latency and process-spawn
+            # overhead.
             time.sleep(.2)
         else:
             raise RuntimeError('Relay listener did not start. Check macOS permissions and the relay logs, then rerun this command.')

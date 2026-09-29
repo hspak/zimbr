@@ -21,6 +21,7 @@ pub fn automation(a: u.Allocator, mode: []const u8, route: []const u8, text: []c
         try a.dupeZ(u8, mode),
         try a.dupeZ(u8, route),
         try a.dupeZ(u8, text),
+        // Allow 15 seconds for Messages automation before treating the result as uncertain.
         15000,
     );
     switch (rc) {

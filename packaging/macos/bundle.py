@@ -9,6 +9,7 @@ from signing import LABEL, sign
 from profiles import PROFILES
 
 ROOT = Path(__file__).resolve().parents[2]
+# Package for the macOS 27 baseline used by the native relay and decoder fixtures.
 MINIMUM_MACOS = '27.0'
 
 

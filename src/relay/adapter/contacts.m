@@ -61,6 +61,8 @@ int zr_contacts_raw_status(void) {
 int zr_contacts_status(void) {
     if (!atomic_load(&monitorAuthorization)) return zr_contacts_raw_status();
     // A stalled checker cannot extend permission to cached photos indefinitely.
+    // Treat permission knowledge older than five seconds as stale so revocation takes effect
+    // promptly.
     if (monotonicMilliseconds() - atomic_load(&authorizationChecked) > 5000) return -1;
     return atomic_load(&observedAuthorization);
 }
@@ -89,6 +91,7 @@ void zr_contacts_refresh_status(void) {
     posix_spawn_file_actions_destroy(&actions);
     posix_spawnattr_destroy(&attributes);
     if (error) goto complete;
+    // Bound the permission subprocess to two seconds to avoid blocking the relay on Contacts.
     uint64_t deadline = monotonicMilliseconds() + 2000;
     for (;;) {
         int result = 0;
@@ -107,6 +110,7 @@ void zr_contacts_refresh_status(void) {
             while (waitpid(child, &result, 0) < 0 && errno == EINTR) {}
             break;
         }
+        // Ten-millisecond yields keep child supervision responsive without spinning.
         usleep(10000);
     }
 complete:
@@ -130,6 +134,7 @@ uint64_t zr_contacts_generation(void) {
 // Network accept and Contacts enumeration run on separate workers.
 void zr_contacts_pump_main(void) {
     @autoreleasepool {
+        // Pump authorization callbacks in quarter-second slices so shutdown remains responsive.
         SInt32 result = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.25, true);
         if (result == kCFRunLoopRunFinished) usleep(250000);
     }
@@ -146,6 +151,7 @@ int zr_contacts_request(const char *bundle_id) {
             dispatch_semaphore_signal(done);
         }];
         // Pump the local run loop for interactive setup. A timeout is not denial.
+        // Allow a minute for the user to respond to the Contacts permission prompt.
         NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:60];
         while (dispatch_semaphore_wait(done, DISPATCH_TIME_NOW) != 0) {
             if ([deadline timeIntervalSinceNow] <= 0) return -1;
@@ -227,6 +233,7 @@ static int readContacts(char mode, const char *value, size_t maximum, char **byt
     int request[2], response[2];
     if (pipe(request)) return -1;
     if (pipe(response)) { close(request[0]); close(request[1]); return -1; }
+    // Fit the mode byte, bounded identifier, and terminator in one small IPC request.
     char input[4096]; input[0] = mode;
     memcpy(input + 1, value, valueLength);
     int inputCopy = fcntl(request[0], F_DUPFD_CLOEXEC, 10);
@@ -259,16 +266,20 @@ static int readContacts(char mode, const char *value, size_t maximum, char **byt
     if (error) { close(response[0]); return -1; }
     int result = -1, childStatus = 0;
     bool reaped = false, eof = false;
+    // A 15-second wall deadline isolates a hung Contacts service from the relay worker.
     uint64_t deadline = monotonicMilliseconds() + 15000;
     size_t capacity = 0, used = 0;
     char *buffer = NULL;
     for (;;) {
+        // Read contact output in 16 KiB batches to amortize IPC without large stack buffers.
         char chunk[16384];
         ssize_t count = read(response[0], chunk, sizeof(chunk));
         if (count > 0) {
             if ((size_t)count > maximum - used) { result = -4; break; }
             size_t needed = used + (size_t)count + 1;
             if (needed > capacity) {
+                // Start at 64 KiB and double to amortize allocation while collecting a bounded
+                // snapshot.
                 size_t next = capacity ? capacity * 2 : 65536;
                 if (next < needed) next = needed;
                 if (next > maximum + 1) next = maximum + 1;
@@ -294,11 +305,14 @@ static int readContacts(char mode, const char *value, size_t maximum, char **byt
         }
         if (!reaped) {
             struct proc_taskinfo task;
+            // 512 MiB RSS caps the native Contacts subprocess even if the framework allocates
+            // excessively.
             if (proc_pidinfo(child, PROC_PIDTASKINFO, 0, &task, sizeof(task)) == sizeof(task) && task.pti_resident_size > 512ULL * 1024 * 1024) { result = -4; break; }
         }
         if (monotonicMilliseconds() >= deadline) { result = -6; break; }
         if (count <= 0) {
             struct pollfd waiting = {.fd = response[0], .events = POLLIN};
+            // Ten-millisecond yields keep child supervision responsive without spinning.
             if (eof) usleep(10000); else poll(&waiting, 1, 10);
         }
     }
@@ -346,6 +360,8 @@ static char *snapshot(const char *region) {
                 @"phones": phones, @"emails": emails, @"has_image": @(contact.imageDataAvailable) };
             NSData *encoded = [NSJSONSerialization dataWithJSONObject:item options:0 error:nil];
             bytes += encoded.length;
+            // Bound snapshots by both 32 MiB and 100,000 contacts so tiny records cannot evade the
+            // cap.
             if (!encoded || bytes > 32 * 1024 * 1024 || contacts.count >= 100000) {
                 bounded = NO; *stop = YES; return;
             }
@@ -414,7 +430,9 @@ int zr_contacts_thumbnail(const char *identifier, uint64_t expected_generation, 
 // request. Refuse ordinary invocation without the two dedicated pipe handles.
 int zr_contacts_reader(void) {
     struct stat input, output;
+    // Descriptors 3/4 are the dedicated request/response pipes; 105 denotes malformed IPC.
     if (fstat(3, &input) || fstat(4, &output) || !S_ISFIFO(input.st_mode) || !S_ISFIFO(output.st_mode)) return 105;
+    // Match the parent IPC request capacity, reserving one byte for NUL.
     char request[4096]; size_t used = 0;
     for (;;) {
         if (used == sizeof(request) - 1) return 105;

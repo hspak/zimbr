@@ -55,6 +55,7 @@ pub const GuidError = Db.QueryError || u.Allocator.Error;
 pub const ChatError = Db.QueryError || u.Allocator.Error || error{InvalidTimestamp};
 pub const ChatRowsError = Db.QueryError;
 pub const RowsForError = Db.QueryError;
+// Read 100 row IDs at a time to amortize SQLite work without monopolizing ingestion.
 pub const row_batch_size = 100;
 const row_limit = std.fmt.comptimePrint(" LIMIT {d}", .{row_batch_size});
 pub const MessageError = Db.QueryError || u.Allocator.Error || error{
@@ -68,6 +69,7 @@ pub const ValidateRouteError = Db.QueryError || error{UnsupportedTarget};
 pub fn open(a: u.Allocator, path: [:0]const u8) OpenError!MessagesDb {
     const db = try Db.open(path, true);
     errdefer db.close();
+    // Fit the native database identity (device, inode, and volume) without a heap allocation.
     var buf: [128]u8 = undefined;
     const n = u.c.zr_file_identity(path, &buf, buf.len);
     if (n < 0) return error.DatabaseUnavailable;
@@ -132,10 +134,12 @@ pub fn guid(self: MessagesDb, a: u.Allocator, row: i64) GuidError!?[]const u8 {
     return if (try s.step()) try s.text(a, 0) else null;
 }
 pub fn chat(self: MessagesDb, a: u.Allocator, row: i64, complete: bool) ChatError!?SourceConversation {
+    // Cap conversation titles at 1,024 characters before copying source database text.
     const s = try self.db.prepare("SELECT guid," ++ effective_service ++ ",substr(coalesce(display_name,''),1,1024),(SELECT max(m.date) FROM chat_message_join j JOIN message m ON m.ROWID=j.message_id WHERE j.chat_id=c.ROWID) FROM chat c WHERE ROWID=?");
     defer s.close();
     try s.bind(&.{.{ .int = row }});
     if (!try s.step()) return null;
+    // Allow email-length addresses and at most 256 participants per source conversation.
     const p = try self.db.prepare("SELECT DISTINCT substr(h.id,1,254) FROM chat_handle_join j JOIN handle h ON h.ROWID=j.handle_id WHERE j.chat_id=? ORDER BY h.id LIMIT 256");
     defer p.close();
     try p.bind(&.{.{ .int = row }});
@@ -165,6 +169,7 @@ pub fn chat(self: MessagesDb, a: u.Allocator, row: i64, complete: bool) ChatErro
 // reaction, system event, or the order in which history happened to be imported.
 const effective_service = "CASE WHEN c.guid LIKE 'any;%' THEN coalesce((SELECT m.service FROM chat_message_join j JOIN message m ON m.ROWID=j.message_id WHERE j.chat_id=c.ROWID AND coalesce(m.associated_message_type,0)=0 AND coalesce(m.item_type,0)=0 AND coalesce(m.is_system_message,0)=0 ORDER BY m.date DESC,m.ROWID DESC LIMIT 1),c.service_name) ELSE c.service_name END";
 
+// Messages style 45 identifies direct chats; LIMIT 2 detects ambiguous self-thread matches.
 fn selfThread(self: MessagesDb, row: i64) !?i64 {
     if (!self.features.self_chat_metadata) return null;
     // Only reciprocal local addresses in single-participant chats on the same
@@ -285,6 +290,8 @@ test "row scans honor caller capacity including empty buffers" {
     }, try source.rowsFor(&buffer, .live, 0, 0));
 }
 
+// Column bounds preserve email-length senders, max_body+1 text for oversize detection,
+// and max_decode attributed archives; column indices below follow this SELECT order.
 const message_sql =
     "SELECT m.guid,m.date,substr(coalesce(h.id,''),1,254),m.is_from_me,m.service,substr(CAST(m.text AS BLOB),1,65537),CASE WHEN length(CAST(m.attributedBody AS BLOB))<=1048576 THEN m.attributedBody END,length(CAST(m.attributedBody AS BLOB)),m.is_delivered,m.date_delivered,m.error,m.is_sent,m.is_finished,m.associated_message_type,m.item_type,m.is_system_message,m.balloon_bundle_id,(SELECT min(chat_id) FROM chat_message_join WHERE message_id=m.ROWID) FROM message m LEFT JOIN handle h ON h.ROWID=m.handle_id";
 pub fn message(self: MessagesDb, a: u.Allocator, row: i64) MessageError!?SourceMessage {
@@ -316,6 +323,8 @@ pub fn message(self: MessagesDb, a: u.Allocator, row: i64) MessageError!?SourceM
     var attachments: std.ArrayList(t.Attachment) = .empty;
     var attachment_sources: std.ArrayList(AttachmentSource) = .empty;
     var metadata_oversized = false;
+    // Read one beyond the 1,024-attachment/GUID and 4,096-path caps to detect truncation;
+    // 255-character names and 128-character MIME/UTI labels bound descriptive metadata.
     const attachment_query = try std.fmt.allocPrintSentinel(a, "SELECT substr(CAST(a.guid AS BLOB),1,1025),substr(coalesce(a.transfer_name,'Attachment'),1,255),substr(coalesce(a.mime_type,''),1,128),a.total_bytes,{s},{s},{s} FROM attachment a JOIN message_attachment_join j ON j.attachment_id=a.ROWID WHERE j.message_id=? ORDER BY a.ROWID LIMIT 1025", .{
         if (self.features.attachment_filename) "substr(CAST(coalesce(a.filename,'') AS BLOB),1,4097)" else "''",
         if (self.features.attachment_uti) "substr(coalesce(a.uti,''),1,128)" else "''",

@@ -21,6 +21,7 @@ const Object = union(enum) {
 };
 const Range = struct { length: usize, attributes: []Entry };
 const Body = struct { text: []const u8, ranges: []Range };
+// Typed-stream control bytes distinguish a new object (0x84), nil (0x85), and object end (0x86).
 const Reader = struct {
     a: u.Allocator,
     bytes: []const u8,
@@ -37,6 +38,7 @@ const Reader = struct {
     fn byte(self: *Reader) Failure!u8 {
         return (try self.take(1))[0];
     }
+    // Typed-stream integers use 0x81/0x82 for 16/32-bit payloads; other control tags are rejected.
     fn integer(self: *Reader, signed: bool) Failure!i64 {
         const lead = try self.byte();
         return switch (lead) {
@@ -61,6 +63,7 @@ const Reader = struct {
     }
     fn ref(self: *Reader, count: usize) Failure!usize {
         const n = try self.integer(true);
+        // Typed-stream reference indices are encoded relative to -110.
         if (n < -110 or n + 110 >= count) return error.Malformed;
         return @intCast(n + 110);
     }
@@ -69,11 +72,13 @@ const Reader = struct {
         if (self.bytes[self.pos] != 0x84) return self.strings.items[try self.ref(self.strings.items.len)];
         self.pos += 1;
         const text = try self.take(try self.readLength());
+        // Bound the shared-string table to the same 8,192-object scale as the plist reader.
         if (self.strings.items.len >= 8192) return error.Oversized;
         try self.strings.append(self.a, text);
         return text;
     }
     fn slot(self: *Reader) Failure!usize {
+        // Bound remembered objects so a small repeated-reference archive cannot grow without limit.
         if (self.objects.items.len >= 8192) return error.Oversized;
         const n = self.objects.items.len;
         try self.objects.append(self.a, .pending);
@@ -83,6 +88,7 @@ const Reader = struct {
         if (!u.eq(try self.shared(), expected)) return error.Unsupported;
     }
     fn class(self: *Reader, depth: usize) Failure!?[]const u8 {
+        // Limit class ancestry to 32 levels to bound recursive archive decoding.
         if (depth >= 32 or self.pos >= self.bytes.len) return error.Oversized;
         if (self.bytes[self.pos] == 0x85) {
             self.pos += 1;
@@ -134,6 +140,7 @@ const Reader = struct {
     }
     fn object(self: *Reader, depth: usize) Failure!Object {
         self.visits += 1;
+        // At most 32 nested objects and 8,192 visits bound recursive archive decoding.
         if (depth >= 32 or self.visits > 8192) return error.Oversized;
         if (self.pos >= self.bytes.len) return error.Malformed;
         if (self.bytes[self.pos] != 0x84) {
@@ -173,6 +180,8 @@ const Reader = struct {
             if (u.eq(name, "NSDictionary") or u.eq(name, "NSMutableDictionary")) {
                 try self.expectType("i");
                 const count = try self.readLength();
+                // Limit each attribute dictionary to 256 entries; ordinary text runs need far
+                // fewer.
                 if (count > 256) return error.Oversized;
                 const entries = try self.a.alloc(Entry, count);
                 for (entries, 0..) |*entry, i| {
@@ -189,6 +198,8 @@ const Reader = struct {
                 var ranges: std.ArrayList(Range) = .empty;
                 var formats: std.AutoHashMapUnmanaged(i64, []Entry) = .empty;
                 while (self.pos < self.bytes.len and self.bytes[self.pos] != 0x86) {
+                    // Bound attributed ranges independently of text length to limit metadata
+                    // amplification.
                     if (ranges.items.len >= 8192) return error.Oversized;
                     try self.expectType("iI");
                     const format = try self.integer(true);
@@ -218,6 +229,7 @@ pub fn decode(
     attachments: []const t.Attachment,
 ) Failure![]t.MessagePart {
     if (bytes.len > t.max_decode) return error.Oversized;
+    // Recognize the observed little-endian typed-stream header before reading object tags.
     const header = "\x04\x0bstreamtyped\x81\xe8\x03";
     if (!std.mem.startsWith(u8, bytes, header)) return error.Unsupported;
     var reader = Reader{
@@ -253,6 +265,7 @@ pub fn decode(
                 if (entry.value != .number or entry.value.number < 0 or entry.value.number > std.math.maxInt(u32)) return error.Malformed;
                 source_index = @intCast(entry.value.number);
             } else if (u.eq(entry.key, "__kIMFileTransferGUIDAttributeName")) {
+                // Attachment GUID metadata gets a 1 KiB cap before matching source attachments.
                 if (entry.value != .text or entry.value.text.len > 1024) return error.Malformed;
                 transfer = entry.value.text;
             }

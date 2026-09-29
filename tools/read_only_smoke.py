@@ -23,6 +23,8 @@ def main():
         data=Path(temporary)
         subprocess.run([str(BIN),'setup','--data-dir',str(data)],check=True,stdout=subprocess.DEVNULL)
         def request(path):
+            # Eight seconds bounds individual reads while leaving room for local TLS and database
+            # work.
             c=credentials.connection(timeout=8)
             c.request('GET',path)
             r=c.getresponse();assert r.status==200;body=json.loads(r.read());c.close();return body
@@ -30,6 +32,7 @@ def main():
             def start():return subprocess.Popen([str(BIN),'serve','--read-only','--data-dir',str(data),'--config',str(args.relay_config)],stdout=log,stderr=log)
             proc=start()
             try:
+                # Allow 30 seconds for initial database readiness before failing the smoke check.
                 deadline=time.monotonic()+30
                 while True:
                     try:
@@ -37,6 +40,7 @@ def main():
                         if status['adapter_ready']:break
                     except OSError:pass
                     if time.monotonic()>deadline:raise RuntimeError('Read-only adapter did not become ready')
+                    # Quarter-second polls keep the readiness check responsive without a busy loop.
                     time.sleep(.25)
                 assert not status['capabilities']['send_direct']
                 before=request('/v1/sync')
@@ -48,11 +52,14 @@ def main():
                 assert message and message['revision']!='0'
                 assert 'source' not in message and 'source_row' not in message
                 proc.terminate();proc.wait(timeout=5);proc=start()
+                # A cached restart gets 20 seconds to restore its listener.
                 deadline=time.monotonic()+20
                 while True:
                     try:after=request('/v1/sync');break
                     except OSError:
                         if time.monotonic()>deadline:raise
+                        # Quarter-second polls keep the readiness check responsive without a busy
+                        # loop.
                         time.sleep(.25)
                 assert before['server_epoch']==after['server_epoch']
                 history=request('/v1/conversations/'+message['conversation_id']+'/messages?limit=200')['messages']

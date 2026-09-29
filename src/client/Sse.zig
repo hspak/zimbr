@@ -25,6 +25,7 @@ pub fn FeedError(comptime Accept: type) type {
 pub fn feed(s: *Sse, comptime accept: anytype, context: anytype, bytes: []const u8) FeedError(@TypeOf(accept))!void {
     const a = std.heap.page_allocator;
     for (bytes) |byte| {
+        // A 1 MiB frame cap bounds memory when a peer never sends the terminating blank line.
         if (s.buffer.items.len >= 1024 * 1024) return error.FrameTooLarge;
         try s.buffer.append(a, byte);
         if (byte == '\n') {

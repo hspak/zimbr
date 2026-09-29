@@ -2,8 +2,11 @@
 const std = @import("std");
 const u = @import("../common.zig");
 
+// Sixteen files bounds one send's reservations and matches the native drop limit.
 pub const max_files = 16;
+// 100 MiB admits large originals while bounding staging and hashing per file.
 pub const max_file_bytes = 100 * 1024 * 1024;
+// 200 MiB lets a send include multiple large files without multiplying the per-file cap.
 pub const max_send_bytes = 200 * 1024 * 1024;
 
 /// Metadata identifies immutable original bytes; name is a basename, never a path.
@@ -25,8 +28,10 @@ pub const ValidateError = error{
 /// Validate metadata and return its byte count. Empty regular files are legal.
 pub fn validate(file: Upload) ValidateError!u64 {
     if (file.id.len != u.id_length) return error.InvalidRequest;
+    // Canonical upload IDs encode the full 128-bit UUID.
     var id: [16]u8 = undefined;
     std.base64.url_safe_no_pad.Decoder.decode(&id, file.id) catch return error.InvalidRequest;
+    // Keep basenames within the filesystem component budget used by upload staging.
     if (file.name.len == 0 or file.name.len > 255 or u.eq(file.name, ".") or
         u.eq(file.name, "..") or !std.unicode.utf8ValidateSlice(file.name))
         return error.InvalidRequest;
@@ -62,6 +67,8 @@ pub fn validateSet(files: []const Upload) ValidateError!void {
 }
 
 fn validMime(mime: []const u8) bool {
+    // Require at least a/b and cap bare media types at 127 bytes to keep reservation headers
+    // bounded.
     if (mime.len < 3 or mime.len > 127) return false;
     const slash = std.mem.indexOfScalar(u8, mime, '/') orelse return false;
     if (slash == 0 or slash == mime.len - 1) return false;

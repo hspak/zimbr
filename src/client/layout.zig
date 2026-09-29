@@ -17,14 +17,21 @@ fn rect(name: []const u8) rl.Rectangle {
         .height = b.height,
     };
 }
+// 32 logical pixels fits the connection status and its vertical padding.
 pub const footer_height: f32 = 32;
+// Eight pixels keeps the final sidebar row clear of the footer.
 pub const list_bottom_padding: f32 = 8;
+// Twenty pixels separates message content from the conversation edges.
 pub const conversation_padding: f32 = 20;
+// Sixteen pixels distinguishes adjacent messages without wasting a full text line.
 pub const message_spacing: f32 = 16;
 // The last row supplies the remaining gap; the composer box is shifted up one pixel.
 pub const composer_top_padding: f32 = conversation_padding - message_spacing + 1;
+// Align conversation actions with the 32-pixel inset used by settings and details.
 pub const action_right_padding: f32 = 32;
+// 64 pixels fits a 40-pixel navigation tile with 12-pixel margins.
 const rail_width: f32 = 64;
+// 244 pixels leaves space for a contact name, avatar, and unread badge.
 const sidebar_width: f32 = 244;
 
 pub fn conversationWidth(width: f32) f32 {
@@ -51,6 +58,7 @@ pub fn frame(width: f32, height: f32, composer_height: f32) Areas {
                 clay.UI()(.{ .id = .ID("sidebar_footer"), .layout = .{ .sizing = .{ .w = .grow, .h = .fixed(footer_height) } } })({});
             });
             clay.UI()(.{ .layout = .{ .sizing = .grow, .direction = .top_to_bottom } })({
+                // The 64-pixel header fits an avatar plus two lines of conversation information.
                 clay.UI()(.{ .id = .ID("header"), .layout = .{ .sizing = .{ .w = .grow, .h = .fixed(64) } } })({});
                 clay.UI()(.{ .id = .ID("history"), .layout = .{ .sizing = .grow } })({});
                 clay.UI()(.{ .id = .ID("composer"), .layout = .{ .sizing = .{ .w = .grow, .h = .fixed(composer_height) } } })({});

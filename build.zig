@@ -16,6 +16,7 @@ const RelayProfile = struct {
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    // Default source builds to dev so experiments use separate identities, ports, and state.
     const profile_name = b.option(ProfileName, "profile", "Application profile: dev (default) or release") orelse .dev;
     const profiles = try std.json.parseFromSlice(
         struct { dev: RelayProfile, release: RelayProfile },
@@ -283,6 +284,7 @@ fn patchRaylibWayland(b: *std.Build, artifact: *std.Build.Step.Compile) !void {
         b.graph.io,
         platform_path.getPath(b),
         b.allocator,
+        // A 1 MiB read cap bounds pinned dependency source patching; larger files need review.
         .limited(1024 * 1024),
     );
     // Flamez's workaround: raylib clears GLFW hints before creating its window.
@@ -310,6 +312,7 @@ fn patchRaylibWayland(b: *std.Build, artifact: *std.Build.Step.Compile) !void {
     artifact.root_module.addIncludePath(dependency.path("src/external/glfw/src"));
     artifact.root_module.addIncludePath(b.path("src/client"));
 
+    // A 1 MiB read cap bounds pinned dependency source patching; larger files need review.
     const init_source = try std.Io.Dir.cwd().readFileAlloc(b.graph.io, dependency.path("src/external/glfw/src/init.c").getPath(b), b.allocator, .limited(1024 * 1024));
     _ = files.add("external/glfw/src/init.c", try replaceCSection(
         b.allocator,
@@ -318,6 +321,7 @@ fn patchRaylibWayland(b: *std.Build, artifact: *std.Build.Step.Compile) !void {
         "char* _glfw_strdup(const char* source)",
         @embedFile("src/client/drop/uri_list.h"),
     ));
+    // A 1 MiB read cap bounds pinned dependency source patching; larger files need review.
     const wayland_source = try std.Io.Dir.cwd().readFileAlloc(b.graph.io, dependency.path("src/external/glfw/src/wl_window.c").getPath(b), b.allocator, .limited(1024 * 1024));
     const reader = "static char* readDataOfferAsString(struct wl_data_offer* offer, const char* mimeType)\n{";
     if (std.mem.count(u8, wayland_source, reader) != 1) return error.GlfwDropReaderChanged;

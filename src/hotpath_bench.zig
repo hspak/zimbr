@@ -9,6 +9,7 @@ const c = @import("client.zig").c.api;
 const Media = @import("client.zig").Media;
 const Store = @import("client.zig").Store;
 const Sse = @import("client.zig").Sse;
+// Match the storage benchmark's sample count for comparable median and upper-tail summaries.
 const samples = 15;
 const Timing = struct { p50_us: f64, p95_us: f64 };
 
@@ -33,7 +34,9 @@ fn diskMaintenance(initial_entries: usize) !struct {
     mean_us: f64,
     batch: Timing,
 } {
+    // 64 KiB sparse files model moderate encoded images without timing payload writes.
     const file_bytes = 64 * 1024;
+    // Average 64 installations per sample to reduce timer noise in cache maintenance.
     const batch_size = 64;
     const total_files = initial_entries + (samples + 1) * batch_size;
     var path = "/tmp/zimbr-cache-bench-XXXXXX".*;
@@ -43,6 +46,7 @@ fn diskMaintenance(initial_entries: usize) !struct {
     if (dir < 0) return error.CacheUnavailable;
     defer _ = u.c.close(dir);
     defer for (0..total_files) |i| {
+        // Use production-shaped 64-character cache keys plus NUL.
         var key: [65]u8 = undefined;
         const name = std.fmt.bufPrintZ(&key, "{x:0>64}", .{i}) catch unreachable;
         c.zc_cache_remove(dir, name);
@@ -96,6 +100,7 @@ fn diskMaintenance(initial_entries: usize) !struct {
 }
 
 fn cacheFile(dir: c_int, index: usize, bytes: usize) !void {
+    // Use production-shaped 64-character cache keys plus NUL.
     var key: [65]u8 = undefined;
     const name = try std.fmt.bufPrintZ(&key, "{x:0>64}", .{index});
     const fd = u.c.openat(dir, name, @as(c_int, u.c.O_WRONLY | u.c.O_CREAT | u.c.O_EXCL | u.c.O_NOFOLLOW), @as(c_uint, 0o600));
@@ -110,10 +115,12 @@ pub fn main(init: std.process.Init) !void {
     const db = try Db.open(":memory:", false);
     defer db.close();
     try db.exec("CREATE TABLE bench(id INTEGER PRIMARY KEY,value TEXT); INSERT INTO bench VALUES(1,'synthetic')");
+    // Exercise JSON checking at the 64 KiB request-body limit.
     const bytes = try init.arena.allocator().alloc(u8, 65536);
     @memset(bytes, 'a');
     bytes[0] = '"';
     bytes[bytes.len - 1] = '"';
+    // Repeat mixed Unicode across six lines to exercise shaping, fallback, and rasterization.
     const body = "Opaque text, é 👩‍💻 and Unicode fallback.\n" ** 6;
     const layout = c.zc_text_new_with_options(body.ptr, body.len, 16, 480, 1.25, 0, 1) orelse return error.LayoutFailed;
     defer c.zc_text_free(layout);
@@ -128,8 +135,10 @@ pub fn main(init: std.process.Init) !void {
     var client_events: [samples]f64 = undefined;
     var media = Media{ .io = init.io, .config = .{ .data = "" } };
     defer media.shutdown();
+    // Fill the media request queue to its 128-entry production bound.
     var asset_ids: [128][t.id_length]u8 = undefined;
     for (&asset_ids, 0..) |*id, i| {
+        // Encode the counter as a full 128-bit UUID-shaped ID for production key paths.
         var id_bytes: [16]u8 = undefined;
         std.mem.writeInt(u128, &id_bytes, i, .big);
         id.* = u.encodeId(id_bytes);

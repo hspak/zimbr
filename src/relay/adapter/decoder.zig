@@ -23,6 +23,7 @@ pub fn decode(a: u.Allocator, body: []const u8) DecodeError![]const u8 {
         var pos = prefix.len;
         const length = try readLength(body, &pos);
         if (length > t.max_body) return error.Oversized;
+        // The typed-stream end-object tag must immediately follow the root text bytes.
         if (length > body.len - pos or pos + length >= body.len or body[pos + length] != 0x86) return error.Malformed;
         const text = body[pos..][0..length];
         if (std.mem.startsWith(u8, text, "\xff\xfe")) {
@@ -59,6 +60,7 @@ fn readLength(b: []const u8, pos: *usize) !usize {
     pos.* += 1;
     if (lead <= 0x7f) return lead;
     const size: usize = switch (lead) {
+        // Typed-stream length markers select little-endian 16-bit or 32-bit lengths.
         0x81 => 2,
         0x82 => 4,
         else => return error.Malformed,
@@ -117,6 +119,7 @@ test "independent Foundation archive fixtures" {
 test "UTF16 expansion cannot exceed the decoded UTF8 byte limit" {
     const a = std.testing.allocator;
     const prefix = prefixes[0];
+    // Stay within a u16 byte length while making UTF-16-to-UTF-8 expansion exceed max_body.
     const length = 65534;
     const fixture = try a.alloc(u8, prefix.len + 3 + length + 1);
     defer a.free(fixture);

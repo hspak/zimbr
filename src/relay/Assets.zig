@@ -25,10 +25,15 @@ helper_path: [:0]const u8,
 worker_busy: std.atomic.Value(bool) = .init(false),
 
 pub const Variant = @FieldType(t.AssetRef, "variant");
+// 100 MiB bounds source reads before an image helper is allowed to decode.
 pub const max_source = 100 * 1024 * 1024;
+// 8 MiB bounds each encoded derivative, independently of source size.
 pub const max_derivative = 8 * 1024 * 1024;
+// 128 pending transforms absorbs bursts without allowing unlimited background work.
 pub const max_queue = 128;
+// 2 GiB retains reusable derivatives while bounding relay disk use.
 pub const cache_budget = 2 * 1024 * 1024 * 1024;
+// Include the transform revision in cache identity so algorithm changes can invalidate bytes.
 pub const transform_version = "image-v1";
 
 pub const InitError = std.process.ExecutablePathAllocError || error{ UnsafeAssetCache, ImageHelperUnavailable };
@@ -433,6 +438,7 @@ pub fn enqueue(a: u.Allocator, j: Journal, ref: t.AssetRef, visible: bool) Enque
         .{ .text = ref.id },
         .{ .text = ref.version },
         .{ .text = @tagName(ref.variant) },
+        // Delay background transforms one second so visible requests can take priority.
         .{ .int = if (visible) u.now() else u.now() + 1000 },
     });
     _ = a;
@@ -506,6 +512,7 @@ pub fn readBytes(a: u.Allocator, fd: c_int, length: usize) ReadBytesError![]cons
     return bytes;
 }
 fn digest(a: u.Allocator, bytes: []const u8) ![]const u8 {
+    // Hash the full source identity with SHA-256 before encoding its cache key.
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
     const hex = std.fmt.bytesToHex(hash, .lower);
@@ -595,6 +602,8 @@ fn checkSources(self: *Assets, core: *Core, a: u.Allocator) !void {
         }
         const attempts = if (fd >= 0) 0 else @min(original.attempts + 1, 6);
         try j.execute("UPDATE asset_sources SET check_ms=?,attempts=? WHERE id=?", &.{
+            // Recheck local sources after three seconds; missing sources back off from one to 30
+            // seconds.
             .{ .int = u.now() + if (fd >= 0) @as(i64, 3000) else @min(
                 @as(i64, 1000) << @intCast(attempts),
                 30000,
@@ -748,6 +757,7 @@ fn convert(self: *Assets, core: *Core, a: u.Allocator, job: Job) !void {
         output,
         @tagName(job.variant),
         &info,
+        // Give the isolated decoder 15 seconds, matching its native resource policy.
         15000,
     );
     if (photo) |p| {
@@ -914,6 +924,7 @@ fn collect(self: *Assets, core: *Core, a: u.Allocator, reserve: usize) !void {
 fn sweepOrphans(self: *Assets, core: *Core) !void {
     const scan = c.zr_media_scan(self.cache_fd) orelse return error.AssetCacheUnavailable;
     defer c.zr_media_scan_close(scan);
+    // Fit a 255-byte directory entry plus NUL while pruning cached representations.
     var name: [256]u8 = undefined;
     while (true) {
         const n = c.zr_media_scan_next(scan, &name, name.len);
@@ -998,6 +1009,7 @@ pub fn loop(core: *Core) void {
             self.sweepOrphans(core) catch |err| {
                 log.warn("Image orphan cleanup deferred: {s}", .{@errorName(err)});
             };
+            // Prune cache bookkeeping every ten seconds to amortize directory/database work.
             maintenance = u.now() + 10000;
         }
         self.worker_busy.store(false, .release);

@@ -6,6 +6,7 @@ static char* readDropOffer(struct wl_data_offer* offer)
 {
     int fds[2];
     if (pipe2(fds, O_CLOEXEC | O_NONBLOCK) == -1) { zc_drop_reject(); return NULL; }
+    // Reserve one byte for overflow detection and another for NUL after the offer budget.
     char* text = _glfw_calloc(ZC_DROP_BYTES + 2, 1);
     if (!text) { close(fds[0]); close(fds[1]); zc_drop_reject(); return NULL; }
     // The receiving end is nonblocking; keep the sender's normal pipe behavior.
@@ -19,6 +20,7 @@ static char* readDropOffer(struct wl_data_offer* offer)
     for (;;)
     {
         const double elapsed = (double)(_glfwPlatformGetTimerValue() - started) / frequency;
+        // Give a file manager two seconds to supply its URI list before unblocking the GUI.
         if (elapsed >= 2.0) break;
         struct pollfd ready = { .fd = fds[0], .events = POLLIN };
         int status = poll(&ready, 1, (int)((2.0 - elapsed) * 1000));

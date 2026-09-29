@@ -22,6 +22,7 @@ listening: ?*std.atomic.Value(bool) = null,
 handshakes: std.atomic.Value(usize) = .init(0),
 asset_responses: std.atomic.Value(usize) = .init(0),
 uploads_active: std.atomic.Value(usize) = .init(0),
+// 128 MiB caps shared request allocations across all connections.
 memory: Memory = .{ .backing = std.heap.page_allocator, .limit = 128 * 1024 * 1024 },
 
 pub const RunError = std.Io.net.Ip6Address.ParseError || std.Io.net.IpAddress.ListenError ||
@@ -61,11 +62,13 @@ pub fn run(self: *Server) RunError!void {
     );
     while (!self.core.stop.load(.acquire)) {
         const stream = try listener.accept(self.core.io);
+        // Cap thread and socket ownership at 32 simultaneous client connections.
         if (self.core.connections.fetchAdd(1, .acq_rel) >= 32) {
             _ = self.core.connections.fetchSub(1, .acq_rel);
             stream.close(self.core.io);
             continue;
         }
+        // Only four concurrent handshakes may spend CPU on certificate verification.
         if (self.handshakes.fetchAdd(1, .acq_rel) >= 4) {
             _ = self.handshakes.fetchSub(1, .acq_rel);
             _ = self.core.connections.fetchSub(1, .acq_rel);
@@ -92,6 +95,7 @@ fn connection(self: *Server, stream: std.Io.net.Stream) void {
     var session: Connection = .{
         .server = self,
         .peer = peer,
+        // An unused authenticated connection gets ten seconds to start a request.
         .idle_deadline = u.c.zr_monotonic_ms() + 10000,
     };
     session.run() catch {};
@@ -161,6 +165,7 @@ pub fn handle(self: *Server, a: u.Allocator, req: *Request, peer: *Tls.c.ZrTls) 
             "application/json",
         )) return error.InvalidRequest;
         const body = req.body.items;
+        // 8,192 tokens bounds structural work even for a body containing many tiny JSON values.
         json_bounds.check(body, t.max_body, 8192) catch return error.InvalidRequest;
         if (resetting) {
             if (query.len != 0) return error.InvalidRequest;
@@ -186,6 +191,7 @@ pub fn handle(self: *Server, a: u.Allocator, req: *Request, peer: *Tls.c.ZrTls) 
         }).value;
     } else if (req.head.method != .GET) return error.NotFound;
     if (Tls.c.zr_tls_valid(peer) == 0) return error.CertificateExpired;
+    // A client certificate's SHA-256 fingerprint needs 64 hex characters plus NUL.
     var owner: [65]u8 = undefined;
     if (input) |v| if (v.attachments.len != 0) {
         if (Tls.c.zr_tls_peer_fingerprint(peer, &owner) != 0) return error.CertificateExpired;
@@ -463,6 +469,8 @@ fn asset(
     const extra = [_]std.http.Header{
         .{ .name = "content-type", .value = value.ref.mime_type orelse return error.InvalidAsset },
         .{ .name = "etag", .value = etag },
+        // Versioned asset URLs identify immutable bytes, so private caches may retain them for a
+        // year.
         .{ .name = "cache-control", .value = "private, max-age=31536000, immutable" },
         .{ .name = "x-content-type-options", .value = "nosniff" },
     };
@@ -543,14 +551,17 @@ pub fn pollEvents(self: *Server, req: *Request) PollEventsError!void {
         try bytes.writer.writeAll(frame.frame);
         events_stream.sequence = frame.sequence;
     }
+    // A heartbeat every 15 seconds keeps idle event streams observable and connections alive.
     if (now - events_stream.heartbeat >= 15000) {
         try bytes.writer.writeAll(": heartbeat\n\n");
         events_stream.heartbeat = now;
     }
     events_stream.observed = if (frames.len == 0) observed else null;
+    // Recheck replay/epoch state once a second when no event signal wakes the stream.
     events_stream.check_at = now + 1000;
     req.response = bytes.written();
     if (req.response.len > 0) {
+        // A queued event batch gets ten seconds to drain before resetting a stalled subscriber.
         req.deadline = u.c.zr_monotonic_ms() + 10000;
         try req.connection.engine.resumeBody(req.id);
     }

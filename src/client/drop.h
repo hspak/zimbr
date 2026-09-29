@@ -1,8 +1,11 @@
 #ifndef ZIMBR_CLIENT_DROP_H
 #define ZIMBR_CLIENT_DROP_H
 #include <stddef.h>
+// Match the protocol's maximum attachments per send.
 #define ZC_DROP_FILES 16
+// Allow a Linux PATH_MAX-sized path, including the terminating NUL.
 #define ZC_DROP_PATH 4096
+// 256 KiB fits percent-encoded paths for a full drop while bounding Wayland offer reads.
 #define ZC_DROP_BYTES (256u * 1024)
 typedef struct {
     int count;

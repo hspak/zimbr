@@ -19,6 +19,7 @@ STATUS_ICON = ROOT / 'packaging/macos/statusTemplate.pdf'
 MAC_ICON = ROOT / 'packaging/macos/zimbr.icns'
 
 # Standard and Retina representations, stored as lossless PNG payloads.
+# ICNS type codes pair standard 16-512 point icons with their 2x Retina pixel sizes.
 ICNS_SIZES = (
     (b'icp4', 16), (b'ic11', 32),
     (b'icp5', 32), (b'ic12', 64),

@@ -55,6 +55,7 @@ pub fn stage(self: Files, a: u.Allocator, s: Store, key: []const u8, options: St
         .name = try a.dupe(u8, name),
         .mime_type = mimeType(name),
         .bytes = try std.fmt.allocPrint(a, "{d}", .{before.bytes}),
+        // Use a correctly shaped placeholder while validating metadata before computing the digest.
         .sha256 = "0" ** 64,
     };
     try outgoing.checkAdd(s, a, key, file);
@@ -74,6 +75,7 @@ pub fn stage(self: Files, a: u.Allocator, s: Store, key: []const u8, options: St
 }
 
 fn copy(source: c_int, destination: c_int, before: c.ZcOutgoingFingerprint, cancel: ?*const std.atomic.Value(bool)) StageError![32]u8 {
+    // Copy/hash in 64 KiB chunks so cancellation stays responsive and memory stays fixed.
     var buffer: [64 * 1024]u8 = undefined;
     var hash: std.crypto.hash.sha2.Sha256 = .init(.{});
     var remaining = before.bytes;

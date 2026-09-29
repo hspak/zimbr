@@ -66,6 +66,7 @@ fn control(init: std.process.Init, worker: *Worker) !void {
     var input: std.ArrayList(u8) = .empty;
     _ = u.c.fcntl(0, u.c.F_SETFL, @as(c_int, u.c.O_NONBLOCK));
     while (true) {
+        // Read control input in 4 KiB chunks rather than allocating per incoming command.
         var buf: [4096]u8 = undefined;
         const n = u.c.read(0, &buf, buf.len);
         if (n == 0) return;

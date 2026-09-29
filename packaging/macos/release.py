@@ -70,6 +70,7 @@ def validate(archive, version, revision):
         for name in ('relay', 'image-helper'):
             path = f'{APP}/MacOS/{name}'
             binary = package.read(path)
+            # Check the little-endian 64-bit Mach-O magic and ARM64 CPU type before packaging.
             if binary[:8] != struct.pack('<II', 0xFEEDFACF, 0x0100000C):
                 raise ValueError(f'{name} is not an arm64 Mach-O executable')
         for name in ('MacOS/relay', 'MacOS/image-helper', 'Resources/zimbr-relay-service',

@@ -8,8 +8,11 @@ const attachments = protocol.attachments;
 const Journal = @import("Journal.zig");
 pub const Files = @import("uploads/Files.zig");
 
+// 256 reservations bounds persistent bookkeeping across concurrent devices.
 pub const max_reservations = 256;
+// 2 GiB bounds staging disk use, including reservations whose bytes have not arrived.
 pub const max_reserved_bytes = 2 * 1024 * 1024 * 1024;
+// A day allows interrupted clients to resume while eventually reclaiming abandoned files.
 pub const unused_lifetime_ms = 24 * 60 * 60 * 1000;
 
 pub const Phase = enum { reserved, receiving, ready, pinned, deleting };

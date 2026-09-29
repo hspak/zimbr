@@ -42,6 +42,7 @@ pub fn init(a: u.Allocator, attachment_root: []const u8, original: c_int, file: 
     });
     defer transfer.deinit();
     errdefer storage.remove(copy.id) catch {};
+    // Stage originals in 64 KiB chunks to bound memory and avoid per-byte I/O.
     var buffer: [64 * 1024]u8 = undefined;
     var offset: u64 = 0;
     while (true) {

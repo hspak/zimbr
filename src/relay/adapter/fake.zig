@@ -31,6 +31,7 @@ pub fn dispatchFile(
     const root = try std.fmt.allocPrint(a, "{s}.attachments/", .{path});
     if (!std.mem.startsWith(u8, filename, root)) return error.Rejected;
     if (u.eq(file.name, "fake-stall.bin")) {
+        // Three seconds makes in-flight dispatch observable to interruption and retry tests.
         var delay: u.c.struct_timespec = .{ .tv_sec = 3, .tv_nsec = 0 };
         _ = u.c.nanosleep(&delay, null);
     }
@@ -44,6 +45,7 @@ const File = struct { file: attachments.Upload, filename: []const u8 };
 
 fn dispatchImpl(a: u.Allocator, path: [:0]const u8, route: Journal.Route, text: []const u8, file: ?File) DispatchError!void {
     if (u.eq(text, "[fake:stall]")) {
+        // Three seconds makes in-flight dispatch observable to interruption and retry tests.
         var delay: u.c.struct_timespec = .{ .tv_sec = 3, .tv_nsec = 0 };
         _ = u.c.nanosleep(&delay, null);
     }
@@ -87,6 +89,7 @@ fn dispatchImpl(a: u.Allocator, path: [:0]const u8, route: Journal.Route, text: 
     defer m.close();
     try m.bind(&.{
         .{ .text = try sourceGuid(a) },
+        // Synthetic rows use the same Apple-epoch nanoseconds as the real Messages database.
         .{ .int = (u.now() - 978307200000) * 1000000 },
         .{ .text = text },
     });
@@ -117,8 +120,10 @@ fn dispatchImpl(a: u.Allocator, path: [:0]const u8, route: Journal.Route, text: 
 }
 
 fn sourceGuid(a: u.Allocator) u.IdError![]const u8 {
+    // Generate a full UUID so fixture source GUIDs exercise the production identifier path.
     var bytes: [16]u8 = undefined;
     if (u.c.zr_random(&bytes, bytes.len) != 0) return error.RandomUnavailable;
+    // Match UUID v4 version and RFC variant bits before formatting the synthetic GUID.
     bytes[6] = (bytes[6] & 15) | 64;
     bytes[8] = (bytes[8] & 63) | 128;
     const hex = std.fmt.bytesToHex(bytes, .lower);

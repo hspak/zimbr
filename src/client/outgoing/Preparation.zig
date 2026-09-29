@@ -73,6 +73,7 @@ pub fn shutdown(self: *Preparation) void {
 pub fn push(self: *Preparation, key: []const u8, path: []const u8) PushError!void {
     self.mutex.lockUncancelable(self.io);
     defer self.mutex.unlock(self.io);
+    // Queue up to two full 16-file drops while bounding preparation work.
     if (self.count == 32) return error.TooManyPreparations;
     const task = try a.create(Task);
     errdefer a.destroy(task);

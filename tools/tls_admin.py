@@ -102,6 +102,7 @@ def validate_extensions(obj, role, expected_names):
     if set(actual) != set(names(expected_names)) or (role == 'server' and not actual):
         raise ValueError('SANs do not exactly match the administrator-selected names')
     pub = obj.public_key()
+    # Accept P-256-or-larger EC and RSA-2048-or-larger keys; reject weaker enrollment keys.
     if not ((isinstance(pub, ec.EllipticCurvePublicKey) and pub.key_size >= 256) or
             (isinstance(pub, rsa.RSAPublicKey) and pub.key_size >= 2048)):
         raise ValueError('Unsupported or weak public key')
@@ -131,6 +132,7 @@ def create_key(directory, role, expected_names):
     key_path, csr_path = directory / f'{role}-key.pem', directory / f'{role}.csr'
     if key_path.exists() or csr_path.exists():
         raise ValueError('Use a new staging directory for renewal; existing keys are never overwritten')
+    # P-256 keeps generated TLS keys compact and interoperable with both endpoint stacks.
     key = ec.generate_private_key(ec.SECP256R1())
     builder = (x509.CertificateSigningRequestBuilder()
         .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'Zimbr ' + role)]))
@@ -384,6 +386,7 @@ def listener_ready(config, pid):
 def restart(config, profile):
     old = pid_of_service(profile)
     subprocess.run(['launchctl', 'kickstart', '-k', f'gui/{os.getuid()}/{profile.bundle_id}'], check=True)
+    # Bound relay restart verification to 30 seconds so administration cannot wait forever.
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         new = pid_of_service(profile)
@@ -394,6 +397,7 @@ def restart(config, profile):
         if old_gone and new and new != old:
             if listener_ready(config, new):
                 return {'old_pid': old, 'pid': new, 'restart_complete': True}
+        # Check restart readiness five times per second while waiting for launchd.
         time.sleep(.2)
     raise RuntimeError('Restart failed: old process exit and new configured listener were not both verified; policy is staged, revocation is NOT complete')
 
@@ -445,6 +449,7 @@ def update_device(args):
 
 def issue_ssh(args):
     """The authenticated SSH login authorizes enrollment; stdout is one JSON response."""
+    # Read one byte beyond 64 KiB to detect oversized SSH enrollment requests.
     raw = sys.stdin.buffer.read(65537)
     if len(raw) > 65536:
         raise ValueError('Enrollment request is too large')
@@ -454,9 +459,11 @@ def issue_ssh(args):
     if any(not isinstance(request[key], str) for key in ('csr', 'name', 'label')):
         raise ValueError('Enrollment fields must be strings')
     name = request['name']
+    # Apply DNS's 253-character name and 63-character label bounds to device SANs.
     if (len(name) > 253 or not name.endswith('.zimbr.invalid') or
             any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', part) for part in name.split('.'))):
         raise ValueError('Expected a device name under zimbr.invalid')
+    # Match the relay allowlist's 128-character label cap and exclude control characters.
     if not 1 <= len(request['label']) <= 128 or any(ord(c) < 32 for c in request['label']):
         raise ValueError('Invalid device label')
     csr_bytes = request['csr'].encode('ascii')

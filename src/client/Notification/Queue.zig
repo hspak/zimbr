@@ -6,10 +6,12 @@ const Notification = @import("../Notification.zig");
 const Queue = @This();
 
 backend: ?*c.ZcNotifications = null,
+// Match the worker/backend notification bound while avatars are pending.
 pending: [64]?Pending = @splat(null),
 
 const Pending = struct {
     notice: *Notification,
+    // Retain the full hexadecimal Media key while awaiting the avatar download.
     key: [64:0]u8,
     generation: u64,
     deadline: i64,
@@ -46,6 +48,7 @@ pub fn submit(s: *Queue, notice: *Notification, media: ?*Media, now: i64) void {
         .notice = notice,
         .key = m.key(asset),
         .generation = m.generation,
+        // Wait at most 750 ms for an avatar so image loading cannot delay an alert indefinitely.
         .deadline = now + 750,
     };
 }

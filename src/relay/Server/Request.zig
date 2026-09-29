@@ -71,8 +71,10 @@ pub fn iterateHeaders(self: *const Request) HeaderIterator {
 
 /// Borrows body until stream closure; headers are copied by the protocol engine.
 pub fn respond(self: *Request, body: []const u8, options: RespondOptions) protocol.Error!void {
+    // An unsigned 64-bit content length needs at most 20 decimal digits.
     var length: [20]u8 = undefined;
     const count = std.fmt.bufPrint(&length, "{d}", .{body.len}) catch unreachable;
+    // Room for standard response headers plus bounded endpoint-specific extras.
     var headers: [16]std.http.Header = undefined;
     if (options.extra_headers.len >= headers.len) return error.HeaderListTooLarge;
     @memcpy(headers[0..options.extra_headers.len], options.extra_headers);
@@ -85,6 +87,7 @@ pub fn respond(self: *Request, body: []const u8, options: RespondOptions) protoc
     self.responded = true;
     self.response = body;
     self.offset = 0;
+    // A stalled response gets ten seconds to make progress before its stream is reset.
     self.deadline = u.c.zr_monotonic_ms() + 10000;
 }
 

@@ -19,10 +19,13 @@ int zc_activation_activate(void *surface, const char *token);
 void zc_activation_free(void);
 typedef struct ZcNet ZcNet;
 /* Complete request URL capacity, including the null terminator. */
+// 8 KiB leaves room for the configured origin, endpoint, and escaped pagination tokens.
 #define ZC_REQUEST_URL_CAPACITY 8192
 typedef int (*ZcStreamFn)(void *, const char *, size_t);
 enum ZcFailure { ZC_OK, ZC_NETWORK, ZC_SERVER_TRUST, ZC_CREDENTIALS, ZC_CLIENT_REJECTED, ZC_TLS, ZC_HTTP, ZC_CONFIG };
+// 256 bytes bounds copied diagnostics across the Zig/C boundary.
 typedef struct { int kind, curl_code; long verify_result; char message[256]; } ZcError;
+// SHA-256 needs 64 hex digits plus NUL; 32 bytes covers the UTC expiry string.
 typedef struct { char fingerprint[65], expires[32]; int64_t expires_at; } ZcIdentity;
 /* Secure descriptor-based read. 1 = success, 0 = absent, -1 = unsafe/error. */
 int zc_private_read(const char *path, char **data, size_t *length);

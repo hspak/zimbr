@@ -11,8 +11,10 @@ texture_bytes: usize = 0,
 frame: u64 = 0,
 scale: f32 = 1,
 
+// Keep logical font sizes unchanged; display scaling is applied separately.
 pub const font_scale = 1.0;
 pub const Weight = enum(c_int) {
+    // Use the native font-weight scale: 400 regular and 600 semibold.
     normal = 400,
     semibold = 600,
 };
@@ -41,6 +43,7 @@ const Entry = struct {
     start: usize = 0,
     end: usize = 0,
 };
+// 32 MiB bounds cached glyph textures while retaining several visible screens of text.
 const max_texture_bytes = 32 * 1024 * 1024;
 pub fn deinit(s: *Text) void {
     for (s.entries.items) |*e| {
@@ -80,6 +83,7 @@ fn getStyled(s: *Text, text: []const u8, style: Style, width: f32, single_line: 
     hash.update(std.mem.asBytes(&single_line));
     hash.update(std.mem.asBytes(&subpixel));
     if (!std.math.isFinite(width) or !std.math.isFinite(s.scale) or s.scale < 0.5 or s.scale > 8) return error.TextLayoutFailed;
+    // Stay below the native 4096-pixel raster width after scale and two pixels of layout margin.
     const w: i32 = @intFromFloat(std.math.clamp(width, 1, 4096 / s.scale - 2));
     hash.update(std.mem.asBytes(&w));
     const key = hash.final();
@@ -87,6 +91,7 @@ fn getStyled(s: *Text, text: []const u8, style: Style, width: f32, single_line: 
         e.used = s.frame;
         return e;
     };
+    // Match the native 64 KiB shaping cap; larger content uses the bounded preview fallback.
     const original = if (text.len <= 65536) c.zc_text_new_weighted(
         text.ptr,
         @intCast(text.len),
@@ -120,6 +125,8 @@ fn getStyled(s: *Text, text: []const u8, style: Style, width: f32, single_line: 
         .height = @as(f32, @floatFromInt(c.zc_text_height(layout))) / s.scale,
     };
     // Bound the texture cache; layouts for offscreen rows have no GPU allocation.
+    // 384 layouts retains recent visible text while bounding Pango objects independently of
+    // textures.
     if (s.entries.items.len >= 384) {
         var oldest: usize = 0;
         for (s.entries.items, 0..) |entry, i| if (entry.used < s.entries.items[oldest].used) {
@@ -143,7 +150,9 @@ pub fn height(s: *Text, text: []const u8, size: i32, width: f32) f32 {
 // cache evicts visible glyphs and textures during every background batch.
 pub fn measure(s: *Text, text: []const u8, size: i32, width: f32) f32 {
     if (!std.math.isFinite(width) or !std.math.isFinite(s.scale) or s.scale < 0.5 or s.scale > 8) return 24;
+    // Stay below the native 4096-pixel raster width after scale and two pixels of layout margin.
     const w: i32 = @intFromFloat(std.math.clamp(width, 1, 4096 / s.scale - 2));
+    // Match the native 64 KiB shaping cap; larger content uses the bounded preview fallback.
     const original = if (text.len <= 65536) c.zc_text_new_with_options(
         text.ptr,
         @intCast(text.len),
@@ -231,6 +240,7 @@ pub fn lineInkCenterY(s: *Text, text: []const u8, size: i32, width: f32) f32 {
     if (e.ink_center_y) |center| return center;
     const fallback: f32 = @floatCast(c.zc_text_ink_center_y(e.layout));
     const height_pixels = c.zc_text_height(e.layout);
+    // Keep one-shot rasterization within the native 2048-row tile limit.
     if (height_pixels > 2048) return fallback;
     // Hinting and fallback fonts can put ink outside Pango's reported extents.
     // Measure a neutral raster once per cached layout at its actual display scale.
@@ -313,6 +323,7 @@ fn drawEntry(
 ) void {
     if (e.raster_failed or y >= @as(f32, @floatFromInt(rl.getScreenHeight())) or y + e.height <= 0) return;
     const full_height = c.zc_text_height(e.layout);
+    // Align tiles to 256-pixel bands so small scroll movements reuse cached rasterization.
     var top: i32 = @intFromFloat(@floor(@min(
         @as(f32, @floatFromInt(full_height)),
         @max(0, -y) * s.scale,
@@ -323,6 +334,7 @@ fn drawEntry(
     ));
     // Very tall/high-DPI windows can span several bounded texture tiles.
     while (top < visible_end) {
+        // Match the native raster cap while allowing tall windows to draw several bounded tiles.
         const tile_height = @min(visible_end - top, 2048);
         if (tile_height <= 0) return;
         if (e.texture != null and (e.tile_top != top or e.texture.?.height != tile_height or !std.meta.eql(

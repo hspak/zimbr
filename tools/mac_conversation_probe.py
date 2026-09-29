@@ -69,6 +69,7 @@ def inspect(journal_path, messages_path, conversation_ids):
                 continue
             chat = chats[0]
             participants = [row[0] for row in source.execute(
+                # Mirror the relay's 256-participant read bound when comparing source conversations.
                 'SELECT DISTINCT h.id FROM chat_handle_join j JOIN handle h ON h.ROWID=j.handle_id WHERE j.chat_id=? ORDER BY h.id LIMIT 256',
                 (chat['ROWID'],),
             )]
@@ -84,6 +85,7 @@ def inspect(journal_path, messages_path, conversation_ids):
             messages = source.execute(
                 'SELECT m.ROWID,m.service,m.is_from_me,m.associated_message_type,m.item_type,m.is_system_message '
                 'FROM chat_message_join j JOIN message m ON m.ROWID=j.message_id '
+                # Inspect one maximum-sized protocol page per conversation to bound the probe.
                 'WHERE j.chat_id=? ORDER BY m.date DESC,m.ROWID DESC LIMIT 200',
                 (chat['ROWID'],),
             ).fetchall()

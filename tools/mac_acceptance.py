@@ -49,6 +49,7 @@ class Client:
         self.credentials=Credentials(tls_config or data_dir/'admin.json')
 
     def connect(self,path,body=None):
+        # Bound each administrative request to 20 seconds while allowing a slow local relay.
         connection=self.credentials.connection(timeout=20)
         headers={}
         if body is not None:headers['Content-Type']='application/json'
@@ -81,6 +82,7 @@ class Client:
         deadline=time.monotonic()+30
         try:
             while time.monotonic()<deadline:
+                # A 2 MiB line bound accommodates large event JSON without an unlimited read.
                 line=response.readline(2*1024*1024)
                 if not line:raise RuntimeError('event_stream_closed')
                 if line.startswith(b'data: '):
@@ -188,6 +190,7 @@ def main():
         deadline=time.monotonic()+args.wait_for_lock
         while not screen_locked():
             if time.monotonic()>deadline:raise RuntimeError('Screen was not locked; nothing sent')
+            # Poll once a second so acceptance checks do not compete with relay work.
             time.sleep(1)
     baseline=request('/v1/sync');results=[];payloads=[]
     evidence={'os_build':subprocess.check_output(['sw_vers','-buildVersion'],text=True).strip(),'timestamp_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'baseline':baseline,'sends':results,'restart_verified':False,'locked_screen_verified':False,'recipient_confirmation_required':True,'complete':False}
@@ -210,6 +213,7 @@ def main():
         item['state']=accepted['state'];save_evidence(args.output,evidence)
         # Repeating the exact request must not dispatch again.
         assert request('/v1/messages',payload)['request_id']==identity
+        # Allow a minute of asynchronous send observation plus five seconds of startup margin.
         deadline=time.monotonic()+65;result=accepted
         while time.monotonic()<deadline:
             if args.wait_for_lock:
@@ -221,6 +225,7 @@ def main():
             item.update(state=result['state'],message_id=result['message_id'],error_code=(result.get('error_info') or {}).get('code'))
             save_evidence(args.output,evidence)
             if result['state'] in ('submitted','delivered','failed'):break
+            # Poll once a second so acceptance checks do not compete with relay work.
             time.sleep(1)
         if result['state'] not in ('submitted','delivered'):raise RuntimeError('Send outcome: '+result['state']+'; do not blindly retry')
         # Match only this known synthetic marker; do not print real history.
@@ -246,6 +251,7 @@ def main():
     replay=client.events(baseline['cursor'],before_restart['cursor'],identities=identity_events)
     if args.restart:
         subprocess.run(['launchctl','kickstart','-k',f'gui/{os.getuid()}/{profile.bundle_id}'],check=True)
+        # Allow 45 seconds for the locked-session send to be observed.
         deadline=time.monotonic()+45
         while True:
             try:
@@ -254,6 +260,7 @@ def main():
             except (OSError,http.client.HTTPException):
                 pass
             if time.monotonic()>deadline:raise RuntimeError('Relay did not recover after restart')
+            # Poll once a second so acceptance checks do not compete with relay work.
             time.sleep(1)
         assert after['server_epoch']==baseline['server_epoch']
         for item,payload in zip(results,payloads):

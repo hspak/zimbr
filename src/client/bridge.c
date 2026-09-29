@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+// Expose POSIX.1-2008 descriptor, clock, and process APIs consistently across libc builds.
 #define _POSIX_C_SOURCE 200809L
 #include "bridge.h"
 #include "../tls_policy.h"
@@ -26,11 +27,13 @@ _Static_assert(CURL_ERROR_SIZE <= sizeof(((ZcError *)0)->message), "Diagnostic b
 struct Slot {
     CURL *easy; char *body; size_t len; long status; int done, stream, alert;
     int64_t last_rx; struct ZcNet *owner; ZcError error;
+    // Bound copied protocol metadata; these fields hold short capability and media-type tokens.
     char extensions[128], mime[64];
     int media, fd, extension_seen; size_t expected;
     int upload; uint64_t sent, read_offset, upload_length; struct curl_slist *headers;
 };
 struct ZcNet {
+    // Separate JSON, SSE, two media downloads, and one upload so transfers do not block sync.
     CURLM *multi; struct curl_slist *headers; struct Slot slots[5];
     char *origin, *ca, *cert, *key; size_t ca_len, cert_len, key_len;
     X509 *root; ZcStreamFn fn; void *context;
@@ -89,6 +92,7 @@ void zc_private_free(char *data, size_t length) {
     if (data) { OPENSSL_cleanse(data,length); free(data); }
 }
 int zc_origin_valid(const char *origin) {
+    // Require HTTPS and bound the configured origin to leave room in the 8 KiB request URL.
     if (!origin || strncmp(origin,"https://",8) || strlen(origin)>4096) return 0;
     for (const unsigned char *p=(const unsigned char *)origin; *p; p++)
         if (*p<=32 || *p>=127 || strchr("@?#%\\",*p)) return 0;
@@ -102,6 +106,7 @@ int zc_origin_valid(const char *origin) {
            curl_url_get(url,CURLUPART_HOST,&host,0)==CURLUE_OK && host && *host;
     if (ok && host[0]!='[') {
         size_t label=0, total=strlen(host);
+        // DNS text names allow 253 characters overall and 63 per label.
         if (total>253 || host[0]=='.' || host[0]=='-') ok=0;
         for (size_t i=0;ok && i<total;i++) {
             unsigned char ch=(unsigned char)host[i];
@@ -168,8 +173,10 @@ static int progress(void *context, curl_off_t a, curl_off_t b, curl_off_t c, cur
     struct Slot *s=context;
     if (s->upload) {
         if (d>=0 && (uint64_t)d!=s->sent) { s->sent=(uint64_t)d; s->last_rx=monotonic_ms(); }
+        // Thirty seconds without upload progress is a stall, regardless of overall timeout.
         return monotonic_ms()-s->last_rx>30000;
     }
+    // Allow three 15-second SSE heartbeat intervals before treating the stream as dead.
     return s->stream && monotonic_ms()-s->last_rx>45000;
 }
 static size_t receive(char *data, size_t size, size_t count, void *context) {
@@ -177,11 +184,13 @@ static size_t receive(char *data, size_t size, size_t count, void *context) {
     if (s->media) {
         long status=0; curl_easy_getinfo(s->easy,CURLINFO_RESPONSE_CODE,&status);
         if (status==200) {
+            // Enforce the relay derivative byte cap even when Content-Length is absent or false.
             if (n>8*1024*1024-s->len) return 0;
             size_t used=0;
             while (used<n) { ssize_t wrote=write(s->fd,data+used,n-used); if (wrote<0 && errno==EINTR) continue; if (wrote<=0) return 0; used+=(size_t)wrote; }
             s->len+=n; return n;
         }
+        // Media errors need only small JSON diagnostics, not the image-size response budget.
         if (n>8192-s->len) return 0;
     }
     if (s->stream) {
@@ -189,6 +198,7 @@ static size_t receive(char *data, size_t size, size_t count, void *context) {
         if (status!=200) return n;
         return s->owner->fn(s->owner->context,data,n) ? n : 0;
     }
+    // Upload metadata gets 512 KiB; ordinary JSON gets a coarse 64 MiB transport cap.
     size_t limit=s==&s->owner->slots[4] ? 512*1024 : 64*1024*1024;
     if (n>limit-s->len) return 0;
     char *next=realloc(s->body,s->len+n+1); if (!next) return 0;
@@ -266,6 +276,7 @@ ZcNet *zc_net_new(const char *origin, const char *ca, const char *cert, const ch
     ZcNet *n=calloc(1,sizeof(*n));
     if (!n) { curl_global_cleanup(); failure(error,ZC_CONFIG,"Transport allocation failed."); return NULL; }
     const curl_version_info_data *version=curl_version_info(CURLVERSION_NOW);
+    // The transport requires the libcurl 8.10 API baseline and HTTP/2 support.
     if (version->version_num < 0x080a00 || !(version->features & CURL_VERSION_HTTP2)) {
         failure(error,ZC_CONFIG,"Zimbr requires libcurl 8.10 or newer with HTTP/2 support. Install a supported build."); goto fail;
     }
@@ -315,6 +326,7 @@ int zc_net_start(ZcNet *n, int stream, const char *path, const char *body, size_
     SET(CURLOPT_SSLCERT_BLOB,&cert); SET(CURLOPT_SSLKEY_BLOB,&key);
     SET(CURLOPT_SSL_CTX_FUNCTION,tls_context); SET(CURLOPT_SSL_CTX_DATA,s);
     SET(CURLOPT_HTTPHEADER,n->headers); SET(CURLOPT_NOSIGNAL,1L);
+    // Connect within 3 s; JSON gets 7 s, media 30 s, and SSE uses its heartbeat watchdog.
     SET(CURLOPT_CONNECTTIMEOUT_MS,3000L); SET(CURLOPT_TIMEOUT_MS,s->stream ? 0L : (s->media ? 30000L : 7000L));
     if (!s->stream) { SET(CURLOPT_LOW_SPEED_LIMIT,1L); SET(CURLOPT_LOW_SPEED_TIME,7L); }
     SET(CURLOPT_NOPROGRESS,0L); SET(CURLOPT_XFERINFOFUNCTION,progress); SET(CURLOPT_XFERINFODATA,s);
@@ -344,6 +356,7 @@ static size_t upload_read(char *buffer, size_t size, size_t count, void *context
     struct Slot *s=context;
     uint64_t remaining=s->upload_length-s->read_offset;
     size_t length=size*count;
+    // Read at most 64 KiB per callback so uploads do not monopolize the network worker.
     if (length>65536) length=65536;
     if ((uint64_t)length>remaining) length=(size_t)remaining;
     if (!length) return 0;
@@ -359,6 +372,7 @@ int zc_net_upload(ZcNet *n, const char *path, const char *epoch, int fd, uint64_
     struct Slot *s=&n->slots[4];
     if (s->done) return 1;
     s->upload=1; s->fd=fd; s->upload_length=length;
+    // The fixed header name, 22-character epoch, and NUL fit comfortably in 64 bytes.
     char header[64]; snprintf(header,sizeof(header),"Zimbr-Server-Epoch: %s",epoch);
     const char *headers[]={"Content-Type: application/octet-stream","Expect:",header};
     for (size_t i=0;i<sizeof(headers)/sizeof(headers[0]);i++) {
@@ -371,8 +385,11 @@ int zc_net_upload(ZcNet *n, const char *path, const char *epoch, int fd, uint64_
     UPLOAD_SET(CURLOPT_UPLOAD,1L);
     UPLOAD_SET(CURLOPT_INFILESIZE_LARGE,(curl_off_t)length);
     UPLOAD_SET(CURLOPT_READFUNCTION,upload_read); UPLOAD_SET(CURLOPT_READDATA,s);
+    // Match the 64 KiB read callback batch to avoid larger unused curl buffers.
     UPLOAD_SET(CURLOPT_UPLOAD_BUFFERSIZE,65536L);
+    // Match the relay's 15-minute overall upload deadline.
     UPLOAD_SET(CURLOPT_TIMEOUT_MS,15L*60*1000);
+    // Thirty seconds below the configured byte rate also counts as a stalled upload.
     UPLOAD_SET(CURLOPT_LOW_SPEED_TIME,30L);
 #undef UPLOAD_SET
     return 1;
@@ -393,6 +410,7 @@ int zc_net_wait(ZcNet *n, int wake_fd, int timeout_ms) {
     } else {
         struct pollfd wake={.fd=wake_fd,.events=POLLIN}; poll(&wake,wake_fd>=0 ? 1 : 0,timeout_ms);
     }
+    // Drain wake tokens in batches; only the presence of a wakeup matters.
     if (wake_fd>=0) { char bytes[128]; while (read(wake_fd,bytes,sizeof(bytes))>0) {} }
     return 1;
 }
@@ -410,6 +428,8 @@ int zc_net_poll(ZcNet *n) {
                 snprintf(s->error.message,sizeof(s->error.message),"The relay must negotiate HTTP/2 (h2). Upgrade the relay, then Reconnect.");
             else if (code==CURLE_PEER_FAILED_VERIFICATION || code==CURLE_SSL_ISSUER_ERROR) s->error.kind=ZC_SERVER_TRUST;
             else if (code==CURLE_SSL_CERTPROBLEM || code==CURLE_SSL_CACERT_BADFILE) s->error.kind=ZC_CREDENTIALS;
+            // TLS certificate alerts 42-46, unknown_ca (48), and certificate_required (116) mean
+            // rejection.
             else if ((s->alert>=42 && s->alert<=46) || s->alert==48 || s->alert==116) s->error.kind=ZC_CLIENT_REJECTED;
             else if (code==CURLE_SSL_CONNECT_ERROR || s->alert) s->error.kind=ZC_TLS;
             else s->error.kind=ZC_NETWORK;
@@ -454,6 +474,7 @@ char *zc_net_take_slot_body(ZcNet *n, int index, size_t *length) {
 void zc_net_ack(ZcNet *n, int stream) { clear_slot(n,stream); }
 
 int zc_url_host(const char *value, char *output, size_t size) {
+    // Bound external link parsing to the same 8 KiB scale as request URLs.
     if (!value || strlen(value)>8192) return 0;
     for (const unsigned char *p=(const unsigned char *)value; *p; p++)
         if (*p<=32 || *p==127 || *p=='\\') return 0;
@@ -470,6 +491,7 @@ int zc_url_host(const char *value, char *output, size_t size) {
     curl_free(host); curl_free(user); curl_free(password); curl_url_cleanup(url); return ok;
 }
 int zc_url_open(const char *url) {
+    // Room for DNS/IP host text plus NUL, with margin beyond the 253-character DNS limit.
     char host[512]; if (!zc_url_host(url,host,sizeof(host))) return 0;
     /* The desktop API receives a URI argument; no command or shell expansion. */
     g_app_info_launch_default_for_uri_async(url,NULL,NULL,NULL,NULL);
@@ -565,6 +587,8 @@ static int text_measure_lines(ZcText *t, const PangoFontDescription *description
     return (int)y;
 }
 ZcText *zc_text_new_weighted(const char *text, int length, double size, int width, double scale, int single_line, int subpixel, int weight) {
+    // Cap text at 64 KiB, font size at 256, scale at 0.5-8, and raster width at 4096.
+    // The extra 1 MiB of Pango-unit headroom avoids overflow in later layout arithmetic.
     if (length < 0 || length > 65536 || !isfinite(size) || size < 1 || size > 256 ||
         weight < PANGO_WEIGHT_THIN || weight > PANGO_WEIGHT_ULTRAHEAVY ||
         length*(size + 4)*PANGO_SCALE > INT_MAX - 1048576.0 ||
@@ -578,16 +602,21 @@ ZcText *zc_text_new_weighted(const char *text, int length, double size, int widt
     const char *word = text;
     for (const char *p = text; p < text + length; p = g_utf8_next_char(p)) {
         gunichar ch = g_utf8_get_char(p);
+        // Cap explicit line breaks at 2,048 so pathological text cannot build unlimited line
+        // objects.
         if ((ch == '\n' || ch == '\r' || ch == 0x2028 || ch == 0x2029) && ++lines > 2048) return NULL;
         GUnicodeType type = g_unichar_type(ch);
         if (type == G_UNICODE_NON_SPACING_MARK || type == G_UNICODE_SPACING_MARK ||
             type == G_UNICODE_ENCLOSING_MARK || type == G_UNICODE_FORMAT) {
+            // Limit combining-mark runs to 32 to bound shaping work on adversarial text.
             if (++marks > 32) return NULL;
         } else marks = 0;
         if (g_unichar_isspace(ch)) word = p;
+        // Switch very long words to character wrapping before word shaping becomes expensive.
         if (p - word > 512) char_wrap = 1;
     }
     ZcText *t = calloc(1, sizeof(*t)); if (!t) return NULL; t->scale = scale; t->subpixel = subpixel;
+    // Layout needs a Cairo context but no rendered pixels yet; a 1x1 surface is sufficient.
     cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
     // Shape and hint at the same device scale used for rasterization. Creating
     // the layout at 1x then drawing it at fractional scale softens small text.
@@ -605,6 +634,7 @@ ZcText *zc_text_new_weighted(const char *text, int length, double size, int widt
         pango_layout_set_height(t->layout, -1);
         pango_layout_set_ellipsize(t->layout, PANGO_ELLIPSIZE_END);
     }
+    // Three logical pixels separates lines without changing the requested font size.
     pango_layout_set_spacing(t->layout, 3 * PANGO_SCALE);
     PangoRectangle bounds;
     pango_layout_get_pixel_extents(t->layout, NULL, &bounds);
@@ -659,6 +689,7 @@ unsigned char *zc_text_pixels_on(ZcText *t, unsigned color, int start, int end, 
 }
 unsigned char *zc_text_pixels_with_selection(ZcText *t, unsigned color, int start, int end, int top, int height, unsigned background, unsigned selection) {
     zc_text_clear_pixels(t);
+    // Rasterize at most 2,048 rows and eight million pixels per tile to bound allocations.
     if (top < 0 || top >= t->height || height < 1 || height > 2048 ||
         height > t->height - top || (size_t)t->width * (size_t)height > 8*1024*1024 ||
         (t->subpixel && (background & 255) != 255)) return NULL;
@@ -854,6 +885,7 @@ size_t zc_text_boundary(const char *text, size_t length, size_t position, int di
 }
 
 int zc_timestamp_ms(const char *timestamp, size_t length, int64_t *output) {
+    // 64 bytes covers an ISO timestamp with fractional seconds and timezone plus NUL.
     char value[64];
     if (!length || length >= sizeof(value) || memchr(timestamp, '\0', length)) return 0;
     memcpy(value, timestamp, length); value[length] = '\0';

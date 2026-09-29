@@ -10,9 +10,11 @@ start: usize = 0,
 count: usize = 0,
 serial: u64 = 0,
 
+// 500 entries retains recent diagnostics with a fixed in-process memory cost.
 pub const capacity = 500;
 pub const Entry = struct {
     serial: u64,
+    // 768 bytes covers ordinary diagnostics; longer entries carry a truncation marker.
     storage: [768]u8,
     length: usize,
 
@@ -32,6 +34,7 @@ pub fn append(
     var entry: Entry = .{ .serial = 0, .storage = undefined, .length = 0 };
     const marker = " … [truncated]";
     var writer = std.Io.Writer.fixed(entry.storage[0 .. entry.storage.len - marker.len]);
+    // The 19-byte local date/time plus two hundredths digits needs 21 bytes and a C terminator.
     var timestamp: [22]u8 = undefined;
     writer.print("{s} {s}({s}): ", .{
         formatTimestamp(&timestamp, u.now()),

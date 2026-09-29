@@ -9,7 +9,9 @@ pub const Files = @import("outgoing/Files.zig");
 pub const Preparation = @import("outgoing/Preparation.zig");
 pub const Upload = @import("outgoing/Upload.zig");
 
+// 256 staged files bounds draft bookkeeping across conversations.
 pub const max_stored_files = 256;
+// 2 GiB bounds local originals retained for drafts and retryable sends.
 pub const max_stored_bytes = 2 * 1024 * 1024 * 1024;
 pub const AddError = Store.ReadError || attachments.ValidateError || error{AttachmentStorageFull};
 pub const TransferError = Store.RecordError || error{AttachmentDraftChanged};

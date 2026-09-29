@@ -91,6 +91,7 @@ want_identities: bool = false,
 stream_verified: bool = false,
 extension_rejected: bool = false,
 retry_at: i64 = 0,
+// Start reconnect attempts one second apart; failures double this up to 30 seconds.
 backoff: i64 = 1000,
 status_at: i64 = 0,
 recovery_at: i64 = 0,
@@ -274,6 +275,7 @@ pub fn takeNotification(s: *Worker) ?*Notification {
 pub fn push(s: *Worker, cmd: Command) PushError!void {
     s.mutex.lockUncancelable(s.io);
     defer s.mutex.unlock(s.io);
+    // Bound pending UI commands so a stalled worker cannot accumulate unlimited requests.
     if (s.commands.items.len >= 64) return error.Busy;
     const key = try a.dupe(u8, cmd.key);
     errdefer a.free(key);
@@ -416,11 +418,14 @@ fn work(s: *Worker) !void {
             if (s.job == .idle and !s.auth_blocked and s.reset != .complete and u.now() >= s.retry_at) try s.schedule();
             try s.uploadFiles();
         }
+        // Coalesce snapshots to roughly 60 Hz while the worker is busy.
         if (s.dirty and u.now() - s.last_published >= 16) try s.publish();
         // Network activity and commands wake immediately; timers only bound
         // publication coalescing and maintenance, rather than every request.
         const now = u.now();
+        // Publish dirty snapshots after 16 ms; otherwise wake at least once a second.
         var delay: i64 = if (s.dirty) @max(0, 16 - (now - s.last_published)) else 1000;
+        // Refresh active upload progress at most 100 ms apart.
         if (s.upload != null) delay = @min(delay, 100);
         delay = @min(delay, @max(0, s.expiry_at - now));
         if (s.contacts_sync_until != 0) delay = @min(delay, @max(0, s.contacts_sync_until - now));
@@ -494,6 +499,7 @@ fn receiveBatch(s: *Worker, bytes: []const u8) !void {
     var batch = EventBatch{ .worker = s };
     try s.sse.feed(event, &batch, bytes);
     try s.store.db.exec("COMMIT");
+    // Keep brief contact activity visible for 1.2 seconds across snapshot publication.
     if (batch.contacts > 0) s.contacts_sync_until = u.now() + 1200;
     if (batch.events > 0) log.debug("Live sync committed: events={d} contacts={d} bytes={d}", .{
         batch.events,
@@ -504,6 +510,7 @@ fn receiveBatch(s: *Worker, bytes: []const u8) !void {
     s.mutex.lockUncancelable(s.io);
     defer s.mutex.unlock(s.io);
     for (s.batch_notifications.items) |n| {
+        // Keep the newest 64 notifications during delivery stalls.
         if (s.notifications.items.len == 64) s.notifications.orderedRemove(0).destroy();
         s.notifications.append(a, n) catch n.destroy();
     }
@@ -514,6 +521,7 @@ fn event(batch: *EventBatch, arena: u.Allocator, raw: []const u8, id: []const u8
     if (try s.store.eventNotification(arena, raw, id, kind, if (s.viewed) s.selected else "")) |message| {
         const notification = Notification.create(s.store, message) catch null;
         if (notification) |n| {
+            // Bound alerts accumulated during a sync batch to the same 64-entry delivery limit.
             if (s.batch_notifications.items.len == 64) s.batch_notifications.orderedRemove(0).destroy();
             s.batch_notifications.append(a, n) catch n.destroy();
         }
@@ -571,7 +579,9 @@ fn disconnected(s: *Worker, status: c_long) void {
         else => "Offline · cached messages and drafts available. Check the network and relay.",
     };
     if (s.auth_blocked) s.retry_at = 0 else {
+        // Add up to 250 ms of jitter to spread reconnects after a shared outage.
         s.retry_at = u.now() + s.backoff + @mod(u.now(), 251);
+        // Exponential backoff tops out at 30 seconds so recovery remains timely.
         s.backoff = @min(s.backoff * 2, 30000);
     }
     if (s.auth_blocked) {
@@ -595,6 +605,7 @@ fn expireUnknown(s: *Worker) !void {
     const now = u.now();
     if (now < s.expiry_at) return;
     const removed = try s.store.expireUnknown(now);
+    // Expire unresolved outbox entries once per second instead of querying on every iteration.
     s.expiry_at = now + 1000;
     if (removed) {
         s.content_dirty = true;
@@ -669,6 +680,7 @@ fn uploadFiles(s: *Worker) !void {
             const failure = upload.transport_error;
             const status = upload.http_status;
             s.stopUpload();
+            // Wait five seconds before retrying transient upload failures.
             s.upload_retry_at = u.now() + 5000;
             s.content_dirty = true;
             s.dirty = true;
@@ -677,6 +689,7 @@ fn uploadFiles(s: *Worker) !void {
                 s.disconnected(status);
             }
         } else if (u.now() - s.upload_published_at >= 100) {
+            // Publish upload progress at 10 Hz to avoid rebuilding the UI snapshot per chunk.
             s.upload_published_at = u.now();
             s.dirty = true;
         }
@@ -728,6 +741,7 @@ fn schedule(s: *Worker) !void {
         defer q.close();
         if (try q.step()) {
             try s.setJobKey(q.bytes(0));
+            // Poll unresolved sends every five seconds while awaiting relay observation.
             s.recovery_at = u.now() + 5000;
             try s.request(
                 .recover,
@@ -761,6 +775,7 @@ fn schedule(s: *Worker) !void {
     } else if (u.now() >= s.status_at) {
         try s.request(.status, "/v1/status", .{}, null);
     } else if (u.now() >= s.recovery_at) {
+        // Poll unresolved sends every five seconds while awaiting relay observation.
         s.recovery_at = u.now() + 5000;
         const q = try s.store.db.prepare("SELECT id,rowid FROM outbox WHERE epoch=? AND state IN ('sending','unknown','queued','dispatching','submitted') AND (record IS NOT NULL OR coalesce(json_array_length(payload,'$.attachments'),0)=0) AND rowid>? ORDER BY rowid LIMIT 1");
         defer q.close();
@@ -778,6 +793,7 @@ fn schedule(s: *Worker) !void {
     } else if (u.now() >= s.hydration_at and try s.hydrate(ar)) {
         // One visible message per cancellable request, after text and recovery.
     } else if (u.now() >= s.preview_at) {
+        // Space preview refreshes by 100 ms while there is active work.
         s.preview_at = u.now() + 100;
         const q = try s.store.db.prepare("SELECT c.id FROM records c WHERE c.kind='conversation' AND NOT EXISTS(SELECT 1 FROM records m WHERE m.kind='message' AND m.chat=c.id) AND NOT EXISTS(SELECT 1 FROM previews p WHERE p.chat=c.id) ORDER BY c.sort_key DESC LIMIT 1");
         defer q.close();
@@ -789,7 +805,7 @@ fn schedule(s: *Worker) !void {
                 .{ url_format.escaped(s.job_key), if (s.text_first_history) "&content=text" else "" },
                 null,
             );
-        } else s.preview_at = u.now() + 30000;
+        } else s.preview_at = u.now() + 30000; // Idle previews can wait 30 seconds before another query.
     }
 }
 fn requestHistory(s: *Worker, ar: u.Allocator) !void {
@@ -811,6 +827,7 @@ fn hydrateSend(s: *Worker) !bool {
     defer q.close();
     if (!try q.step()) return false;
     try s.setJobKey(q.bytes(0));
+    // Throttle metadata retries for five seconds after a response or transient failure.
     s.hydration_at = u.now() + 5000;
     try s.request(
         .hydrate,
@@ -824,6 +841,7 @@ fn hydrate(s: *Worker, ar: u.Allocator) !bool {
     const cmd = s.hydration_request orelse return false;
     if (!u.eq(cmd.key, s.selected)) return false;
     const ids = try std.json.parseFromSliceLeaky([]const []const u8, ar, cmd.text, .{});
+    // Match the server's 64-message hydration batch limit.
     for (ids[0..@min(ids.len, 64)]) |id| {
         const q = try s.store.db.prepare("SELECT json_extract(record,'$.metadata_deferred') FROM records WHERE kind='message' AND id=?");
         defer q.close();
@@ -911,6 +929,7 @@ fn complete(s: *Worker) !void {
     if (status < 200 or status >= 300) {
         if (job == .hydrate and status != 401 and status != 403 and (status != 0 or request_error.kind == c.ZC_NETWORK)) {
             // Optional metadata failures leave text and the live stream usable.
+            // Throttle metadata retries for five seconds after a response or transient failure.
             s.hydration_at = u.now() + 5000;
             s.dirty = true;
             return;
@@ -961,6 +980,7 @@ fn complete(s: *Worker) !void {
     s.handleResponse(ar, job, raw) catch |err| {
         log.warn("{s} response could not be applied: {s}", .{ @tagName(job), @errorName(err) });
         if (job == .hydrate) {
+            // Throttle metadata retries for five seconds after a response or transient failure.
             s.hydration_at = u.now() + 5000;
             s.dirty = true;
             return;
@@ -983,6 +1003,7 @@ fn complete(s: *Worker) !void {
     s.dirty = true;
 }
 fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), raw: []const u8) !void {
+    // Bound token work as well as bytes before decoding an aggregate history response.
     try json_bounds.check(raw, t.max_history_bytes, 512 * 1024);
     switch (job) {
         .reset_status => {
@@ -1066,6 +1087,7 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
             s.send_direct = v.capabilities.send_direct;
             s.reply_existing = v.capabilities.reply_existing;
             s.send_attachments = v.capabilities.send_attachments_v1 and v.capabilities.attachment_uploads_v1;
+            // Poll status each second during sync and every five seconds while idle.
             s.status_at = u.now() + @as(i64, if (v.sync_activity.active()) 1000 else 5000);
             if (!u.eq(v.server_epoch, try s.store.get(ar, "epoch")) or !u.eq(
                 try s.store.get(ar, "bootstrapped"),
@@ -1603,6 +1625,7 @@ fn publish(s: *Worker) !void {
         v.upload.filename = try ar.dupe(u8, v.upload.filename);
     }
     const server = try s.store.get(ar, "relay_status");
+    // Warn 30 days before expiry to leave time for certificate renewal.
     const expiring = s.identity.expires_at > 0 and s.identity.expires_at - @divTrunc(u.now(), 1000) <= 30 * 86400;
     if (expiring and s.online) v.status = try std.fmt.allocPrint(
         ar,

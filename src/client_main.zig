@@ -106,19 +106,24 @@ fn run(init: std.process.Init) !void {
     rl.setConfigFlags(.{
         .window_resizable = true,
         .window_highdpi = true,
+        // Four samples smooth rounded shapes at fractional display scales.
         .msaa_4x_hint = true,
     });
+    // Start with room for navigation, conversation history, and a multiline composer.
     rl.initWindow(1120, 780, "Zimbr");
     defer rl.closeWindow();
     bridge.zc_activation_init();
     defer bridge.zc_activation_free();
     // Let Wayland deliver its initial scale before caching any text textures.
     rl.pollInputEvents();
+    // Keep settings controls and the conversation usable beside the fixed-width sidebar.
     rl.setWindowMinSize(780, 560);
     rl.setExitKey(.null);
+    // Allow smooth interaction on high-refresh displays; the idle loop throttles redraws.
     rl.setTargetFPS(120);
     _ = clay.initialize(
         .init(try init.arena.allocator().alloc(u8, clay.minMemorySize())),
+        // Initialize Clay to the same logical dimensions as the window.
         .{ .w = 1120, .h = 780 },
         .{ .error_handler_function = clayError },
     );
@@ -191,9 +196,12 @@ fn runSession(init: std.process.Init, config: Config) !?Config {
         // Keep rendering between input events so scrolling and key repeat do
         // not fall back to the idle polling cadence during an interaction.
         if (input or window_changed or revision != last_revision or drop_hovered != last_drop_hovered)
+            // Hold the fast redraw cadence for half a second to bridge gaps between input events.
             active_until = now + 0.5;
         const syncing = !app.settings.visible and app.syncActivity().active();
+        // Animate sync at about 30 fps; redraw idle status twice per second.
         const frame_delay: i64 = if (syncing) 33 else 500;
+        // Render four startup frames to settle initial window/layout events before idle throttling.
         if (frames < 4 or config.frames > 0 or background_ready or app.layout_pending or now < active_until or generation != last_generation or u.now() - last_draw >= frame_delay) {
             app.capture_frame = config.screenshot != null and config.frames > 0 and frames + 1 >= config.frames;
             app.draw(window.scale);
@@ -206,6 +214,7 @@ fn runSession(init: std.process.Init, config: Config) !?Config {
             last_window = window;
             frames += 1;
         } else {
+            // Short 10/25 ms waits keep background updates responsive without polling continuously.
             background_ready = bridge.zc_activation_wait(if (syncing) 10 else 25) != 0;
             rl.pollInputEvents();
         }
@@ -342,11 +351,13 @@ const App = struct {
         fn near(click: TextClick, position: rl.Vector2) bool {
             const dx = position.x - click.position.x;
             const dy = position.y - click.position.y;
+            // Treat clicks within a five-pixel radius as the same target.
             return dx * dx + dy * dy <= 25;
         }
 
         fn follows(click: TextClick, previous: TextClick) bool {
             const interval = click.time - previous.time;
+            // A 400 ms interval permits ordinary double/triple clicks without merging slow clicks.
             return interval >= 0 and interval <= 0.4 and previous.near(click.position) and
                 std.meta.eql(click.target, previous.target);
         }
@@ -409,6 +420,7 @@ const App = struct {
     }
     fn info(s: *App, msg: []const u8) void {
         s.notice = msg;
+        // Keep notices visible for seven seconds so longer errors can be read.
         s.notice_until = u.now() + 7000;
     }
     fn notificationAction(context: ?*anyopaque, chat: [*c]const u8, token: [*c]const u8) callconv(.c) void {
@@ -651,6 +663,7 @@ const App = struct {
                 v.snapshot.directory.available,
             )) s.images.contextChanged(v.snapshot.directory.available);
         };
+        // Debounce draft writes for 300 ms to avoid a database transaction per keystroke.
         if (s.draft_dirty and u.now() - s.draft_at > 300) try s.saveDraft();
         s.handleDrops();
         const reading = s.readingConversation();
@@ -685,6 +698,7 @@ const App = struct {
                     return;
                 }
                 if (ctrl and rl.isKeyPressed(.c)) rl.setClipboardText(body);
+                // Move expanded content in 100-pixel keyboard steps so long text remains navigable.
                 if (pressed(.page_down) or pressed(.down)) s.content_detail_scroll += 100;
                 if (pressed(.page_up) or pressed(.up)) s.content_detail_scroll -= 100;
                 while (rl.getCharPressed() != 0) {}
@@ -709,6 +723,7 @@ const App = struct {
                 if (s.logs_focused) {
                     if (ctrl and pressed(.c)) s.copyLogs();
                     var offset = s.logs_scroll;
+                    // Diagnostic panes use 160-pixel page steps and 24-pixel line steps.
                     if (pressed(.page_down)) offset += 160;
                     if (pressed(.page_up)) offset -= 160;
                     if (pressed(.down)) offset += 24;
@@ -792,7 +807,10 @@ const App = struct {
             if (!ctrl) while (true) {
                 const ch = rl.getCharPressed();
                 if (ch == 0) break;
+                // C0 controls come from explicit key handling; text input accepts printable Unicode
+                // scalars.
                 if (ch < 32) continue;
+                // A single Unicode scalar needs at most four UTF-8 bytes.
                 var buf: [4]u8 = undefined;
                 const n = std.unicode.utf8Encode(@intCast(ch), &buf) catch continue;
                 e.insert(buf[0..n]) catch s.info("Message exceeds the 16 KiB limit.");
@@ -939,6 +957,7 @@ const App = struct {
         s.following = true;
     }
     fn draw(s: *App, scale: f32) void {
+        // Reuse 1 MiB of frame scratch space but release exceptional large-frame allocations.
         defer _ = s.frame_arena.reset(.{ .retain_with_limit = 1024 * 1024 });
         const ar = s.frame_arena.allocator();
         if (s.text.scale != scale) s.text_click = null;
@@ -1068,6 +1087,7 @@ const App = struct {
             );
             const online = s.view != null and s.view.?.online;
             const activity = s.syncActivity();
+            // Fit the bounded combination of active sync labels without allocating each frame.
             var sync_buffer: [96]u8 = undefined;
             const status = if (activity.active()) display.syncLabel(activity, &sync_buffer) else if (online) status: {
                 const endpoint = std.Uri.parse(s.worker.config.relay_url) catch break :status "Connected";
@@ -1100,7 +1120,9 @@ const App = struct {
         }
         if (comptime client_options.fps_counter) {
             if (!s.settings.visible) {
+                // Reserve 72 pixels so FPS updates do not shift the connection status.
                 const fps_width: f32 = 72;
+                // Fit the numeric FPS diagnostic and suffix without per-frame allocation.
                 var buffer: [32]u8 = undefined;
                 const fps = std.fmt.bufPrint(&buffer, "{d} FPS", .{rl.getFPS()}) catch unreachable;
                 const band = layout.footer(areas.composer);
@@ -1138,6 +1160,7 @@ const App = struct {
         // a one-pixel antialiased edge even at fractional display scales.
         const cx = @round(center.x * scale * 2) / 2;
         const cy = @round(center.y * scale * 2) / 2;
+        // A six-pixel status dot remains legible without competing with the footer label.
         const radius = 3 * scale;
         var y = @floor(cy - radius - 0.5);
         while (y < cy + radius + 0.5) : (y += 1) {
@@ -1220,12 +1243,14 @@ const App = struct {
     }
     fn drawPaneHeader(s: *App, title: []const u8, subtitle: []const u8, r: rl.Rectangle) void {
         const x = r.x + 32;
+        // Cap form line length at 760 pixels and retain 32-pixel side margins.
         const width = @min(760, r.width - 64);
         s.text.drawLine(title, x, r.y + 22, 25, width, theme.colors.ink, theme.colors.paper);
         s.text.drawLine(subtitle, x, r.y + 58, 15, width, theme.colors.muted, theme.colors.paper);
     }
     fn drawSettings(s: *App, r: rl.Rectangle) void {
         const x = r.x + 32;
+        // Cap form line length at 760 pixels and retain 32-pixel side margins.
         const width = @min(760, r.width - 64);
         s.drawPaneHeader(
             "Settings",
@@ -1233,8 +1258,10 @@ const App = struct {
             r,
         );
         const helper = "Use absolute paths to your enrolled device credentials. Files must be owned 0600, in private 0700 directories.";
+        // Place credential rows after the URL, send preference, and wrapped helper text.
         const paths_y = 144 + s.text.height(helper, 14, width) + 20;
         const failure = std.mem.sliceTo(&s.settings.failure.message, 0);
+        // Three credential rows each need 66 pixels for label, input, and spacing.
         const failure_y = paths_y + 3 * 66 + 8;
         const reset_y = failure_y + (if (failure.len > 0)
             s.text.height(failure, 14, width) + 12
@@ -1394,6 +1421,7 @@ const App = struct {
         s.composer_bar = .{};
         s.worker.push(.{ .kind = .viewed, .text = if (!s.show_details and s.following and rl.isWindowFocused()) "yes" else "no" }) catch {};
     }
+    // Small semibold labels remain distinguishable beneath the navigation icons.
     const rail_label_style = Text.Style{ .size = 10, .weight = .semibold };
     const RailIcon = enum {
         messages,
@@ -1401,6 +1429,8 @@ const App = struct {
         settings,
         details,
     };
+    // A 40x36 tile centers a roughly 20-pixel icon; 1.5-pixel strokes keep the small glyphs
+    // legible.
     fn railItem(s: *App, r: rl.Rectangle, label: []const u8, icon: RailIcon, selected: bool) bool {
         const hot = hover(r);
         const bg = if (selected) theme.colors.selected else if (hot) theme.colors.avatar else theme.colors.rail;
@@ -1487,6 +1517,8 @@ const App = struct {
         if (hot) rl.setMouseCursor(.pointing_hand);
         return hot and rl.isMouseButtonPressed(.left);
     }
+    // 62-pixel items pair icon tiles with captions; larger end gaps separate navigation from
+    // settings.
     fn drawRail(s: *App, r: rl.Rectangle) void {
         rl.drawRectangleRec(r, theme.colors.rail);
         if (s.railItem(.{
@@ -1532,14 +1564,21 @@ const App = struct {
             .height = 62,
         }, "Details", .details, s.show_details and !s.settings.visible)) s.toggleDetails();
     }
+    // 36 pixels fits a 22-pixel avatar with vertical breathing room.
     const sidebar_row_height: f32 = 36;
+    // Eight-pixel margins separate rows and search from the sidebar edge.
     const sidebar_padding: f32 = 8;
+    // Align icons with the sidebar's eight-pixel inner margin.
     const sidebar_icon_inset: f32 = 8;
+    // 22 pixels keeps avatars recognizable within compact 36-pixel rows.
     const sidebar_icon_size: f32 = 22;
+    // Eight-pixel inset plus 22-pixel avatar plus an eight-pixel text gap.
     const sidebar_text_inset: f32 = 38;
+    // 30 pixels fits one search line while preserving list space.
     const sidebar_search_height: f32 = 30;
     const sidebar_search_gap: f32 = sidebar_padding;
     const sidebar_header_height = sidebar_padding + sidebar_search_height + sidebar_search_gap;
+    // A four-pixel gap separates search from the first conversation row.
     const sidebar_list_gap: f32 = 4;
     fn sidebarViewport(r: rl.Rectangle) rl.Rectangle {
         return .{
@@ -1674,6 +1713,7 @@ const App = struct {
                     };
                     const badge_color = if (read_only) theme.colors.muted else theme.colors.accent;
                     shapes.drawRectangle(badge, 0.5, badge_color);
+                    // Cap the badge at 99+ so large unread counts fit its fixed width.
                     const label = if (chat.unread > 99) "99+" else std.fmt.allocPrint(
                         ar,
                         "{d}",
@@ -1722,6 +1762,7 @@ const App = struct {
     }
     fn drawAvatar(s: *App, r: rl.Rectangle, name: []const u8, style: theme.Participant, size: i32) void {
         ImageCache.drawAvatar(null, r, style.bubble);
+        // Inspect at most 128 bytes of one line to extract a bounded avatar initial.
         const safe = display.prefix(name, 128, 1);
         var ascii = [_]u8{if (safe.len > 0 and std.ascii.isAlphabetic(safe[0])) std.ascii.toUpper(safe[0]) else '+'};
         const initial: []const u8 = if (safe.len > 0 and safe[0] >= 128) safe[0..bridge.zc_text_boundary(
@@ -1732,12 +1773,16 @@ const App = struct {
         )] else &ascii;
         s.text.drawLineCentered(initial, r, size, style.label, null);
     }
+    // An 18-pixel lead-in and 32-pixel heading row distinguish groups from 14-pixel detail values.
     fn detailSection(s: *App, label: []const u8, r: rl.Rectangle, y: *f32) void {
         y.* += 18;
         s.text.draw(label, r.x, y.*, 17, r.width, theme.colors.ink, theme.colors.paper);
         y.* += 32;
     }
+    // 122 pixels aligns diagnostic values after their short labels.
     const detail_label_width: f32 = 122;
+    // Use 12-pixel labels, 14-pixel values, and a ten-pixel row gap for dense but readable
+    // diagnostics.
     fn detailRow(s: *App, label: []const u8, value: []const u8, r: rl.Rectangle, y: *f32) void {
         const label_width = detail_label_width;
         const value_width = @max(80, r.width - label_width - 12);
@@ -2018,6 +2063,7 @@ const App = struct {
         rl.setClipboardText(copied);
     }
 
+    // Keep logs between 120 and 260 pixels tall, with ten-pixel inner padding and 28-pixel actions.
     fn drawLogs(s: *App, r: rl.Rectangle, y: *f32, ar: u.Allocator) bool {
         s.detailSection("Logs", r, y);
         const box = rl.Rectangle{
@@ -2027,6 +2073,7 @@ const App = struct {
             .height = @min(260, @max(120, r.height - 90)),
         };
         const header_y = y.* - 34;
+        // Four pixels separates the adjacent log actions without consuming the header width.
         const button_gap = 4;
         const latest_size = s.buttonSize("Latest");
         const copy_size = s.buttonSize("Copy");
@@ -2122,6 +2169,7 @@ const App = struct {
         if (entries.len == 0) s.text.draw("No logs yet.", inner.x, inner.y, 12, inner.width, theme.colors.muted, theme.colors.surface);
         endClip();
         s.logs_bar.draw(viewport, total, s.logs_scroll);
+        // Fit a localized timezone name and offset in the log footer.
         var zone: [80]u8 = undefined;
         const latest_label = std.fmt.comptimePrint("latest {d} entries", .{LogBuffer.capacity});
         const status = std.fmt.allocPrint(ar, "{s} · {s} · {s}", .{
@@ -2140,6 +2188,7 @@ const App = struct {
         );
         return hot;
     }
+    // A 34-pixel avatar and 20/12-pixel title/subtitle fit the shared 64-pixel conversation header.
     fn drawHeader(s: *App, r: rl.Rectangle, ar: u.Allocator) void {
         var title: []const u8 = if (s.show_hidden) "Hidden conversations" else "Messages";
         var subtitle: []const u8 = if (s.show_hidden) "Hidden on this device" else "Choose a conversation to get started.";
@@ -2219,7 +2268,9 @@ const App = struct {
             theme.colors.line,
         );
     }
+    // Reserve 22 pixels for sender/time metadata before the inter-message gap.
     const message_padding = 22 + layout.message_spacing;
+    // 118 pixels leaves room for the uncertain-send recovery action beside status text.
     const recovery_width: f32 = 118;
     const recovery_slot = recovery_width + 8;
 
@@ -2235,6 +2286,7 @@ const App = struct {
         blocks: []const message_content.Block = &.{},
 
         fn height(row: HistoryRow) f32 {
+            // Use one approximate text line until deferred measurement supplies the exact height.
             return (row.measured orelse 24) + row.padding;
         }
 
@@ -2391,6 +2443,7 @@ const App = struct {
         s.following = wheel < 0 and s.scroll >= s.historyLimit(viewport) - 1;
     }
     fn positionHistory(s: *App, rows: []HistoryRow, viewport: f32) void {
+        // Reserve the top history strip for the older-messages control and its spacing.
         var total: f64 = 54;
         var unmeasured = false;
         for (rows) |*row| {
@@ -2423,6 +2476,7 @@ const App = struct {
         s.history_needs_measurement = unmeasured;
         s.layout_pending = unmeasured;
     }
+    // Measure at most 256 rows per frame so large histories yield to input and rendering.
     const max_height_work = 256;
     fn hasHeightBudget(s: *App) bool {
         // Guarantee progress even when preparing a large snapshot took time.
@@ -2451,8 +2505,10 @@ const App = struct {
     }
     fn measureHistory(s: *App, rows: []HistoryRow, inner: f32, viewport: f32) void {
         s.height_budget = max_height_work;
+        // An eight-millisecond layout budget leaves part of the frame for drawing and input.
         s.height_deadline = u.c.zr_monotonic_ms() + 8;
         var anchor: usize = 0;
+        // Match the 54-pixel older-messages strip used when positioning history rows.
         var top: f64 = 54;
         while (anchor < rows.len and top + rows[anchor].height() <= s.scroll) : (anchor += 1) top += rows[anchor].height();
         // The visible block may be deeper than its row's temporary estimate.
@@ -2691,6 +2747,7 @@ const App = struct {
                     .text = raw,
                 }) catch {};
             } else |_| {}
+            // Coalesce visible metadata requests for a quarter second while scrolling.
             s.hydration_at = u.now() + 250;
         }
         // Reevaluate on idle redraws too, even when the snapshot is unchanged.
@@ -2952,6 +3009,8 @@ const App = struct {
             }
         }
     }
+    // 24-pixel side margins and 65-pixel top/bottom bands keep image content clear of viewer
+    // controls.
     fn drawViewer(s: *App, ar: u.Allocator) void {
         if (s.viewer_message.len == 0) return;
         const m = s.viewerMessage() orelse {
@@ -3030,12 +3089,14 @@ const App = struct {
             theme.colors.paper,
         );
     }
+    // Use a 320x200 placeholder; cap photos at 480x320 with a 32-pixel minimum hit area.
     fn imageSize(asset: ?t.AssetRef, width: f32) rl.Vector2 {
         const w: f32 = if (asset) |v| @floatFromInt(v.width orelse 320) else 320;
         const h: f32 = if (asset) |v| @floatFromInt(v.height orelse 200) else 200;
         const scale = @min(@min(@min(width, 480) / @max(1, w), 320 / @max(1, h)), 1);
         return .{ .x = @max(32, w * scale), .y = @max(32, h * scale) };
     }
+    // Missing dimensions use the relay's 1024/2560 inline/viewer derivative bounds.
     fn inlineAsset(item: t.Attachment, size: rl.Vector2, scale: f32) ?t.AssetRef {
         const inline_image = item.image orelse return null;
         const viewer = item.viewer orelse return inline_image;
@@ -3046,6 +3107,8 @@ const App = struct {
         if (viewer.availability != .retired and (size.x * scale > w or size.y * scale > h) and ((viewer.width orelse 2560) > (inline_image.width orelse 1024) or (viewer.height orelse 2560) > (inline_image.height orelse 1024))) return viewer;
         return inline_image;
     }
+    // Keep these heights aligned with drawBlocks: 28-pixel link rows, 32-pixel chip rows,
+    // 48-pixel file cards, and a three-line (54-pixel) optional preview summary.
     fn blockHeight(s: *App, block: message_content.Block, width: f32, visible: bool) f32 {
         return switch (block.value) {
             .text => |value| height: {
@@ -3147,6 +3210,8 @@ const App = struct {
             y += h + 8;
             if (clip_depth > 0) {
                 const viewport = clip_stack[clip_depth - 1];
+                // Prefetch within 200 pixels of the viewport so nearby images can be ready after
+                // scrolling.
                 if (r.y + r.height < viewport.y - 200 or r.y > viewport.y + viewport.height + 200) continue;
             }
             switch (block.value) {
@@ -3288,6 +3353,8 @@ const App = struct {
                             .height = 54,
                         });
                         s.text.draw(
+                            // Limit card summaries to 2 KiB and three lines so cards remain
+                            // compact.
                             display.prefix(summary, 2048, 3),
                             r.x + 12,
                             top,
@@ -3408,6 +3475,7 @@ const App = struct {
             s.detail_body = owned;
         }
     }
+    // An 80%-sized panel leaves 10% margins; alpha 190 dims the conversation without hiding it.
     fn drawContentDetail(s: *App) void {
         const body = s.detail_body orelse return;
         const width: f32 = @floatFromInt(rl.getScreenWidth());
@@ -3476,6 +3544,7 @@ const App = struct {
         foreground: rl.Color,
         background: rl.Color,
     ) ?MessageHint {
+        // Give the sender at most 55% of the row, leaving space for time and delivery status.
         const name_width = @min(r.width * 0.55, s.text.lineSize(name, 14, r.width * 0.55).x);
         // Use a common pixel origin and a fixed font reference. Centering each
         // string's ink moves dates when names or months contain descenders/emoji.
@@ -3541,6 +3610,7 @@ const App = struct {
         }
         return null;
     }
+    // Draw checks within a 20x12 box using a 1.5-pixel stroke; dotted tips mark partial delivery.
     fn drawDeliveryChecks(x: f32, y: f32, checks: display.MessageStatus.Checks) void {
         // Neutral checks indicate transport status; the relay has no read receipts.
         const color = theme.colors.muted;
@@ -3565,6 +3635,7 @@ const App = struct {
             },
         }
     }
+    // Cap tooltips at 420 pixels, with 10x6 padding, so recovery explanations fit inside history.
     fn drawMessageHint(s: *App, hint: MessageHint, viewport: rl.Rectangle) void {
         const anchor = hint.bounds;
         const label = hint.text;
@@ -3588,6 +3659,7 @@ const App = struct {
         s.text.draw(label, bounds.x + 10, bounds.y + 6, 12, size.x, theme.colors.ink, theme.colors.incoming);
         endClip();
     }
+    // Reserve 90 pixels for avatar/margins and keep at least 80 pixels for text layout.
     fn historyTextWidth(r: rl.Rectangle) f32 {
         return @max(80, r.width - 90);
     }
@@ -3647,6 +3719,7 @@ const App = struct {
             background,
         );
     }
+    // Reserve 80 pixels for the file selector/card and 28 more while preparation is in progress.
     fn attachmentsHeight(s: *const App) f32 {
         if (s.key.len == 0 or s.new_mode) return 0;
         const preparing = if (s.view) |v| v.preparing_draft else false;
@@ -3715,6 +3788,7 @@ const App = struct {
             .height = 28,
         }, "Remove", false)) s.fileCommand(.remove_attachment, s.key, file.id) catch s.info("Could not remove the attachment.");
     }
+    // A 48-pixel thumbnail fits two text rows; the 58-pixel text inset leaves a ten-pixel gap.
     fn drawLocalFile(
         s: *App,
         file: outgoing_attachments.Upload,
@@ -3769,6 +3843,7 @@ const App = struct {
         );
     }
     fn composerHeight(s: *App) f32 {
+        // Ag includes ascender and descender; width 400 prevents wrapping the line-height probe.
         const one_line = s.text.height("Ag", 16, 400);
         var height = one_line;
         if (!s.readOnlyChat() and s.key.len > 0 and !s.new_mode) {
@@ -3786,6 +3861,7 @@ const App = struct {
                 s.text.height(s.composer.text.items, 16, width),
                 caret.y + caret.height,
             );
+            // Show at most three composer lines before scrolling to preserve conversation space.
             height = std.math.clamp(content_height, one_line, s.text.height("Ag\nAg\nAg", 16, 400));
         }
         // Round up so fractional layout arithmetic cannot scroll a fitting draft.
@@ -3800,6 +3876,7 @@ const App = struct {
             .height = r.height - layout.composer_top_padding - layout.footer_height,
         };
     }
+    // Reserve 100 pixels at the right of the composer for Send and its surrounding padding.
     fn composerEditor(box: rl.Rectangle) rl.Rectangle {
         // Keep the text clear of the Send button.
         return .{
@@ -3913,6 +3990,8 @@ const App = struct {
             );
         }
         if (read_only) return;
+        // 76x28 fits both Send and Saving labels; its eight-pixel bottom inset aligns with the
+        // editor.
         const send_button = rl.Rectangle{
             .x = r.x + r.width - layout.action_right_padding - 76,
             .y = box.y + box.height - 36,
@@ -3942,6 +4021,8 @@ const App = struct {
             if (rl.isMouseButtonPressed(.left)) s.send() catch s.info("Could not queue message. Your draft is retained.");
         }
     }
+    // 11-pixel side insets separate text from the border; multiline inputs use ten-pixel vertical
+    // insets.
     fn inputBox(
         s: *App,
         e: *Editor,
@@ -4068,6 +4149,7 @@ const App = struct {
             @max(e.caret, e.anchor),
             background,
         );
+        // Blink once per second with 600 ms visible so the insertion point is easy to locate.
         if (s.focus == focus and @mod(u.now(), 1000) < 600) rl.drawRectangleRec(.{
             .x = inner.x + caret.x,
             .y = inner.y + caret.y - offset,
@@ -4081,8 +4163,11 @@ const App = struct {
         if (caret.y < s.composer_scroll) s.composer_scroll = caret.y;
         if (caret.y + caret.height > s.composer_scroll + viewport) s.composer_scroll = caret.y + caret.height - viewport;
     }
+    // Twelve horizontal and four vertical pixels make text buttons easy to target.
     const button_padding = rl.Vector2{ .x = 12, .y = 4 };
+    // 13-pixel labels fit compact toolbar actions without matching body-text emphasis.
     const button_font_size = 13;
+    // Bound label measurement at 512 pixels before adding button padding.
     const button_label_width = 512;
     fn buttonSize(s: *App, label: []const u8) rl.Vector2 {
         const text_size = s.text.lineSize(label, button_font_size, button_label_width);
@@ -4141,6 +4226,7 @@ fn hover(r: rl.Rectangle) bool {
         clip_stack[clip_depth - 1],
     ));
 }
+// Sixteen nested clips covers panes, cards, and editors without allocating during drawing.
 var clip_stack: [16]rl.Rectangle = undefined;
 var clip_depth: usize = 0;
 fn beginClip(requested: rl.Rectangle) void {
@@ -4179,6 +4265,7 @@ fn chatName(v: t.Conversation) []const u8 {
 }
 fn localTime(ar: u.Allocator, value: []const u8, compact: bool) []const u8 {
     const stamp = ar.dupeZ(u8, value) catch return value;
+    // 64 bytes covers localized display timestamps; fall back to source text if formatting fails.
     const buffer = ar.alloc(u8, 64) catch return value;
     const n = bridge.zc_local_time(stamp, buffer.ptr, buffer.len, @intFromBool(compact));
     return if (n > 0) buffer[0..@intCast(n)] else value;
@@ -4400,6 +4487,7 @@ test "double text clicks require a nearby matching target within the time limit"
 test "workspace navigation, compact lists, message selection, and scrollbars render correctly" {
     // Raylib logs to stdout, which Zig's test runner reserves for its protocol.
     rl.setTraceLogLevel(.none);
+    // Four samples smooth rounded shapes at fractional display scales.
     rl.setConfigFlags(.{ .window_highdpi = true, .msaa_4x_hint = true });
     rl.initWindow(1120, 780, "Zimbr UI checks");
     defer rl.closeWindow();
@@ -4417,6 +4505,7 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     defer arena.deinit();
     _ = clay.initialize(
         .init(try arena.allocator().alloc(u8, clay.minMemorySize())),
+        // Initialize Clay to the same logical dimensions as the window.
         .{ .w = 1120, .h = 780 },
         .{ .error_handler_function = clayError },
     );
@@ -5109,6 +5198,7 @@ test "sidebar highlight stays selected while Messages and Hidden wait for histor
     defer std.testing.allocator.free(clay_memory);
     _ = clay.initialize(
         .init(clay_memory),
+        // Initialize Clay to the same logical dimensions as the window.
         .{ .w = 1120, .h = 780 },
         .{ .error_handler_function = clayError },
     );
@@ -5236,6 +5326,7 @@ test "conversation switches keep the previous frame until the latest selection i
     defer std.testing.allocator.free(clay_memory);
     _ = clay.initialize(
         .init(clay_memory),
+        // Initialize Clay to the same logical dimensions as the window.
         .{ .w = 1120, .h = 780 },
         .{ .error_handler_function = clayError },
     );
@@ -6948,6 +7039,7 @@ test "Details streams logs, preserves scrollback, and supports latest copy and c
     defer reset_context(null);
     _ = clay.initialize(
         .init(try arena.allocator().alloc(u8, clay.minMemorySize())),
+        // Initialize Clay to the same logical dimensions as the window.
         .{ .w = 1120, .h = 780 },
         .{ .error_handler_function = clayError },
     );
@@ -7038,6 +7130,7 @@ test "settings validate credentials and commit through the pane before unlocking
     var worker = Worker{ .io = std.testing.io, .config = .{ .data = data } };
     defer worker.shutdown();
     rl.setTraceLogLevel(.none);
+    // Four samples smooth rounded shapes at fractional display scales.
     rl.setConfigFlags(.{ .window_highdpi = true, .msaa_4x_hint = true });
     rl.initWindow(780, 560, "Zimbr settings checks");
     defer rl.closeWindow();
@@ -7131,6 +7224,7 @@ test "composer consumes file drops and waits for reviewed attachments before an 
     const reset_context: *const fn (?*clay.Context) callconv(.c) void = @ptrCast(&clay.setCurrentContext);
     reset_context(null);
     rl.setTraceLogLevel(.none);
+    // Four samples smooth rounded shapes at fractional display scales.
     rl.setConfigFlags(.{ .window_highdpi = true, .msaa_4x_hint = true });
     rl.initWindow(780, 560, "Attachment composer");
     defer rl.closeWindow();
@@ -7364,6 +7458,7 @@ test "native file drops reach the synthetic relay with reviewed original bytes" 
     const reset_context: *const fn (?*clay.Context) callconv(.c) void = @ptrCast(&clay.setCurrentContext);
     reset_context(null);
     rl.setTraceLogLevel(.none);
+    // Four samples smooth rounded shapes at fractional display scales.
     rl.setConfigFlags(.{ .window_highdpi = true, .msaa_4x_hint = true });
     rl.initWindow(780, 560, "Attachment integration");
     defer rl.closeWindow();
