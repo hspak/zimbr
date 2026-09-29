@@ -21,6 +21,7 @@ pub const content = @import("client/content.zig");
 pub const display = @import("client/display.zig");
 pub const layout = @import("client/layout.zig");
 pub const links = @import("client/links.zig");
+pub const outgoing = @import("client/outgoing.zig");
 pub const shapes = @import("client/shapes.zig");
 pub const theme = @import("client/theme.zig");
 pub const validation = @import("client/validation.zig");

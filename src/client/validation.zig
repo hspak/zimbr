@@ -2,11 +2,32 @@
 //! independent of rendering and apply them before committing received records.
 const std = @import("std");
 const t = @import("../protocol.zig").types;
+const attachments = @import("../protocol.zig").attachments;
+const u = @import("../common.zig");
 pub const max_record_bytes = 512 * 1024;
 pub const max_section_items = 4096;
 pub const max_expanded_bytes = 8 * 1024 * 1024;
 
 pub const MessageError = error{InvalidRecord};
+
+pub fn request(value: t.SendRequest) MessageError!void {
+    if (value.attachments.len == 0) {
+        if (value.parts.len != 0) return error.InvalidRecord;
+        return;
+    }
+    attachments.validateSet(value.attachments) catch return error.InvalidRecord;
+    const caption: usize = @intFromBool(value.text.len != 0);
+    if (value.parts.len != caption + value.attachments.len) return error.InvalidRecord;
+    for (value.parts, 0..) |part, i| {
+        if (i < caption) {
+            if (part.kind != .text or part.attachment_id != null) return error.InvalidRecord;
+        } else if (part.kind != .attachment or !u.eq(
+            part.attachment_id orelse return error.InvalidRecord,
+            value.attachments[i - caption].id,
+        )) return error.InvalidRecord;
+        if (value.state == .delivered and part.state != .delivered) return error.InvalidRecord;
+    }
+}
 
 pub fn message(value: t.Message) MessageError!void {
     if (value.text) |text| {

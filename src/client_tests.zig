@@ -14,6 +14,7 @@ test {
     _ = @import("client.zig").Worker;
     _ = @import("client.zig").display;
     _ = @import("client.zig").MessageSelection;
+    _ = @import("client.zig").outgoing.Files;
 }
 const epoch = "EjRWeBI0EjQSNBI0VniQEg";
 const message = "{\"id\":\"m1\",\"revision\":\"2\",\"conversation_id\":\"c1\",\"sender\":\"test@example.invalid\",\"direction\":\"incoming\",\"service\":\"imessage\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"kind\":\"text\",\"text\":\"Hello 👋\",\"decoding\":\"plain\",\"observed_status\":\"received\"}";

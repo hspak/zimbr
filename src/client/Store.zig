@@ -11,6 +11,8 @@ const Sqlite = @import("../relay.zig").Sqlite;
 const Directory = @import("IdentityDirectory.zig");
 const display = @import("display.zig");
 const bridge = @import("c.zig").api;
+const outgoing = @import("outgoing.zig");
+const attachments = @import("../protocol.zig").attachments;
 const Store = @This();
 pub const recent_history_limit = 100;
 
@@ -54,7 +56,7 @@ pub const EventNotificationError = RecordError || error{
     ResyncRequired,
     UnknownEvent,
 };
-pub const PersistSendError = ReadError || t.ValidateError || error{
+pub const PersistSendError = ReadError || t.ValidateError || outgoing.TransferError || error{
     InvalidDraft,
     InvalidRequest,
     InvalidTimestamp,
@@ -96,6 +98,9 @@ pub fn open(path: [:0]const u8) ReadError!Store {
         \\CREATE TABLE IF NOT EXISTS previews(chat TEXT PRIMARY KEY);
         \\CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY,epoch TEXT NOT NULL,draft_key TEXT NOT NULL,payload TEXT NOT NULL,state TEXT NOT NULL,detail TEXT NOT NULL DEFAULT '',record TEXT);
         \\CREATE INDEX IF NOT EXISTS outbox_state ON outbox(state);
+        \\CREATE TABLE IF NOT EXISTS outgoing_files(id TEXT PRIMARY KEY,draft_key TEXT,request_id TEXT,record TEXT NOT NULL,bytes INTEGER NOT NULL CHECK(bytes BETWEEN 0 AND 104857600),CHECK(draft_key IS NULL OR request_id IS NULL));
+        \\CREATE INDEX IF NOT EXISTS outgoing_draft ON outgoing_files(draft_key);
+        \\CREATE INDEX IF NOT EXISTS outgoing_request ON outgoing_files(request_id);
     );
     if (try db.scalar("SELECT count(*) FROM pragma_table_info('previews') WHERE name='record'") == 0) try db.exec("ALTER TABLE previews ADD COLUMN record TEXT");
     try db.exec("UPDATE records SET chat=id WHERE kind='conversation' AND chat=''");
@@ -264,6 +269,10 @@ fn mergeThreadState(s: Store, a: u.Allocator, key: []const u8) !void {
         thread_cte ++ "UPDATE outbox SET draft_key=?1 WHERE draft_key IN (SELECT id FROM members)",
         &.{.{ .text = canonical }},
     );
+    try s.exec(
+        thread_cte ++ "UPDATE outgoing_files SET draft_key=?1 WHERE draft_key IN (SELECT id FROM members)",
+        &.{.{ .text = canonical }},
+    );
 }
 pub fn read(s: Store, chat: []const u8) Sqlite.QueryError!void {
     try s.exec(
@@ -374,16 +383,21 @@ fn writeRecord(s: Store, a: u.Allocator, record: Incoming) UpsertError!bool {
         },
         .request => |decoded| {
             const v = decoded.value;
+            try validation.request(v);
             id = v.request_id;
             rev = v.revision;
             chat = v.target.conversation_id orelse "";
             const epoch = try s.get(a, "epoch");
             if (!u.eq(epoch, v.server_epoch)) return false;
+            try outgoing.validateRequest(s, a, v);
         },
         .identity => unreachable, // The separate directory write returned above.
     }
     const revision = try std.fmt.parseInt(i64, rev, 10);
     if (revision < 0 or id.len == 0) return error.InvalidRecord;
+    const owns_transaction = record == .request and u.c.sqlite3_get_autocommit(s.db.handle) != 0;
+    if (owns_transaction) try s.db.exec("BEGIN IMMEDIATE");
+    errdefer if (owns_transaction) s.db.exec("ROLLBACK") catch {};
     const existing = try s.db.prepare("SELECT revision,record,chat FROM records WHERE kind=? AND id=?");
     defer existing.close();
     try existing.bind(&.{ .{ .text = kind }, .{ .text = id } });
@@ -404,6 +418,7 @@ fn writeRecord(s: Store, a: u.Allocator, record: Incoming) UpsertError!bool {
             existing.bytes(1),
             .{ .ignore_unknown_fields = true },
         ), existing.bytes(1));
+        if (owns_transaction) try s.db.exec("COMMIT");
         return false;
     }
     const regrouped = u.eq(kind, "conversation") and (fresh or !u.eq(existing.bytes(2), chat));
@@ -434,6 +449,7 @@ fn writeRecord(s: Store, a: u.Allocator, record: Incoming) UpsertError!bool {
         );
         try s.mergeThreadState(a, id);
     }
+    if (owns_transaction) try s.db.exec("COMMIT");
     return fresh;
 }
 fn requestState(s: Store, v: t.SendRequest, raw: []const u8) !void {
@@ -443,6 +459,7 @@ fn requestState(s: Store, v: t.SendRequest, raw: []const u8) !void {
         .{ .text = raw },
         .{ .text = v.request_id },
     });
+    if (v.state == .delivered) try outgoing.delivered(s, v.request_id);
 }
 pub const Event = struct {
     cursor: []const u8,
@@ -569,11 +586,13 @@ pub fn persistSend(s: Store, a: u.Allocator, key: []const u8, input: t.SendInput
     const sent_at = try u.timestamp(a, (u.now() - 978307200000) * 1000000);
     try s.db.exec("BEGIN IMMEDIATE");
     errdefer s.db.exec("ROLLBACK") catch {};
-    try s.exec("INSERT INTO outbox(id,epoch,draft_key,payload,state,sent_at) VALUES(?,?,?,?,'sending',?)", &.{
+    try outgoing.transfer(s, a, key, input);
+    try s.exec("INSERT INTO outbox(id,epoch,draft_key,payload,state,sent_at) VALUES(?,?,?,?,?,?)", &.{
         .{ .text = input.request_id },
         .{ .text = input.server_epoch },
         .{ .text = key },
         .{ .text = payload },
+        .{ .text = if (input.attachments.len == 0) "sending" else "uploading" },
         .{ .text = sent_at },
     });
     try s.saveDraft(key, "");
@@ -588,10 +607,11 @@ pub fn outcome(s: Store, id: []const u8, state: []const u8, detail: []const u8) 
     });
 }
 /// Remove unknown pending sends five minutes after their saved send time, across
-/// all relay epochs. Returns whether entries were removed; message history stays.
+/// all relay epochs. Attachment sends retain their originals and review history.
+/// Returns whether entries were removed; message history stays.
 pub fn expireUnknown(s: Store, now_ms: i64) Sqlite.QueryError!bool {
     try s.exec(
-        "DELETE FROM outbox WHERE state='unknown' AND julianday(sent_at)<=julianday(? / 1000.0,'unixepoch')",
+        "DELETE FROM outbox WHERE state='unknown' AND coalesce(json_array_length(payload,'$.attachments'),0)=0 AND julianday(sent_at)<=julianday(? / 1000.0,'unixepoch')",
         &.{.{ .int = now_ms - 5 * 60 * 1000 }},
     );
     return u.c.sqlite3_changes(s.db.handle) > 0;
@@ -655,6 +675,7 @@ pub const Snapshot = struct {
     pending: []const Pending,
     selected: []const u8,
     draft: []const u8,
+    draft_attachments: []const attachments.Upload = &.{},
     epoch: []const u8,
     more: bool,
     directory: Directory = .{},
@@ -772,7 +793,7 @@ pub fn snapshotWithMessages(
     chats = grouped;
     // Local drafts without a current server conversation remain discoverable
     // after an epoch reset or while composing a new direct conversation.
-    const drafts = try s.db.prepare("SELECT key,EXISTS(SELECT 1 FROM hidden_chats h WHERE h.key=local.key) FROM (SELECT key FROM drafts WHERE text!='' UNION SELECT draft_key AS key FROM outbox WHERE state!='delivered') local WHERE NOT EXISTS(SELECT 1 FROM records WHERE kind='conversation' AND id=local.key)");
+    const drafts = try s.db.prepare("SELECT key,EXISTS(SELECT 1 FROM hidden_chats h WHERE h.key=local.key) FROM (SELECT key FROM drafts WHERE text!='' UNION SELECT draft_key AS key FROM outgoing_files WHERE draft_key IS NOT NULL UNION SELECT draft_key AS key FROM outbox WHERE state!='delivered') local WHERE NOT EXISTS(SELECT 1 FROM records WHERE kind='conversation' AND id=local.key)");
     defer drafts.close();
     while (try drafts.step()) {
         const key = try drafts.text(a, 0);
@@ -829,6 +850,7 @@ pub fn snapshotWithMessages(
         .pending = try s.pendingWithoutEchoes(a, selected, epoch, visible_messages, pending.items),
         .selected = try a.dupe(u8, selected),
         .draft = try s.draft(a, selected),
+        .draft_attachments = try outgoing.draft(s, a, selected),
         .epoch = epoch,
         .more = (try s.nextPage(a, selected)) != null,
         .directory = try s.directory(a),

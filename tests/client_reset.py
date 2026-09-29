@@ -60,6 +60,10 @@ os._exit(0)
         (media / ('a' * 64)).write_bytes(b'cached avatar')
         (media / 'nested' / 'image').write_bytes(b'cached image')
         (media / 'outside').symlink_to(credentials, target_is_directory=True)
+        outgoing = data / 'outgoing'
+        outgoing.mkdir(mode=0o700)
+        (outgoing / 'original').write_bytes(b'Unsent private attachment')
+        (outgoing / 'outside').symlink_to(credentials, target_is_directory=True)
 
         def reset(*extra, error=None):
             result = subprocess.run([str(binary), '--reset-cache', *extra], env=env,
@@ -80,16 +84,18 @@ os._exit(0)
             old_inode = (data / 'client.db').stat().st_ino
             reset(error='another client is already using this data directory')
             assert (media / ('a' * 64)).read_bytes() == b'cached avatar'
+            assert (outgoing / 'original').read_bytes() == b'Unsent private attachment'
             assert (data / 'client.db').stat().st_ino == old_inode
         reset('--relay-url', 'https://temporary-override.example')
         assert not media.exists()
+        assert not outgoing.exists()
         assert (data / 'client.db').stat().st_ino != old_inode
         assert (data / 'client.lock').stat().st_ino == lock_inode
         assert stat.S_IMODE((data / 'client.db').stat().st_mode) == 0o600
         assert saved() == settings
         with sqlite3.connect(data / 'client.db') as db:
             assert db.execute("SELECT count(*) FROM sqlite_master WHERE name='obsolete_cache'").fetchone() == (0,)
-            for table in ('records', 'drafts', 'outbox', 'identities', 'enrichment_cache', 'enrichment_pages', 'pages'):
+            for table in ('records', 'drafts', 'outbox', 'outgoing_files', 'identities', 'enrichment_cache', 'enrichment_pages', 'pages'):
                 assert db.execute('SELECT count(*) FROM ' + table).fetchone() == (0,)
             assert db.execute("SELECT count(*) FROM meta WHERE key IN ('epoch','cursor','bootstrapped')").fetchone() == (0,)
         for suffix in ('-wal', '-shm', '-journal'):

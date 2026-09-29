@@ -121,6 +121,7 @@ fn clientModule(
         "src/client/bridge.c",
         "src/client/notifications.c",
         "src/client/media.c",
+        "src/client/outgoing.c",
     }, .flags = &.{
         "-std=c11",
         "-Wall",

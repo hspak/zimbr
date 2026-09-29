@@ -29,9 +29,10 @@ means the implementation and its relevant automated checks have passed.
    and follows receipt changes. Safe reclamation releases unstarted parts and
    independently observed deliveries. Automated checks pass; native file sending
    still requires Mac acceptance.
-4. **Pending: client attachment drafts and upload worker.** Snapshot local files,
-   persist drafts and outbox ownership, upload with progress, and recover without
-   duplicating sends.
+4. **In progress: client attachment drafts and upload worker.** Private local
+   snapshots and transactional draft/outbox ownership pass automated storage
+   validation. Background preparation, uploads with progress, and recovery
+   without duplicate sends remain to be connected to the worker.
 5. **Pending: composer integration.** Accept Wayland file drops, show removable
    attachments and thumbnails, allow attachment-only sends, and surface errors
    and cancellation.
@@ -116,6 +117,30 @@ not alter an already staged attachment. Draft removal, outbox transfer, restart,
 reset, and eventual cleanup must explicitly transfer or release file ownership.
 Disk and network work must remain bounded and allow the GUI and live events to
 continue making progress.
+
+The client stores originals as private files and streams snapshot copies in
+64 KiB chunks, hashing while copying. It rejects changed sources, symlinks, and
+nonregular files. Its persistent ledger bounds all owned and retired originals
+to 256 files and 2 GiB, in addition to the per-draft protocol limits. A single
+copy may temporarily use another 100 MiB before its ledger commit. Startup
+collection removes interrupted orphan copies; routine collection removes only
+retired entries and releases quota after deleting their files.
+
+Send must contain exactly the saved draft's ordered attachments. The outbox
+insert, attachment ownership transfer, and draft clearing commit together.
+Attachment-only drafts remain discoverable after relay resets. Failed and
+uncertain attachment sends retain their local originals and review history;
+the text-only five-minute unknown-send expiry does not apply to them. Confirmed
+delivery retires local originals atomically with the matching request update.
+An explicit local cache reset also removes the private outgoing directory.
+
+Storage validation passed `zig build test-client client-probe client
+-Doptimize=ReleaseSafe` (138 client tests and both executable builds),
+`python3 tests/client_integration.py`, and `python3 tests/client_reset.py`.
+The new cases exercise original-byte preservation, cancellation, unsafe sources,
+crash orphans, quotas, merged drafts, empty files, transaction rollback, invalid
+delivery updates, and retention across relay resets. Existing text-send and
+unknown-send expiry checks remain intact.
 
 Browser image offers and clipboard image bytes require additional input support;
 the first input path handles local file-manager drops. Upload and dispatch are

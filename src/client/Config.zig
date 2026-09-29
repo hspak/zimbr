@@ -304,6 +304,7 @@ pub fn resetCache(s: Config, io: std.Io) ResetCacheError!void {
         try replacement.db.exec("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;");
     }
     try dir.deleteTree(io, "media");
+    try dir.deleteTree(io, "outgoing");
     try removeSidecars(dir, io, "client.db");
     try dir.rename(name, dir, "client.db", io);
 }
