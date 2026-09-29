@@ -5,15 +5,10 @@ pub const Source = @import("MessagesDb.zig");
 const u = @import("../../common.zig");
 const Db = @import("../Sqlite.zig");
 const Journal = @import("../Journal.zig");
-const uploads = @import("../uploads.zig");
 const attachments = @import("../../protocol.zig").attachments;
-const c = @cImport({
-    @cInclude("errno.h");
-    @cInclude("relay/media.h");
-});
 pub const open = Source.open;
 
-pub const DispatchError = Db.QueryError || uploads.Files.BeginError || uploads.Files.Transfer.SealError || error{
+pub const DispatchError = u.Allocator.Error || Db.QueryError || attachments.ValidateError || error{
     NotAFixture,
     RandomUnavailable,
     Rejected,
@@ -24,26 +19,28 @@ pub fn dispatch(a: u.Allocator, path: [:0]const u8, route: Journal.Route, text: 
     return dispatchImpl(a, path, route, text, null);
 }
 
-/// Copy bytes from the caller-owned descriptor into the synthetic Messages
-/// attachment root. The real Messages database is never opened for writing.
+/// Model Messages' sandbox: the handoff must already be inside its attachment
+/// root. Only synthetic source metadata is written; the caller retains the file.
 pub fn dispatchFile(
     a: u.Allocator,
     path: [:0]const u8,
     route: Journal.Route,
     file: attachments.Upload,
-    fd: c_int,
+    filename: []const u8,
 ) DispatchError!void {
+    const root = try std.fmt.allocPrint(a, "{s}.attachments/", .{path});
+    if (!std.mem.startsWith(u8, filename, root)) return error.Rejected;
     if (u.eq(file.name, "fake-stall.bin")) {
         var delay: u.c.struct_timespec = .{ .tv_sec = 3, .tv_nsec = 0 };
         _ = u.c.nanosleep(&delay, null);
     }
     if (u.eq(file.name, "fake-reject.bin")) return error.Rejected;
     if (u.eq(file.name, "fake-unknown.bin")) return error.Uncertain;
-    try dispatchImpl(a, path, route, "", .{ .file = file, .fd = fd });
+    try dispatchImpl(a, path, route, "", .{ .file = file, .filename = filename });
     if (u.eq(file.name, "fake-uncertain-after.bin")) return error.Uncertain;
 }
 
-const File = struct { file: attachments.Upload, fd: c_int };
+const File = struct { file: attachments.Upload, filename: []const u8 };
 
 fn dispatchImpl(a: u.Allocator, path: [:0]const u8, route: Journal.Route, text: []const u8, file: ?File) DispatchError!void {
     if (u.eq(text, "[fake:stall]")) {
@@ -57,38 +54,11 @@ fn dispatchImpl(a: u.Allocator, path: [:0]const u8, route: Journal.Route, text: 
     const guard = try db.prepare("SELECT value FROM zimbr_fixture WHERE key='synthetic'");
     defer guard.close();
     if (!try guard.step() or !u.eq(guard.bytes(0), "yes")) return error.NotAFixture;
-    var storage: ?uploads.Files = null;
-    defer if (storage) |*files| files.deinit();
-    var transfer: ?uploads.Files.Transfer = null;
-    defer if (transfer) |*pending| pending.deinit();
     const filename: ?[]const u8 = if (file) |input| filename: {
         // Only the optional attachment-send fixture adds these source columns.
         const available = db.prepare("SELECT filename FROM attachment LIMIT 0") catch return error.Rejected;
         available.close();
-        const root = try std.fmt.allocPrintSentinel(a, "{s}.attachments", .{path}, 0);
-        const root_fd = c.zr_media_directory(root, 1);
-        if (root_fd < 0) return error.UploadStorageUnavailable;
-        _ = u.c.close(root_fd);
-        storage = try uploads.Files.init(a, root);
-        var copy = input.file;
-        copy.id = try u.id(a);
-        transfer = try storage.?.begin(a, .{
-            .server_epoch = try u.id(a),
-            .token = try u.id(a),
-            .file = copy,
-        });
-        var buffer: [64 * 1024]u8 = undefined;
-        while (true) {
-            const count = u.c.read(input.fd, &buffer, buffer.len);
-            if (count == 0) break;
-            if (count < 0) {
-                if (std.c._errno().* == c.EINTR) continue;
-                return error.UploadStorageUnavailable;
-            }
-            try transfer.?.write(buffer[0..@intCast(count)]);
-        }
-        try transfer.?.seal();
-        break :filename try storage.?.path(a, copy);
+        break :filename input.filename;
     } else null;
     try db.exec("BEGIN IMMEDIATE");
     errdefer db.exec("ROLLBACK") catch {};
@@ -144,7 +114,6 @@ fn dispatchImpl(a: u.Allocator, path: [:0]const u8, route: Journal.Route, text: 
         _ = try link.step();
     }
     try db.exec("COMMIT");
-    if (transfer) |*pending| pending.publish();
 }
 
 fn sourceGuid(a: u.Allocator) u.IdError![]const u8 {

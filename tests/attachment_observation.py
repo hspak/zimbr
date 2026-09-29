@@ -75,6 +75,40 @@ class AttachmentObservation(unittest.TestCase):
         with closing(sqlite3.connect(self.root/'data/relay.db')) as db:
             self.assertEqual(db.execute('SELECT count(*) FROM uploads').fetchone()[0], 0)
 
+    def test_handoff_is_readable_by_messages_and_preview_survives_upload_cleanup(self):
+        content = b'ZIMBR-IMAGE-original-image-bytes'
+        upload = self.upload(content, 'handoff.png', 'image/png')
+        outgoing = self.outgoing([upload])
+        self.send(outgoing)
+        record = self.settled(outgoing)
+        self.assertEqual(record['parts'][0]['state'], 'invoked')
+        filename = Path(self.source_rows()[0][2])
+        self.assertTrue(filename.is_relative_to(self.root/'source.db.attachments'))
+        self.assertNotEqual(filename.stat().st_ino, self.local(upload).stat().st_ino)
+        self.assertEqual(filename.read_bytes(), content)
+        confirmed = self.confirmed(outgoing)
+        self.wait(lambda: not self.local(upload).exists())
+        self.assertEqual(filename.read_bytes(), content)
+        message = self.get('/v1/messages/'+confirmed['parts'][0]['message_id'])
+        ref = message['attachments'][0]['image']
+
+        def preview_ready():
+            with closing(self.tls.connection()) as connection:
+                connection.request('GET', f'/v1/assets/{ref["id"]}/{ref["version"]}/inline_image')
+                response = connection.getresponse()
+                body = response.read()
+                if response.status == 200:
+                    self.assertTrue(body.startswith(b'\x89PNG\r\n\x1a\n'))
+                    return True
+                self.assertEqual(response.status, 409)
+                return False
+
+        self.wait(preview_ready)
+        self.stop(); self.start()
+        self.send(outgoing, 200)
+        self.assertEqual(len(self.source_rows()), 1)
+        self.assertEqual(filename.read_bytes(), content)
+
     def test_same_name_and_size_with_different_bytes_match_the_correct_requests(self):
         first = self.outgoing([self.upload(b'one', 'same.bin')])
         second = self.outgoing([self.upload(b'two', 'same.bin')])

@@ -76,6 +76,17 @@ pub fn recover(self: Files, j: Journal) RecoverError!void {
 /// interrupted files. The returned transfer borrows self and lease's slices;
 /// its allocated names belong to a. No file is published on failure.
 pub fn begin(self: Files, a: u.Allocator, lease: uploads.Lease) BeginError!Transfer {
+    return self.beginTransfer(a, lease, true);
+}
+
+/// Create a new private copy without replacing any existing directory or file.
+/// The transfer borrows self and lease's slices; allocated names belong to a.
+/// It owns cleanup until its sealed file is published.
+pub fn beginNew(self: Files, a: u.Allocator, lease: uploads.Lease) BeginError!Transfer {
+    return self.beginTransfer(a, lease, false);
+}
+
+fn beginTransfer(self: Files, a: u.Allocator, lease: uploads.Lease, replace: bool) BeginError!Transfer {
     const expected = try attachments.validate(lease.file);
     if (!t.validId(lease.token)) return error.InvalidRequest;
     const id = try a.dupeZ(u8, lease.file.id);
@@ -86,7 +97,7 @@ pub fn begin(self: Files, a: u.Allocator, lease: uploads.Lease) BeginError!Trans
     }, 0);
     var digest: [32]u8 = undefined;
     _ = std.fmt.hexToBytes(&digest, lease.file.sha256) catch return error.InvalidRequest;
-    if (c.zr_upload_remove(self.directory, id) != 0) return error.UploadStorageUnavailable;
+    if (replace and c.zr_upload_remove(self.directory, id) != 0) return error.UploadStorageUnavailable;
     const directory = c.zr_upload_directory(self.directory, id);
     if (directory < 0) return error.UploadStorageUnavailable;
     errdefer _ = u.c.close(directory);
@@ -164,8 +175,8 @@ pub const Transfer = struct {
         self.phase = .sealed;
     }
 
-    /// Call only after the ledger's completion commits. Relinquishes file cleanup
-    /// ownership to the upload service; deinit still closes this transfer's handles.
+    /// Relinquish cleanup to the file's owner; deinit still closes the handles.
+    /// Upload receivers call this only after committing ledger completion.
     pub fn publish(self: *Transfer) void {
         std.debug.assert(self.phase == .sealed);
         self.phase = .published;
@@ -242,6 +253,11 @@ test "upload storage verifies chunked original bytes and retains only published 
     defer _ = u.c.close(fd);
     var received: [bytes.len]u8 = undefined;
     try std.testing.expectEqual(@as(isize, bytes.len), u.c.read(fd, &received, received.len));
+    try std.testing.expectEqualStrings(bytes, &received);
+    try std.testing.expectError(error.UploadStorageUnavailable, files.beginNew(a, lease));
+    const retained = try files.open(a, lease.file);
+    defer _ = u.c.close(retained);
+    try std.testing.expectEqual(@as(isize, bytes.len), u.c.read(retained, &received, received.len));
     try std.testing.expectEqualStrings(bytes, &received);
     try files.remove(lease.file.id);
     try std.testing.expectError(error.UploadFileUnavailable, files.open(a, lease.file));

@@ -385,4 +385,5 @@ test {
     _ = Server;
     _ = uploads;
     _ = uploads.Files;
+    _ = sends.Handoff;
 }

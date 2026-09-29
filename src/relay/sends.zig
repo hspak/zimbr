@@ -4,6 +4,7 @@ const std = @import("std");
 const u = @import("../common.zig");
 const t = @import("../protocol.zig").types;
 pub const observation = @import("sends/observation.zig");
+pub const Handoff = @import("sends/Handoff.zig");
 pub const observation_window_ms = 10000;
 
 pub const Outcome = union(enum) {

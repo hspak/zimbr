@@ -88,6 +88,16 @@ must track each operation durably and represent partial or uncertain outcomes;
 retrying an uncertain operation must never automatically dispatch it again.
 The source Messages database remains read-only.
 
+Before file automation, the relay streams a separate, hash-verified copy into a
+private subdirectory of Messages' attachment storage. Messages' background
+processes can be denied access to the relay's application-support directory even
+when AppleScript accepts the file alias. The private upload remains unchanged.
+Copying uses a 64 KiB buffer and costs one additional full-file read and write.
+A definite unstarted failure removes the handoff copy. Once automation succeeds
+or may have started, the copy remains available for Messages history and retries;
+relay reset and upload cleanup never delete it. These retained history files are
+outside the upload reservation quota and can grow with sent attachment history.
+
 Multipart requests carry an ordered `parts` array: a text operation when the
 caption is nonempty, followed by one operation per file. Each part retains its
 own status, message association, and safe error. `invoked` means automation
@@ -112,8 +122,8 @@ Discovery examines at most 4,096 source rows after the dispatch boundary and
 and old unconfirmed parts retry every 30 seconds. A confirmed association follows
 its source message identity for later receipts even after newer history exceeds
 the discovery budget or Messages evicts its local copy. Discovery alone retains
-the original; a delivery receipt retires it in the same transaction as the send
-update. Failed transactions preserve both the previous outcome and the original.
+the private upload; a delivery receipt retires it in the same transaction as the
+send update. Failed transactions preserve both the previous outcome and the original.
 Existing cleanup removes retired files before releasing quota, while durable
 request identities continue to answer retries after the files are gone.
 

@@ -106,6 +106,11 @@ pinned until an independently verified message receives a delivery receipt.
 Unknown outcomes and observed failures retain their originals. Exact request
 retries still return the recorded outcome after upload cleanup.
 
+File automation receives a separate verified copy inside Messages' attachment
+storage. Once automation may have used it, the relay retains that copy for
+Messages history, including across upload cleanup and relay reset. These history
+files are separate from private uploads and are outside the reservation quota.
+
 Limits are 100 MiB per file, 256 reservations, 2 GiB reserved storage, and four
 active PUT requests. Uploads have a 30-second idle timeout and a 15-minute total
 deadline. Other command bodies retain their 64 KiB limit. These are application

@@ -684,18 +684,26 @@ fn invokePart(self: *Core, a: u.Allocator, work: Work, position: usize) !sends.O
                 return .{ .unstarted = "upload_file_unavailable" };
             };
             defer _ = u.c.close(fd);
+            var handoff = sends.Handoff.init(a, self.attachment_root, fd, file) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                return .{ .unstarted = "attachment_handoff_unavailable" };
+            };
+            defer handoff.deinit();
             if (comptime fake) {
-                fake_adapter.dispatchFile(a, self.source_path, work.route, file, fd) catch |err| {
+                fake_adapter.dispatchFile(a, self.source_path, work.route, file, handoff.path) catch |err| {
                     if (err == error.OutOfMemory) return err;
+                    if (err != error.Rejected) handoff.retain();
                     return if (err == error.Rejected) .{ .unstarted = "dispatch_unstarted" } else .{ .uncertain = "automation_uncertain" };
                 };
             } else {
                 const mode = if (u.eq(work.route.mode, "direct")) "direct-file" else "chat-file";
-                adapter_api.automation(a, mode, work.route.destination, try files.path(a, file)) catch |err| {
+                adapter_api.automation(a, mode, work.route.destination, handoff.path) catch |err| {
                     if (err == error.OutOfMemory) return err;
+                    if (err == error.AutomationUncertain) handoff.retain();
                     return automationOutcome(err);
                 };
             }
+            handoff.retain();
             return .invoked;
         },
     }

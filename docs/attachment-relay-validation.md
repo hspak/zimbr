@@ -19,7 +19,7 @@ Record the implemented boundary, command, and observed result after each chunk.
 | Upload streaming, integrity, ownership, active limits, timeout, restart, reset, cancellation, and cleanup | `python3 tests/attachment_uploads.py` | Passed: 12 production mTLS/HTTP2 cases, including a 9 MiB binary file, empty files, unsafe storage isolation, and failed publication |
 | Failed disconnected-writer release recovers without restart | `python3 tests/attachment_uploads.py AttachmentUploads.test_failed_lease_release_recovers_without_restarting_the_relay` | Same regression failed before retry handling and passed after; an injected SQLite failure no longer leaves the upload permanently receiving |
 | Attachment dispatch, original copies, direct/group routing, partial failure, result-commit failure, restart, and reset | `python3 tests/attachment_sends.py -v` | Passed: 10 cases through the production HTTP/2 server and synthetic Messages adapter; the original caption-loss regression remains unchanged |
-| Multipart correlation and safe reclamation | `python3 tests/attachment_observation.py -v` | Passed: 16 production HTTP/2 cases covering byte identity, ambiguity, source changes, partial outcomes, late receipts, restart, and atomic cleanup |
+| Multipart correlation and safe reclamation | `python3 tests/attachment_observation.py -v` | Passed: 17 production HTTP/2 cases covering byte identity, ambiguity, source changes, partial outcomes, late receipts, restart, atomic cleanup, and handoff preview retention |
 | Undecodable outgoing records block uniqueness | `python3 tests/attachment_observation.py AttachmentObservation.test_malformed_outgoing_records_cannot_disappear_from_the_uniqueness_check` | Same regression failed before the guard and passed after; a malformed possible echo cannot disappear from correlation |
 | Observed failure reports a failed request while retaining the original | `python3 tests/attachment_observation.py AttachmentObservation.test_observed_failure_is_reported_without_releasing_or_resending_the_file` | Same regression failed before aggregate outcome handling and passed after |
 | A staged original cannot prove an independent Messages copy | `python3 tests/attachment_observation.py AttachmentObservation.test_source_path_to_the_staged_original_is_not_an_independent_copy` | Same regression failed before file-identity checking and passed after, including relay storage nested under the Messages attachment root |
@@ -28,6 +28,8 @@ Record the implemented boundary, command, and observed result after each chunk.
 | HTTP/2 stream isolation | `python3 tests/relay_http2.py` | Passed: all seven existing transport regressions |
 | GUI-reviewed originals through the production worker and relay | `zig build test-gui-attachments -Doptimize=ReleaseSafe` | Passed: native callback drops, background thumbnail, source deletion/replacement, caption/PNG/empty/binary dispatch exactly once in order, byte identity, individual delivery, and confirmed client history |
 | Native AppleScript payload binding under the installed Messages dictionary | `python3 tests/mac_send_script.py -v` on macOS | Passed: four tests covering compilation, literal Unicode text, file aliases, and missing-file rejection. The same text/file operand regression failed before the fix in all four direct/chat modes and passed unchanged afterward. No Messages sends or account/chat queries execute. |
+| Messages-readable handoff and preview after upload cleanup | `python3 tests/attachment_observation.py AttachmentObservation.test_handoff_is_readable_by_messages_and_preview_survives_upload_cleanup -v` | The same regression failed before production handoff staging and passed unchanged afterward. Covers separate original bytes, delivery, preview generation, cleanup, restart, and exact retry without replay. |
+| Handoff integrity and ownership | `zig build test -Doptimize=ReleaseSafe` | Passed: independent inode, unchanged original offset, retained bytes after original deletion, unstarted cleanup, wrong hash, symlink rejection, and no replacement of an existing copy. |
 
 Use Zig from `.zigversion`. Build `fake-relay` before the Python suites. Supply
 `-Dopenssl-prefix=/absolute/openssl-3.5` when the system OpenSSL is not 3.5.
@@ -49,7 +51,7 @@ injected cleanup transaction failure. Discovery refuses to confirm after its
 4,096-row budget is exceeded. Already confirmed submissions still follow a late
 delivery receipt after that history bound and after Messages evicts its copy.
 
-The native script passes the private absolute filename as a literal argument,
+The native script passes the handoff's absolute filename as a literal argument,
 coerces it to an alias before setting its dispatch flag, and uses the same
 account and chat checks as text sending. Apple's
 [file-reference guide](https://developer.apple.com/library/archive/documentation/LanguagesUtilities/Conceptual/MacAutomationScriptingGuide/ReferenceFilesandFolders.html)
@@ -69,6 +71,32 @@ operands but substitutes local capture for sending and synthetic account/chat
 lookup, so it never sends a real message. The original script also compiled
 before the fix: compilation alone did not catch this issue, and the synthetic
 adapter did not exercise AppleScript terminology.
+
+The subsequent native attempt exposed a separate sandbox failure. Read-only Mac
+diagnostics showed Messages' background processes failing to open the relay's
+application-support upload with `Operation not permitted`. Messages recorded a
+failed attachment referencing that external file; the relay correctly refused
+to generate its preview with `unsafe_source`. Relaxing preview path validation
+would not fix delivery.
+
+The relay now creates a separate, length- and hash-verified handoff copy inside
+Messages' attachment storage before invoking file automation. The synthetic
+adapter rejects paths outside that root, reproducing the observed native access
+boundary; it no longer silently copies an arbitrary relay descriptor. The new
+regression first failed against the original production dispatch path using this
+fixture, then passed unchanged with production staging. The handoff copy survives
+uncertain automation, relay restart/reset, and private-upload retirement because
+Messages may keep referencing that exact filename. Definite unstarted operations
+remove their copies. Retained history files are outside the upload quota and
+are not swept by upload recovery. Delivery still requires an observed matching
+message and receipt; preparing the copy alone proves neither.
+
+Handoff validation passed 212 Zig tests with one unavailable-platform skip, plus
+all 49 integration cases across `attachment_uploads.py`, `attachment_sends.py`,
+`attachment_observation.py`, and `client_attachments.py`. Formatting and diff
+checks passed. A further native check could not run because the Mac connection
+timed out; the corrected handoff still needs actual Messages acceptance below.
+No real messages were sent during this validation.
 
 An affected relay must be rebuilt and restarted because it embeds the script.
 Previously attempted requests remain uncertain and are not automatically replayed
@@ -93,9 +121,9 @@ database to manufacture test cases.
    different files with the same name/size, repeated identical files, and an
    unrelated simultaneous send to the same conversation. Ambiguity must remain
    uncertain rather than confirming the wrong request.
-5. Observe when Messages copies the staged file, including a slow transfer.
-   Establish safe retention/cleanup behavior without relying on AppleScript
-   returning successfully as proof that copying is complete.
+5. Observe the handoff filename and any copy Messages creates, including a slow
+   transfer. Verify image viewing after private-upload retirement and relay
+   restart. Do not treat AppleScript returning successfully as proof of delivery.
 6. Interrupt automation before and after each text/file operation. Restart the
    relay and retry the original request ID. Confirm completed or uncertain parts
    are not resent and remaining parts have accurate outcomes.
