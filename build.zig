@@ -122,6 +122,7 @@ fn clientModule(
         "src/client/notifications.c",
         "src/client/media.c",
         "src/client/outgoing.c",
+        "src/client/drop.c",
     }, .flags = &.{
         "-std=c11",
         "-Wall",
@@ -285,31 +286,72 @@ fn patchRaylibWayland(b: *std.Build, artifact: *std.Build.Step.Compile) !void {
     // Existing development dependency trees may already carry Flamez's patch.
     const unpatched = try std.mem.replaceOwned(u8, b.allocator, source, hint, "");
     if (std.mem.count(u8, unpatched, defaults) != 1) return error.RaylibWindowHintsChanged;
-    const patched = try std.mem.replaceOwned(u8, b.allocator, unpatched, defaults, defaults ++ hint);
+    const with_hint = try std.mem.replaceOwned(u8, b.allocator, unpatched, defaults, defaults ++ hint);
+    const patched = try replaceCSection(
+        b.allocator,
+        with_hint,
+        "static void WindowDropCallback(GLFWwindow *window, int count, const char **paths)\n{",
+        "// GLFW3: Keyboard callback, runs on key pressed",
+        @embedFile("src/client/drop/window.h"),
+    );
     const files = b.addWriteFiles();
     _ = files.add("platforms/rcore_desktop_glfw.c", patched);
     const core = files.addCopyFile(dependency.path("src/rcore.c"), "rcore.c");
     artifact.root_module.addIncludePath(dependency.path("src"));
+    artifact.root_module.addIncludePath(dependency.path("src/external/glfw/src"));
+    artifact.root_module.addIncludePath(b.path("src/client"));
 
+    const init_source = try std.Io.Dir.cwd().readFileAlloc(b.graph.io, dependency.path("src/external/glfw/src/init.c").getPath(b), b.allocator, .limited(1024 * 1024));
+    _ = files.add("external/glfw/src/init.c", try replaceCSection(
+        b.allocator,
+        init_source,
+        "char** _glfwParseUriList(char* text, int* count)\n{",
+        "char* _glfw_strdup(const char* source)",
+        @embedFile("src/client/drop/uri_list.h"),
+    ));
+    const wayland_source = try std.Io.Dir.cwd().readFileAlloc(b.graph.io, dependency.path("src/external/glfw/src/wl_window.c").getPath(b), b.allocator, .limited(1024 * 1024));
+    const reader = "static char* readDataOfferAsString(struct wl_data_offer* offer, const char* mimeType)\n{";
+    if (std.mem.count(u8, wayland_source, reader) != 1) return error.GlfwDropReaderChanged;
+    _ = files.add("external/glfw/src/wl_window.c", try std.mem.replaceOwned(
+        u8,
+        b.allocator,
+        wayland_source,
+        reader,
+        @embedFile("src/client/drop/offer.h") ++ reader ++ "\n    if (!strcmp(mimeType, \"text/uri-list\")) return readDropOffer(offer);",
+    ));
+    const glfw = files.addCopyFile(dependency.path("src/rglfw.c"), "rglfw.c");
+    try replaceCSource(b, artifact, "src/rcore.c", core);
+    try replaceCSource(b, artifact, "src/rglfw.c", glfw);
+}
+
+fn replaceCSection(a: std.mem.Allocator, source: []const u8, start: []const u8, end: []const u8, replacement: []const u8) ![]const u8 {
+    if (std.mem.count(u8, source, start) != 1 or std.mem.count(u8, source, end) != 1)
+        return error.DropBackendChanged;
+    const first = std.mem.indexOf(u8, source, start).?;
+    const last = std.mem.indexOfPos(u8, source, first, end) orelse return error.DropBackendChanged;
+    return std.mem.concat(a, u8, &.{ source[0..first], replacement, source[last..] });
+}
+
+fn replaceCSource(b: *std.Build, artifact: *std.Build.Step.Compile, name: []const u8, replacement: std.Build.LazyPath) !void {
     // Compile the generated copy; leave the downloaded dependency untouched.
     for (artifact.root_module.link_objects.items) |object| {
         if (object != .c_source_files) continue;
         const sources = object.c_source_files;
         for (sources.files, 0..) |file, index| {
-            if (!std.mem.eql(u8, file, "src/rcore.c")) continue;
+            if (!std.mem.eql(u8, file, name)) continue;
             const remaining = try b.allocator.alloc([]const u8, sources.files.len - 1);
             @memcpy(remaining[0..index], sources.files[0..index]);
             @memcpy(remaining[index..], sources.files[index + 1 ..]);
             sources.files = remaining;
             artifact.root_module.addCSourceFile(.{
-                .file = core,
+                .file = replacement,
                 .flags = sources.flags,
                 .language = sources.language,
             });
             return;
         }
     }
-    return error.RaylibCoreSourceNotFound;
+    return error.RaylibSourceNotFound;
 }
 
 fn module(

@@ -29,6 +29,12 @@ const layout = @import("client.zig").layout;
 const Scrollbar = @import("client.zig").Scrollbar;
 const bridge = @import("client.zig").c.api;
 
+const GlfwDrop = *const fn (?*anyopaque, c_int, [*c]const [*c]const u8) callconv(.c) void;
+extern fn glfwGetCurrentContext() ?*anyopaque;
+extern fn glfwSetDropCallback(?*anyopaque, ?GlfwDrop) ?GlfwDrop;
+extern fn _glfwParseUriList([*:0]u8, *c_int) [*c][*c]u8;
+extern fn _glfw_free(?*anyopaque) void;
+
 var session_logs: LogBuffer = .{};
 pub const std_options: std.Options = .{
     .logFn = clientLog,
@@ -6856,4 +6862,39 @@ test "settings validate credentials and commit through the pane before unlocking
     var reopened = try Settings.init(next);
     defer reopened.deinit();
     try std.testing.expect(!reopened.required and !reopened.visible);
+}
+
+test "Wayland drop backend preserves local filenames and never truncates rejected paths" {
+    rl.setTraceLogLevel(.none);
+    rl.initWindow(780, 560, "File drop backend");
+    defer rl.closeWindow();
+    const window = glfwGetCurrentContext() orelse return error.TestUnexpectedResult;
+    const callback = glfwSetDropCallback(window, null) orelse return error.TestUnexpectedResult;
+    defer _ = glfwSetDropCallback(window, callback);
+    var uri = "file:///tmp/photo%20%F0%9F%91%8B.png\r\nfile://localhost/tmp/empty.txt\r\n".*;
+    var count: c_int = 0;
+    const paths = _glfwParseUriList(&uri, &count);
+    try std.testing.expectEqual(@as(c_int, 2), count);
+    defer {
+        for (0..@intCast(count)) |i| _glfw_free(paths[i]);
+        _glfw_free(@ptrCast(paths));
+    }
+    callback(window, count, @ptrCast(paths));
+    try std.testing.expect(rl.isFileDropped());
+    const dropped = rl.loadDroppedFiles();
+    try std.testing.expectEqual(@as(c_uint, 2), dropped.count);
+    try std.testing.expectEqualStrings("/tmp/photo 👋.png", std.mem.span(dropped.paths[0]));
+    try std.testing.expectEqualStrings("/tmp/empty.txt", std.mem.span(dropped.paths[1]));
+    rl.unloadDroppedFiles(dropped);
+    try std.testing.expect(!rl.isFileDropped());
+    var remote = "file://remote/tmp/photo.png".*;
+    var rejected_count: c_int = 0;
+    const rejected = _glfwParseUriList(&remote, &rejected_count);
+    try std.testing.expect(rejected == null and rejected_count == 0);
+    try std.testing.expect(@import("client.zig").drop.rejected());
+    const too_long = "/" ++ "x" ** 4095;
+    const invalid = [_][*c]const u8{too_long};
+    callback(window, 1, &invalid);
+    try std.testing.expect(!rl.isFileDropped());
+    try std.testing.expect(@import("client.zig").drop.rejected());
 }

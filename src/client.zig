@@ -19,6 +19,7 @@ pub const Worker = @import("client/Worker.zig");
 pub const c = @import("client/c.zig");
 pub const content = @import("client/content.zig");
 pub const display = @import("client/display.zig");
+pub const drop = @import("client/drop.zig");
 pub const layout = @import("client/layout.zig");
 pub const links = @import("client/links.zig");
 pub const outgoing = @import("client/outgoing.zig");
