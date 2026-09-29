@@ -170,6 +170,7 @@ fn runSession(init: std.process.Init, config: Config) !?Config {
     var last_generation: u64 = 0;
     var last_revision: u64 = 0;
     var last_mouse = rl.getMousePosition();
+    var last_drop_hovered = drop.hovered();
     var last_window = WindowMetrics{};
     var background_ready = false;
     while (!rl.windowShouldClose()) {
@@ -179,6 +180,7 @@ fn runSession(init: std.process.Init, config: Config) !?Config {
         const generation = if (app.view) |v| v.generation else 0;
         const revision = app.composer.revision + app.search.revision + app.recipient.revision;
         const mouse = rl.getMousePosition();
+        const drop_hovered = drop.hovered();
         const window = WindowMetrics.current();
         const keyboard_input = for (std.enums.values(rl.KeyboardKey)) |key| {
             if (pressed(key)) break true;
@@ -188,7 +190,8 @@ fn runSession(init: std.process.Init, config: Config) !?Config {
         const now = rl.getTime();
         // Keep rendering between input events so scrolling and key repeat do
         // not fall back to the idle polling cadence during an interaction.
-        if (input or window_changed or revision != last_revision) active_until = now + 0.5;
+        if (input or window_changed or revision != last_revision or drop_hovered != last_drop_hovered)
+            active_until = now + 0.5;
         const syncing = !app.settings.visible and app.syncActivity().active();
         const frame_delay: i64 = if (syncing) 33 else 500;
         if (frames < 4 or config.frames > 0 or background_ready or app.layout_pending or now < active_until or generation != last_generation or u.now() - last_draw >= frame_delay) {
@@ -199,6 +202,7 @@ fn runSession(init: std.process.Init, config: Config) !?Config {
             last_generation = generation;
             last_revision = revision;
             last_mouse = mouse;
+            last_drop_hovered = drop_hovered;
             last_window = window;
             frames += 1;
         } else {
@@ -897,15 +901,17 @@ const App = struct {
         });
         s.files_serial = serial;
     }
+    fn canAttach(s: *const App) bool {
+        return s.pending_key == null and !s.settings.visible and !s.new_mode and !s.show_details and
+            s.viewer_message.len == 0 and s.detail_body == null and !s.send_wait and s.key.len > 0 and
+            u.eq(s.key, s.loaded_key) and !s.readOnlyChat();
+    }
     fn handleDrops(s: *App) void {
         if (drop.rejected()) s.info("Drop up to 16 local files with valid, complete filenames.");
         if (!rl.isFileDropped()) return;
         const files = rl.loadDroppedFiles();
         defer rl.unloadDroppedFiles(files);
-        if (s.pending_key != null or s.settings.visible or s.new_mode or s.show_details or
-            s.viewer_message.len > 0 or s.detail_body != null or s.send_wait or s.key.len == 0 or
-            !u.eq(s.key, s.loaded_key) or s.readOnlyChat())
-        {
+        if (!s.canAttach()) {
             s.info("Select a sendable conversation before dropping files.");
             return;
         }
@@ -1011,6 +1017,7 @@ const App = struct {
                     "+1 415 555 0123 or name@example.com",
                     .recipient,
                     false,
+                    theme.colors.paper,
                 );
                 if (s.button(.{
                     .x = r.x + 32,
@@ -1292,7 +1299,7 @@ const App = struct {
                 .y = y + 21,
                 .width = width,
                 .height = 34,
-            }, placeholder, settings_focus[index], false);
+            }, placeholder, settings_focus[index], false, theme.colors.paper);
         }
         s.text.drawLine(
             "Ctrl+Enter always sends",
@@ -1703,7 +1710,7 @@ const App = struct {
             .width = clip.width,
             .height = sidebar_search_height,
         };
-        s.inputBox(&s.search, search, "Search conversations", .search, false);
+        s.inputBox(&s.search, search, "Search conversations", .search, false, theme.colors.sidebar);
         const divider_y = r.y + sidebar_header_height;
         rl.drawLine(
             @intFromFloat(search.x),
@@ -3845,6 +3852,7 @@ const App = struct {
         box.y += files_height;
         box.height -= files_height;
         const read_only = s.readOnlyChat();
+        const drop_hovered = drop.hovered() and s.canAttach();
         if (!read_only) {
             var footer = composerFooter(r);
             if (s.duplicate_risk and u.now() < s.notice_until) {
@@ -3868,7 +3876,10 @@ const App = struct {
                 s.drawFooterLabel(hint, footer, theme.colors.muted);
             }
         }
-        const background = if (read_only) theme.colors.incoming else theme.colors.surface;
+        const background = if (read_only) theme.colors.incoming else if (drop_hovered)
+            theme.colors.drop_surface
+        else
+            theme.colors.surface;
         shapes.drawRectangle(box, 0.12, background);
         const editor = composerEditor(box);
         if (read_only) {
@@ -3885,17 +3896,22 @@ const App = struct {
             s.inputBox(
                 &s.composer,
                 editor,
-                if (s.view != null and s.view.?.online) "Message this conversation…" else "Write a draft while offline…",
+                if (drop_hovered) "Drop files to attach…" else if (s.view != null and s.view.?.online) "Message this conversation…" else "Write a draft while offline…",
                 .composer,
                 true,
+                background,
             );
         }
-        shapes.drawRectangleLines(
-            box,
-            0.12,
-            1,
-            if (!read_only and s.focus == .composer) theme.colors.focus else theme.colors.line,
-        );
+        if (drop_hovered) {
+            shapes.drawRectangleDots(box, 0.12, 2, theme.colors.drop);
+        } else {
+            shapes.drawRectangleLines(
+                box,
+                0.12,
+                1,
+                if (!read_only and s.focus == .composer) theme.colors.focus else theme.colors.line,
+            );
+        }
         if (read_only) return;
         const send_button = rl.Rectangle{
             .x = r.x + r.width - layout.action_right_padding - 76,
@@ -3933,8 +3949,8 @@ const App = struct {
         placeholder: []const u8,
         focus: @FieldType(App, "focus"),
         multiline: bool,
+        background: rl.Color,
     ) void {
-        const background = if (multiline) theme.colors.surface else if (focus == .search) theme.colors.sidebar else theme.colors.paper;
         if (!multiline) {
             shapes.drawRectangle(r, 0.2, background);
             shapes.drawRectangleLines(
@@ -7176,11 +7192,52 @@ test "composer consumes file drops and waits for reviewed attachments before an 
     defer app.deinit();
     app.draw(WindowMetrics.current().scale);
     const empty_height = app.composerHeight();
+    const scale = WindowMetrics.current().scale;
+    const empty_box = App.composerBox(layout.frame(780, 560, empty_height).composer);
+    const sample_x: i32 = @intFromFloat((empty_box.x + 8) * scale);
+    const sample_y: i32 = @intFromFloat((empty_box.y + empty_box.height - 8) * scale);
+    bridge.zc_drop_set_hovered(1);
+    defer bridge.zc_drop_set_hovered(0);
+    {
+        const shot = try captureTestFrame(&app, scale);
+        defer rl.unloadImage(shot);
+        try std.testing.expectEqual(theme.colors.drop_surface, rl.getImageColor(shot, sample_x, sample_y));
+        // A solid outline has no gaps; a missing outline has no blue dots.
+        var dots: usize = 0;
+        var gaps: usize = 0;
+        var previous_blue = false;
+        var x: i32 = @intFromFloat((empty_box.x + 12) * scale);
+        while (x < @as(i32, @intFromFloat((empty_box.x + empty_box.width - 12) * scale))) : (x += 1) {
+            const pixel = rl.getImageColor(shot, x, @intFromFloat((empty_box.y - 1) * scale));
+            const blue = pixel.b > 100 and pixel.b > pixel.r;
+            if (blue and !previous_blue) dots += 1;
+            if (!blue) gaps += 1;
+            previous_blue = blue;
+        }
+        try std.testing.expect(dots > 10 and gaps > 10);
+        if (u.c.getenv("ZIMBR_GUI_DROP_SCREENSHOT")) |path|
+            try std.testing.expect(rl.exportImage(shot, std.mem.span(path)));
+    }
+    bridge.zc_drop_set_hovered(0);
+    {
+        const shot = try captureTestFrame(&app, scale);
+        defer rl.unloadImage(shot);
+        try std.testing.expectEqual(theme.colors.surface, rl.getImageColor(shot, sample_x, sample_y));
+    }
+    bridge.zc_drop_set_hovered(1);
+    app.send_wait = true;
+    {
+        const shot = try captureTestFrame(&app, scale);
+        defer rl.unloadImage(shot);
+        try std.testing.expectEqual(theme.colors.surface, rl.getImageColor(shot, sample_x, sample_y));
+    }
+    app.send_wait = false;
     const window = glfwGetCurrentContext() orelse return error.TestUnexpectedResult;
     const callback = glfwSetDropCallback(window, null) orelse return error.TestUnexpectedResult;
     defer _ = glfwSetDropCallback(window, callback);
     const paths = [_][*c]const u8{ "/tmp/photo 👋.png", "/tmp/empty.txt" };
     callback(window, paths.len, &paths);
+    try std.testing.expect(!drop.hovered());
     try app.update();
     try std.testing.expect(!rl.isFileDropped() and app.filesPending() and !app.canSend());
     var count: usize = 0;

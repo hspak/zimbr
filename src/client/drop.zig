@@ -3,6 +3,12 @@
 const std = @import("std");
 const c = @import("c.zig").api;
 
+/// Whether a file offer is over the window, before it is dropped or leaves.
+/// Read only on the GUI thread.
+pub fn hovered() bool {
+    return c.zc_drop_hovered() != 0;
+}
+
 /// Consume a backend rejection once, on the GUI thread.
 pub fn rejected() bool {
     return c.zc_drop_take_error() != 0;

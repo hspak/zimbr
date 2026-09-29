@@ -23,6 +23,8 @@ pub const Palette = struct {
     selection: rl.Color,
     avatar: rl.Color,
     focus: rl.Color,
+    drop: rl.Color,
+    drop_surface: rl.Color,
     danger: rl.Color,
     rail: rl.Color,
     surface: rl.Color,
@@ -37,6 +39,9 @@ pub const colors = Palette{
     .accent_hover = color(0xd5b9efff),
     .on_accent = color(0x241b30ff),
     .focus = color(0xd0b6eaff),
+    // Periwinkle from the participant palette keeps file drops in the same color family.
+    .drop = color(0xb6c3eeff),
+    .drop_surface = color(0x30324aff),
     .selected = color(0x393148ff),
     .selection = color(0xc4a3e650),
     // Graphite surfaces share a violet undertone, with the rail deepest in the stack.

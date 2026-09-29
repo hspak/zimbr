@@ -3,6 +3,9 @@
 
 // Wayland callbacks and the composer consume this on the GUI thread.
 static int rejected;
+static int hovered;
+void zc_drop_set_hovered(int active) { hovered = active; }
+int zc_drop_hovered(void) { return hovered; }
 void zc_drop_reject(void) { rejected = 1; }
 int zc_drop_take_error(void) { int result = rejected; rejected = 0; return result; }
 static int hex(unsigned char c) {

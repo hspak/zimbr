@@ -321,12 +321,19 @@ fn patchRaylibWayland(b: *std.Build, artifact: *std.Build.Step.Compile) !void {
     const wayland_source = try std.Io.Dir.cwd().readFileAlloc(b.graph.io, dependency.path("src/external/glfw/src/wl_window.c").getPath(b), b.allocator, .limited(1024 * 1024));
     const reader = "static char* readDataOfferAsString(struct wl_data_offer* offer, const char* mimeType)\n{";
     if (std.mem.count(u8, wayland_source, reader) != 1) return error.GlfwDropReaderChanged;
-    _ = files.add("external/glfw/src/wl_window.c", try std.mem.replaceOwned(
+    const with_reader = try std.mem.replaceOwned(
         u8,
         b.allocator,
         wayland_source,
         reader,
         @embedFile("src/client/drop/offer.h") ++ reader ++ "\n    if (!strcmp(mimeType, \"text/uri-list\")) return readDropOffer(offer);",
+    );
+    _ = files.add("external/glfw/src/wl_window.c", try replaceCSection(
+        b.allocator,
+        with_reader,
+        "const struct wl_data_device_listener dataDeviceListener =\n{",
+        "static void xdgActivationHandleDone(void* userData,",
+        @embedFile("src/client/drop/hover.h"),
     ));
     const glfw = files.addCopyFile(dependency.path("src/rglfw.c"), "rglfw.c");
     try replaceCSource(b, artifact, "src/rcore.c", core);

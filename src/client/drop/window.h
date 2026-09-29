@@ -3,6 +3,7 @@
 static void WindowDropCallback(GLFWwindow *window, int count, const char **paths)
 {
     (void)window;
+    zc_drop_set_hovered(0);
     for (unsigned int i = 0; i < CORE.Window.dropFileCount; i++) RL_FREE(CORE.Window.dropFilepaths[i]);
     RL_FREE(CORE.Window.dropFilepaths);
     CORE.Window.dropFileCount = 0;
@@ -29,4 +30,3 @@ static void WindowDropCallback(GLFWwindow *window, int count, const char **paths
     CORE.Window.dropFilepaths = copies;
     CORE.Window.dropFileCount = (unsigned int)count;
 }
-

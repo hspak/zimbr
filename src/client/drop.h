@@ -11,4 +11,7 @@ typedef struct {
 int zc_drop_parse(const char *text, size_t length, ZcDrop *output);
 void zc_drop_reject(void);
 int zc_drop_take_error(void);
+// Accepted file offers only; all access stays on the GUI thread.
+void zc_drop_set_hovered(int hovered);
+int zc_drop_hovered(void);
 #endif

@@ -73,6 +73,50 @@ pub fn drawRectangleLines(bounds: rl.Rectangle, roundness: f32, thickness: f32, 
     for (edges) |edge| rl.drawRectangleRec(edge, color);
 }
 
+/// Draws evenly spaced round dots outside bounds, in logical pixels.
+pub fn drawRectangleDots(bounds: rl.Rectangle, roundness: f32, thickness: f32, color: rl.Color) void {
+    if (bounds.width <= 0 or bounds.height <= 0 or thickness <= 0) return;
+    const radius = @min(bounds.width, bounds.height) * std.math.clamp(roundness, 0, 1) / 2;
+    const path_radius = radius + thickness / 2;
+    const horizontal = bounds.width - 2 * radius;
+    const vertical = bounds.height - 2 * radius;
+    const arc = std.math.pi / 2.0 * path_radius;
+    const perimeter = 2 * (horizontal + vertical) + 4 * arc;
+    const count = @max(4, @ceil(perimeter / (3 * thickness)));
+    const spacing = perimeter / count;
+    const centers = [_]rl.Vector2{
+        .{ .x = bounds.x + bounds.width - radius, .y = bounds.y + radius },
+        .{ .x = bounds.x + bounds.width - radius, .y = bounds.y + bounds.height - radius },
+        .{ .x = bounds.x + radius, .y = bounds.y + bounds.height - radius },
+        .{ .x = bounds.x + radius, .y = bounds.y + radius },
+    };
+    const lengths = [_]f32{
+        horizontal,
+        vertical,
+        horizontal,
+        vertical,
+    };
+    var distance: f32 = spacing / 2;
+    for (centers, lengths, 0..) |center, length, side| {
+        const angle = (@as(f32, @floatFromInt(side)) - 1) * (std.math.pi / 2.0);
+        const radial = rl.Vector2{ .x = @cos(angle), .y = @sin(angle) };
+        const tangent = rl.Vector2{ .x = -radial.y, .y = radial.x };
+        const end = center.add(radial.scale(path_radius));
+        while (distance < length) : (distance += spacing) {
+            drawCircle(end.subtract(tangent.scale(length - distance)), thickness / 2, color);
+        }
+        distance -= length;
+        while (distance < arc) : (distance += spacing) {
+            const dot_angle = angle + distance / path_radius;
+            drawCircle(center.add(.{
+                .x = @cos(dot_angle) * path_radius,
+                .y = @sin(dot_angle) * path_radius,
+            }), thickness / 2, color);
+        }
+        distance -= arc;
+    }
+}
+
 /// Fills a circle without rounding its center to integer coordinates.
 pub fn drawCircle(center: rl.Vector2, radius: f32, color: rl.Color) void {
     if (radius <= 0) return;
