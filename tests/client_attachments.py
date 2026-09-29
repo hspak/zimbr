@@ -156,6 +156,11 @@ class ClientAttachments(unittest.TestCase):
         payload, record = self.rows('SELECT payload,record FROM outbox WHERE id=?', (request_id,))[0]
         self.assertEqual([item['id'] for item in json.loads(payload)['attachments']], [first['id'], empty['id']])
         self.assertEqual([part['state'] for part in json.loads(record)['parts']], ['delivered'] * 3)
+        parts = json.loads(record)['parts']
+        echo_ids = {part['message_id'] for part in parts}
+        self.probe.until(lambda v: v.get('selected') and not v['selected'].startswith('new:') and
+                         v.get('messages', 0) >= 3 and not v.get('pending'), timeout=15)
+        self.assertTrue(echo_ids <= {row[0] for row in self.rows("SELECT id FROM records WHERE kind='message'")})
         wait(lambda: self.rows('SELECT count(*) FROM outgoing_files') == [(0,)])
         self.assertEqual(list((self.client / 'outgoing').iterdir()), [])
         self.probe.close()

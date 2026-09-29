@@ -144,6 +144,8 @@ fn migrateHistoryCache(s: Store) !void {
         \\) WHERE position>{d} AND id NOT IN (
         \\ SELECT json_extract(record,'$.message_id') FROM outbox WHERE json_extract(record,'$.message_id') IS NOT NULL
         \\ UNION SELECT json_extract(record,'$.candidate_message_id') FROM outbox WHERE json_extract(record,'$.candidate_message_id') IS NOT NULL
+        \\ UNION SELECT json_extract(part.value,'$.message_id') FROM outbox,json_each(outbox.record,'$.parts') part WHERE json_extract(part.value,'$.message_id') IS NOT NULL
+        \\ UNION SELECT json_extract(part.value,'$.candidate_message_id') FROM outbox,json_each(outbox.record,'$.parts') part WHERE json_extract(part.value,'$.candidate_message_id') IS NOT NULL
         \\);
         \\DELETE FROM pages WHERE chat IN (SELECT thread FROM cache_prune)
         \\ OR chat IN (SELECT id FROM records WHERE kind='conversation' AND chat IN (SELECT thread FROM cache_prune));
@@ -821,7 +823,7 @@ pub fn snapshotWithMessages(
     }
     const visible_messages = shared_messages orelse messages.items;
     const epoch = try s.get(a, "epoch");
-    const ps = try s.db.prepare(thread_cte ++ "SELECT payload,state,detail,record,sent_at FROM outbox WHERE draft_key IN (SELECT id FROM members) AND NOT EXISTS(SELECT 1 FROM records m WHERE m.kind='message' AND m.id=" ++ echo_id_sql ++ ") ORDER BY rowid");
+    const ps = try s.db.prepare(thread_cte ++ "SELECT payload,state,detail,record,sent_at FROM outbox WHERE draft_key IN (SELECT id FROM members) AND (coalesce(json_array_length(payload,'$.attachments'),0)>0 OR NOT EXISTS(SELECT 1 FROM records m WHERE m.kind='message' AND m.id=" ++ echo_id_sql ++ ")) ORDER BY rowid");
     defer ps.close();
     try ps.bind(&.{.{ .text = selected }});
     while (try ps.step()) {
@@ -870,7 +872,7 @@ fn pendingWithoutEchoes(
     // A message already accounting for one request cannot hide another one.
     var used_echoes: std.StringHashMapUnmanaged(void) = .empty;
     defer used_echoes.deinit(a);
-    const linked = try s.db.prepare(thread_cte ++ "SELECT " ++ echo_id_sql ++ " FROM outbox WHERE draft_key IN (SELECT id FROM members) AND " ++ echo_id_sql ++ " IS NOT NULL");
+    const linked = try s.db.prepare(thread_cte ++ "SELECT id FROM (" ++ send_echoes_query ++ ") WHERE draft_key IN (SELECT id FROM members) AND id IS NOT NULL");
     defer linked.close();
     try linked.bind(&.{.{ .text = selected }});
     while (try linked.step()) try used_echoes.put(a, try linked.text(a, 0), {});
@@ -880,6 +882,7 @@ fn pendingWithoutEchoes(
     // only; never confirm, discard, or otherwise change the durable requests.
     var count: usize = 0;
     for (pending) |p| {
+        if (multipartDelivered(p, epoch, messages)) continue;
         if (pendingEcho(p, epoch, messages, used_echoes)) |id| {
             try used_echoes.put(a, id, {});
         } else {
@@ -890,13 +893,28 @@ fn pendingWithoutEchoes(
     return pending[0..count];
 }
 
+fn multipartDelivered(p: Pending, epoch: []const u8, messages: []const t.Message) bool {
+    if (p.input.attachments.len == 0 or !u.eq(p.state, "delivered") or
+        !u.eq(p.input.server_epoch, epoch)) return false;
+    const record = p.record orelse return false;
+    if (record.parts.len == 0) return false;
+    for (record.parts) |part| {
+        if (part.state != .delivered) return false;
+        const id = part.message_id orelse return false;
+        for (messages) |message| {
+            if (u.eq(message.id, id)) break;
+        } else return false;
+    }
+    return true;
+}
+
 fn pendingEcho(
     p: Pending,
     epoch: []const u8,
     messages: []const t.Message,
     used_echoes: std.StringHashMapUnmanaged(void),
 ) ?[]const u8 {
-    if (!u.eq(p.input.server_epoch, epoch) or u.eq(p.state, "failed")) return null;
+    if (p.input.attachments.len != 0 or !u.eq(p.input.server_epoch, epoch) or u.eq(p.state, "failed")) return null;
     if (p.record) |record| if (record.message_id != null or record.candidate_message_id != null) return null;
     var sent_ms: i64 = undefined;
     if (bridge.zc_timestamp_ms(p.sent_at.ptr, p.sent_at.len, &sent_ms) == 0) return null;
@@ -915,12 +933,100 @@ fn pendingEcho(
 }
 
 pub const echo_id_sql = "coalesce(json_extract(outbox.record,'$.message_id'),CASE WHEN outbox.state='unknown' AND outbox.epoch=(SELECT value FROM meta WHERE key='epoch') THEN json_extract(outbox.record,'$.candidate_message_id') END)";
+// Include each operation so a caption cannot stand in for the entire send.
+pub const send_echoes_query = "SELECT " ++ echo_id_sql ++ " AS id,epoch,draft_key,outbox.rowid AS position FROM outbox UNION ALL SELECT coalesce(json_extract(part.value,'$.message_id'),CASE WHEN outbox.epoch=(SELECT value FROM meta WHERE key='epoch') AND json_extract(part.value,'$.state')='unknown' THEN json_extract(part.value,'$.candidate_message_id') END),epoch,draft_key,outbox.rowid FROM outbox,json_each(outbox.record,'$.parts') part";
 const enriched_record = "coalesce((SELECT e.record FROM enrichment_cache e WHERE e.message_id=records.id AND e.revision=records.revision),record)";
 const enrichment_serial = "coalesce((SELECT e.serial FROM enrichment_cache e WHERE e.message_id=records.id AND e.revision=records.revision),0)";
-const history_tail = " FROM records WHERE kind='message' AND chat NOT IN (SELECT id FROM members) AND id IN (SELECT " ++ echo_id_sql ++ " FROM outbox WHERE draft_key IN (SELECT id FROM members) AND record IS NOT NULL) ORDER BY sort_key,id";
+const history_tail = " FROM records WHERE kind='message' AND chat NOT IN (SELECT id FROM members) AND id IN (SELECT id FROM (" ++ send_echoes_query ++ ") WHERE draft_key IN (SELECT id FROM members)) ORDER BY sort_key,id";
 pub const history_query = thread_cte ++ "SELECT " ++ enriched_record ++ ",id,revision,sort_key," ++ enrichment_serial ++ " FROM records WHERE kind='message' AND chat IN (SELECT id FROM members) UNION ALL SELECT " ++ enriched_record ++ ",id,revision,sort_key," ++ enrichment_serial ++ history_tail;
 pub const history_versions_query = thread_cte ++ "SELECT NULL,id,revision,sort_key," ++ enrichment_serial ++ " FROM records WHERE kind='message' AND chat IN (SELECT id FROM members) UNION ALL SELECT NULL,id,revision,sort_key," ++ enrichment_serial ++ history_tail;
 pub const message_query = "SELECT " ++ enriched_record ++ " FROM records WHERE kind='message' AND id=?";
+
+test "multipart history preserves partial outcomes and follows every confirmed echo" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const s = try Store.open(":memory:");
+    defer s.close();
+    const epoch = try u.id(a);
+    try s.set("epoch", epoch);
+    const file: attachments.Upload = .{
+        .id = try u.id(a),
+        .name = "photo.png",
+        .mime_type = "image/png",
+        .bytes = "17",
+        .sha256 = "0" ** 64,
+    };
+    const key = "new:peer@example.invalid";
+    try outgoing.addDraft(s, a, key, file);
+    const input: t.SendInput = .{
+        .request_id = try u.id(a),
+        .server_epoch = epoch,
+        .target = .{ .recipient = .{ .address = "peer@example.invalid", .service = "imessage" } },
+        .text = "A caption",
+        .attachments = &.{file},
+    };
+    try s.persistSend(a, key, input);
+    const initial = try s.snapshot(a, key);
+    const caption: t.Message = .{
+        .id = try u.id(a),
+        .revision = "1",
+        .conversation_id = key,
+        .sender = "",
+        .service = "imessage",
+        .direction = .outgoing,
+        .timestamp = initial.pending[0].sent_at,
+        .kind = .text,
+        .text = input.text,
+        .decoding = .plain,
+        .observed_status = .delivered,
+    };
+    _ = try s.upsert(a, "message", try u.json(a, caption));
+    // A matching caption alone cannot account for the attachment operation.
+    try testing.expectEqual(@as(usize, 1), (try s.snapshot(a, key)).pending.len);
+    var parts = [_]t.SendPart{
+        .{ .kind = .text, .state = .delivered, .message_id = caption.id },
+        .{ .kind = .attachment, .attachment_id = file.id, .state = .unknown },
+    };
+    var request: t.SendRequest = .{
+        .request_id = input.request_id,
+        .server_epoch = epoch,
+        .revision = "2",
+        .target = input.target,
+        .text = input.text,
+        .attachments = input.attachments,
+        .parts = &parts,
+        .state = .unknown,
+    };
+    _ = try s.upsert(a, "request", try u.json(a, request));
+    try testing.expectEqual(@as(usize, 1), (try s.snapshot(a, key)).pending.len);
+    var attachment = caption;
+    attachment.id = try u.id(a);
+    attachment.revision = "3";
+    attachment.timestamp = "9999-01-01T00:00:00Z";
+    attachment.conversation_id = try u.id(a);
+    attachment.kind = .attachment;
+    attachment.text = null;
+    parts[1].state = .delivered;
+    parts[1].message_id = attachment.id;
+    request.revision = "4";
+    request.state = .delivered;
+    _ = try s.upsert(a, "request", try u.json(a, request));
+    // Keep the summary until all linked records have been hydrated.
+    try testing.expectEqual(@as(usize, 1), (try s.snapshot(a, key)).pending.len);
+    _ = try s.upsert(a, "message", try u.json(a, attachment));
+    const complete = try s.snapshot(a, key);
+    try testing.expectEqual(@as(usize, 0), complete.pending.len);
+    try testing.expectEqual(@as(usize, 2), complete.messages.len);
+    try testing.expectEqualStrings(attachment.id, complete.messages[1].id);
+    var versions = try s.db.prepare(history_versions_query);
+    defer versions.close();
+    try versions.bind(&.{.{ .text = key }});
+    var count: usize = 0;
+    while (try versions.step()) : (count += 1) {}
+    try testing.expectEqual(@as(usize, 2), count);
+}
 
 pub fn enrichmentNext(
     s: Store,

@@ -801,7 +801,7 @@ fn requestHistory(s: *Worker, ar: u.Allocator) !void {
     }, null);
 }
 fn hydrateSend(s: *Worker) !bool {
-    const q = try s.store.db.prepare("SELECT " ++ Store.echo_id_sql ++ " AS id FROM outbox WHERE epoch=(SELECT value FROM meta WHERE key='epoch') AND " ++ Store.echo_id_sql ++ " IS NOT NULL AND NOT EXISTS(SELECT 1 FROM records m WHERE m.kind='message' AND m.id=" ++ Store.echo_id_sql ++ ") ORDER BY rowid DESC LIMIT 1");
+    const q = try s.store.db.prepare("SELECT id FROM (" ++ Store.send_echoes_query ++ ") echoes WHERE epoch=(SELECT value FROM meta WHERE key='epoch') AND id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM records m WHERE m.kind='message' AND m.id=echoes.id) ORDER BY position DESC LIMIT 1");
     defer q.close();
     if (!try q.step()) return false;
     try s.setJobKey(q.bytes(0));
@@ -1519,7 +1519,7 @@ fn resolveDirect(s: *Worker) !void {
     if (!std.mem.startsWith(u8, s.selected, "new:")) return;
     if ((try s.store.draft(ar, s.selected)).len > 0) return;
     if ((try outgoing.draft(s.store, ar, s.selected)).len != 0) return;
-    const q = try s.store.db.prepare("SELECT m.chat FROM outbox o JOIN records m ON m.kind='message' AND m.id=json_extract(o.record,'$.message_id') WHERE o.draft_key=? AND o.epoch=? LIMIT 1");
+    const q = try s.store.db.prepare("SELECT m.chat FROM outbox o LEFT JOIN json_each(o.record,'$.parts') part JOIN records m ON m.kind='message' AND m.id=coalesce(json_extract(o.record,'$.message_id'),json_extract(part.value,'$.message_id')) WHERE o.draft_key=? AND o.epoch=? LIMIT 1");
     defer q.close();
     try q.bind(&.{ .{ .text = s.selected }, .{ .text = try s.store.get(ar, "epoch") } });
     if (!try q.step()) return;

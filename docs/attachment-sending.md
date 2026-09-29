@@ -169,6 +169,16 @@ The final worker build passed 139 client tests, including completion of queued
 preparations when the file worker cannot open its cache connection. Both the
 desktop client and headless client executable built successfully.
 
+Composer integration also requires multipart history to remain reviewable. A
+matching caption cannot hide its attachment request; partial and uncertain
+requests keep their summary. A delivered summary disappears only after every
+part's message has loaded. History queries, missing-message hydration, and new
+conversation selection now follow individual part links. The unchanged
+regression test failed before this fix and passed afterward; 140 client tests
+and both client builds passed. The production-worker suite verifies all three
+caption/file echoes and redirection to the resulting conversation; all nine
+attachment cases and the existing text-send integration suite passed.
+
 Browser image offers and clipboard image bytes require additional input support;
 the first input path handles local file-manager drops. Upload and dispatch are
 generic across regular files and do not depend on preview support.
