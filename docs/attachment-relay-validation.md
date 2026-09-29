@@ -27,6 +27,7 @@ Record the implemented boundary, command, and observed result after each chunk.
 | Existing text sends, idempotency, recovery, and source resets | `python3 tests/integration.py` | Passed after multipart observation and safe reclamation |
 | HTTP/2 stream isolation | `python3 tests/relay_http2.py` | Passed: all seven existing transport regressions |
 | GUI-reviewed originals through the production worker and relay | `zig build test-gui-attachments -Doptimize=ReleaseSafe` | Passed: native callback drops, background thumbnail, source deletion/replacement, caption/PNG/empty/binary dispatch exactly once in order, byte identity, individual delivery, and confirmed client history |
+| Native AppleScript payload binding under the installed Messages dictionary | `python3 tests/mac_send_script.py -v` on macOS | Passed: four tests covering compilation, literal Unicode text, file aliases, and missing-file rejection. The same text/file operand regression failed before the fix in all four direct/chat modes and passed unchanged afterward. No Messages sends or account/chat queries execute. |
 
 Use Zig from `.zigversion`. Build `fake-relay` before the Python suites. Supply
 `-Dopenssl-prefix=/absolute/openssl-3.5` when the system OpenSSL is not 3.5.
@@ -52,20 +53,37 @@ The native script passes the private absolute filename as a literal argument,
 coerces it to an alias before setting its dispatch flag, and uses the same
 account and chat checks as text sending. Apple's
 [file-reference guide](https://developer.apple.com/library/archive/documentation/LanguagesUtilities/Conceptual/MacAutomationScriptingGuide/ReferenceFilesandFolders.html)
-documents POSIX-file-to-alias conversion. That does not establish current
-Messages behavior: script compilation, file acceptance, copy timing, and delivery
-remain native acceptance checks below. Synthetic copies exercise the journal
-boundary, not Apple's implementation.
+documents POSIX-file-to-alias conversion. Native compilation and payload operand
+binding now have a separate macOS regression check. File acceptance, copy timing,
+and delivery still require the real Messages acceptance checks below. Synthetic
+copies exercise the journal boundary, not Apple's implementation.
 
-## Real Mac acceptance: not yet run
+The first native send exposed a terminology collision: the script's variable
+`outgoing` was interpreted inside the Messages block as the application's `FTog`
+enumeration. This substituted an enum for both captions and file aliases, producing
+unexpected text while the intended request remained unconfirmed. The payload now
+uses `messagePayload`. The installed dictionary confirmed the conflicting term;
+the unchanged regression reproduced the wrong argument before the rename and
+the correct text/alias afterward. It retains production preparation and send
+operands but substitutes local capture for sending and synthetic account/chat
+lookup, so it never sends a real message. The original script also compiled
+before the fix: compilation alone did not catch this issue, and the synthetic
+adapter did not exercise AppleScript terminology.
+
+An affected relay must be rebuilt and restarted because it embeds the script.
+Previously attempted requests remain uncertain and are not automatically replayed
+or declared delivered. Preserve their originals and review actual message history
+before deliberately creating another send.
+
+## Remaining real Messages acceptance
 
 Validate under the installed relay app identity, with a deliberately selected
 recipient and separate authorization for actual sends. Follow the existing
 [Mac validation guide](mac-validation.md). Never write to the real Messages
 database to manufacture test cases.
 
-1. Inspect the installed Messages scripting dictionary and verify file sending
-   to a direct recipient, an existing direct chat, and an existing group.
+1. After the dictionary and operand checks above, verify actual file sending to a
+   direct recipient, an existing direct chat, and an existing group.
 2. Send a PNG, JPEG, PDF, and an ordinary binary file. Check recipient-side bytes,
    filename, presentation, and observed attachment metadata. Check empty files
    and the configured size boundary; document any Messages-specific restriction.

@@ -4,9 +4,10 @@ on run argv
     set bodyText to item 3 of argv
     set dispatchStarted to false
     try
-        set outgoing to bodyText
+        -- Messages reserves "outgoing" for the FTog enumeration.
+        set messagePayload to bodyText
         if operation is "direct-file" or operation is "chat-file" then
-            set outgoing to (POSIX file bodyText) as alias
+            set messagePayload to (POSIX file bodyText) as alias
         end if
         tell application "Messages"
             set candidates to every account whose service type is iMessage and enabled is true
@@ -16,13 +17,13 @@ on run argv
             if operation is "direct" or operation is "direct-file" then
                 set recipient to participant destination of imAccount
                 set dispatchStarted to true
-                send outgoing to recipient
+                send messagePayload to recipient
             else if operation is "chat" or operation is "chat-file" then
                 set destinationChat to chat id destination
                 if service type of account of destinationChat is not iMessage then return "unsupported_target"
                 if id of account of destinationChat is not id of imAccount then return "unsupported_account"
                 set dispatchStarted to true
-                send outgoing to destinationChat
+                send messagePayload to destinationChat
             else
                 return "unsupported_target"
             end if

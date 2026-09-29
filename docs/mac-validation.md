@@ -12,6 +12,13 @@ acceptance-helper suites. Use synthetic databases for fault injection, source
 replacement, Unicode decoding, routing, cursor replay, and send recovery.
 Never mutate the real Messages database to exercise a failure.
 
+Run `python3 tests/mac_send_script.py -v` on macOS before installing changes to
+the sending script. It compiles the production script and checks its text/file
+operands under the installed Messages terminology, using local capture instead
+of sending or querying accounts/chats. This catches application dictionary terms
+being mistaken for payload variables. Linux skips these native checks; synthetic
+relay tests do not establish AppleScript behavior.
+
 `python3 tests/initial_sync.py` checks initial batch sizes, rollback and restart
 recovery, live event origins, and subsequent reconciliation. To compare initial
 import throughput between fixture relay builds, run
