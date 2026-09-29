@@ -394,9 +394,12 @@ python3 tests/contact_refresh.py
 python3 tests/client_enrichment_protocol.py
 python3 tests/client_contact_sync.py
 python3 tests/client_media_transport.py
+python3 tests/client_attachments.py -v
 python3 tests/client_details.py
-# Requires a running Wayland desktop and Python cryptography for temporary test certificates:
+# Requires Wayland plus Python cryptography and h2 for temporary test endpoints:
 zig build test-gui
+# Focused GUI -> preparation -> upload -> synthetic Messages dispatch check:
+zig build test-gui-attachments
 python3 tests/client_desktop.py
 python3 tests/integration.py
 python3 tests/mac_acceptance_test.py
@@ -421,6 +424,15 @@ uses mTLS on both the worker and relay sides of its intermediary. It covers
 history, pagination, direct/group sends, echo merging, uncertain outcomes,
 crashes, expired cursors, and epoch changes. A Wayland screenshot
 can be exported with `zimbr --screenshot /path/to/image.png --frames 90`.
+
+Both GUI test commands build the synthetic relay and therefore require OpenSSL
+3.5 or the prefix option above. The attachment integration injects the native
+file-drop callback, checks a decoded draft thumbnail, presses Enter, and verifies
+original bytes and confirmed history through the real worker and transport. It
+deletes or changes the source files after preparation. It uses temporary storage
+and synthetic recipients; it does not send real iMessages. A file-manager drag
+across the compositor and [native Mac acceptance](attachment-relay-validation.md)
+remain manual checks.
 
 `python3 tests/client_notifications.py` tests the production notification backend
 against a mock freedesktop service on a private D-Bus session. It requires a C

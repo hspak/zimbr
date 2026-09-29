@@ -243,7 +243,16 @@ fn client(
     m.addImport("raylib", ray_module);
     m.addImport("zclay", clay.module("zclay"));
     const gui_tests = b.addTest(.{ .root_module = m });
-    b.step("test-gui", "Check sidebar clipping and theme rendering on Wayland").dependOn(&b.addRunArtifact(gui_tests).step);
+    const gui_run = b.addRunArtifact(gui_tests);
+    gui_run.step.dependOn(&b.top_level_steps.get("fake-relay").?.step);
+    b.step("test-gui", "Test rendering and client interactions on Wayland").dependOn(&gui_run.step);
+    const attachment_tests = b.addTest(.{
+        .root_module = m,
+        .filters = &.{"native file drops reach the synthetic relay"},
+    });
+    const attachment_run = b.addRunArtifact(attachment_tests);
+    attachment_run.step.dependOn(&b.top_level_steps.get("fake-relay").?.step);
+    b.step("test-gui-attachments", "Send native file drops through the GUI to a synthetic relay").dependOn(&attachment_run.step);
     const exe = b.addExecutable(.{ .name = "zimbr", .root_module = m });
     const install = b.addInstallArtifact(exe, .{});
     step.dependOn(&install.step);

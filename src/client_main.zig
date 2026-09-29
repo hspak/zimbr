@@ -3723,11 +3723,25 @@ const App = struct {
             .height = 48,
         };
         shapes.drawRectangle(thumb, 0.12, theme.colors.incoming);
-        s.text.drawLine("File", thumb.x + 10, thumb.y + 16, 11, 38, theme.colors.muted, theme.colors.incoming);
-        if (std.mem.startsWith(u8, file.mime_type, "image/")) if (s.media) |media| {
-            if (s.images.getLocal(media, file)) |entry| if (entry.availableTexture()) |texture|
-                ImageCache.draw(texture, thumb);
+        const preview = preview: {
+            if (std.mem.startsWith(u8, file.mime_type, "image/")) if (s.media) |media| {
+                if (s.images.getLocal(media, file)) |entry| break :preview entry.availableTexture();
+            };
+            break :preview null;
         };
+        if (preview) |texture| {
+            ImageCache.draw(texture, thumb);
+        } else {
+            s.text.drawLine(
+                "File",
+                thumb.x + 10,
+                thumb.y + 16,
+                11,
+                38,
+                theme.colors.muted,
+                theme.colors.incoming,
+            );
+        }
         s.text.drawLine(
             display.label(ar, file.name),
             bounds.x + 58,
@@ -7264,4 +7278,138 @@ test "composer consumes file drops and waits for reviewed attachments before an 
     try std.testing.expect(!app.duplicate_risk);
     try std.testing.expectEqual(@as(usize, 0), app.draftFiles().len);
     try std.testing.expectEqual(@as(usize, 2), pending[0].input.attachments.len);
+}
+
+test "native file drops reach the synthetic relay with reviewed original bytes" {
+    const io = std.testing.io;
+    var fixture = try std.process.spawn(io, .{
+        .argv = &.{ "python3", "tests/gui_attachment_fixture.py" },
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .inherit,
+    });
+    defer {
+        if (fixture.stdin) |input| input.close(io);
+        fixture.stdin = null;
+        if (fixture.id != null) _ = fixture.wait(io) catch {
+            fixture.kill(io);
+        };
+    }
+    var buffer: [16384]u8 = undefined;
+    var reader = fixture.stdout.?.readerStreaming(io, &buffer);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ready = try std.json.parseFromSliceLeaky(struct {
+        config: Config,
+        paths: []const [:0]const u8,
+    }, arena.allocator(), try reader.interface.takeDelimiterInclusive('\n'), .{ .allocate = .alloc_always });
+
+    const reset_context: *const fn (?*clay.Context) callconv(.c) void = @ptrCast(&clay.setCurrentContext);
+    reset_context(null);
+    rl.setTraceLogLevel(.none);
+    rl.setConfigFlags(.{ .window_highdpi = true, .msaa_4x_hint = true });
+    rl.initWindow(780, 560, "Attachment integration");
+    defer rl.closeWindow();
+    rl.setExitKey(.null);
+    rl.pollInputEvents();
+    defer reset_context(null);
+    _ = clay.initialize(
+        .init(try arena.allocator().alloc(u8, clay.minMemorySize())),
+        .{ .w = 780, .h = 560 },
+        .{ .error_handler_function = clayError },
+    );
+    var worker = Worker{ .io = io, .config = ready.config };
+    var media = Media{ .io = io, .config = ready.config };
+    var app = App{ .worker = &worker, .media = &media };
+    defer app.deinit();
+    try worker.start();
+    defer worker.shutdown();
+    try media.start();
+    defer media.shutdown();
+    const key = "new:alice@example.invalid";
+    try app.select(key);
+    const ready_deadline = u.now() + 10000;
+    while (true) {
+        try attachmentTestFrame(&app, ready_deadline);
+        if (app.view) |view| if (view.online and view.send_attachments and app.pending_key == null and u.eq(app.loaded_key, key)) break;
+    }
+
+    const window = glfwGetCurrentContext() orelse return error.TestUnexpectedResult;
+    const callback = glfwSetDropCallback(window, null) orelse return error.TestUnexpectedResult;
+    defer _ = glfwSetDropCallback(window, callback);
+    var paths: [3][*c]const u8 = undefined;
+    try std.testing.expectEqual(paths.len, ready.paths.len);
+    for (&paths, ready.paths) |*dest, path| dest.* = path.ptr;
+    callback(window, paths.len, &paths);
+    try app.update();
+    try std.testing.expect(!app.canSend());
+    const stage_deadline = u.now() + 10000;
+    while (app.draftFiles().len != 3 or !app.canSend()) try attachmentTestFrame(&app, stage_deadline);
+    try std.testing.expectEqualStrings("photo 👋.png", app.draftFiles()[0].name);
+    try std.testing.expectEqualStrings("0", app.draftFiles()[1].bytes);
+    try std.testing.expectEqualStrings("262144", app.draftFiles()[2].bytes);
+    while (true) {
+        try attachmentTestFrame(&app, stage_deadline);
+        if (app.images.getLocal(&media, app.draftFiles()[0])) |entry| if (entry.texture) |texture| {
+            try std.testing.expectEqual(@as(i32, 2), texture.width);
+            try std.testing.expectEqual(@as(i32, 3), texture.height);
+            break;
+        };
+    }
+    try fixture.stdin.?.writeStreamingAll(io, "staged\n");
+    try std.testing.expectEqualStrings("\"changed\"\n", try reader.interface.takeDelimiterInclusive('\n'));
+    try app.composer.insert("Reviewed caption 👋");
+    app.draft_dirty = true;
+    app.draft_at = u.now();
+    if (u.c.getenv("ZIMBR_GUI_ATTACHMENT_SCREENSHOT")) |path| {
+        const shot = try captureTestFrame(&app, WindowMetrics.current().scale);
+        defer rl.unloadImage(shot);
+        try std.testing.expect(rl.exportImage(shot, std.mem.span(path)));
+    }
+    testKey(.left_control, false);
+    testKey(.right_control, false);
+    testKey(.enter, true);
+    try app.update();
+    testKey(.enter, false);
+    try std.testing.expect(app.send_wait);
+
+    const delivery_deadline = u.now() + 25000;
+    while (true) {
+        try attachmentTestFrame(&app, delivery_deadline);
+        const snapshot = app.view.?.snapshot;
+        var captions: usize = 0;
+        var files: usize = 0;
+        for (snapshot.messages) |message| {
+            if (message.direction != .outgoing or message.observed_status != .delivered) continue;
+            if (message.text) |text| if (u.eq(text, "Reviewed caption 👋")) {
+                captions += 1;
+            };
+            files += message.attachments.len;
+        }
+        if (captions == 1 and files == 3 and snapshot.pending.len == 0) break;
+    }
+    while (std.mem.startsWith(u8, app.key, "new:")) try attachmentTestFrame(&app, delivery_deadline);
+    try std.testing.expectEqual(@as(usize, 0), app.draftFiles().len);
+    try std.testing.expectEqualStrings("", app.composer.text.items);
+    try fixture.stdin.?.writeStreamingAll(io, "verify\n");
+    try std.testing.expectEqualStrings("\"verified\"\n", try reader.interface.takeDelimiterInclusive('\n'));
+    fixture.stdin.?.close(io);
+    fixture.stdin = null;
+    const term = try fixture.wait(io);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
+}
+
+fn attachmentTestFrame(app: *App, deadline: i64) !void {
+    if (u.now() >= deadline) {
+        std.debug.print("Attachment GUI timeout: selected={s}, notice={s}, status={s}\n", .{
+            app.key,
+            app.notice,
+            if (app.view) |view| view.status else "no snapshot",
+        });
+        return error.TestUnexpectedResult;
+    }
+    try app.update();
+    app.deliverNotifications();
+    app.draw(WindowMetrics.current().scale);
+    rl.waitTime(0.01);
 }

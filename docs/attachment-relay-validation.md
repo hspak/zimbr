@@ -26,11 +26,15 @@ Record the implemented boundary, command, and observed result after each chunk.
 | Multipart acceptance and recovery journal | `zig build test -Doptimize=ReleaseSafe` | Passed: atomic pinning, incomplete and foreign uploads, injected part-write rollback, ordered caption/file parts, exact retries, partial outcomes, restart between/during operations, and source-reset holds |
 | Existing text sends, idempotency, recovery, and source resets | `python3 tests/integration.py` | Passed after multipart observation and safe reclamation |
 | HTTP/2 stream isolation | `python3 tests/relay_http2.py` | Passed: all seven existing transport regressions |
+| GUI-reviewed originals through the production worker and relay | `zig build test-gui-attachments -Doptimize=ReleaseSafe` | Passed: native callback drops, background thumbnail, source deletion/replacement, caption/PNG/empty/binary dispatch exactly once in order, byte identity, individual delivery, and confirmed client history |
 
 Use Zig from `.zigversion`. Build `fake-relay` before the Python suites. Supply
 `-Dopenssl-prefix=/absolute/openssl-3.5` when the system OpenSSL is not 3.5.
 Build caches can be redirected with `ZIG_LOCAL_CACHE_DIR` and
 `ZIG_GLOBAL_CACHE_DIR` when the normal cache is unavailable.
+The GUI attachment check builds its synthetic relay automatically and additionally
+requires a Wayland display and Python `cryptography` and `h2`. Its native callback
+injection does not test compositor drag negotiation or Messages Automation.
 
 The observation chunk passed 202 Zig tests with one unavailable-platform skip.
 The dispatch suite passed all 10 cases and the upload suite passed all 12 cases.

@@ -7,7 +7,9 @@ Linux build, verification, and text-backend limitations are documented in the
 [Linux client guide](docs/linux-client.md).
 The [Mac enrichment contract](docs/macos-message-enrichment.md) and
 [Linux enrichment guide](docs/linux-message-enrichment.md) describe implemented
-Contacts names/photos, images, stored link previews, and reactions.
+Contacts names/photos, images, stored link previews, and reactions. The
+[outgoing attachment implementation](docs/attachment-sending.md) and separate
+[relay acceptance checklist](docs/attachment-relay-validation.md) cover file sends.
 
 Build a small, self-hosted system that uses an always-on Mac mini, signed into
 Messages, to send and receive iMessages from a graphical Linux application.
@@ -20,11 +22,12 @@ should support reading and text replies once their routing is validated on the
 Mac. Creating or administering groups is outside the first version.
 
 The client displays image attachments, stored link previews, reactions, and
-contact names/photos supplied by the relay. Attachment/reaction sending, editing,
-unsending, typing indicators, and Apple read-receipt control remain outside the
-current scope. Linux desktop notifications are supported while the client is
-running. Unknown message kinds must remain visible as unsupported content rather
-than silently disappearing.
+contact names/photos supplied by the relay. It stages dropped local files and
+sends them with optional captions; native Messages file dispatch still requires
+Mac acceptance. Reaction sending, editing, unsending, typing indicators, and Apple
+read-receipt control remain outside the current scope. Linux desktop notifications
+are supported while the client is running. Unknown message kinds must remain
+visible as unsupported content rather than silently disappearing.
 
 The Mac remains the endpoint that communicates with Apple's iMessage service.
 The relay exposes our own API; Linux never receives Apple account credentials.
@@ -779,9 +782,10 @@ stream. A push can signal that changes are available, with content fetched throu
 the authenticated API. Design payload privacy, device registration, and credentials
 when implementing that feature.
 
-**Attachments.** Add authenticated attachment endpoints and lazy downloads.
-Retain attachment IDs and metadata in the initial model, but never expose arbitrary
-Mac filesystem paths as downloadable resources.
+**Attachments.** Authenticated incoming previews and outgoing uploads are now
+implemented. Further input paths can add browser image offers and clipboard
+images while preserving immutable draft originals. Never expose arbitrary Mac
+filesystem paths as downloadable resources.
 
 **Richer iMessage features.** Add capabilities per operation and adapter version.
 Unsupported operations stay disabled. Typing indicators, Apple read receipts,

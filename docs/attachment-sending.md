@@ -40,9 +40,10 @@ means the implementation and its relevant automated checks have passed.
    attachment-only sends, preparation and upload cancellation, progress, and
    individual file outcomes. Automated input and GUI checks pass, apart from
    the separately verified baseline software-renderer antialiasing assertion.
-6. **Pending: end-to-end validation and documentation.** Exercise the actual
-   client and synthetic relay together, then record outstanding Mac acceptance
-   checks separately.
+6. **Complete: end-to-end validation and documentation.** The GUI, preparation
+   worker, image worker, upload lane, and synthetic relay pass an integrated
+   original-byte send check. Usage and limits are documented; outstanding native
+   Mac acceptance is recorded separately.
 
 ## Protocol and lifetime decisions
 
@@ -235,6 +236,23 @@ the previously documented baseline antialiasing failure remaining.
 Browser image offers and clipboard image bytes require additional input support;
 the first input path handles local file-manager drops. Upload and dispatch are
 generic across regular files and do not depend on preview support.
+
+The final `zig build test-gui-attachments -Doptimize=ReleaseSafe` check drives a
+real App, Worker, and Media instance through the native file-drop callback on
+Wayland. It stages a Unicode-named PNG, an empty file, and a 256 KiB binary file,
+checks the decoded thumbnail, and verifies that no send occurs before review.
+After deleting or modifying every source, Enter submits the reviewed caption and
+private originals. The synthetic relay receives the original bytes exactly once
+in order, every part reaches delivered, and the client shows confirmed history
+in the resulting conversation with an empty draft. The minimum-size screenshot
+was reviewed, including the transparent preview's fallback-label correction.
+
+Final core validation passed 142 client tests and 69 relay/protocol tests, with
+one unavailable-platform skip, and both client executables built successfully.
+The dedicated GUI integration passed; the full GUI suite passed 109 of 110 tests,
+with only the previously verified baseline software-renderer antialiasing failure.
+Native file-manager drag negotiation across a compositor and actual Messages file
+acceptance remain manual checks; callback injection does not establish either.
 
 Relay-specific checks and their evidence are maintained in
 [attachment relay validation](attachment-relay-validation.md).

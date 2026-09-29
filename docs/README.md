@@ -34,6 +34,9 @@ environment is active (`. .tools/python/bin/activate`).
 ## Protocol and implementation
 
 - [API v1](api.md): routes, synchronization, SSE, send recovery, and limits.
+- [Outgoing attachments](attachment-sending.md): client drafts, uploads, dispatch,
+  recovery, and implementation evidence; [relay validation](attachment-relay-validation.md)
+  tracks synthetic checks and outstanding native Mac acceptance.
 - [Certificate contract](certificate-management.md): key ownership, validated
   issuance/import, fingerprint authorization, and lifecycle.
 - [Message security](message-security.md): parsing/storage boundaries and tests.

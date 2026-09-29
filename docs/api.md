@@ -245,6 +245,7 @@ indices and file-transfer GUIDs; unknown layouts retain full text and attachment
 fallbacks. Stored URL payloads use a bounded primitive plist/archive reader.
 Reactions retain their source rows and publish complete target aggregates using
 durable source ordering/removal state. Resolved reaction rows are skipped by the
-relay sidebar projection. General message deletion, reaction/attachment sending,
-group administration, read receipts, video/audio playback, and animated stickers
-remain outside this reading extension.
+relay sidebar projection. Outgoing files use the separate upload and send protocol
+described above. General message deletion, reaction sending, group administration,
+read receipts, video/audio playback, and animated stickers remain outside this
+reading extension.

@@ -14,6 +14,7 @@ Linux never receives your Apple account credentials.
 - Receive live updates and desktop notifications while the client is running.
 - Keep cached history, Unicode drafts, contact names, and photos available offline.
 - View inline images, stored link previews, and reactions when the relay supplies them.
+- Drop local images and files into a draft, review them, and send with an optional caption.
 
 The relay reads the Messages database without modifying it and sends through
 Messages Automation. Every API and live-event connection requires HTTP/2 over TLS 1.3 and an
@@ -55,6 +56,8 @@ with the [validation guide](docs/mac-validation.md). Closing the Linux client st
 notifications. Offline drafts are saved, but new sends are not queued offline;
 retrying an uncertain send can create a duplicate. Local caches contain plaintext.
 
-Sending is limited to iMessage text in direct or existing conversations. Group
-creation, attachment/reaction sending, video/audio playback, full input-method
-integration, and accessibility support remain unimplemented.
+Sending supports iMessage text and local files in direct or existing conversations.
+Attachment dispatch still needs [real Mac acceptance](docs/attachment-relay-validation.md);
+automated checks use a synthetic Messages adapter. Group creation, reaction sending,
+video/audio playback, full input-method integration, and accessibility support remain
+unimplemented. See [sending files](docs/linux-client.md#sending-files) for limits.
