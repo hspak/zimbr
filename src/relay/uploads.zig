@@ -12,10 +12,6 @@ pub const max_reservations = 256;
 pub const max_reserved_bytes = 2 * 1024 * 1024 * 1024;
 pub const unused_lifetime_ms = 24 * 60 * 60 * 1000;
 
-test {
-    _ = Files;
-}
-
 pub const Phase = enum { reserved, receiving, ready, pinned, deleting };
 pub const Record = struct {
     server_epoch: []const u8,

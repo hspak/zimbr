@@ -14,6 +14,13 @@ CREATE TABLE IF NOT EXISTS reconcile_chats(conversation_id TEXT PRIMARY KEY,afte
 CREATE TABLE IF NOT EXISTS send_observations(request_id TEXT PRIMARY KEY REFERENCES send_requests(id),attempt_ms INTEGER NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS request_message ON send_requests(message_id) WHERE message_id IS NOT NULL;
 
+-- Parts in send_requests.record are authoritative; this projection indexes
+-- their outcomes and retains the source boundary captured before each dispatch.
+CREATE TABLE IF NOT EXISTS send_parts(request_id TEXT NOT NULL REFERENCES send_requests(id),position INTEGER NOT NULL,state TEXT NOT NULL,dispatch_ms INTEGER,source_floor INTEGER,mode TEXT,route TEXT,message_id TEXT,PRIMARY KEY(request_id,position));
+CREATE INDEX IF NOT EXISTS part_state ON send_parts(state);
+CREATE UNIQUE INDEX IF NOT EXISTS part_message ON send_parts(message_id) WHERE message_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS send_owners(request_id TEXT PRIMARY KEY REFERENCES send_requests(id),owner TEXT NOT NULL);
+
 -- Outgoing bytes live in private files; this ledger owns their reservations.
 CREATE TABLE IF NOT EXISTS uploads(id TEXT PRIMARY KEY,epoch TEXT NOT NULL,owner TEXT NOT NULL,record TEXT NOT NULL,bytes INTEGER NOT NULL CHECK(bytes BETWEEN 0 AND 104857600),state TEXT NOT NULL CHECK(state IN ('reserved','receiving','ready','pinned','deleting')),lease TEXT NOT NULL DEFAULT '',created_ms INTEGER NOT NULL,request_id TEXT REFERENCES send_requests(id));
 CREATE INDEX IF NOT EXISTS upload_cleanup ON uploads(state,created_ms);

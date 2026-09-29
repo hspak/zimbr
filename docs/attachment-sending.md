@@ -19,9 +19,11 @@ means the implementation and its relevant automated checks have passed.
    verifies length and SHA-256 before atomic publication. Authenticated HTTP/2
    endpoints, restart recovery, failed-lease recovery, physical cleanup, and
    transport regression checks are complete.
-3. **Pending: relay dispatch and observation.** Pass staged files to Messages,
-   retain per-part outcomes, correlate observed attachments conservatively, and
-   preserve uncertainty through crashes and source resets.
+3. **In progress: relay dispatch and observation.** Atomic acceptance now pins
+   every completed upload and journals ordered caption/file operations. Exact
+   retries retain their outcomes. Recovery holds an interrupted operation and
+   skips its unstarted successors. Passing files to Messages and conservative
+   source correlation remain pending; the HTTP send capability stays disabled.
 4. **Pending: client attachment drafts and upload worker.** Snapshot local files,
    persist drafts and outbox ownership, upload with progress, and recover without
    duplicating sends.
@@ -73,6 +75,16 @@ Text and files may become separate Messages records. The dispatch implementation
 must track each operation durably and represent partial or uncertain outcomes;
 retrying an uncertain operation must never automatically dispatch it again.
 The source Messages database remains read-only.
+
+Multipart requests carry an ordered `parts` array: a text operation when the
+caption is nonempty, followed by one operation per file. Each part retains its
+own status, message association, and safe error. `invoked` means automation
+returned, not that a message was observed or delivered. A confirmed unstarted
+failure or uncertain operation skips the remaining parts. A crash between
+durable successful invocations can resume at the next queued part; a crash
+during invocation makes that part uncertain and holds its successors. Exact
+request retries never replay attempted parts. Aggregate delivery requires every
+part to be delivered; partial requests expose the individual outcomes.
 
 Local drafts own private copies so a moved, changed, or deleted source file does
 not alter an already staged attachment. Draft removal, outbox transfer, restart,

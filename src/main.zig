@@ -380,4 +380,5 @@ test {
     _ = Menu;
     _ = Server;
     _ = uploads;
+    _ = uploads.Files;
 }

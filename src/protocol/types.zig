@@ -262,6 +262,24 @@ pub const SendStatus = enum {
     failed,
     unknown,
 };
+pub const SendPart = struct {
+    kind: enum { text, attachment },
+    attachment_id: ?[]const u8 = null,
+    state: enum {
+        queued,
+        dispatching,
+        // Automation returned successfully; a Messages record is still required.
+        invoked,
+        submitted,
+        delivered,
+        failed,
+        unknown,
+        skipped,
+    } = .queued,
+    message_id: ?[]const u8 = null,
+    candidate_message_id: ?[]const u8 = null,
+    error_info: ?SafeError = null,
+};
 pub const SendRequest = struct {
     request_id: []const u8,
     server_epoch: []const u8,
@@ -269,6 +287,8 @@ pub const SendRequest = struct {
     target: Target,
     text: []const u8,
     attachments: []const attachments.Upload = &.{},
+    // Ordered operations for attachment sends; empty for text-only requests.
+    parts: []SendPart = &.{},
     state: SendStatus = .queued,
     message_id: ?[]const u8 = null,
     // Presentation-only echo while the observation window is still open.

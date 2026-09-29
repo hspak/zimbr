@@ -18,6 +18,7 @@ Record the implemented boundary, command, and observed result after each chunk.
 | Upload streaming, integrity, ownership, active limits, timeout, restart, reset, cancellation, and cleanup | `python3 tests/attachment_uploads.py` | Passed: 12 production mTLS/HTTP2 cases, including a 9 MiB binary file, empty files, unsafe storage isolation, and failed publication |
 | Failed disconnected-writer release recovers without restart | `python3 tests/attachment_uploads.py AttachmentUploads.test_failed_lease_release_recovers_without_restarting_the_relay` | Same regression failed before retry handling and passed after; an injected SQLite failure no longer leaves the upload permanently receiving |
 | Attachment dispatch, correlation, partial failure, and restart | To be added with dispatch implementation | Pending |
+| Multipart acceptance and recovery journal | `zig build test -Doptimize=ReleaseSafe` | Passed: atomic pinning, incomplete and foreign uploads, injected part-write rollback, ordered caption/file parts, exact retries, partial outcomes, restart between/during operations, and source-reset holds |
 | Existing text sends, idempotency, recovery, and source resets | `python3 tests/integration.py` | Passed after protocol and upload transport changes |
 | HTTP/2 stream isolation | `python3 tests/relay_http2.py` | Passed: all seven existing transport regressions |
 

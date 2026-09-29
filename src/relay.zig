@@ -13,3 +13,4 @@ pub const adapter = @import("relay/adapter.zig");
 pub const enrichment = @import("relay/enrichment.zig");
 pub const reactions = @import("relay/reactions.zig");
 pub const uploads = @import("relay/uploads.zig");
+pub const sends = @import("relay/sends.zig");

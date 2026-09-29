@@ -6,6 +6,8 @@ const u = @import("../common.zig");
 const t = @import("../protocol.zig").types;
 const Db = @import("Sqlite.zig");
 const Json = @import("../protocol.zig").Json;
+const uploads = @import("uploads.zig");
+const sends = @import("sends.zig");
 pub const enrichment = @import("enrichment.zig");
 const Journal = @This();
 
@@ -31,7 +33,7 @@ pub const MessageError = RecordError || error{
     WriteFailed,
 };
 pub const GetRouteError = ReadError || error{UnsupportedTarget};
-pub const AcceptError = ReadError || t.ValidateError || error{
+pub const AcceptError = uploads.PinError || t.ValidateError || error{
     AdapterUnavailable,
     InvalidRequest,
     RequestConflict,
@@ -40,6 +42,7 @@ pub const AcceptError = ReadError || t.ValidateError || error{
     UnsupportedTarget,
     UnsupportedAttachments,
 };
+pub const Accepted = struct { record: []const u8, fresh: bool };
 pub const ResetError = RecordError || error{RandomUnavailable};
 pub const CheckCursorError = ReadError || error{
     CursorExpired,
@@ -330,10 +333,31 @@ pub fn getRoute(self: Journal, a: u.Allocator, target: t.Target) GetRouteError!R
     if (!try s.step() or !u.eq(s.bytes(1), "imessage")) return error.UnsupportedTarget;
     return .{ .mode = "chat", .destination = try s.text(a, 0) };
 }
-pub fn accept(self: Journal, a: u.Allocator, input: t.SendInput, ready: bool) AcceptError!struct { record: []const u8, fresh: bool } {
-    try t.validate(input);
+pub fn accept(self: Journal, a: u.Allocator, input: t.SendInput, ready: bool) AcceptError!Accepted {
     // The text adapter must never dispatch a caption after discarding its files.
     if (input.attachments.len != 0) return error.UnsupportedAttachments;
+    return self.acceptImpl(a, input, ready, null);
+}
+/// Atomically accept and pin completed uploads belonging to the authenticated
+/// device. Owns its transaction; all returned slices belong to a. Exact retries
+/// retain the original parts and do not require automation readiness or files.
+pub fn acceptAttachments(
+    self: Journal,
+    a: u.Allocator,
+    input: t.SendInput,
+    ready: bool,
+    owner: []const u8,
+) AcceptError!Accepted {
+    return self.acceptImpl(a, input, ready, owner);
+}
+fn acceptImpl(
+    self: Journal,
+    a: u.Allocator,
+    input: t.SendInput,
+    ready: bool,
+    owner: ?[]const u8,
+) AcceptError!Accepted {
+    try t.validate(input);
     try self.begin();
     errdefer self.rollback();
     if (!u.eq(input.server_epoch, try self.epoch(a))) return error.ResyncRequired;
@@ -342,6 +366,12 @@ pub fn accept(self: Journal, a: u.Allocator, input: t.SendInput, ready: bool) Ac
     defer s.close();
     try s.bind(&.{.{ .text = input.request_id }});
     if (try s.step()) {
+        if (input.attachments.len != 0) {
+            const device = try self.db.prepare("SELECT owner FROM send_owners WHERE request_id=?");
+            defer device.close();
+            try device.bind(&.{.{ .text = input.request_id }});
+            if (!try device.step() or !u.eq(device.bytes(0), owner.?)) return error.UploadNotFound;
+        }
         if (!u.eq(s.bytes(0), payload)) return error.RequestConflict;
         const existing = try s.text(a, 1);
         try self.commit();
@@ -354,6 +384,8 @@ pub fn accept(self: Journal, a: u.Allocator, input: t.SendInput, ready: bool) Ac
         .server_epoch = input.server_epoch,
         .target = input.target,
         .text = input.text,
+        .attachments = input.attachments,
+        .parts = try sends.init(a, input),
     };
     try self.execute("INSERT INTO send_requests(id,epoch,payload,record,state,mode,route,accepted_ms) VALUES(?,?,?,?,'queued',?,?,?)", &.{
         .{ .text = input.request_id },
@@ -364,6 +396,13 @@ pub fn accept(self: Journal, a: u.Allocator, input: t.SendInput, ready: bool) Ac
         .{ .text = r.destination },
         .{ .int = u.now() },
     });
+    if (input.attachments.len != 0) {
+        try uploads.pin(self, a, owner.?, input.server_epoch, input.attachments, input.request_id);
+        try self.execute("INSERT INTO send_owners VALUES(?,?)", &.{
+            .{ .text = input.request_id },
+            .{ .text = owner.? },
+        });
+    }
     const record_json = try self.updateRequest(a, v);
     try self.commit();
     return .{ .record = record_json, .fresh = true };
@@ -378,6 +417,12 @@ pub fn updateRequest(self: Journal, a: u.Allocator, value: t.SendRequest) ReadEr
         .{ .text = record_json },
         if (v.message_id) |m| .{ .text = m } else .null_value,
         .{ .text = v.request_id },
+    });
+    for (v.parts, 0..) |part, ordinal| try self.execute("INSERT INTO send_parts(request_id,position,state,message_id) VALUES(?,?,?,?) ON CONFLICT(request_id,position) DO UPDATE SET state=excluded.state,message_id=excluded.message_id", &.{
+        .{ .text = v.request_id },
+        .{ .int = @intCast(ordinal) },
+        .{ .text = @tagName(part.state) },
+        if (part.message_id) |id| .{ .text = id } else .null_value,
     });
     try self.event(seq, "send_request.updated", record_json, "reconciliation");
     return record_json;
@@ -394,6 +439,7 @@ pub fn recover(self: Journal, a: u.Allocator) RecordError!void {
     );
     for (items.items) |item| {
         var v = item;
+        if (v.parts.len != 0) sends.interrupt(&v, false);
         v.state = .unknown;
         v.error_info = .{
             .code = "interrupted_dispatch",
@@ -421,6 +467,7 @@ pub fn reset(self: Journal, a: u.Allocator) ResetError!void {
     try self.db.exec("DELETE FROM events; DELETE FROM reaction_work; DELETE FROM reaction_sources; DELETE FROM ordinary_anchors; DELETE FROM asset_work; DELETE FROM asset_owners; DELETE FROM asset_representations; DELETE FROM asset_blobs; DELETE FROM asset_sources; DELETE FROM contact_mappings; DELETE FROM identity_work; DELETE FROM identities; DELETE FROM enrichment_items; DELETE FROM enrichment_sections; DELETE FROM participants; DELETE FROM messages; DELETE FROM conversations; DELETE FROM ingestion_progress; DELETE FROM pending_source; DELETE FROM reconcile_chats;");
     for (items.items) |item| {
         var v = item;
+        if (v.parts.len != 0) sends.interrupt(&v, true);
         v.state = .unknown;
         v.message_id = null;
         v.candidate_message_id = null;
@@ -1092,6 +1139,174 @@ test "failed journal acceptance never leaves a queued send" {
     try std.testing.expectError(error.DatabaseFailure, j.accept(a, input, true));
     try std.testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM send_requests"));
     try std.testing.expectEqual(@as(i64, 0), try j.sequence());
+}
+
+test "attachment acceptance pins every file and records every part atomically" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const j = try Journal.open(":memory:");
+    defer j.close();
+    var files = [_]@import("../protocol.zig").attachments.Upload{
+        .{
+            .id = try u.id(a),
+            .name = "one.png",
+            .mime_type = "image/png",
+            .bytes = "4",
+            .sha256 = "0123456789abcdef" ** 4,
+        },
+        .{
+            .id = try u.id(a),
+            .name = "two.pdf",
+            .mime_type = "application/pdf",
+            .bytes = "4",
+            .sha256 = "0123456789abcdef" ** 4,
+        },
+    };
+    var input: t.SendInput = .{
+        .request_id = try u.id(a),
+        .server_epoch = try j.epoch(a),
+        .target = .{ .recipient = .{ .address = "fixture@example.invalid", .service = "imessage" } },
+        .text = "Caption",
+        .attachments = &files,
+    };
+    for (files) |file| _ = try uploads.reserve(j, a, "device", input.server_epoch, file, 0);
+    try uploads.complete(j, a, (try uploads.claim(j, a, "device", input.server_epoch, files[0].id)).write);
+    try testing.expectError(error.UploadNotReady, j.acceptAttachments(a, input, true, "device"));
+    try testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM send_requests"));
+    try testing.expectEqual(uploads.Phase.ready, (try uploads.lookup(j, a, "device", input.server_epoch, files[0].id)).phase);
+    try uploads.complete(j, a, (try uploads.claim(j, a, "device", input.server_epoch, files[1].id)).write);
+    try testing.expectError(error.UnsupportedAttachments, j.accept(a, input, true));
+    try testing.expectError(error.UploadNotFound, j.acceptAttachments(a, input, true, "other-device"));
+    try j.db.exec("CREATE TRIGGER fail_part BEFORE INSERT ON send_parts WHEN NEW.position=2 BEGIN SELECT RAISE(ABORT,'fixture'); END");
+    try testing.expectError(error.DatabaseFailure, j.acceptAttachments(a, input, true, "device"));
+    try testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM send_requests"));
+    try testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM send_owners"));
+    try testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM send_parts"));
+    try testing.expectEqual(@as(i64, 2), try j.db.scalar("SELECT count(*) FROM uploads WHERE state='ready'"));
+    try testing.expectEqual(@as(i64, 0), try j.sequence());
+    try j.db.exec("DROP TRIGGER fail_part");
+    const accepted = try j.acceptAttachments(a, input, true, "device");
+    const v = try std.json.parseFromSliceLeaky(t.SendRequest, a, accepted.record, .{});
+    try testing.expect(accepted.fresh);
+    try testing.expectEqual(@as(usize, 3), v.parts.len);
+    try testing.expectEqual(.text, v.parts[0].kind);
+    try testing.expectEqualStrings(files[0].id, v.parts[1].attachment_id.?);
+    try testing.expectEqualStrings(files[1].id, v.parts[2].attachment_id.?);
+    try testing.expectEqual(@as(i64, 2), try j.db.scalar("SELECT count(*) FROM uploads WHERE state='pinned'"));
+    const retry = try j.acceptAttachments(a, input, false, "device");
+    try testing.expect(!retry.fresh);
+    try testing.expectEqualStrings(accepted.record, retry.record);
+    try testing.expectError(error.UploadNotFound, j.acceptAttachments(a, input, true, "other-device"));
+    files[0].name = "changed.png";
+    try testing.expectError(error.RequestConflict, j.acceptAttachments(a, input, true, "device"));
+    files[0].name = "one.png";
+    const original_id = input.request_id;
+    input.request_id = try u.id(a);
+    try testing.expectError(error.UploadInUse, j.acceptAttachments(a, input, true, "device"));
+    try testing.expectEqual(@as(i64, 1), try j.db.scalar("SELECT count(*) FROM send_requests"));
+    try j.begin();
+    try j.reset(a);
+    try j.commit();
+    const held = try std.json.parseFromSliceLeaky(t.SendRequest, a, (try j.getRecord(a, .request, original_id)).?, .{});
+    try testing.expectEqual(.unknown, held.state);
+    try testing.expectEqualStrings("source_reset", held.error_info.?.code);
+    try testing.expectEqual(@as(?usize, null), sends.next(held));
+    for (held.parts) |part| {
+        try testing.expectEqual(.skipped, part.state);
+        try testing.expectEqual(.unstarted, part.error_info.?.outcome);
+    }
+    try testing.expectEqual(@as(i64, 2), try j.db.scalar("SELECT count(*) FROM uploads WHERE state='pinned'"));
+}
+
+test "restart preserves completed parts and holds interrupted and unstarted parts" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const path = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}/relay.db", .{tmp.sub_path}, 0);
+    const files = [_]@import("../protocol.zig").attachments.Upload{
+        .{
+            .id = try u.id(a),
+            .name = "one.png",
+            .mime_type = "image/png",
+            .bytes = "4",
+            .sha256 = "0123456789abcdef" ** 4,
+        },
+        .{
+            .id = try u.id(a),
+            .name = "two.pdf",
+            .mime_type = "application/pdf",
+            .bytes = "4",
+            .sha256 = "0123456789abcdef" ** 4,
+        },
+    };
+    var input: t.SendInput = .{
+        .request_id = try u.id(a),
+        .server_epoch = undefined,
+        .target = .{ .recipient = .{ .address = "fixture@example.invalid", .service = "imessage" } },
+        .text = "Caption",
+        .attachments = &files,
+    };
+    {
+        const j = try Journal.open(path);
+        defer j.close();
+        input.server_epoch = try j.epoch(a);
+        for (files) |file| {
+            _ = try uploads.reserve(j, a, "device", input.server_epoch, file, 0);
+            try uploads.complete(j, a, (try uploads.claim(j, a, "device", input.server_epoch, file.id)).write);
+        }
+        const accepted = try j.acceptAttachments(a, input, true, "device");
+        var v = try std.json.parseFromSliceLeaky(t.SendRequest, a, accepted.record, .{});
+        try j.begin();
+        sends.start(&v, 0);
+        _ = try j.updateRequest(a, v);
+        try j.execute("UPDATE send_parts SET dispatch_ms=123,source_floor=42,mode='direct',route='fixture@example.invalid' WHERE position=0", &.{});
+        try j.commit();
+        try j.begin();
+        sends.finish(&v, 0, .invoked);
+        _ = try j.updateRequest(a, v);
+        try j.commit();
+    }
+    {
+        const j = try Journal.open(path);
+        defer j.close();
+        try j.recover(a);
+        const retry = try j.acceptAttachments(a, input, false, "device");
+        var v = try std.json.parseFromSliceLeaky(t.SendRequest, a, retry.record, .{});
+        try testing.expectEqual(.queued, v.state);
+        try testing.expectEqual(.invoked, v.parts[0].state);
+        try testing.expectEqual(@as(?usize, 1), sends.next(v));
+        try testing.expectEqual(@as(i64, 42), try j.db.scalar("SELECT source_floor FROM send_parts WHERE position=0"));
+        try j.begin();
+        sends.start(&v, 1);
+        _ = try j.updateRequest(a, v);
+        try j.commit();
+    }
+    const j = try Journal.open(path);
+    defer j.close();
+    try j.recover(a);
+    const retry = try j.acceptAttachments(a, input, false, "device");
+    const v = try std.json.parseFromSliceLeaky(t.SendRequest, a, retry.record, .{});
+    try testing.expect(!retry.fresh);
+    try testing.expectEqual(.unknown, v.state);
+    try testing.expectEqual(.invoked, v.parts[0].state);
+    try testing.expectEqual(.unknown, v.parts[1].state);
+    try testing.expectEqual(.skipped, v.parts[2].state);
+    try testing.expectEqualStrings("interrupted_dispatch", v.parts[1].error_info.?.code);
+    try testing.expectEqual(.uncertain, v.parts[1].error_info.?.outcome);
+    try testing.expectEqual(.unstarted, v.parts[2].error_info.?.outcome);
+    try testing.expectEqual(@as(?usize, null), sends.next(v));
+    try testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM send_parts WHERE state IN ('queued','dispatching')"));
+    try testing.expectEqual(@as(i64, 2), try j.db.scalar("SELECT count(*) FROM uploads WHERE state='pinned'"));
+    try j.begin();
+    try j.reset(a);
+    try j.commit();
+    try testing.expectError(error.ResyncRequired, j.acceptAttachments(a, input, true, "device"));
+    try testing.expectEqual(@as(i64, 2), try j.db.scalar("SELECT count(*) FROM uploads WHERE state='pinned'"));
 }
 
 test "directory tombstones preserve identity and legacy streams skip extension events" {

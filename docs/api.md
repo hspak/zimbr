@@ -46,6 +46,16 @@ separate capability, `send_attachments_v1`, which remains false until attachment
 dispatch is implemented. The current send endpoint rejects nonempty attachment
 arrays; it never sends just their caption.
 
+The attachment-send journal is implemented behind that capability gate. Its
+`parts` array contains an optional text operation followed by each file in input
+order. Each part has `kind`, `attachment_id` for files, `state`, optional
+`message_id`/`candidate_message_id`, and `error_info`. Part states are `queued`,
+`dispatching`, `invoked`, `submitted`, `delivered`, `failed`, `unknown`, and
+`skipped`. `invoked` records automation returning successfully and does not
+confirm submission or delivery. An uncertain or failed operation skips its
+unstarted successors; exact request retries retain all outcomes. Text-only
+requests keep their existing single-message tracking and have an empty array.
+
 Reserve with `POST /v1/uploads`, `Content-Type: application/json`, and:
 
 ```json
