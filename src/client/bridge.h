@@ -65,6 +65,8 @@ typedef struct { size_t bytes, entries; } ZcCacheUsage;
 int zc_cache_prune(int dir, size_t budget, size_t max_entries, int startup, ZcCacheUsage *usage);
 void zc_cache_clear_avatars(int dir);
 int zc_image_read(int dir, const char *name, ZcPixels *pixels);
+/* Borrow a private original descriptor without changing its offset or timestamps. */
+int zc_image_read_fd(int fd, ZcPixels *pixels);
 void zc_pixels_free(ZcPixels *pixels);
 typedef struct ZcText ZcText;
 ZcText *zc_text_new(const char *text, int length, double size, int width, double scale);

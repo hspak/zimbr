@@ -3,6 +3,7 @@ const std = @import("std");
 const rl = @import("raylib");
 const Media = @import("Media.zig");
 const t = @import("../protocol.zig").types;
+const attachments = @import("../protocol.zig").attachments;
 const u = @import("../common.zig");
 const ImageCache = @This();
 const a = std.heap.c_allocator;
@@ -159,6 +160,22 @@ pub fn retry(entry: *Entry) void {
     entry.requested = false;
     entry.retry_at = 0;
 }
+
+/// Borrow a local preview entry until the next cache mutation. Returns null when
+/// capacity or allocation prevents caching; decoding failure remains an entry.
+pub fn getLocal(s: *ImageCache, media: *Media, file: attachments.Upload) ?*Entry {
+    const cache_key = media.localKey(file);
+    if (s.entries.count() >= 1024 and !s.entries.contains(cache_key)) return null;
+    const value = s.entries.getOrPut(a, cache_key) catch return null;
+    if (!value.found_existing) value.value_ptr.* = .{};
+    const entry = value.value_ptr;
+    entry.used = s.frame;
+    if (entry.texture == null and entry.state == .pending) {
+        media.requestLocal(file) catch return entry;
+        entry.requested = true;
+    }
+    return entry;
+}
 pub fn draw(texture: rl.Texture2D, bounds: rl.Rectangle) void {
     const scale = @min(
         bounds.width / @as(f32, @floatFromInt(texture.width)),
@@ -234,4 +251,58 @@ fn avatarVertex(
         0.5 + direction.y * uv.y * distance / radius,
     );
     rl.gl.rlVertex2f(center.x + direction.x * distance, center.y + direction.y * distance);
+}
+
+test "local previews queue offline and transfer decoded pixels into bounded textures" {
+    rl.setTraceLogLevel(.none);
+    rl.setConfigFlags(.{ .window_highdpi = true, .msaa_4x_hint = true });
+    rl.initWindow(780, 560, "Local attachment preview");
+    defer rl.closeWindow();
+    var media = Media{ .io = std.testing.io, .config = .{ .data = "" } };
+    defer media.shutdown();
+    _ = try media.context("", "draft", 0, false, true);
+    var images = ImageCache{};
+    defer images.deinit();
+    const file: attachments.Upload = .{
+        .id = "ABEiM0RVZneImaq7zN3u_w",
+        .name = "photo.png",
+        .mime_type = "image/png",
+        .bytes = "71",
+        .sha256 = "0" ** 64,
+    };
+    const queued = images.getLocal(&media, file) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(queued.texture == null and queued.requested);
+    _ = images.getLocal(&media, file);
+    try std.testing.expectEqual(@as(usize, 1), media.queue.items.len);
+    var pixel = [_]u8{
+        12,
+        34,
+        56,
+        255,
+    };
+    const result: Media.Result = .{
+        .key = media.localKey(file),
+        .generation = media.generation,
+        .state = .ready,
+        .pixels = .{
+            .data = &pixel,
+            .width = 1,
+            .height = 1,
+            .bytes = pixel.len,
+        },
+    };
+    images.accept(&result);
+    const ready = images.getLocal(&media, file) orelse return error.TestUnexpectedResult;
+    const texture = ready.availableTexture() orelse return error.TestUnexpectedResult;
+    const image = try rl.loadImageFromTexture(texture);
+    defer rl.unloadImage(image);
+    try std.testing.expectEqual(rl.Color{
+        .r = 12,
+        .g = 34,
+        .b = 56,
+        .a = 255,
+    }, rl.getImageColor(image, 0, 0));
+    try std.testing.expectEqual(@as(usize, 4), images.bytes);
+    images.contextChanged(false);
+    try std.testing.expect(images.getLocal(&media, file).?.availableTexture() != null);
 }

@@ -197,6 +197,19 @@ unchanged baseline on that software renderer; its coverage was left intact.
 This validates the native input boundary, not yet a compositor-driven drag
 through the completed composer.
 
+Local originals can now use the existing background image worker and bounded
+texture cache, including with no relay epoch or connection. PNG/JPEG decoding
+keeps its 8 MiB encoded, 2,560-pixel dimension and 32 MiB decoded limits. Preview
+failure leaves the attachment available for sending. The decoder borrows the
+original descriptor without changing its offset or modification timestamps;
+preview pixels do not replace uploaded bytes.
+
+The preview chunk passed 141 client tests, both client builds, an offline
+production-worker case covering deleted sources, PNG/JPEG, unsupported files,
+oversized dimensions and symlink rejection, and the existing authenticated
+media transport suite. The GUI texture handoff check passed; 106 of 107 GUI
+checks passed with the same baseline software-renderer antialiasing failure.
+
 Browser image offers and clipboard image bytes require additional input support;
 the first input path handles local file-manager drops. Upload and dispatch are
 generic across regular files and do not depend on preview support.

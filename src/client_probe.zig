@@ -6,6 +6,7 @@ const Worker = @import("client.zig").Worker;
 const u = @import("common.zig");
 const Media = @import("client.zig").Media;
 const types = @import("protocol.zig").types;
+const attachments = @import("protocol.zig").attachments;
 pub fn main(init: std.process.Init) !void {
     var config = try Config.parse(init);
     const cache_lock = try config.lockCache();
@@ -87,6 +88,14 @@ fn control(init: std.process.Init, worker: *Worker) !void {
                     avatars: bool = true,
                 }, a, line, .{ .ignore_unknown_fields = true });
                 _ = try media.context(ctx.epoch, ctx.chat, ctx.credentials, ctx.online, ctx.avatars);
+            } else if (u.eq(kind.kind, "local_media")) {
+                const request = try std.json.parseFromSliceLeaky(
+                    struct { file: attachments.Upload },
+                    a,
+                    line,
+                    .{ .ignore_unknown_fields = true },
+                );
+                try media.requestLocal(request.file);
             } else if (u.eq(kind.kind, "media")) {
                 const request = try std.json.parseFromSliceLeaky(
                     struct { asset: types.AssetRef },

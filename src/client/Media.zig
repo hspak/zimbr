@@ -4,6 +4,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const u = @import("../common.zig");
 const t = @import("../protocol.zig").types;
+const attachments = @import("../protocol.zig").attachments;
 const c = @import("c.zig").api;
 const Config = @import("Config.zig");
 pub const DiskCache = @import("Media/DiskCache.zig");
@@ -68,6 +69,7 @@ const Request = struct {
     key: [64:0]u8,
     generation: u64,
     wanted_at: i64,
+    local: bool = false,
     fd: c_int = -1,
     temporary: [64:0]u8 = @splat(0),
     fn destroy(r: *Request, dir: c_int) void {
@@ -196,6 +198,46 @@ pub fn key(s: *Media, asset: t.AssetRef) [64:0]u8 {
     return output;
 }
 pub const RequestError = u.Allocator.Error || error{InvalidAssetReference};
+pub const LocalRequestError = u.Allocator.Error || attachments.ValidateError;
+
+/// Local preview identity includes the private storage root and immutable bytes.
+pub fn localKey(s: *Media, file: attachments.Upload) [64:0]u8 {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    for ([_][]const u8{
+        s.config.data,
+        file.id,
+        file.sha256,
+    }) |part| {
+        hash.update(part);
+        hash.update(&.{0});
+    }
+    var digest: [32]u8 = undefined;
+    hash.final(&digest);
+    var output: [64:0]u8 = undefined;
+    @memcpy(output[0..64], &std.fmt.bytesToHex(digest, .lower));
+    output[0] = 'd';
+    output[64] = 0;
+    return output;
+}
+
+/// Queue a bounded preview of a staged original, including while offline.
+/// The caller retains all metadata strings; decoding runs on the media worker.
+pub fn requestLocal(s: *Media, file: attachments.Upload) LocalRequestError!void {
+    const bytes = try attachments.validate(file);
+    s.mutex.lockUncancelable(s.io);
+    defer s.mutex.unlock(s.io);
+    try s.enqueue(.{
+        .id = file.id[0..t.id_length].*,
+        .version = @splat(0),
+        .variant = .inline_image,
+        .retired = false,
+        .expected_bytes = @intCast(bytes),
+        .key = s.localKey(file),
+        .generation = s.generation,
+        .wanted_at = u.now(),
+        .local = true,
+    });
+}
 
 /// Copy the download fields into the bounded queue. Asset IDs and versions must
 /// be canonical Base64url UUIDs; the caller retains ownership of all asset strings.
@@ -204,7 +246,21 @@ pub fn request(s: *Media, asset: t.AssetRef) RequestError!void {
     defer s.mutex.unlock(s.io);
     if (s.epoch.len == 0 or (!s.avatars and asset.variant == .avatar)) return;
     if (!t.validId(asset.id) or !t.validId(asset.version)) return error.InvalidAssetReference;
-    const cache_key = s.key(asset);
+    try s.enqueue(.{
+        .id = asset.id[0..t.id_length].*,
+        .version = asset.version[0..t.id_length].*,
+        .variant = asset.variant,
+        .retired = asset.availability == .retired,
+        .expected_bytes = if (asset.bytes) |bytes| std.fmt.parseInt(usize, bytes, 10) catch 0 else 0,
+        .key = s.key(asset),
+        .generation = s.generation,
+        .wanted_at = u.now(),
+    });
+}
+
+// The caller holds the queue mutex; requests copy only fixed-size metadata.
+fn enqueue(s: *Media, request_value: Request) u.Allocator.Error!void {
+    const cache_key = request_value.key;
     for (s.active) |active| if (active) |r| if (r.generation == s.generation and u.eq(
         &r.key,
         &cache_key,
@@ -220,16 +276,7 @@ pub fn request(s: *Media, asset: t.AssetRef) RequestError!void {
     if (s.queue.items.len >= 128) return;
     const r = try a.create(Request);
     errdefer a.destroy(r);
-    r.* = .{
-        .id = asset.id[0..t.id_length].*,
-        .version = asset.version[0..t.id_length].*,
-        .variant = asset.variant,
-        .retired = asset.availability == .retired,
-        .expected_bytes = if (asset.bytes) |bytes| std.fmt.parseInt(usize, bytes, 10) catch 0 else 0,
-        .key = cache_key,
-        .generation = s.generation,
-        .wanted_at = u.now(),
-    };
+    r.* = request_value;
     try s.queue.append(a, r);
     s.wake();
 }
@@ -427,6 +474,11 @@ fn work(s: *Media) !void {
                 s.mutex.unlock(s.io);
                 const r = queued orelse continue;
                 const result = try resultFor(r, "Image unavailable · retry");
+                if (r.local) {
+                    s.localPreview(r, result);
+                    s.deliver(r, result, lane);
+                    break;
+                }
                 if (r.retired) {
                     result.state = .retired;
                     setReason(result, "Photo changed · refreshing message");
@@ -494,6 +546,22 @@ fn work(s: *Media) !void {
         _ = c.zc_net_wait(net, s.wake_pipe[0], 50);
     }
 }
+fn localPreview(s: *Media, request_value: *Request, result: *Result) void {
+    setReason(result, "No local preview");
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buffer, "{s}/outgoing", .{s.config.data}) catch return;
+    const directory = u.c.open(path, u.c.O_RDONLY | u.c.O_DIRECTORY | u.c.O_NOFOLLOW | u.c.O_CLOEXEC);
+    if (directory < 0) return;
+    defer _ = u.c.close(directory);
+    var id: [t.id_length:0]u8 = undefined;
+    @memcpy(id[0..t.id_length], &request_value.id);
+    id[t.id_length] = 0;
+    const fd = c.zc_outgoing_open(directory, &id, request_value.expected_bytes);
+    if (fd < 0) return;
+    defer _ = u.c.close(fd);
+    if (c.zc_image_read_fd(fd, &result.pixels) == 1) result.state = .ready;
+}
+
 fn setReason(result: *Result, reason: []const u8) void {
     @memset(&result.reason, 0);
     const length = @min(reason.len, result.reason.len);
@@ -589,6 +657,15 @@ test "media cache validates files and pixels, installs atomically, and evicts pr
     try std.testing.expectEqual(@as(usize, 4), pixels.bytes);
     try std.testing.expectEqual(@as(u8, 0), pixels.data[3]);
     c.zc_pixels_free(&pixels);
+    // Original previews borrow descriptors, including ones positioned at EOF.
+    var before: c.ZcOutgoingFingerprint = undefined;
+    try std.testing.expectEqual(@as(c_int, 1), c.zc_outgoing_fingerprint(fd, &before));
+    try std.testing.expectEqual(@as(c_int, 1), c.zc_image_read_fd(fd, &pixels));
+    c.zc_pixels_free(&pixels);
+    try std.testing.expectEqual(@as(i64, png.len), u.c.lseek(fd, 0, u.c.SEEK_CUR));
+    var after: c.ZcOutgoingFingerprint = undefined;
+    try std.testing.expectEqual(@as(c_int, 1), c.zc_outgoing_fingerprint(fd, &after));
+    try std.testing.expectEqualDeep(before, after);
     const key_value = "b" ** 64;
     try std.testing.expectEqual(@as(c_int, 1), c.zc_cache_install(dir, &temporary, key_value, fd));
     try std.testing.expectEqual(@as(c_int, 0), c.zc_image_read(dir, &temporary, &pixels));

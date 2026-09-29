@@ -183,26 +183,33 @@ int zc_image_read(int dir, const char *name, ZcPixels *output) {
     if (!cache_name(name)) return -1;
     int fd=openat(dir,name,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);
     if (fd<0) return errno==ENOENT ? 0 : -1;
+    int result=zc_image_read_fd(fd,output);
+    if (result==1) futimens(fd,NULL);
+    close(fd);
+    return result;
+}
+int zc_image_read_fd(int fd, ZcPixels *output) {
+    memset(output,0,sizeof(*output));
     struct stat st; int result=-1;
     unsigned char *bytes=NULL;
     if (fstat(fd,&st) || !S_ISREG(st.st_mode) || st.st_uid!=getuid() || (st.st_mode&0777)!=0600 || st.st_nlink!=1 || st.st_size<8 || st.st_size>ENCODED_LIMIT) goto end;
     bytes=malloc((size_t)st.st_size); if (!bytes) goto end;
     size_t used=0;
     while (used<(size_t)st.st_size) {
-        ssize_t n=read(fd,bytes+used,(size_t)st.st_size-used);
+        ssize_t n=pread(fd,bytes+used,(size_t)st.st_size-used,(off_t)used);
         if (n<0 && errno==EINTR) continue;
         if (n<=0) goto end;
         used+=(size_t)n;
     }
     unsigned char extra;
-    if (read(fd,&extra,1)!=0) goto end;
+    if (pread(fd,&extra,1,(off_t)used)!=0) goto end;
     int decoded=0;
     if (!memcmp(bytes,"\x89PNG\r\n\x1a\n",8)) decoded=decode_png(bytes,used,output);
     else if (bytes[0]==0xff && bytes[1]==0xd8 && bytes[2]==0xff) decoded=decode_jpeg(bytes,used,output);
     if (!decoded) goto end;
-    futimens(fd,NULL); result=1;
+    result=1;
 end:
-    free(bytes); close(fd);
+    free(bytes);
     if (result!=1) zc_pixels_free(output);
     return result;
 }

@@ -15,6 +15,7 @@ import unittest
 
 import attachment_sends
 from client_integration import wait
+from client_media_transport import png, JPEG
 from performance import Probe
 from fixture import add_message
 from tls_fixture import TLSServer
@@ -167,6 +168,37 @@ class ClientAttachments(unittest.TestCase):
         self.launch()
         time.sleep(.5)
         self.assertEqual(self.source_rows(), rows)
+
+    def test_local_previews_use_private_originals_offline_and_bound_decoding(self):
+        source, photo = self.stage('photo.png', png())
+        _, jpeg = self.stage('photo.jpg', JPEG)
+        _, document = self.stage('document.pdf', b'%PDF test')
+        _, large = self.stage('oversized.png', png(50000, 50000))
+        source.unlink()
+        self.stop()
+        self.probe.until(lambda v: not v.get('online'))
+        self.probe.command(kind='media_context', epoch='', chat='draft', online=False)
+
+        def preview(file):
+            self.probe.command(kind='local_media', file=file)
+            self.probe.until(lambda v: 'media' in v, timeout=5)
+            return self.probe.latest['media']
+
+        first = preview(photo)
+        self.assertEqual((first['state'], first['width'], first['height']), ('ready', 2, 3))
+        second = preview(jpeg)
+        self.assertEqual((second['state'], second['width'], second['height']), ('ready', 4, 3))
+        self.assertNotEqual(first['key'], second['key'])
+        for file in (document, large):
+            result = preview(file)
+            self.assertEqual((result['state'], result['bytes']), ('failed', 0))
+        original = self.client / 'outgoing' / photo['id']
+        original.unlink()
+        original.symlink_to(self.client / 'outgoing' / jpeg['id'])
+        self.assertEqual(preview(photo)['state'], 'failed')
+        self.assertEqual(preview(jpeg)['state'], 'ready')
+        self.assertEqual(self.rows('SELECT count(*) FROM outgoing_files WHERE draft_key IS NOT NULL'), [(4,)])
+        self.assertEqual(self.rows('SELECT count(*) FROM outbox'), [(0,)])
 
     def test_corrupt_second_original_cannot_dispatch_its_caption_or_first_file(self):
         _, first = self.stage('first.bin', b'good')
