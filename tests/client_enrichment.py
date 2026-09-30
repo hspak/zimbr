@@ -123,6 +123,25 @@ def main():
             avatar_key=avatar['key']
             assert (client/'media'/avatar_key).exists()
             epoch=rows("SELECT value FROM meta WHERE key='epoch'")[0][0]
+            wait(lambda: directory()['avatar']['availability'] == 'ready')
+            before_directory = rows('SELECT id,record FROM identities ORDER BY id')
+            before_messages = rows("SELECT id,record FROM records WHERE kind='message' ORDER BY id")
+            cursor = rows("SELECT value FROM meta WHERE key='cursor'")
+            bootstraps = Path(log.name).read_text().count('Sync bootstrap started')
+            server.terminate(); server.wait(timeout=5)
+            wait(lambda: not pump().get('online'))
+            server = subprocess.Popen([str(BIN/'fake-relay'), 'serve', *args], stdout=log, stderr=log)
+            wait(lambda: pump().get('online'))
+            wait(lambda: not any(pump()['sync_activity'].values()))
+            assert rows('SELECT id,record FROM identities ORDER BY id') == before_directory
+            assert rows("SELECT id,record FROM records WHERE kind='message' ORDER BY id") == before_messages
+            assert rows("SELECT value FROM meta WHERE key='cursor'") == cursor
+            assert rows('SELECT text FROM drafts WHERE key=?', (cid,)) == [('Draft survives enrichment',)]
+            cached_avatar = fetch(directory()['avatar'], online=False)
+            cached_image = fetch(asset, online=False)
+            assert cached_avatar['state'] == 'ready' and cached_avatar['key'] == avatar_key
+            assert cached_image['state'] == 'ready' and cached_image['key'] == key
+            assert Path(log.name).read_text().count('Sync bootstrap started') == bootstraps
             command(kind='media_context', epoch=epoch, chat='visible', avatars=False)
             wait(lambda:not (client/'media'/avatar_key).exists())
             # Completion is revision-bound; a conversion may update the owner

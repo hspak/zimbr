@@ -123,6 +123,30 @@ def main():
             assert avatar(old_avatar)[1].startswith(b'\x89PNG\r\n\x1a\n')
             assert old_avatar == identity('+14155550123')['avatar']
             assert old_avatar['width'] <= 128 and old_avatar['height'] <= 128
+            # A scan or restart must validate photos without changing cached
+            # identities, messages, or immutable asset URLs when nothing changed.
+            def settled_contacts():
+                status = request('/v1/status')[1]
+                if not status['enrichment_readiness']['identity_directory_v1']['ready']:
+                    return False
+                with sqlite3.connect(data / 'relay.db') as db:
+                    return db.execute('SELECT count(*) FROM asset_work').fetchone()[0] == 0
+
+            before_directory = directory_page()
+            before_sync = sync()
+            refreshed = status['enrichment_readiness']['identity_directory_v1']['last_refresh_ms']
+            contacts([alice, unobserved])
+            wait_for(lambda: request('/v1/status')[1]['enrichment_readiness']['identity_directory_v1']['last_refresh_ms'] > refreshed)
+            wait_for(settled_contacts)
+            assert directory_page() == before_directory, 'Unchanged Contacts scan invalidated cached identities/photos'
+            assert sync() == before_sync, 'Unchanged scan published redundant events'
+            process.terminate(); process.wait(timeout=5)
+            process = start()
+            wait_for(lambda: request('/v1/status')[1].get('adapter_ready'))
+            wait_for(settled_contacts)
+            assert directory_page() == before_directory, 'Relay restart invalidated cached identities/photos'
+            assert sync() == before_sync, 'Relay restart published redundant events'
+            assert avatar(old_avatar)[0] == 200
             # A photo-only edit invalidates requested thumbnails even though
             # name and imageDataAvailable are unchanged. No second GET needed.
             alice['thumbnail'] = 'ZIMBR-IMAGE changed contact thumbnail'

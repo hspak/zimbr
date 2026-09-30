@@ -81,8 +81,14 @@ pub fn syncActivity(self: *Core) Journal.QueryError!t.SyncActivity {
     const directory = contacts.currentStatus(self.contacts_status);
     const contact_ready = directory.permission == .authorized and !directory.stale and
         !u.eq(directory.reason, "contacts_persistence_failure");
+    // Revalidating cached avatars produces no client refresh unless their source changes.
     const images = try j.db.prepare(
-        "SELECT EXISTS(SELECT 1 FROM asset_work w JOIN asset_sources s ON s.id=w.asset_id AND s.version=w.version WHERE w.attempt_ms<=? AND (s.kind!='contact' OR ?) AND EXISTS(SELECT 1 FROM asset_owners WHERE asset_id=s.id))",
+        "SELECT EXISTS(SELECT 1 FROM asset_work w JOIN asset_sources s " ++
+            "ON s.id=w.asset_id AND s.version=w.version WHERE w.attempt_ms<=? " ++
+            "AND (s.kind!='contact' OR (? AND EXISTS(SELECT 1 FROM asset_representations r " ++
+            "WHERE r.asset_id=w.asset_id AND r.version=w.version AND r.variant=w.variant " ++
+            "AND json_extract(r.record,'$.availability')!='ready'))) " ++
+            "AND EXISTS(SELECT 1 FROM asset_owners WHERE asset_id=s.id))",
     );
     defer images.close();
     try images.bind(&.{ .{ .int = u.now() }, .{ .int = @intFromBool(contact_ready) } });
@@ -933,4 +939,32 @@ test "sync activity follows durable backfills and runnable asset work" {
     try j.db.exec("DELETE FROM asset_work");
     core.reset_required = true;
     try std.testing.expect(!(try core.syncActivity()).active());
+}
+
+test "validating a ready contact photo does not report an image refresh" {
+    if (comptime !fake) return error.SkipZigTest;
+    const j = try Journal.open(":memory:");
+    defer j.close();
+    var core = Core{
+        .io = std.testing.io,
+        .journal = j,
+        .source_path = "",
+        .contacts_status = .{ .permission = .authorized },
+        .assets_service = .{
+            .root_path = "",
+            .cache_fd = -1,
+            .helper_path = "",
+        },
+    };
+    try j.db.exec(
+        "INSERT INTO asset_sources(id,kind,source_key,path,version) VALUES('photo','contact','photo','','v1');" ++
+            "INSERT INTO asset_owners VALUES('photo','identity','identity');" ++
+            "INSERT INTO asset_representations(asset_id,version,variant,record) VALUES('photo','v1','avatar','{\"availability\":\"ready\"}');" ++
+            "INSERT INTO asset_work VALUES('photo','v1','avatar',0);",
+    );
+    try std.testing.expect(!(try core.syncActivity()).images);
+    try j.db.exec("UPDATE asset_representations SET record='{\"availability\":\"pending\"}'");
+    try std.testing.expect((try core.syncActivity()).images);
+    core.contacts_status.permission = .denied;
+    try std.testing.expect(!(try core.syncActivity()).images);
 }

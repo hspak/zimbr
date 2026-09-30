@@ -197,8 +197,18 @@ pub fn register(a: u.Allocator, j: Journal, kind: []const u8, key: []const u8, p
     if (try q.step()) {
         const source = try sourceRow(a, q);
         if (!u.eq(source.path, path)) {
-            _ = try rotate(a, j, source, path, "");
-            try publishOwners(a, j, source.id);
+            if (u.eq(kind, "contact")) {
+                // Contacts generations and scan tokens only guard in-flight reads.
+                // Validate requested thumbnails before invalidating their public version.
+                try j.execute("UPDATE asset_sources SET path=?,check_ms=0 WHERE id=?", &.{
+                    .{ .text = path },
+                    .{ .text = source.id },
+                });
+                try j.execute("UPDATE asset_work SET attempt_ms=0 WHERE asset_id=?", &.{.{ .text = source.id }});
+            } else {
+                _ = try rotate(a, j, source, path, "");
+                try publishOwners(a, j, source.id);
+            }
         }
         return source.id;
     }
@@ -644,6 +654,16 @@ fn nextJob(a: u.Allocator, core: *Core, contact: bool) !?Job {
     core.lock();
     defer core.unlock();
     const j = core.journal;
+    if (contact) {
+        try j.begin();
+        errdefer j.rollback();
+        // Leave checks that exceed queue capacity pending in asset_sources.
+        // Unrequested photos remain lazy; aliases share the same check.
+        try j.execute("INSERT OR IGNORE INTO asset_work SELECT s.id,s.version,'avatar',0 FROM asset_sources s JOIN asset_representations r ON r.asset_id=s.id AND r.version=s.version AND r.variant='avatar' WHERE s.kind='contact' AND s.check_ms=0 AND r.requested=1 AND NOT EXISTS(SELECT 1 FROM asset_work WHERE asset_id=s.id) AND EXISTS(SELECT 1 FROM asset_owners WHERE asset_id=s.id) LIMIT ?", &.{.{ .int = @max(0, max_queue - try j.db.scalar("SELECT count(*) FROM asset_work")) }});
+        // For contacts, -1 means this scan's validation has been queued durably.
+        try j.db.exec("UPDATE asset_sources SET check_ms=-1 WHERE kind='contact' AND check_ms=0 AND EXISTS(SELECT 1 FROM asset_work WHERE asset_id=asset_sources.id AND version=asset_sources.version)");
+        try j.commit();
+    }
     const q = try j.db.prepare("SELECT s.id,s.kind,s.path,s.version,s.fingerprint,s.attempts,w.variant,r.etag FROM asset_work w JOIN asset_sources s ON s.id=w.asset_id AND s.version=w.version JOIN asset_representations r ON r.asset_id=w.asset_id AND r.version=w.version AND r.variant=w.variant WHERE w.attempt_ms<=? AND (s.kind='contact')=? AND EXISTS(SELECT 1 FROM asset_owners WHERE asset_id=s.id) ORDER BY w.attempt_ms,w.rowid LIMIT 1");
     defer q.close();
     try q.bind(&.{ .{ .int = u.now() }, .{ .int = @intFromBool(contact) } });
@@ -657,6 +677,21 @@ fn nextJob(a: u.Allocator, core: *Core, contact: bool) !?Job {
 }
 fn failJob(a: u.Allocator, j: Journal, job: Job, code: c_int) !t.AssetRef {
     var ref = try reference(a, j, job.source.id, job.variant);
+    if (u.eq(job.source.kind, "contact") and ref.availability == .ready) {
+        if (code != -2 and code != -3 and code != -4 and code != -5) {
+            // A transient validation failure does not invalidate known photo bytes.
+            try j.execute("UPDATE asset_work SET attempt_ms=? WHERE asset_id=? AND version=? AND variant=?", &.{
+                .{ .int = u.now() + 30000 },
+                .{ .text = ref.id },
+                .{ .text = ref.version },
+                .{ .text = @tagName(ref.variant) },
+            });
+            return ref;
+        }
+        // Known source loss must also invalidate clients holding a ready texture.
+        _ = try rotate(a, j, job.source, job.source.path, "");
+        ref = try reference(a, j, job.source.id, job.variant);
+    }
     ref.availability = switch (code) {
         -2 => .not_local,
         -4 => .oversized,
@@ -693,6 +728,37 @@ fn failJob(a: u.Allocator, j: Journal, job: Job, code: c_int) !t.AssetRef {
     try publishOwners(a, j, ref.id);
     return ref;
 }
+
+fn checkPhoto(a: u.Allocator, core: *Core, job: Job, signature: []const u8) !bool {
+    core.lock();
+    defer core.unlock();
+    const j = core.journal;
+    try j.begin();
+    errdefer j.rollback();
+    if (!try current(a, j, job.epoch, job.source)) {
+        j.rollback();
+        return false;
+    }
+    if (job.source.fingerprint.len > 0 and !u.eq(signature, job.source.fingerprint)) {
+        _ = try rotate(a, j, job.source, job.source.path, signature);
+        try publishOwners(a, j, job.source.id);
+        try j.commit();
+        return false;
+    }
+    const ref = try reference(a, j, job.source.id, job.variant);
+    if (u.eq(signature, job.source.fingerprint) and ref.availability == .ready) {
+        try j.execute("DELETE FROM asset_work WHERE asset_id=? AND version=? AND variant=?", &.{
+            .{ .text = ref.id },
+            .{ .text = ref.version },
+            .{ .text = @tagName(ref.variant) },
+        });
+        try j.commit();
+        return false;
+    }
+    try j.commit();
+    return true;
+}
+
 fn convert(self: *Assets, core: *Core, a: u.Allocator, job: Job) !void {
     const started = u.c.zr_monotonic_ms();
     log.debug("Image preparation started: asset={s} kind={s} variant={s}", .{
@@ -742,6 +808,16 @@ fn convert(self: *Assets, core: *Core, a: u.Allocator, job: Job) !void {
     defer if (input >= 0) {
         _ = u.c.close(input);
     };
+    const photo_signature = if (photo) |p| signature: {
+        if (input < 0) break :signature null;
+        const length = u.c.lseek(input, 0, u.c.SEEK_END);
+        if (length <= 0 or length > max_derivative) return error.InvalidImage;
+        const signature = try std.fmt.allocPrint(a, "{s}:{s}", .{
+            transform_version, try digest(a, try readBytes(a, input, @intCast(length))),
+        });
+        if (!try contacts.photoCurrent(a, core, p) or !try checkPhoto(a, core, job, signature)) return;
+        break :signature signature;
+    } else null;
     const temporary = try std.fmt.allocPrintSentinel(a, ".tmp-{s}", .{try u.id(a)}, 0);
     const output = c.zr_media_temporary(self.cache_fd, temporary);
     if (output < 0) return error.AssetCacheUnavailable;
@@ -803,6 +879,10 @@ fn convert(self: *Assets, core: *Core, a: u.Allocator, job: Job) !void {
         _ = try rotate(a, j, job.source, job.source.path, job.source.fingerprint);
         try publishOwners(a, j, job.source.id);
     } else {
+        if (photo_signature) |signature| try j.execute(
+            "UPDATE asset_sources SET fingerprint=? WHERE id=?",
+            &.{ .{ .text = signature }, .{ .text = job.source.id } },
+        );
         const ref: t.AssetRef = .{
             .id = job.source.id,
             .version = job.source.version,
@@ -1048,4 +1128,101 @@ test "asset requests deduplicate and enforce the shared durable queue bound" {
     );
     try j.reset(a);
     try std.testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM asset_work"));
+}
+
+test "contact validation preserves ready photos on failure and rejects superseded scans" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const j = try Journal.open(":memory:");
+    defer j.close();
+    var core = Core{
+        .io = testing.io,
+        .journal = j,
+        .source_path = "",
+    };
+    var photo = contacts.PhotoSource{
+        .contact_id = "contact",
+        .generation = 1,
+        .token = "first",
+    };
+    var ref = (try avatar(a, j, "identity", photo)).?;
+    _ = try lookup(a, j, ref.id, ref.version, .avatar);
+    ref.availability = .ready;
+    ref.reason = null;
+    try j.execute("UPDATE asset_representations SET record=?", &.{.{ .text = try u.json(a, ref) }});
+    try j.db.exec("UPDATE asset_sources SET fingerprint='original'");
+    const first = (try nextJob(a, &core, true)).?;
+    try testing.expect(!try checkPhoto(a, &core, first, "original"));
+    try testing.expectEqual(@as(i64, 0), try j.db.scalar("SELECT count(*) FROM asset_work"));
+
+    photo.token = "second";
+    const unchanged = (try avatar(a, j, "identity", photo)).?;
+    try testing.expectEqualStrings(ref.version, unchanged.version);
+    const second = (try nextJob(a, &core, true)).?;
+    try testing.expect(!try checkPhoto(a, &core, first, "superseded"));
+    try testing.expectEqualStrings(ref.version, (try reference(a, j, ref.id, .avatar)).version);
+    const failed = try failJob(a, j, second, -1);
+    try testing.expectEqual(.ready, failed.availability);
+    try testing.expectEqualStrings(ref.version, failed.version);
+    try testing.expectEqual(@as(i64, 1), try j.db.scalar("SELECT count(*) FROM asset_work"));
+    try testing.expect(try nextJob(a, &core, true) == null);
+
+    // A fresh notification retries immediately, even during failure backoff.
+    photo.token = "third";
+    _ = try avatar(a, j, "identity", photo);
+    const third = (try nextJob(a, &core, true)).?;
+    try testing.expect(!try checkPhoto(a, &core, third, "edited"));
+    const edited = try reference(a, j, ref.id, .avatar);
+    try testing.expect(!u.eq(ref.version, edited.version));
+    try testing.expectEqual(.pending, edited.availability);
+    try testing.expectError(error.AssetRetired, lookup(a, j, ref.id, ref.version, .avatar));
+    const replacement = (try nextJob(a, &core, true)).?;
+    try testing.expectEqualStrings(edited.version, replacement.source.version);
+    var ready = edited;
+    ready.availability = .ready;
+    try j.execute("UPDATE asset_representations SET record=? WHERE version=?", &.{
+        .{ .text = try u.json(a, ready) }, .{ .text = ready.version },
+    });
+    const missing = try failJob(a, j, replacement, -2);
+    try testing.expectEqual(.not_local, missing.availability);
+    try testing.expect(!u.eq(ready.version, missing.version));
+    try testing.expectError(error.AssetRetired, lookup(a, j, ready.id, ready.version, .avatar));
+}
+
+test "contact validation resumes after queue pressure and leaves unrequested photos lazy" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const j = try Journal.open(":memory:");
+    defer j.close();
+    var core = Core{
+        .io = testing.io,
+        .journal = j,
+        .source_path = "",
+    };
+    for (0..max_queue + 1) |i| {
+        const id = try std.fmt.allocPrint(a, "contact-{d}", .{i});
+        _ = try avatar(a, j, id, .{
+            .contact_id = id,
+            .generation = 1,
+            .token = "scan",
+        });
+    }
+    try j.db.exec("UPDATE asset_representations SET requested=1");
+    const lazy = (try avatar(a, j, "lazy", .{
+        .contact_id = "lazy",
+        .generation = 1,
+        .token = "scan",
+    })).?;
+    try testing.expect(try nextJob(a, &core, true) != null);
+    try testing.expectEqual(@as(i64, max_queue), try j.db.scalar("SELECT count(*) FROM asset_work"));
+    try j.db.exec("DELETE FROM asset_work");
+    const remaining = (try nextJob(a, &core, true)).?;
+    try testing.expect(!u.eq(lazy.id, remaining.source.id));
+    try testing.expectEqual(@as(i64, 1), try j.db.scalar("SELECT count(*) FROM asset_work"));
+    try j.db.exec("DELETE FROM asset_work");
+    try testing.expect(try nextJob(a, &core, true) == null);
 }
