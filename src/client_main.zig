@@ -4,7 +4,6 @@ const log = std.log.scoped(.client);
 const a = std.heap.page_allocator;
 
 const graphics = @import("client/graphics.zig");
-const clay = @import("zclay");
 const client_options = @import("client_options");
 const zrct = if (client_options.automation) @import("zrct") else void;
 const u = @import("common.zig");
@@ -53,26 +52,7 @@ fn clientLog(
     std.log.defaultLog(level, scope, format, args);
 }
 
-// Track framebuffer changes as well as logical size, as Flamez does. Moving a
-// window between displays can change the former without changing the latter.
-const WindowMetrics = struct {
-    width: i32 = 0,
-    height: i32 = 0,
-    render_width: i32 = 0,
-    render_height: i32 = 0,
-    scale: f32 = 1,
-
-    fn current() WindowMetrics {
-        return .{
-            .width = desktop.width(),
-            .height = desktop.height(),
-            .render_width = desktop.pixelWidth(),
-            .render_height = desktop.pixelHeight(),
-            // Use the actual framebuffer-to-logical ratio, including fractional DPI.
-            .scale = @max(1, desktop.scale().x),
-        };
-    }
-};
+const WindowMetrics = desktop.Metrics;
 
 pub fn main(init: std.process.Init) void {
     run(init) catch |err| {
@@ -83,10 +63,6 @@ pub fn main(init: std.process.Init) void {
         }
         std.process.exit(1);
     };
-}
-fn clayError(data: clay.ErrorData) callconv(.c) void {
-    _ = data;
-    log.warn("UI layout limit reached", .{});
 }
 fn run(init: std.process.Init) !void {
     var config = try Config.parse(init);
@@ -105,21 +81,13 @@ fn run(init: std.process.Init) !void {
     if (comptime client_options.automation) {
         try zrct.init("zimbr", client_options.version);
         zrct.setDropHandler(bridge.zc_drop_paths);
-        zrct.setRenderer(.{ .flush = graphics.flush, .overlay = automationOverlay });
+        zrct.setRenderer(.{ .window = @ptrCast(desktop.window()), .flush = graphics.flush, .overlay = automationOverlay });
     }
     defer if (comptime client_options.automation) zrct.deinit();
     // Let Wayland deliver its initial scale before caching any text textures.
     desktop.poll();
     // Keep settings controls and the conversation usable beside the fixed-width sidebar.
     desktop.setMinSize(780, 560);
-    // Allow smooth interaction on high-refresh displays; the idle loop throttles redraws.
-    desktop.setFrameLimit(120);
-    _ = clay.initialize(
-        .init(try init.arena.allocator().alloc(u8, clay.minMemorySize())),
-        // Initialize Clay to the same logical dimensions as the window.
-        .{ .w = 1120, .h = 780 },
-        .{ .error_handler_function = clayError },
-    );
     while (true) {
         config = try runSession(init, config) orelse break;
         if (config.reset_cache) {
@@ -164,8 +132,9 @@ fn runSession(init: std.process.Init, config: Config) !?Config {
     if (media_ready) app.media = &media;
     app.notifications.backend = bridge.zc_notifications_new(App.notificationAction, &app);
     var frames: usize = 0;
-    var last_draw: i64 = 0;
-    var active_until: f64 = 0;
+    var last_draw: u64 = 0;
+    var next_draw: u64 = 0;
+    var active_until: u64 = 0;
     var last_generation: u64 = 0;
     var last_revision: u64 = 0;
     var last_mouse = desktop.mouse();
@@ -183,26 +152,27 @@ fn runSession(init: std.process.Init, config: Config) !?Config {
         const mouse = desktop.mouse();
         const drop_hovered = drop.hovered();
         const window = WindowMetrics.current();
-        const keyboard_input = for (std.enums.values(desktop.Key)) |key| {
-            if (pressed(key)) break true;
-        } else false;
-        const input = keyboard_input or desktop.buttonDown(.left) or desktop.buttonReleased(.left) or desktop.wheel() != 0 or mouse.x != last_mouse.x or mouse.y != last_mouse.y;
-        const window_changed = desktop.resized() or !std.meta.eql(window, last_window);
-        const now = desktop.time();
+        const input = app.had_input or mouse.x != last_mouse.x or mouse.y != last_mouse.y;
+        const window_changed = !std.meta.eql(window, last_window);
+        const now = desktop.ticks();
         // Keep rendering between input events so scrolling and key repeat do
         // not fall back to the idle polling cadence during an interaction.
         if (input or window_changed or revision != last_revision or drop_hovered != last_drop_hovered)
             // Hold the fast redraw cadence for half a second to bridge gaps between input events.
-            active_until = now + 0.5;
+            active_until = now + 500 * std.time.ns_per_ms;
         const syncing = !app.settings.visible and app.syncActivity().active();
         // Animate sync at about 30 fps; redraw idle status twice per second.
-        const frame_delay: i64 = if (syncing) 33 else 500;
+        const frame_delay: u64 = (if (syncing) @as(u64, 33) else 500) * std.time.ns_per_ms;
         // Render four startup frames to settle initial window/layout events before idle throttling.
-        if (automation_input or frames < 4 or config.frames > 0 or background_ready or app.layout_pending or now < active_until or generation != last_generation or u.now() - last_draw >= frame_delay) {
+        const needs_draw = automation_input or frames < 4 or config.frames > 0 or background_ready or app.layout_pending or now < active_until or generation != last_generation or now - last_draw >= frame_delay;
+        if (needs_draw and now >= next_draw) {
+            app.frame_seconds = @as(f64, @floatFromInt(now - last_draw)) / std.time.ns_per_s;
             app.capture_frame = config.screenshot != null and config.frames > 0 and frames + 1 >= config.frames;
             app.draw(window.scale);
+            graphics.endFrame();
             background_ready = false;
-            last_draw = u.now();
+            last_draw = now;
+            next_draw = now + std.time.ns_per_s / 120;
             last_generation = generation;
             last_revision = revision;
             last_mouse = mouse;
@@ -210,15 +180,17 @@ fn runSession(init: std.process.Init, config: Config) !?Config {
             last_window = window;
             frames += 1;
         } else {
-            // Short 10/25 ms waits keep background updates responsive without polling continuously.
-            background_ready = desktop.wait(if (syncing) 10 else 25);
-            desktop.poll();
+            // Service GLib notifications, draft persistence, and transfers at least every
+            // 25 ms, even when no SDL or worker event requests a frame.
+            const deadline = if (needs_draw) next_draw else last_draw + frame_delay;
+            const remaining = deadline -| now;
+            background_ready = desktop.wait(@intCast(@min(25, (remaining + std.time.ns_per_ms - 1) / std.time.ns_per_ms))) or background_ready;
         }
         if (app.next_config != null) break;
         if (config.frames > 0 and frames >= config.frames) {
             if (config.screenshot) |path| {
                 const shot = app.captured orelse return error.ScreenshotFailed;
-                try shot.save(path);
+                try graphics.saveImage(shot, path);
             }
             break;
         }
@@ -233,6 +205,9 @@ fn runSession(init: std.process.Init, config: Config) !?Config {
     return app.next_config;
 }
 const App = struct {
+    frame_seconds: f64 = 0,
+    controls: std.ArrayList(Control) = .empty,
+    control_arena: std.heap.ArenaAllocator = .init(a),
     worker: *Worker,
     settings: Settings = .{},
     next_config: ?Config = null,
@@ -249,7 +224,6 @@ const App = struct {
     detail_reaction_label: []const u8 = "",
     content_detail_scroll: f32 = 0,
     rich_count: usize = 0,
-    rich_consumed: bool = false,
     rich_focus: ?usize = null,
     enter_to_send: bool = true,
     view: ?*Worker.View = null,
@@ -273,6 +247,10 @@ const App = struct {
     focus: Focus = .composer,
     input_editor: ?*Editor = null,
     input_initialized: bool = false,
+    reset_echo: std.ArrayList(u8) = .empty,
+    had_input: bool = false,
+    click_timestamp: f64 = 0,
+    click_count: u8 = 0,
     key: []const u8 = "",
     // Own the requested key while the displayed key and view stay together.
     pending_key: ?[]const u8 = null,
@@ -330,6 +308,445 @@ const App = struct {
     capture_frame: bool = false,
     captured: ?graphics.Image = null,
 
+    const ButtonAction = enum {
+        recipient_continue,
+        settings_enter_to_send,
+        settings_reset,
+        settings_keep_data,
+        settings_cancel,
+        settings_save,
+        logs_latest,
+        logs_copy,
+        logs_clear,
+        conversation_visibility,
+        load_older,
+        new_messages,
+        viewer_close,
+        viewer_previous,
+        viewer_next,
+        content_close,
+        attachment_previous,
+        attachment_next,
+        attachments_cancel,
+        attachment_remove,
+        viewer_retry,
+        send,
+        reconnect,
+    };
+    const Action = union(enum) {
+        button: ButtonAction,
+        recover: []const u8,
+        rail: RailIcon,
+        select: []const u8,
+        retry: Media.Key,
+        link: link_targets.Target,
+        viewer: struct { message: []const u8, attachment: []const u8 },
+        detail: []const u8,
+        reaction: struct { message: []const u8, part: []const u8, label: []const u8 },
+        enrichment: struct { message: []const u8, revision: []const u8, section: []const u8 },
+        editor: struct { focus: Focus, origin: graphics.Point, width: f32, offset: f32 },
+        message: struct { id: []const u8, pending: bool, text: []const u8, full: []const u8, origin: graphics.Point, width: f32 },
+        scroll: struct { pane: ScrollPane, viewport: graphics.Rect, content: f64 },
+        history_background,
+    };
+    const ScrollPane = enum { sidebar, history, settings, details, logs, composer, content };
+    const Control = struct {
+        bounds: graphics.Rect,
+        clip: ?graphics.Rect,
+        action: Action,
+        rich_index: ?usize = null,
+    };
+    fn addControl(s: *App, bounds: graphics.Rect, action: Action) void {
+        if (input_obscured or bounds.width <= 0 or bounds.height <= 0) return;
+        const owned = copyControl(Action, s.control_arena.allocator(), action) catch return;
+        s.controls.append(a, .{
+            .bounds = bounds,
+            .clip = if (clip_depth > 0) clip_stack[clip_depth - 1] else null,
+            .action = owned,
+        }) catch {};
+    }
+    fn clickControl(s: *App, point: graphics.Point) bool {
+        var i = s.controls.items.len;
+        while (i > 0) {
+            i -= 1;
+            const control = s.controls.items[i];
+            if (!control.bounds.contains(point)) continue;
+            if (control.clip) |clip| if (!clip.contains(point)) continue;
+            if (control.action != .editor and control.action != .message) s.text_click = null;
+            if (control.action == .scroll) {
+                const scroll = control.action.scroll;
+                if (scroll.pane == .logs) s.logs_focused = true;
+                const bar = s.scrollbar(scroll.pane) orelse continue;
+                const offset = s.scrollOffset(scroll.pane);
+                const geometry = Scrollbar.geometry(scroll.viewport, scroll.content, offset) orelse continue;
+                if (!geometry.track.contains(point)) continue;
+                if (bar.update(scroll.viewport, scroll.content, offset, .{ .mouse = point, .pressed = true, .down = true })) |next| s.setScroll(scroll.pane, next);
+                s.dragging = false;
+                s.layout_pending = true;
+                return true;
+            }
+            if (control.rich_index != null) {
+                s.focus = .none;
+                s.rich_focus = null;
+            }
+            s.activate(control.action);
+            s.layout_pending = true;
+            return true;
+        }
+        return false;
+    }
+    const PointerInput = struct {
+        pressed: bool = false,
+        released: bool = false,
+        down: bool,
+        wheel: f32 = 0,
+    };
+    fn pointerInput(s: *App, input: PointerInput) void {
+        const point = desktop.mouse();
+        if (input.pressed) {
+            s.word_drag = null;
+            s.dragging = false;
+            s.message_selection.dragging = false;
+            s.logs_focused = false;
+            if (!s.clickControl(point)) s.text_click = null;
+        }
+        if (input.wheel != 0) {
+            var i = s.controls.items.len;
+            while (i > 0) {
+                i -= 1;
+                const control = s.controls.items[i];
+                if (control.action != .scroll or !control.bounds.contains(point)) continue;
+                if (control.clip) |clip| if (!clip.contains(point)) continue;
+                const scroll = control.action.scroll;
+                if (scroll.pane == .history) {
+                    _ = s.layoutHistory(scroll.viewport);
+                    s.scrollHistory(input.wheel, scroll.viewport.height);
+                    s.rememberHistoryAnchor(s.history_rows);
+                } else {
+                    const distance: f32 = switch (scroll.pane) {
+                        .sidebar => 34 * Scrollbar.wheel_scale,
+                        .composer => 46 * Scrollbar.wheel_scale,
+                        .content => 40,
+                        .settings, .details, .logs => 42 * Scrollbar.wheel_scale,
+                        .history => unreachable,
+                    };
+                    const offset = std.math.clamp(s.scrollOffset(scroll.pane) - input.wheel * distance, 0, @max(0, scroll.content - scroll.viewport.height));
+                    s.setScroll(scroll.pane, offset);
+                }
+                s.layout_pending = true;
+                break;
+            }
+        }
+        for (s.controls.items) |control| switch (control.action) {
+            .editor => |field| if (s.dragging and s.focus == field.focus and
+                (input.down or input.released))
+            {
+                const editor = s.focusedEditor() orelse continue;
+                if (editor.preedit.items.len > 0) continue;
+                const position = point.subtract(field.origin).add(.{ .x = 0, .y = field.offset });
+                s.dragTextSelection(editor.text.items, field.width, position, &editor.anchor, &editor.caret);
+            },
+            .message => |message| if (s.focus == .none and s.message_selection.dragging and
+                s.message_selection.matches(message.id, message.pending, message.text) and
+                (input.down or input.released))
+            {
+                const selection = &s.message_selection;
+                s.dragTextSelection(message.text, message.width, point.subtract(message.origin), &selection.anchor, &selection.caret);
+                selection.whole = false;
+            },
+            .scroll => |scroll| {
+                const bar = s.scrollbar(scroll.pane) orelse continue;
+                if (!bar.dragging) continue;
+                if (bar.update(scroll.viewport, scroll.content, s.scrollOffset(scroll.pane), .{
+                    .mouse = point,
+                    .pressed = false,
+                    .down = input.down,
+                })) |offset| s.setScroll(scroll.pane, offset);
+            },
+            .button, .recover, .rail, .select, .retry, .link, .viewer, .detail, .reaction, .enrichment, .history_background => {},
+        };
+        if (s.text_click) |click| if ((input.down or input.released) and !click.near(point)) {
+            s.text_click = null;
+        };
+        if (!input.down) {
+            s.dragging = false;
+            s.message_selection.dragging = false;
+        }
+    }
+    fn scrollbar(s: *App, pane: ScrollPane) ?*Scrollbar {
+        return switch (pane) {
+            .sidebar => &s.sidebar_bar,
+            .history => &s.history_bar,
+            .settings => &s.settings_bar,
+            .details => &s.details_bar,
+            .logs => &s.logs_bar,
+            .composer => &s.composer_bar,
+            .content => null,
+        };
+    }
+    fn scrollOffset(s: *const App, pane: ScrollPane) f64 {
+        return switch (pane) {
+            .sidebar => s.sidebar_scroll,
+            .history => s.scroll,
+            .settings => s.settings_scroll,
+            .details => s.details_scroll,
+            .logs => s.logs_scroll,
+            .composer => s.composer_scroll,
+            .content => s.content_detail_scroll,
+        };
+    }
+    fn setScroll(s: *App, pane: ScrollPane, offset: f64) void {
+        switch (pane) {
+            .sidebar => s.sidebar_scroll = @floatCast(offset),
+            .history => {
+                s.scroll = offset;
+                for (s.controls.items) |control| if (control.action == .scroll and control.action.scroll.pane == .history) {
+                    s.following = offset >= s.historyLimit(control.action.scroll.viewport.height) - 1;
+                    break;
+                };
+                s.rememberHistoryAnchor(s.history_rows);
+                s.worker.push(.{ .kind = .viewed, .text = if (s.following and desktop.focused()) "yes" else "no" }) catch {};
+            },
+            .settings => s.settings_scroll = @floatCast(offset),
+            .details => s.details_scroll = @floatCast(offset),
+            .logs => {
+                s.logs_scroll = @floatCast(offset);
+                s.logs_follow = s.logs_scroll >= s.logs_limit;
+                s.logs_anchor = null;
+            },
+            .composer => s.composer_scroll = @floatCast(offset),
+            .content => s.content_detail_scroll = @floatCast(offset),
+        }
+    }
+    fn moveCaretVertically(s: *App, up: bool, shift: bool) void {
+        const editor = s.focusedEditor() orelse return;
+        for (s.controls.items) |control| if (control.action == .editor and control.action.editor.focus == s.focus) {
+            const width = control.action.editor.width;
+            const caret = s.text.caret(editor.text.items, width, editor.caret);
+            editor.caret = s.text.hit(editor.text.items, width, caret.x, caret.y + (if (up) -1 else caret.height + 1));
+            if (!shift) editor.anchor = editor.caret;
+            s.layout_pending = true;
+            return;
+        };
+    }
+    fn copyControl(comptime T: type, allocator: std.mem.Allocator, item: T) std.mem.Allocator.Error!T {
+        if (T == []const u8) return allocator.dupe(u8, item);
+        if (T == [:0]const u8) return allocator.dupeZ(u8, item);
+        switch (@typeInfo(T)) {
+            .@"struct" => |fields| {
+                var result: T = undefined;
+                inline for (fields.fields) |field| @field(result, field.name) = try copyControl(field.type, allocator, @field(item, field.name));
+                return result;
+            },
+            .@"union" => return switch (item) {
+                inline else => |payload, tag| @unionInit(T, @tagName(tag), try copyControl(@TypeOf(payload), allocator, payload)),
+            },
+            else => return item,
+        }
+    }
+    fn activate(s: *App, action: Action) void {
+        switch (action) {
+            .editor => |field| {
+                s.message_selection.clear();
+                s.focus = field.focus;
+                const editor = s.focusedEditor() orelse {
+                    s.focus = .none;
+                    s.syncTextInput();
+                    return;
+                };
+                s.syncTextInput();
+                const point = desktop.mouse().subtract(field.origin).add(.{ .x = 0, .y = field.offset });
+                const at = s.text.hit(editor.text.items, field.width, point.x, point.y);
+                editor.caret = at;
+                if (desktop.modifiers() & desktop.c.SDL_KMOD_SHIFT == 0) editor.anchor = at;
+                s.dragging = true;
+                if (s.doubleTextClick(.{ .field = .{ .focus = field.focus, .revision = editor.revision } }))
+                    s.word_drag = s.text.wordHit(editor.text.items, field.width, point.x, point.y);
+            },
+            .message => |message| {
+                const point = desktop.mouse().subtract(message.origin);
+                const at = s.text.hit(message.text, message.width, point.x, point.y);
+                s.message_selection.begin(message.id, message.pending, message.text, message.full, at) catch {
+                    s.info("Could not select message text.");
+                    return;
+                };
+                s.focus = .none;
+                s.dragging = false;
+                if (s.doubleTextClick(.{ .message = .{
+                    .id = std.hash.Wyhash.hash(0, message.id),
+                    .text = std.hash.Wyhash.hash(0, message.text),
+                    .pending = message.pending,
+                } })) s.word_drag = s.text.wordHit(message.text, message.width, point.x, point.y);
+                s.info("Double-click a word or drag to select · Ctrl+C to copy · Ctrl+A for the whole message");
+            },
+            .history_background => s.message_selection.clear(),
+            .scroll => {},
+            .button => |kind| s.activateButton(kind),
+            .recover => |id| s.recoverMessage(id),
+            .rail => |icon| switch (icon) {
+                .messages, .hidden => {
+                    if (s.settings.required) return;
+                    s.settings.close();
+                    if (s.show_hidden != (icon == .hidden)) s.toggleHidden() catch s.info("Could not switch conversations.");
+                    if (s.show_details) s.toggleDetails();
+                    s.new_mode = false;
+                    s.focus = .composer;
+                },
+                .settings => s.openSettings() catch s.info("Could not open Settings."),
+                .details => s.toggleDetails(),
+            },
+            .select => |id| s.select(id) catch s.info("Could not open conversation."),
+            .retry => |key| if (s.images.entries.getPtr(key)) |entry| {
+                ImageCache.retry(entry);
+            },
+            .link => |link| {
+                _ = s.open_link(link);
+            },
+            .viewer => |photo| {
+                const view = s.view orelse return;
+                for (view.snapshot.messages) |message| if (u.eq(message.id, photo.message)) {
+                    s.openViewer(message, photo.attachment);
+                    break;
+                };
+            },
+            .detail => |body| s.showContentDetail(body),
+            .reaction => |reaction| {
+                s.showContentDetail("");
+                s.detail_reaction_message = a.dupe(u8, reaction.message) catch "";
+                s.detail_reaction_part = a.dupe(u8, reaction.part) catch "";
+                s.detail_reaction_label = a.dupe(u8, reaction.label) catch "";
+                s.refreshReactionDetail();
+            },
+            .enrichment => |section| s.worker.push(.{
+                .kind = .enrichment,
+                .key = section.message,
+                .recipient = section.revision,
+                .text = section.section,
+            }) catch {},
+        }
+    }
+    fn activateButton(s: *App, kind: ButtonAction) void {
+        switch (kind) {
+            .recipient_continue => {
+                s.startDirect() catch s.info("Could not open conversation.");
+            },
+            .settings_enter_to_send => {
+                s.settings.enter_to_send = !s.settings.enter_to_send;
+            },
+            .settings_reset => {
+                if (s.settings.confirm_reset) {
+                    s.resetLocalData() catch |err| {
+                        const message = if (err == error.RelayConnectionRequired)
+                            "Save valid connection settings and connect before resetting the relay. Local data was kept."
+                        else
+                            "Could not request a reset. Local data was kept; try again.";
+                        s.settings.failure = std.mem.zeroes(bridge.ZcError);
+                        @memcpy(s.settings.failure.message[0..message.len], message);
+                    };
+                } else s.settings.confirm_reset = true;
+            },
+            .settings_keep_data => {
+                s.settings.confirm_reset = false;
+            },
+            .settings_cancel => {
+                s.settings.close();
+                s.focus = .composer;
+            },
+            .settings_save => {
+                s.saveSettings() catch s.settingsSaveError();
+            },
+            .logs_latest => {
+                s.logs_follow = true;
+            },
+            .logs_copy => {
+                s.copyLogs();
+            },
+            .logs_clear => {
+                s.logs.clear();
+                s.logs_scroll = 0;
+                s.logs_follow = true;
+                s.logs_anchor = null;
+            },
+            .conversation_visibility => {
+                if (s.view) |view| for (view.snapshot.chats) |chat| {
+                    if (u.eq(chat.value.id, s.key)) {
+                        s.setSelectedHidden(!chat.hidden) catch s.info("Could not save conversation visibility. Try again.");
+                        break;
+                    }
+                };
+            },
+            .load_older => {
+                s.worker.push(.{ .kind = .older }) catch {};
+                s.following = false;
+            },
+            .new_messages => {
+                s.following = true;
+                s.new_messages = false;
+                s.worker.push(.{ .kind = .viewed, .text = "yes" }) catch {};
+            },
+            .viewer_close => {
+                s.closeViewer();
+                return;
+            },
+            .viewer_previous => {
+                s.moveViewer(-1);
+            },
+            .viewer_next => {
+                s.moveViewer(1);
+            },
+            .content_close => {
+                s.closeContentDetail();
+                return;
+            },
+            .attachment_previous => {
+                const files = s.draftFiles();
+                if (files.len == 0) return;
+                s.attachment_index = (s.attachment_index + files.len - 1) % files.len;
+            },
+            .attachment_next => {
+                const files = s.draftFiles();
+                if (files.len == 0) return;
+                s.attachment_index = (s.attachment_index + 1) % files.len;
+            },
+            .attachments_cancel => s.fileCommand(.cancel_preparation, s.key, "") catch s.info("Could not cancel file preparation."),
+            .attachment_remove => {
+                const files = s.draftFiles();
+                if (s.attachment_index >= files.len or s.send_wait) return;
+                s.fileCommand(.remove_attachment, s.key, files[s.attachment_index].id) catch s.info("Could not remove the attachment.");
+            },
+            .viewer_retry => {
+                const message = s.viewerMessage() orelse return;
+                if (s.viewer_attachment >= message.attachments.len) return;
+                const item = message.attachments[s.viewer_attachment];
+                const asset = item.viewer orelse item.image orelse return;
+                const media = s.media orelse return;
+                if (s.images.get(media, asset)) |entry| ImageCache.retry(entry);
+            },
+            .send => s.send() catch s.info("Could not queue message. Your draft is retained."),
+            .reconnect => {
+                s.worker.push(.{ .kind = .reconnect }) catch {};
+                s.send_wait = false;
+            },
+        }
+    }
+    fn recoverMessage(s: *App, id: []const u8) void {
+        const v = s.view orelse return;
+        for (v.snapshot.pending) |p| {
+            if (!u.eq(p.input.request_id, id)) continue;
+            if (p.input.attachments.len > 0 and u.eq(p.state, "uploading")) {
+                s.fileCommand(.cancel_upload, id, "") catch s.info("Could not cancel the upload. Check its status.");
+            } else if (s.readOnlyChat()) s.info("This conversation is read-only.") else if (s.composer.text.items.len > 0 or s.draftFiles().len > 0 or v.preparing_attachments or s.filesPending()) s.info("Your composer has a draft. Save or clear it before copying another message.") else {
+                s.composer.set(p.input.text) catch return;
+                s.draft_dirty = true;
+                s.draft_at = 0;
+                s.focus = .composer;
+                s.duplicate_risk = display.captionMayHaveSent(p.record, p.state);
+                if (p.input.attachments.len > 0) s.info("Caption copied. Files remain with the earlier send; drop files into this draft to attach them.");
+            }
+            return;
+        }
+    }
+
     const Focus = enum {
         composer,
         recipient,
@@ -371,10 +788,13 @@ const App = struct {
         const click = TextClick{
             .target = target,
             .position = desktop.mouse(),
-            .time = desktop.time(),
+            .time = s.click_timestamp,
             .frame = s.text.frame,
         };
-        const double = if (s.text_click) |previous| click.follows(previous) else false;
+        const double = if (s.text_click) |previous|
+            if (s.click_count == 0) click.follows(previous) else s.click_count > 1 and previous.near(click.position) and std.meta.eql(click.target, previous.target)
+        else
+            false;
         s.text_click = if (double) null else click;
         return double;
     }
@@ -400,6 +820,9 @@ const App = struct {
     }
 
     fn deinit(s: *App) void {
+        s.reset_echo.deinit(a);
+        s.controls.deinit(a);
+        s.control_arena.deinit();
         if (s.input_initialized) desktop.resetTextInput(false);
         s.notifications.deinit();
         s.settings.deinit();
@@ -485,6 +908,12 @@ const App = struct {
         s.closeViewer();
         s.closeContentDetail();
         s.show_details = false;
+        if (s.pending_key == null and u.eq(s.key, key) and u.eq(s.loaded_key, key)) {
+            s.focus = .composer;
+            s.new_mode = false;
+            s.dragging = false;
+            return;
+        }
         try s.saveDraft();
         const next_key = try a.dupe(u8, key);
         errdefer a.free(next_key);
@@ -677,99 +1106,107 @@ const App = struct {
             s.worker.push(.{ .kind = .viewed, .text = if (reading) "yes" else "no" }) catch return;
             s.was_reading = reading;
         }
-        const ctrl = desktop.keyDown(.left_control) or desktop.keyDown(.right_control);
-        const shift = desktop.keyDown(.left_shift) or desktop.keyDown(.right_shift);
-        // Consume commits for the old focus before shortcuts can select another field.
-        if (s.input_initialized) s.syncTextInput();
+        try s.processEvents();
+    }
+    fn keyInput(s: *App, key: desktop.KeyPress, composing: bool) !void {
+        const ctrl = key.modifiers & desktop.c.SDL_KMOD_CTRL != 0;
+        const shift = key.modifiers & desktop.c.SDL_KMOD_SHIFT != 0;
         defer s.syncTextInput();
-        const composing = desktop.composing();
-        s.consumeTextInput();
-        if (composing and desktop.keyPressed(.escape)) {
-            if (s.focusedEditor()) |e| e.cancelPreedit();
+        defer if (s.settings.visible and (key.pressed(.tab) or (!ctrl and (key.pressed(.enter) or key.pressed(.kp_enter))))) s.revealSettingsFocus();
+        if (composing and key.pressed(.escape)) {
+            if (s.focusedEditor()) |e| {
+                s.rememberReset(e);
+                e.cancelPreedit();
+            }
             desktop.resetTextInput(s.focusedEditor() != null);
             s.layout_pending = true;
             return;
         }
-        if (ctrl and desktop.keyPressed(.comma)) try s.openSettings();
+        if (ctrl and key.pressed(.comma)) try s.openSettings();
         if (s.settings.visible) {
-            if (desktop.keyPressed(.escape)) {
+            if (key.pressed(.escape)) {
                 s.settings.close();
                 if (!s.settings.visible) s.focus = .composer;
                 return;
             }
-            if (!composing and desktop.keyPressed(.tab)) {
+            if (!composing and key.pressed(.tab)) {
                 const index = s.settingsFocus() orelse 0;
                 s.focus = settings_focus[(index + (if (shift) @as(usize, 3) else 1)) % 4];
             }
         } else {
             if (s.viewer_message.len > 0) {
-                if (desktop.keyPressed(.escape)) s.closeViewer();
-                if (desktop.keyPressed(.left)) s.moveViewer(-1);
-                if (desktop.keyPressed(.right)) s.moveViewer(1);
-                desktop.discardText();
+                if (key.pressed(.escape)) s.closeViewer();
+                if (key.pressed(.left)) s.moveViewer(-1);
+                if (key.pressed(.right)) s.moveViewer(1);
+                if (key.pressed(.r)) s.activateButton(.viewer_retry);
                 return;
             }
             if (s.detail_body) |body| {
-                if (desktop.keyPressed(.escape)) {
+                if (key.pressed(.escape)) {
                     s.closeContentDetail();
                     return;
                 }
-                if (ctrl and desktop.keyPressed(.c)) desktop.setClipboardText(body);
+                if (ctrl and key.pressed(.c)) desktop.setClipboardText(body);
                 // Move expanded content in 100-pixel keyboard steps so long text remains navigable.
-                if (pressed(.page_down) or pressed(.down)) s.content_detail_scroll += 100;
-                if (pressed(.page_up) or pressed(.up)) s.content_detail_scroll -= 100;
-                desktop.discardText();
+                if (key.matches(.page_down) or key.matches(.down)) s.content_detail_scroll += 100;
+                if (key.matches(.page_up) or key.matches(.up)) s.content_detail_scroll -= 100;
                 return;
             }
-            if (!composing and s.pending_key == null and desktop.keyPressed(.tab) and s.rich_count > 0) {
+            if (!composing and s.pending_key == null and key.pressed(.tab) and s.rich_count > 0) {
                 s.focus = .none;
                 const old = s.rich_focus orelse (if (shift) 0 else s.rich_count - 1);
                 s.rich_focus = if (shift) (old + s.rich_count - 1) % s.rich_count else (old + 1) % s.rich_count;
             }
-            if (ctrl and desktop.keyPressed(.f) and !s.show_details) {
+            if (!composing and s.focus == .none and key.pressed(.enter)) {
+                if (s.rich_focus) |index| for (s.controls.items) |control| {
+                    if (control.rich_index == index) {
+                        s.activate(control.action);
+                        return;
+                    }
+                };
+            }
+            if (ctrl and key.pressed(.f) and !s.show_details) {
                 s.message_selection.clear();
                 s.focus = .search;
             }
-            if (ctrl and desktop.keyPressed(.d)) s.toggleDetails();
-            if (ctrl and desktop.keyPressed(.n)) try s.newMessage();
+            if (ctrl and key.pressed(.d)) s.toggleDetails();
+            if (ctrl and key.pressed(.n)) try s.newMessage();
             if (s.show_details) {
-                if (desktop.keyPressed(.escape)) {
+                if (key.pressed(.escape)) {
                     s.toggleDetails();
                     return;
                 }
                 if (s.logs_focused) {
-                    if (ctrl and pressed(.c)) s.copyLogs();
+                    if (ctrl and key.matches(.c)) s.copyLogs();
                     var offset = s.logs_scroll;
                     // Diagnostic panes use 160-pixel page steps and 24-pixel line steps.
-                    if (pressed(.page_down)) offset += 160;
-                    if (pressed(.page_up)) offset -= 160;
-                    if (pressed(.down)) offset += 24;
-                    if (pressed(.up)) offset -= 24;
-                    if (pressed(.home)) offset = 0;
-                    if (pressed(.end)) offset = s.logs_limit;
+                    if (key.matches(.page_down)) offset += 160;
+                    if (key.matches(.page_up)) offset -= 160;
+                    if (key.matches(.down)) offset += 24;
+                    if (key.matches(.up)) offset -= 24;
+                    if (key.matches(.home)) offset = 0;
+                    if (key.matches(.end)) offset = s.logs_limit;
                     if (offset != s.logs_scroll) {
                         s.logs_scroll = std.math.clamp(offset, 0, s.logs_limit);
                         s.logs_follow = s.logs_scroll >= s.logs_limit;
                         s.logs_anchor = null;
                     }
-                    desktop.discardText();
                     return;
                 }
-                if (pressed(.page_down)) s.details_scroll += @as(
+                if (key.matches(.page_down)) s.details_scroll += @as(
                     f32,
                     @floatFromInt(desktop.height()),
                 ) * 0.7;
-                if (pressed(.page_up)) s.details_scroll -= @as(
+                if (key.matches(.page_up)) s.details_scroll -= @as(
                     f32,
                     @floatFromInt(desktop.height()),
                 ) * 0.7;
-                if (pressed(.home)) s.details_scroll = 0;
-                if (pressed(.end)) s.details_scroll = s.details_height;
+                if (key.matches(.home)) s.details_scroll = 0;
+                if (key.matches(.end)) s.details_scroll = s.details_height;
                 // Do not route keystrokes to hidden conversation inputs.
-                desktop.discardText();
                 return;
             }
-            if (desktop.keyPressed(.escape)) {
+            if (key.pressed(.escape)) {
                 s.message_selection.clear();
                 s.new_mode = false;
                 s.focus = .composer;
@@ -781,46 +1218,47 @@ const App = struct {
         }
         const editor = s.focusedEditor();
         if (editor) |e| {
-            const editing_shortcut = ctrl and (desktop.keyPressed(.a) or
-                desktop.keyPressed(.c) or desktop.keyPressed(.x) or desktop.keyPressed(.v) or
-                desktop.keyPressed(.z) or desktop.keyPressed(.y));
+            const editing_shortcut = ctrl and (key.pressed(.a) or
+                key.pressed(.c) or key.pressed(.x) or key.pressed(.v) or
+                key.pressed(.z) or key.pressed(.y));
             // Preserve the IME's final Backspace/Enter, even if it cleared preedit
             // in this batch. Explicit clipboard/undo commands first confirm it.
             if (composing and !editing_shortcut) return;
             if (editing_shortcut and !s.finishPreedit(e)) return;
             const revision = e.revision;
-            if (ctrl and desktop.keyPressed(.a)) {
+            if (ctrl and key.pressed(.a)) {
                 e.anchor = 0;
                 e.caret = e.text.items.len;
             }
-            if (ctrl and (desktop.keyPressed(.c) or desktop.keyPressed(.x))) {
+            if (ctrl and (key.pressed(.c) or key.pressed(.x))) {
                 if (e.selected().len > 0) {
                     const clip = try a.dupeZ(u8, e.selected());
                     defer a.free(clip);
                     desktop.setClipboardText(clip);
-                    if (desktop.keyPressed(.x)) try e.insert("");
+                    if (key.pressed(.x)) try e.insert("");
                 }
             }
-            if (ctrl and desktop.keyPressed(.v)) {
+            if (ctrl and key.pressed(.v)) {
                 if (desktop.clipboardText()) |clip| {
                     e.insert(clip) catch s.info("Text exceeds the 16 KiB limit or has invalid encoding.");
                 } else s.info("Could not read the clipboard.");
             }
-            if (ctrl and desktop.keyPressed(.z)) try e.history(shift);
-            if (ctrl and desktop.keyPressed(.y)) try e.history(true);
-            if (pressed(.left)) e.move(-1, shift);
-            if (pressed(.right)) e.move(1, shift);
-            if (pressed(.backspace)) try e.delete(true);
-            if (pressed(.delete)) try e.delete(false);
-            if (pressed(.home)) {
+            if (ctrl and key.pressed(.z)) try e.history(shift);
+            if (ctrl and key.pressed(.y)) try e.history(true);
+            if (key.matches(.up) or key.matches(.down)) s.moveCaretVertically(key.matches(.up), shift);
+            if (key.matches(.left)) e.move(-1, shift);
+            if (key.matches(.right)) e.move(1, shift);
+            if (key.matches(.backspace)) try e.delete(true);
+            if (key.matches(.delete)) try e.delete(false);
+            if (key.matches(.home)) {
                 e.caret = if (ctrl) 0 else lineStart(e.text.items, e.caret);
                 if (!shift) e.anchor = e.caret;
             }
-            if (pressed(.end)) {
+            if (key.matches(.end)) {
                 e.caret = if (ctrl) e.text.items.len else lineEnd(e.text.items, e.caret);
                 if (!shift) e.anchor = e.caret;
             }
-            if (desktop.keyPressed(.enter) or desktop.keyPressed(.kp_enter)) {
+            if (key.pressed(.enter) or key.pressed(.kp_enter)) {
                 switch (s.focus) {
                     .composer => if (shift or (!s.enter_to_send and !ctrl)) {
                         e.insert("\n") catch s.info("Message exceeds the 16 KiB limit.");
@@ -842,8 +1280,8 @@ const App = struct {
             }
         } else {
             if (s.focus == .none and s.message_selection.id.len > 0) {
-                if (ctrl and desktop.keyPressed(.a)) s.message_selection.selectAll();
-                if (ctrl and desktop.keyPressed(.c) and s.message_selection.selected().len > 0) {
+                if (ctrl and key.pressed(.a)) s.message_selection.selectAll();
+                if (ctrl and key.pressed(.c) and s.message_selection.selected().len > 0) {
                     const clip = try a.dupeZ(u8, s.message_selection.selected());
                     defer a.free(clip);
                     desktop.setClipboardText(clip);
@@ -852,7 +1290,6 @@ const App = struct {
             }
             // Discard typing while an input is disabled instead of replaying
             // it when a writable conversation gains focus.
-            desktop.discardText();
         }
     }
     fn focusedEditor(s: *App) ?*Editor {
@@ -868,6 +1305,7 @@ const App = struct {
     }
     fn finishPreedit(s: *App, e: *Editor) bool {
         if (e.preedit.items.len == 0) return true;
+        s.rememberReset(e);
         e.commitPreedit() catch {
             s.info("Could not confirm the composing text. Your draft is retained.");
             return false;
@@ -889,34 +1327,110 @@ const App = struct {
         s.input_initialized = true;
         s.layout_pending = true;
     }
-    fn consumeTextInput(s: *App) void {
-        const committed = desktop.takeText();
-        const preedit = desktop.preedit();
-        const e = s.focusedEditor() orelse return;
-        const revision = e.revision;
-        if (desktop.textRejected()) {
-            s.info("Text exceeds the 16 KiB limit.");
-            e.cancelPreedit();
-            desktop.resetTextInput(true);
-        } else {
-            if (committed.len > 0) e.insert(committed) catch {
-                s.info("Text exceeds the 16 KiB limit or has invalid encoding.");
-                e.cancelPreedit();
-                desktop.resetTextInput(true);
-                s.layout_pending = true;
-                return;
-            };
-            if (preedit) |edit| e.setPreedit(edit.text, edit.start, edit.length) catch {
-                s.info("Text exceeds the 16 KiB limit or has invalid encoding.");
-                e.cancelPreedit();
-                desktop.resetTextInput(true);
-            };
+    fn rememberReset(s: *App, editor: *const Editor) void {
+        if (editor.preedit.items.len == 0) return;
+        s.reset_echo.clearRetainingCapacity();
+        s.reset_echo.appendSlice(a, editor.preedit.items) catch {};
+    }
+    fn processEvents(s: *App) !void {
+        desktop.poll();
+        s.had_input = false;
+        if (s.focus == .composer and s.readOnlyChat()) {
+            s.focus = .none;
+            s.dragging = false;
         }
-        if (committed.len > 0 or preedit != null) s.layout_pending = true;
-        if (e == &s.composer and revision != e.revision) {
-            s.draft_dirty = true;
-            s.draft_at = u.now();
+        s.syncTextInput();
+        // A commit/empty preedit can precede the key which confirmed it. Own
+        // that next key within this pump, while subsequent keys retain order.
+        var composition_key = false;
+        while (desktop.nextEvent()) |event| {
+            const c = desktop.c;
+            s.had_input = true;
+            switch (event.type) {
+                c.SDL_EVENT_KEY_DOWN => {
+                    s.reset_echo.clearRetainingCapacity();
+                    const composing = composition_key or if (s.focusedEditor()) |editor| editor.preedit.items.len > 0 else false;
+                    composition_key = false;
+                    try s.keyInput(.{ .code = event.key.key, .modifiers = event.key.mod, .repeat = event.key.repeat }, composing);
+                },
+                c.SDL_EVENT_TEXT_INPUT => {
+                    const committed = if (event.text.text != null) std.mem.span(event.text.text) else "";
+                    if (s.reset_echo.items.len > 0) {
+                        const echo = u.eq(committed, s.reset_echo.items);
+                        s.reset_echo.clearRetainingCapacity();
+                        if (echo) continue;
+                    }
+                    if (s.focusedEditor()) |editor| {
+                        composition_key = composition_key or editor.preedit.items.len > 0;
+                        const revision = editor.revision;
+                        editor.insert(committed) catch {
+                            s.info("Text exceeds the 16 KiB limit or has invalid encoding.");
+                            editor.cancelPreedit();
+                            desktop.resetTextInput(true);
+                            continue;
+                        };
+                        editor.cancelPreedit();
+                        if (editor == &s.composer and revision != editor.revision) {
+                            s.draft_dirty = true;
+                            s.draft_at = u.now();
+                        }
+                    }
+                    s.layout_pending = true;
+                },
+                c.SDL_EVENT_TEXT_EDITING => {
+                    const text = if (event.edit.text != null) std.mem.span(event.edit.text) else "";
+                    if (text.len > 0) s.reset_echo.clearRetainingCapacity();
+                    if (s.focusedEditor()) |editor| {
+                        composition_key = composition_key or editor.preedit.items.len > 0;
+                        editor.setPreedit(text, event.edit.start, event.edit.length) catch {
+                            s.info("Text exceeds the 16 KiB limit or has invalid encoding.");
+                            editor.cancelPreedit();
+                            desktop.resetTextInput(true);
+                        };
+                    }
+                    s.layout_pending = true;
+                },
+                c.SDL_EVENT_MOUSE_BUTTON_DOWN, c.SDL_EVENT_MOUSE_BUTTON_UP => {
+                    if (event.button.button != c.SDL_BUTTON_LEFT) continue;
+                    if (event.button.down) {
+                        if (s.input_editor) |editor| if (!s.finishPreedit(editor)) continue;
+                        s.click_timestamp = if (event.button.timestamp == 0) desktop.time() else @as(f64, @floatFromInt(event.button.timestamp)) / std.time.ns_per_s;
+                        s.click_count = event.button.clicks;
+                    }
+                    s.pointerInput(.{ .pressed = event.button.down, .released = !event.button.down, .down = desktop.leftDown() });
+                    s.syncTextInput();
+                    s.layout_pending = true;
+                },
+                c.SDL_EVENT_MOUSE_MOTION => {
+                    s.pointerInput(.{ .down = desktop.leftDown() });
+                    s.layout_pending = true;
+                },
+                c.SDL_EVENT_MOUSE_WHEEL => {
+                    s.pointerInput(.{ .down = desktop.leftDown(), .wheel = event.wheel.y * @as(f32, if (event.wheel.direction == c.SDL_MOUSEWHEEL_FLIPPED) -1 else 1) });
+                    s.layout_pending = true;
+                },
+                c.SDL_EVENT_WINDOW_FOCUS_LOST => {
+                    if (s.input_editor) |editor| editor.cancelPreedit();
+                    s.pointerInput(.{ .down = false });
+                    s.text_click = null;
+                    composition_key = false;
+                },
+                else => {},
+            }
         }
+    }
+    fn revealSettingsFocus(s: *App) void {
+        var viewport: ?graphics.Rect = null;
+        for (s.controls.items) |control| if (control.action == .scroll and control.action.scroll.pane == .settings) {
+            viewport = control.action.scroll.viewport;
+            break;
+        };
+        const clip = viewport orelse return;
+        for (s.controls.items) |control| if (control.action == .editor and control.action.editor.focus == s.focus) {
+            if (control.bounds.y < clip.y) s.settings_scroll -= clip.y - control.bounds.y;
+            if (control.bounds.y + control.bounds.height > clip.y + clip.height) s.settings_scroll += control.bounds.y + control.bounds.height - clip.y - clip.height;
+            break;
+        };
     }
     fn newMessage(s: *App) !void {
         if (s.settings.required) return;
@@ -1026,21 +1540,16 @@ const App = struct {
         s.following = true;
     }
     fn draw(s: *App, scale: f32) void {
-        // Confirm Korean preedit before a pointer action can move the caret,
-        // change fields, or use the draft in a button action.
-        if (desktop.buttonPressed(.left)) {
-            if (s.input_editor) |e| if (!s.finishPreedit(e)) return;
-        }
+        s.controls.clearRetainingCapacity();
+        _ = s.control_arena.reset(.{ .retain_with_limit = 256 * 1024 });
         if (comptime client_options.automation) zrct.beginFrame();
         // Reuse 1 MiB of frame scratch space but release exceptional large-frame allocations.
         defer _ = s.frame_arena.reset(.{ .retain_with_limit = 1024 * 1024 });
         const ar = s.frame_arena.allocator();
         if (s.text.scale != scale) s.text_click = null;
         s.text.nextFrame(scale);
-        if (desktop.buttonPressed(.left)) s.word_drag = null;
         s.images.nextFrame();
         s.rich_count = 0;
-        s.rich_consumed = false;
         input_obscured = s.detail_body != null or s.viewer_message.len > 0;
         s.layout_pending = false;
         const areas = layout.frame(
@@ -1050,16 +1559,7 @@ const App = struct {
         );
         std.debug.assert(clip_depth == 0);
         graphics.beginFrame();
-        defer graphics.endFrame();
-        defer s.syncTextInput();
         defer if (comptime client_options.automation) zrct.endFrame();
-        // A drag or a click outside text breaks the sequence. Check before
-        // EndDrawing polls input and clears this frame's pressed/released flags.
-        defer if (s.text_click) |click| {
-            if ((desktop.buttonPressed(.left) and click.frame != s.text.frame) or
-                ((desktop.buttonDown(.left) or desktop.buttonReleased(.left)) and
-                    !click.near(desktop.mouse()))) s.text_click = null;
-        };
         graphics.clear(theme.colors.paper);
         desktop.setCursor(.default);
         s.drawRail(areas.rail);
@@ -1116,12 +1616,12 @@ const App = struct {
                     false,
                     theme.colors.paper,
                 );
-                if (s.button("recipient-continue", .{
+                s.button("recipient-continue", .{
                     .x = r.x + 32,
                     .y = r.y + 176,
                     .width = 164,
                     .height = 36,
-                }, "Continue", true)) s.startDirect() catch s.info("Could not open conversation.");
+                }, "Continue", true);
                 s.text.draw(
                     "Existing groups appear in your conversations.\nCreating groups is not supported yet.",
                     r.x + 32,
@@ -1196,7 +1696,7 @@ const App = struct {
                 const fps_width: f32 = 72;
                 // Fit the numeric FPS diagnostic and suffix without per-frame allocation.
                 var buffer: [32]u8 = undefined;
-                const fps = std.fmt.bufPrint(&buffer, "{d} FPS", .{desktop.fps()}) catch unreachable;
+                const fps = std.fmt.bufPrint(&buffer, "{d} FPS", .{if (s.frame_seconds > 0) @as(u32, @intFromFloat(@round(1 / s.frame_seconds))) else 0}) catch unreachable;
                 const band = layout.footer(areas.composer);
                 s.drawFooterLabel(fps, .{
                     .x = band.x + band.width - fps_width,
@@ -1216,7 +1716,6 @@ const App = struct {
             if (s.captured) |old| graphics.destroyImage(old);
             s.captured = graphics.capture() catch null;
         }
-        if (!desktop.buttonDown(.left)) s.message_selection.dragging = false;
     }
     fn syncActivity(s: *App) t.SyncActivity {
         const view = s.view orelse return .{};
@@ -1361,25 +1860,12 @@ const App = struct {
             .status = failure,
             .interactive = false,
         });
-        if (hover(viewport)) s.settings_scroll -= desktop.wheel() * 42 * Scrollbar.wheel_scale;
-        const ctrl = desktop.keyDown(.left_control) or desktop.keyDown(.right_control);
-        if (desktop.keyPressed(.tab) or (!ctrl and (desktop.keyPressed(.enter) or desktop.keyPressed(.kp_enter)))) {
-            if (s.settingsFocus()) |index| {
-                const top = if (index == 0) 0 else paths_y + @as(f32, @floatFromInt(index - 1)) * 66;
-                if (top < s.settings_scroll) s.settings_scroll = top;
-                if (top + 55 > s.settings_scroll + viewport.height) {
-                    s.settings_scroll = top + 55 - viewport.height;
-                }
-            }
-        }
+        s.addControl(viewport, .{ .scroll = .{ .pane = .settings, .viewport = viewport, .content = content_height } });
         s.settings_scroll = std.math.clamp(
             s.settings_scroll,
             0,
             @max(0, content_height - viewport.height),
         );
-        if (s.settings_bar.update(viewport, content_height, s.settings_scroll, scrollbarInput())) |offset| {
-            s.settings_scroll = @floatCast(offset);
-        }
         var clip = viewport;
         // Field outlines extend beyond their nominal bounds.
         clip.x -= 2;
@@ -1419,12 +1905,12 @@ const App = struct {
         );
         const toggle_label = if (s.settings.enter_to_send) "Enter to send: On" else "Enter to send: Off";
         const toggle_size = s.buttonSize(toggle_label);
-        if (s.button("settings-enter-to-send", .{
+        s.button("settings-enter-to-send", .{
             .x = x,
             .y = top + 96,
             .width = toggle_size.x,
             .height = toggle_size.y,
-        }, toggle_label, false)) s.settings.enter_to_send = !s.settings.enter_to_send;
+        }, toggle_label, false);
         s.text.draw(helper, x, top + 144, 14, width, theme.colors.muted, theme.colors.paper);
         if (failure.len > 0) s.text.draw(
             failure,
@@ -1439,31 +1925,20 @@ const App = struct {
         s.text.draw(reset_help, x, top + reset_y + 25, 14, width, theme.colors.muted, theme.colors.paper);
         const reset_label = if (s.settings.reset_pending) "Resetting…" else if (s.settings.confirm_reset) "Reset and resync" else "Reset client and relay…";
         const reset_size = s.buttonSize(reset_label);
-        if (s.button("settings-reset", .{
+        s.button("settings-reset", .{
             .x = x,
             .y = top + reset_buttons_y,
             .width = reset_size.x,
             .height = reset_size.y,
-        }, reset_label, false)) {
-            if (s.settings.confirm_reset) {
-                s.resetLocalData() catch |err| {
-                    const message = if (err == error.RelayConnectionRequired)
-                        "Save valid connection settings and connect before resetting the relay. Local data was kept."
-                    else
-                        "Could not request a reset. Local data was kept; try again.";
-                    s.settings.failure = std.mem.zeroes(bridge.ZcError);
-                    @memcpy(s.settings.failure.message[0..message.len], message);
-                };
-            } else s.settings.confirm_reset = true;
-        }
+        }, reset_label, false);
         if (s.settings.confirm_reset and !s.settings.reset_pending) {
             const keep_size = s.buttonSize("Keep local data");
-            if (s.button("settings-keep-data", .{
+            s.button("settings-keep-data", .{
                 .x = x + reset_size.x + 12,
                 .y = top + reset_buttons_y,
                 .width = keep_size.x,
                 .height = keep_size.y,
-            }, "Keep local data", false)) s.settings.confirm_reset = false;
+            }, "Keep local data", false);
         }
         endClip();
         s.settings_bar.draw(viewport, content_height, s.settings_scroll);
@@ -1477,17 +1952,14 @@ const App = struct {
         };
         if (!s.settings.required) {
             const cancel_size = s.buttonSize("Cancel");
-            if (s.button("settings-cancel", .{
+            s.button("settings-cancel", .{
                 .x = save.x - 12 - cancel_size.x,
                 .y = save.y,
                 .width = cancel_size.x,
                 .height = save.height,
-            }, "Cancel", false)) {
-                s.settings.close();
-                s.focus = .composer;
-            }
+            }, "Cancel", false);
         }
-        if (s.button("settings-save", save, "Save and connect", true)) s.saveSettings() catch s.settingsSaveError();
+        s.button("settings-save", save, "Save and connect", true);
     }
     fn toggleDetails(s: *App) void {
         if (s.settings.required) return;
@@ -1511,7 +1983,7 @@ const App = struct {
     };
     // A 40x36 tile centers a roughly 20-pixel icon; 1.5-pixel strokes keep the small glyphs
     // legible.
-    fn railItem(s: *App, r: graphics.Rect, label: []const u8, icon: RailIcon, selected: bool) bool {
+    fn railItem(s: *App, r: graphics.Rect, label: []const u8, icon: RailIcon, selected: bool) void {
         if (comptime client_options.automation) zrct.add(.{
             .id = @tagName(icon),
             .role = "tab",
@@ -1529,7 +2001,7 @@ const App = struct {
             .width = 40,
             .height = 36,
         };
-        if (selected or hot) shapes.drawRectangle(tile, 0.3, bg);
+        if (selected or hot) shapes.drawRectangle(tile, 5, bg);
         const color = if (selected) theme.colors.focus else if (hot) theme.colors.ink else theme.colors.muted;
         const x = tile.x + 10;
         const y = tile.y + 9;
@@ -1540,7 +2012,7 @@ const App = struct {
                     .y = y,
                     .width = 20,
                     .height = 15,
-                }, 0.3, 1.5, color);
+                }, 5, 1.5, color);
                 graphics.line(
                     .{ .x = x + 4, .y = y + 15 },
                     .{ .x = x + 4, .y = y + 19 },
@@ -1604,54 +2076,38 @@ const App = struct {
             theme.colors.rail,
         );
         if (hot) desktop.setCursor(.pointing_hand);
-        return hot and desktop.buttonPressed(.left);
+        if (!s.settings.required or icon == .settings) s.addControl(r, .{ .rail = icon });
     }
     // 62-pixel items pair icon tiles with captions; larger end gaps separate navigation from
     // settings.
     fn drawRail(s: *App, r: graphics.Rect) void {
         graphics.rectangle(r, theme.colors.rail);
-        if (s.railItem(.{
+        s.railItem(.{
             .x = r.x,
             .y = r.y + 16,
             .width = r.width,
             .height = 62,
-        }, "Messages", .messages, !s.show_hidden and !s.show_details and !s.settings.visible)) {
-            if (s.settings.required) return;
-            s.settings.close();
-            if (s.show_hidden) s.toggleHidden() catch s.info("Could not switch conversations.");
-            if (s.show_details) s.toggleDetails();
-            s.new_mode = false;
-            s.focus = .composer;
-        }
-        if (s.railItem(.{
+        }, "Messages", .messages, !s.show_hidden and !s.show_details and !s.settings.visible);
+        s.railItem(.{
             .x = r.x,
             .y = r.y + 86,
             .width = r.width,
             .height = 62,
-        }, "Hidden", .hidden, s.show_hidden and !s.show_details and !s.settings.visible)) {
-            if (s.settings.required) return;
-            s.settings.close();
-            if (!s.show_hidden) s.toggleHidden() catch s.info("Could not switch conversations.");
-            if (s.show_details) s.toggleDetails();
-            s.new_mode = false;
-            s.focus = .composer;
-        }
-        if (s.railItem(.{
+        }, "Hidden", .hidden, s.show_hidden and !s.show_details and !s.settings.visible);
+        s.railItem(.{
             .x = r.x,
             .y = r.y + r.height - 142,
             .width = r.width,
             .height = 62,
-        }, "Settings", .settings, s.settings.visible)) {
-            s.openSettings() catch s.info("Could not open Settings.");
-        }
+        }, "Settings", .settings, s.settings.visible);
         const footer = layout.footer(r);
         const details_size = s.text.lineSizeStyled("Details", rail_label_style, r.width);
-        if (s.railItem(.{
+        s.railItem(.{
             .x = r.x,
             .y = footer.y + (footer.height - details_size.y) / 2 - 43,
             .width = r.width,
             .height = 62,
-        }, "Details", .details, s.show_details and !s.settings.visible)) s.toggleDetails();
+        }, "Details", .details, s.show_details and !s.settings.visible);
     }
     // 36 pixels fits a 22-pixel avatar with vertical breathing room.
     const sidebar_row_height: f32 = 36;
@@ -1692,29 +2148,12 @@ const App = struct {
             if (s.matchesSidebar(chat)) count += 1;
         };
         const content_height = @as(f32, @floatFromInt(count)) * sidebar_row_height;
-        if (hover(viewport)) s.sidebar_scroll -= desktop.wheel() * 34 * Scrollbar.wheel_scale;
+        s.addControl(viewport, .{ .scroll = .{ .pane = .sidebar, .viewport = viewport, .content = content_height } });
         s.sidebar_scroll = std.math.clamp(
             s.sidebar_scroll,
             0,
             @max(0, content_height - clip.height),
         );
-        if (s.sidebar_bar.update(viewport, content_height, s.sidebar_scroll, scrollbarInput())) |offset| s.sidebar_scroll = @floatCast(offset);
-        // Resolve clicks before painting rows so a frame has one selection,
-        // even when a click replaces an earlier pending selection.
-        if (hover(clip) and desktop.buttonPressed(.left)) {
-            const offset = desktop.mouse().y - clip.y + s.sidebar_scroll;
-            if (@mod(offset, sidebar_row_height) < sidebar_row_height - 2) {
-                var index: usize = @intFromFloat(@floor(offset / sidebar_row_height));
-                if (s.view) |v| for (v.snapshot.chats) |chat| {
-                    if (!s.matchesSidebar(chat)) continue;
-                    if (index == 0) {
-                        s.select(chat.value.id) catch s.info("Could not open conversation.");
-                        break;
-                    }
-                    index -= 1;
-                };
-            }
-        }
         const selected_key = s.pending_key orelse s.key;
         beginClip(clip);
         var y = clip.y - s.sidebar_scroll;
@@ -1733,6 +2172,7 @@ const App = struct {
                 if (row.y + row.height < clip.y or row.y > clip.y + clip.height) continue;
                 const selected = u.eq(selected_key, chat.value.id) and !s.new_mode and !s.show_details;
                 const hot = hover(row) and hover(clip);
+                s.addControl(row, .{ .select = chat.value.id });
                 const read_only = !chat.value.sendable and Store.selfRecipient(chat.value) == null;
                 const emphasized = selected or chat.unread > 0;
                 const foreground = if (read_only)
@@ -1744,7 +2184,7 @@ const App = struct {
                     (if (read_only) theme.colors.incoming else theme.colors.avatar)
                 else
                     theme.colors.sidebar;
-                if (selected or hot) shapes.drawRectangle(row, 0.2, bg);
+                if (selected or hot) shapes.drawRectangle(row, 4, bg);
                 const name = display.label(ar, v.snapshot.directory.conversation(ar, chat.value));
                 if (comptime client_options.automation) zrct.add(.{
                     .id = std.fmt.allocPrint(ar, "conversation/{s}", .{chat.value.id}) catch "",
@@ -1806,7 +2246,7 @@ const App = struct {
                         .height = 19,
                     };
                     const badge_color = if (read_only) theme.colors.muted else theme.colors.accent;
-                    shapes.drawRectangle(badge, 0.5, badge_color);
+                    shapes.drawRectangle(badge, 5, badge_color);
                     // Cap the badge at 99+ so large unread counts fit its fixed width.
                     const label = if (chat.unread > 99) "99+" else std.fmt.allocPrint(
                         ar,
@@ -1895,12 +2335,12 @@ const App = struct {
         );
         y.* += height + 10;
     }
-    fn reconnectButton(s: *App, bounds: graphics.Rect, viewport: graphics.Rect) bool {
+    fn reconnectButton(s: *App, bounds: graphics.Rect, viewport: graphics.Rect) void {
         const hot = hover(bounds);
         const color = if (hot) theme.colors.ink else theme.colors.muted;
         if (hot) {
             desktop.setCursor(.pointing_hand);
-            shapes.drawRectangle(bounds, 0.25, theme.colors.incoming);
+            shapes.drawRectangle(bounds, 5, theme.colors.incoming);
             const size = s.buttonSize("Reconnect");
             const tooltip = graphics.Rect{
                 .x = @max(viewport.x, @min(bounds.x, viewport.x + viewport.width - size.x)),
@@ -1908,28 +2348,27 @@ const App = struct {
                 .width = size.x,
                 .height = size.y,
             };
-            shapes.drawRectangle(tooltip, 0.2, theme.colors.incoming);
+            shapes.drawRectangle(tooltip, 4, theme.colors.incoming);
             s.text.drawLineCentered("Reconnect", tooltip, button_font_size, color, theme.colors.incoming);
         }
         // Rasterize the symbol through Pango for smooth edges at the display scale.
         s.text.drawLineCentered("↻", bounds, 22, color, null);
-        return hot and desktop.buttonPressed(.left);
+        s.addControl(bounds, .{ .button = .reconnect });
     }
-    fn detailStatus(s: *App, r: graphics.Rect, y: *f32) bool {
+    fn detailStatus(s: *App, r: graphics.Rect, y: *f32) void {
         const status = if (s.view) |v| v.status else "Opening cache…";
         const value_width = @max(1, r.width - detail_label_width - 12 - 30);
         const text_width = s.text.lineSize(status, 14, value_width).x;
         const text_y = y.* + 2;
         s.text.draw("Status", r.x, y.* + 3, 12, detail_label_width - 8, theme.colors.muted, theme.colors.paper);
         s.text.draw(status, r.x + detail_label_width, text_y, 14, value_width, theme.colors.ink, theme.colors.paper);
-        const clicked = s.reconnectButton(.{
+        s.reconnectButton(.{
             .x = r.x + detail_label_width + text_width + 6,
             .y = text_y + s.text.inkCenterY(status, 14, value_width) - 12,
             .width = 24,
             .height = 24,
         }, r);
         y.* += @max(24, s.text.height(status, 14, value_width) + 4) + 10;
-        return clicked;
     }
     fn drawDetails(s: *App, r: graphics.Rect, ar: u.Allocator) void {
         s.drawPaneHeader("Details", "Connection, synchronization and this client", r);
@@ -1946,15 +2385,12 @@ const App = struct {
             0,
             @max(0, s.details_height - clip.height),
         );
-        if (s.details_bar.update(viewport, s.details_height, s.details_scroll, scrollbarInput())) |offset| s.details_scroll = @floatCast(offset);
+        s.addControl(viewport, .{ .scroll = .{ .pane = .details, .viewport = viewport, .content = s.details_height } });
         beginClip(clip);
         var y = clip.y - s.details_scroll;
-        const logs_hovered = s.drawLogs(clip, &y, ar);
+        _ = s.drawLogs(clip, &y, ar);
         s.detailSection("Connection", clip, &y);
-        if (s.detailStatus(clip, &y)) {
-            s.worker.push(.{ .kind = .reconnect }) catch {};
-            s.send_wait = false;
-        }
+        s.detailStatus(clip, &y);
         s.detailRow("Endpoint", s.worker.config.relay_url, clip, &y);
         s.detailRow("Transport", "Direct HTTPS / SSE · TLS 1.3 · mutual certificates", clip, &y);
         if (s.view) |v| {
@@ -2105,7 +2541,7 @@ const App = struct {
         );
         s.detailRow(
             "Rendering",
-            "SDL3 / OpenGL / Clay · Pango / Cairo · RGB subpixel (grayscale fallback)",
+            "SDL3 · Pango / Cairo · RGB subpixel (grayscale fallback)",
             clip,
             &y,
         );
@@ -2131,14 +2567,8 @@ const App = struct {
             clip,
             &y,
         );
-        if (desktop.buttonPressed(.left)) s.logs_focused = logs_hovered;
         s.details_height = y - clip.y + s.details_scroll + 12;
         endClip();
-        if (hover(viewport) and !logs_hovered) {
-            const wheel = desktop.wheel();
-            s.details_scroll -= wheel * 42 * Scrollbar.wheel_scale;
-            s.layout_pending = s.layout_pending or wheel != 0;
-        }
         const clamped = std.math.clamp(s.details_scroll, 0, @max(0, s.details_height - clip.height));
         s.layout_pending = s.layout_pending or clamped != s.details_scroll;
         s.details_scroll = clamped;
@@ -2168,31 +2598,24 @@ const App = struct {
         const clear_size = s.buttonSize("Clear");
         const clear_x = box.x + box.width - clear_size.x;
         const copy_x = clear_x - button_gap - copy_size.x;
-        if (s.button("logs-latest", .{
+        s.button("logs-latest", .{
             .x = copy_x - button_gap - latest_size.x,
             .y = header_y,
             .width = latest_size.x,
             .height = 28,
-        }, "Latest", false)) {
-            s.logs_follow = true;
-        }
-        if (s.button("logs-copy", .{
+        }, "Latest", false);
+        s.button("logs-copy", .{
             .x = copy_x,
             .y = header_y,
             .width = copy_size.x,
             .height = 28,
-        }, "Copy", false)) s.copyLogs();
-        if (s.button("logs-clear", .{
+        }, "Copy", false);
+        s.button("logs-clear", .{
             .x = clear_x,
             .y = header_y,
             .width = clear_size.x,
             .height = 28,
-        }, "Clear", false)) {
-            s.logs.clear();
-            s.logs_scroll = 0;
-            s.logs_follow = true;
-            s.logs_anchor = null;
-        }
+        }, "Clear", false);
         y.* += box.height + 26;
         const hot = hover(box);
         // Logs remain available while Details is closed, but hidden rows need
@@ -2232,16 +2655,7 @@ const App = struct {
         } else if (s.logs_anchor != null) {
             s.logs_scroll = anchor_offset orelse 0;
         }
-        if (hot and desktop.wheel() != 0) {
-            s.logs_scroll -= desktop.wheel() * 42 * Scrollbar.wheel_scale;
-            s.logs_follow = s.logs_scroll >= s.logs_limit;
-        }
-        var input = scrollbarInput();
-        input.pressed = input.pressed and hot;
-        if (s.logs_bar.update(viewport, total, s.logs_scroll, input)) |offset| {
-            s.logs_scroll = @floatCast(offset);
-            s.logs_follow = s.logs_scroll >= s.logs_limit;
-        }
+        s.addControl(box, .{ .scroll = .{ .pane = .logs, .viewport = viewport, .content = total } });
         s.logs_scroll = std.math.clamp(s.logs_scroll, 0, s.logs_limit);
         s.logs_anchor = null;
         beginClip(inner);
@@ -2350,12 +2764,12 @@ const App = struct {
         if (hidden) |is_hidden| {
             const label = if (is_hidden) "Unhide" else "Hide";
             const size = s.buttonSize(label);
-            if (s.button("conversation-visibility", .{
+            s.button("conversation-visibility", .{
                 .x = r.x + r.width - layout.action_right_padding - size.x,
                 .y = r.y + 16,
                 .width = size.x,
                 .height = 30,
-            }, label, false)) s.setSelectedHidden(!is_hidden) catch s.info("Could not save conversation visibility. Try again.");
+            }, label, false);
         }
         graphics.line(.{ .x = @trunc(r.x), .y = @trunc(r.y + r.height) }, .{ .x = @trunc(r.x + r.width), .y = @trunc(r.y + r.height) }, 1, theme.colors.line);
     }
@@ -2731,6 +3145,28 @@ const App = struct {
         }
         return range;
     }
+    fn layoutHistory(s: *App, r: graphics.Rect) ?[]HistoryRow {
+        const view = s.view orelse return null;
+        if (!u.eq(s.key, view.snapshot.selected)) return null;
+        const inner = historyTextWidth(r);
+        const rows = s.prepareHistory(inner) catch return null;
+        const reposition = s.history_needs_position;
+        if (reposition) {
+            s.positionHistory(rows, r.height);
+            // Restore resized content before input clamps against the scroll range.
+            if (s.history_needs_measurement) s.measureHistory(rows, inner, r.height);
+        } else if (!s.history_needs_measurement) {
+            s.scroll = if (s.following) s.historyLimit(r.height) else s.clampHistoryScroll(
+                s.scroll,
+                r.height,
+            );
+        }
+        if (!reposition and s.history_needs_measurement) {
+            s.measureHistory(rows, inner, r.height);
+        }
+        s.rememberHistoryAnchor(rows);
+        return rows;
+    }
     fn drawHistory(s: *App, r: graphics.Rect, ar: u.Allocator) void {
         if (comptime client_options.automation) zrct.add(.{
             .id = "history",
@@ -2744,50 +3180,11 @@ const App = struct {
         const v = s.view orelse return;
         if (!u.eq(s.key, v.snapshot.selected)) return;
         const inner = historyTextWidth(r);
-        const rows = s.prepareHistory(inner) catch return;
-        const reposition = s.history_needs_position;
-        if (reposition) {
-            s.positionHistory(rows, r.height);
-            // Restore resized content before input clamps against the scroll range.
-            if (s.history_needs_measurement) s.measureHistory(rows, inner, r.height);
-        } else if (!s.history_needs_measurement) {
-            s.scroll = if (s.following) s.historyLimit(r.height) else s.clampHistoryScroll(
-                s.scroll,
-                r.height,
-            );
-        }
-        var scrolled = false;
-        if (hover(r)) {
-            const wheel = desktop.wheel();
-            if (wheel != 0) {
-                s.scrollHistory(wheel, r.height);
-                scrolled = true;
-            }
-        }
-        if (s.history_bar.update(r, s.content_height, s.scroll, scrollbarInput())) |offset| {
-            s.scroll = offset;
-            s.following = s.scroll >= s.historyLimit(r.height) - 1;
-            scrolled = true;
-        }
-        if (!reposition and s.history_needs_measurement) {
-            if (scrolled) s.rememberHistoryAnchor(rows);
-            s.measureHistory(rows, inner, r.height);
-        }
-        // Deferred measurements may change the range during a drag. Keep the
-        // thumb under the pointer, then save this position as the reading anchor.
-        if (s.history_bar.dragging) {
-            var held = scrollbarInput();
-            held.pressed = false;
-            if (s.history_bar.update(r, s.content_height, s.scroll, held)) |offset| {
-                s.scroll = offset;
-                s.following = s.scroll >= s.historyLimit(r.height) - 1;
-            }
-        }
-        if (scrolled) s.worker.push(.{ .kind = .viewed, .text = if (s.following and desktop.focused()) "yes" else "no" }) catch {};
-        s.rememberHistoryAnchor(rows);
+        const rows = s.layoutHistory(r) orelse return;
         var clip = r;
         clip.width -= Scrollbar.gutter;
-        if (hover(clip) and desktop.buttonPressed(.left)) s.message_selection.clear();
+        s.addControl(clip, .history_background);
+        s.addControl(r, .{ .scroll = .{ .pane = .history, .viewport = r, .content = s.content_height } });
         beginClip(clip);
         var participants: []const []const u8 = &.{};
         var is_group = false;
@@ -2801,15 +3198,12 @@ const App = struct {
             v.snapshot.more and !std.mem.startsWith(u8, s.key, "new:"))
         {
             const y = r.y + 16 - @as(f32, @floatCast(s.scroll));
-            if (s.button("load-older", .{
+            s.button("load-older", .{
                 .x = r.x + r.width / 2 - 86,
                 .y = y,
                 .width = 172,
                 .height = 30,
-            }, "Load older messages", false)) {
-                s.worker.push(.{ .kind = .older }) catch {};
-                s.following = false;
-            }
+            }, "Load older messages", false);
         }
         if (empty_history) {
             if (v.loading_history) {
@@ -2993,23 +3387,12 @@ const App = struct {
                     std.fmt.allocPrint(ar, "message/{s}/recover", .{row.id}) catch ""
                 else
                     "";
-                if ((can_cancel or (needs_recovery and p.input.text.len > 0)) and s.button(recovery_id, .{
+                if (can_cancel or (needs_recovery and p.input.text.len > 0)) s.actionButton(recovery_id, .{
                     .x = x + inner - recovery_width,
                     .y = y - 3,
                     .width = recovery_width,
                     .height = 22,
-                }, if (can_cancel) "Cancel upload" else if (p.input.attachments.len > 0) "Copy caption" else "Copy to draft", false)) {
-                    if (can_cancel) {
-                        s.fileCommand(.cancel_upload, p.input.request_id, "") catch s.info("Could not cancel the upload. Check its status.");
-                    } else if (s.readOnlyChat()) s.info("This conversation is read-only.") else if (s.composer.text.items.len > 0 or s.draftFiles().len > 0 or v.preparing_attachments or s.filesPending()) s.info("Your composer has a draft. Save or clear it before copying another message.") else {
-                        s.composer.set(p.input.text) catch {};
-                        s.draft_dirty = true;
-                        s.draft_at = 0;
-                        s.focus = .composer;
-                        s.duplicate_risk = display.captionMayHaveSent(p.record, p.state);
-                        if (p.input.attachments.len > 0) s.info("Caption copied. Files remain with the earlier send; drop files into this draft to attach them.");
-                    }
-                }
+                }, if (can_cancel) "Cancel upload" else if (p.input.attachments.len > 0) "Copy caption" else "Copy to draft", false, .{ .recover = p.input.request_id });
             }
         }
         if (visible.loading) s.text.draw(
@@ -3023,16 +3406,12 @@ const App = struct {
         );
         endClip();
         s.history_bar.draw(r, s.content_height, s.scroll);
-        if (!s.following and s.new_messages) if (s.button("new-messages", .{
+        if (!s.following and s.new_messages) s.button("new-messages", .{
             .x = r.x + r.width / 2 - 74,
             .y = r.y + r.height - 42,
             .width = 148,
             .height = 32,
-        }, "New messages ↓", true)) {
-            s.following = true;
-            s.new_messages = false;
-            s.worker.push(.{ .kind = .viewed, .text = "yes" }) catch {};
-        };
+        }, "New messages ↓", true);
         if (message_hint) |hint| s.drawMessageHint(hint, clip);
     }
     fn drawPeerAvatar(
@@ -3072,7 +3451,7 @@ const App = struct {
         if (entry.availableTexture()) |texture| {
             ImageCache.draw(texture, r);
         } else {
-            const label = std.mem.sliceTo(&entry.reason, 0);
+            const label = entry.reason();
             s.text.draw(
                 display.prefix(if (label.len > 0) label else "Loading photo…", 256, 3),
                 r.x + 8,
@@ -3082,7 +3461,7 @@ const App = struct {
                 theme.colors.muted,
                 theme.colors.incoming,
             );
-            if (s.viewer_message.len == 0 and r.width >= 140 and r.height >= 70 and (entry.state == .failed or entry.state == .offline)) {
+            if (s.viewer_message.len == 0 and r.width >= 140 and r.height >= 70 and entry.canRetry()) {
                 const retry_rect = graphics.Rect{
                     .x = r.x + 8,
                     .y = r.y + r.height - 30,
@@ -3098,10 +3477,9 @@ const App = struct {
                     theme.colors.focus,
                     theme.colors.incoming,
                 );
-                if (s.richControl(retry_rect)) ImageCache.retry(entry);
+                s.richControl(retry_rect, .{ .retry = media.key(asset) });
             }
-            if (entry.refresh_owner) {
-                entry.refresh_owner = false;
+            if (entry.takeRefresh()) {
                 if (u.eq(chat, s.key)) s.worker.push(.{
                     .kind = .select,
                     .key = chat,
@@ -3174,15 +3552,12 @@ const App = struct {
             theme.colors.ink,
             theme.colors.paper,
         );
-        if (s.button("viewer-close", .{
+        s.button("viewer-close", .{
             .x = w - 100,
             .y = 12,
             .width = 80,
             .height = 32,
-        }, "Close", false)) {
-            s.closeViewer();
-            return;
-        }
+        }, "Close", false);
         const image_r = graphics.Rect{
             .x = 24,
             .y = 65,
@@ -3190,25 +3565,25 @@ const App = struct {
             .height = h - 130,
         };
         s.drawAsset(asset, image_r, m.conversation_id);
-        if (s.button("viewer-previous", .{
+        s.button("viewer-previous", .{
             .x = 24,
             .y = h - 52,
             .width = 120,
             .height = 32,
-        }, "← Previous", false)) s.moveViewer(-1);
-        if (s.button("viewer-next", .{
+        }, "← Previous", false);
+        s.button("viewer-next", .{
             .x = w - 144,
             .y = h - 52,
             .width = 120,
             .height = 32,
-        }, "Next →", false)) s.moveViewer(1);
-        if (s.media) |media| if (s.images.get(media, asset)) |entry| if (entry.texture == null and (entry.state == .failed or entry.state == .offline)) {
-            if (s.button("viewer-retry", .{
+        }, "Next →", false);
+        if (s.media) |media| if (s.images.get(media, asset)) |entry| if (entry.availableTexture() == null and entry.canRetry()) {
+            s.button("viewer-retry", .{
                 .x = w / 2 - 50,
                 .y = h - 52,
                 .width = 100,
                 .height = 32,
-            }, "Retry", false) or desktop.keyPressed(.r)) ImageCache.retry(entry);
+            }, "Retry", false);
         };
         if (asset.still_preview) s.text.drawLine(
             "Still preview",
@@ -3286,22 +3661,16 @@ const App = struct {
     fn chipWidth(s: *App, label: []const u8, width: f32) f32 {
         return @min(width, s.text.lineSize(label, 15, @max(1, width - 16)).x + 16);
     }
-    fn richControl(s: *App, r: graphics.Rect) bool {
+    fn richControl(s: *App, r: graphics.Rect, action: Action) void {
         const index = s.rich_count;
         s.rich_count += 1;
         const focused = s.focus == .none and s.rich_focus == index;
         if (focused) graphics.outline(r, 1, theme.colors.focus);
-        if (input_obscured or s.detail_body != null or s.viewer_message.len > 0 or s.rich_consumed) return false;
-        const hot = hover(r);
-        if (hot) desktop.setCursor(.pointing_hand);
-        const clicked = hot and desktop.buttonPressed(.left);
-        if (clicked or (focused and desktop.keyPressed(.enter))) {
-            s.focus = .none;
-            s.rich_focus = if (clicked) null else index;
-            s.rich_consumed = true;
-            return true;
-        }
-        return false;
+        if (input_obscured or s.detail_body != null or s.viewer_message.len > 0) return;
+        if (hover(r)) desktop.setCursor(.pointing_hand);
+        const before = s.controls.items.len;
+        s.addControl(r, action);
+        if (s.controls.items.len > before) s.controls.items[before].rich_index = index;
     }
     fn showContentDetail(s: *App, body: []const u8) void {
         const copy = a.dupeZ(u8, body) catch return;
@@ -3373,7 +3742,7 @@ const App = struct {
                             theme.colors.focus,
                             bg,
                         );
-                        if (s.richControl(link_r)) _ = s.open_link(link);
+                        s.richControl(link_r, .{ .link = link });
                     }
                 },
                 .attachment => |item| {
@@ -3393,13 +3762,13 @@ const App = struct {
                             .width = size.x,
                             .height = size.y,
                         };
-                        shapes.drawRectangle(image_r, 0.06, theme.colors.incoming);
+                        shapes.drawRectangle(image_r, 6, theme.colors.incoming);
+                        s.richControl(image_r, .{ .viewer = .{ .message = m.id, .attachment = item.id } });
                         s.drawAsset(
                             inlineAsset(item, size, s.text.scale).?,
                             image_r,
                             m.conversation_id,
                         );
-                        if (s.richControl(image_r)) s.openViewer(m, item.id);
                         s.text.drawLine(
                             if (asset.still_preview) "Still preview" else display.label(ar, item.name),
                             r.x,
@@ -3431,7 +3800,7 @@ const App = struct {
                     }
                 },
                 .card => |card| {
-                    shapes.drawRectangle(r, 0.04, theme.colors.incoming);
+                    shapes.drawRectangle(r, 6, theme.colors.incoming);
                     const link = link_targets.target(ar, card) catch null;
                     var top = r.y + 10;
                     if (card.image) |asset| {
@@ -3496,13 +3865,9 @@ const App = struct {
                         );
                         endClip();
                     }
-                    if (s.richControl(r)) {
-                        if (link) |target| {
-                            _ = s.open_link(target);
-                        } else s.showContentDetail(
-                            card.original_url orelse card.metadata_url orelse "Stored link metadata is unavailable",
-                        );
-                    }
+                    s.richControl(r, if (link) |target| .{ .link = target } else .{
+                        .detail = card.original_url orelse card.metadata_url orelse "Stored link metadata is unavailable",
+                    });
                 },
                 .reactions => |chips| {
                     var x = r.x;
@@ -3524,19 +3889,18 @@ const App = struct {
                             .width = w,
                             .height = 28,
                         };
-                        shapes.drawRectangle(chip_r, 0.6, theme.colors.incoming);
+                        shapes.drawRectangle(chip_r, 8, theme.colors.incoming);
                         s.text.drawLineCentered(label, .{
                             .x = x + 8,
                             .y = top,
                             .width = @max(1, w - 16),
                             .height = chip_r.height,
                         }, 15, theme.colors.ink, theme.colors.incoming);
-                        if (s.richControl(chip_r)) {
-                            s.showContentDetail(s.reactionDetail(ar, chip));
-                            s.detail_reaction_message = a.dupe(u8, m.id) catch "";
-                            s.detail_reaction_part = a.dupe(u8, block.part_id orelse "") catch "";
-                            s.detail_reaction_label = a.dupe(u8, chip.label) catch "";
-                        }
+                        s.richControl(chip_r, .{ .reaction = .{
+                            .message = m.id,
+                            .part = block.part_id orelse "",
+                            .label = chip.label,
+                        } });
                         x += w + 6;
                     }
                 },
@@ -3551,12 +3915,11 @@ const App = struct {
                         theme.colors.focus,
                         bg,
                     );
-                    if (s.richControl(r)) s.worker.push(.{
-                        .kind = .enrichment,
-                        .key = m.id,
-                        .recipient = m.revision,
-                        .text = @tagName(section),
-                    }) catch {};
+                    s.richControl(r, .{ .enrichment = .{
+                        .message = m.id,
+                        .revision = m.revision,
+                        .section = @tagName(section),
+                    } });
                 },
             }
         }
@@ -3628,16 +3991,13 @@ const App = struct {
             .width = width * 0.8,
             .height = height * 0.8,
         };
-        shapes.drawRectangle(r, 0.03, theme.colors.paper);
-        if (s.button("content-close", .{
+        shapes.drawRectangle(r, 8, theme.colors.paper);
+        s.button("content-close", .{
             .x = r.x + r.width - 90,
             .y = r.y + 10,
             .width = 80,
             .height = 30,
-        }, "Close", false)) {
-            s.closeContentDetail();
-            return;
-        }
+        }, "Close", false);
         const viewport = graphics.Rect{
             .x = r.x + 20,
             .y = r.y + 52,
@@ -3645,7 +4005,7 @@ const App = struct {
             .height = r.height - 72,
         };
         const content_height = s.text.height(body, 16, viewport.width);
-        if (hover(viewport)) s.content_detail_scroll -= desktop.wheel() * 40;
+        s.addControl(viewport, .{ .scroll = .{ .pane = .content, .viewport = viewport, .content = content_height } });
         s.content_detail_scroll = std.math.clamp(
             s.content_detail_scroll,
             0,
@@ -3784,8 +4144,8 @@ const App = struct {
             .width = width,
             .height = height,
         };
-        shapes.drawRectangle(bounds, 0.2, theme.colors.incoming);
-        shapes.drawRectangleLines(bounds, 0.2, 1, theme.colors.line);
+        shapes.drawRectangle(bounds, 4, theme.colors.incoming);
+        shapes.drawRectangleLines(bounds, 4, 1, theme.colors.line);
         beginClip(bounds);
         s.text.draw(label, bounds.x + 10, bounds.y + 6, 12, size.x, theme.colors.ink, theme.colors.incoming);
         endClip();
@@ -3807,37 +4167,16 @@ const App = struct {
         const width = bounds.width;
         const hot = hover(bounds);
         const selection = &s.message_selection;
-        const position = graphics.Point{
-            .x = desktop.mouse().x - x,
-            .y = desktop.mouse().y - y,
-        };
         if (hot) desktop.setCursor(.ibeam);
-        if (hot and desktop.buttonPressed(.left)) {
-            const at = s.text.hit(row.text, width, position.x, position.y);
-            selection.begin(row.id, row.pending, row.text, full, at) catch {
-                s.info("Could not select message text.");
-                return;
-            };
-            s.focus = .none;
-            s.dragging = false;
-            if (s.doubleTextClick(.{ .message = .{
-                .id = std.hash.Wyhash.hash(0, row.id),
-                .text = std.hash.Wyhash.hash(0, row.text),
-                .pending = row.pending,
-            } })) s.word_drag = s.text.wordHit(row.text, width, position.x, position.y);
-            s.info("Double-click a word or drag to select · Ctrl+C to copy · Ctrl+A for the whole message");
-        }
+        s.addControl(bounds, .{ .message = .{
+            .id = row.id,
+            .pending = row.pending,
+            .text = row.text,
+            .full = full,
+            .origin = .{ .x = x, .y = y },
+            .width = width,
+        } });
         const active = s.focus == .none and selection.matches(row.id, row.pending, row.text);
-        if (active and selection.dragging and (desktop.buttonDown(.left) or desktop.buttonReleased(.left))) {
-            s.dragTextSelection(
-                row.text,
-                width,
-                position,
-                &selection.anchor,
-                &selection.caret,
-            );
-            selection.whole = false;
-        }
         s.text.drawSelection(
             row.text,
             x,
@@ -3870,12 +4209,12 @@ const App = struct {
                 theme.colors.muted,
                 theme.colors.paper,
             );
-            if (preparing and s.button("attachments-cancel", .{
+            if (preparing) s.button("attachments-cancel", .{
                 .x = bounds.x + bounds.width - 78,
                 .y = top,
                 .width = 78,
                 .height = 22,
-            }, "Cancel", false)) s.fileCommand(.cancel_preparation, s.key, "") catch s.info("Could not cancel file preparation.");
+            }, "Cancel", false);
             top += 28;
         }
         const files = s.draftFiles();
@@ -3891,18 +4230,18 @@ const App = struct {
             theme.colors.paper,
         );
         if (files.len > 1) {
-            if (s.button("attachment-previous", .{
+            s.button("attachment-previous", .{
                 .x = bounds.x + bounds.width - 66,
                 .y = top,
                 .width = 30,
                 .height = 22,
-            }, "←", false)) s.attachment_index = (s.attachment_index + files.len - 1) % files.len;
-            if (s.button("attachment-next", .{
+            }, "←", false);
+            s.button("attachment-next", .{
                 .x = bounds.x + bounds.width - 30,
                 .y = top,
                 .width = 30,
                 .height = 22,
-            }, "→", false)) s.attachment_index = (s.attachment_index + 1) % files.len;
+            }, "→", false);
         }
         const file = files[s.attachment_index];
         if (comptime client_options.automation) zrct.add(.{
@@ -3921,12 +4260,12 @@ const App = struct {
             .height = 48,
         };
         s.drawLocalFile(file, card, "Saved in draft", theme.colors.paper, ar);
-        if (!s.send_wait and s.button("attachment-remove", .{
+        if (!s.send_wait) s.button("attachment-remove", .{
             .x = bounds.x + bounds.width - 76,
             .y = card.y + 10,
             .width = 76,
             .height = 28,
-        }, "Remove", false)) s.fileCommand(.remove_attachment, s.key, file.id) catch s.info("Could not remove the attachment.");
+        }, "Remove", false);
     }
     // A 48-pixel thumbnail fits two text rows; the 58-pixel text inset leaves a ten-pixel gap.
     fn drawLocalFile(
@@ -3943,7 +4282,7 @@ const App = struct {
             .width = 48,
             .height = 48,
         };
-        shapes.drawRectangle(thumb, 0.12, theme.colors.incoming);
+        shapes.drawRectangle(thumb, 6, theme.colors.incoming);
         const preview = preview: {
             if (std.mem.startsWith(u8, file.mime_type, "image/")) if (s.media) |media| {
                 if (s.images.getLocal(media, file)) |entry| break :preview entry.availableTexture();
@@ -4099,7 +4438,7 @@ const App = struct {
             theme.colors.drop_surface
         else
             theme.colors.surface;
-        shapes.drawRectangle(box, 0.12, background);
+        shapes.drawRectangle(box, 6, background);
         const editor = composerEditor(box);
         if (comptime client_options.automation) zrct.add(.{
             .id = "composer",
@@ -4131,11 +4470,11 @@ const App = struct {
             );
         }
         if (drop_hovered) {
-            shapes.drawRectangleDots(box, 0.12, 2, theme.colors.drop);
+            shapes.drawRectangleDots(box, 6, 2, theme.colors.drop);
         } else {
             shapes.drawRectangleLines(
                 box,
-                0.12,
+                6,
                 1,
                 if (!read_only and s.focus == .composer) theme.colors.focus else theme.colors.line,
             );
@@ -4156,7 +4495,7 @@ const App = struct {
             (if (hot) theme.colors.accent_hover else theme.colors.accent)
         else
             theme.colors.incoming;
-        shapes.drawRectangle(send_button, 0.25, bg);
+        shapes.drawRectangle(send_button, 5, bg);
         const label = if (s.send_wait) "Saving…" else "Send ↑";
         const size = s.text.lineSize(label, 13, send_button.width);
         s.text.drawLine(
@@ -4168,10 +4507,8 @@ const App = struct {
             if (enabled) theme.colors.on_accent else theme.colors.muted,
             bg,
         );
-        if (hot and enabled) {
-            desktop.setCursor(.pointing_hand);
-            if (desktop.buttonPressed(.left)) s.send() catch s.info("Could not queue message. Your draft is retained.");
-        }
+        if (hot and enabled) desktop.setCursor(.pointing_hand);
+        if (enabled) s.addControl(send_button, .{ .button = .send });
     }
     // 11-pixel side insets separate text from the border; multiline inputs use ten-pixel vertical
     // insets.
@@ -4185,7 +4522,7 @@ const App = struct {
         background: graphics.Color,
     ) void {
         var buffer: [t.max_text]u8 = undefined;
-        var visible = e.display(&buffer);
+        const visible = e.display(&buffer);
         if (comptime client_options.automation) if (focus != .composer and focus != .recipient) zrct.add(.{
             .id = @tagName(focus),
             .role = "textbox",
@@ -4196,10 +4533,10 @@ const App = struct {
             .obscured = input_obscured,
         });
         if (!multiline) {
-            shapes.drawRectangle(r, 0.2, background);
+            shapes.drawRectangle(r, 4, background);
             shapes.drawRectangleLines(
                 r,
-                0.2,
+                4,
                 1,
                 if (s.focus == focus) theme.colors.focus else theme.colors.line,
             );
@@ -4219,7 +4556,7 @@ const App = struct {
         var inner = viewport;
         if (multiline) inner.width -= Scrollbar.gutter;
         const width = inner.width;
-        var caret = s.text.caret(visible.text, width, visible.caret);
+        const caret = s.text.caret(visible.text, width, visible.caret);
         const content_height = if (multiline) @max(
             s.text.height(visible.text, 16, width),
             caret.y + caret.height,
@@ -4231,64 +4568,23 @@ const App = struct {
                 caret,
                 inner.height,
             );
-            if (hover(r)) s.composer_scroll -= desktop.wheel() * 46 * Scrollbar.wheel_scale;
+            s.addControl(r, .{ .scroll = .{ .pane = .composer, .viewport = viewport, .content = content_height } });
             s.composer_scroll = std.math.clamp(
                 s.composer_scroll,
                 0,
                 @max(0, content_height - inner.height),
             );
-            if (s.composer_bar.update(viewport, content_height, s.composer_scroll, scrollbarInput())) |offset| {
-                s.composer_scroll = @floatCast(offset);
-                s.dragging = false;
-            }
         }
         const settings_field = for (settings_focus) |item| {
             if (focus == item) break true;
         } else false;
-        var offset = if (multiline) s.composer_scroll else if (settings_field) @max(0, caret.y + caret.height - inner.height) else 0;
-        const previous_caret = e.caret;
-        const position = graphics.Point{
-            .x = desktop.mouse().x - inner.x,
-            .y = desktop.mouse().y - inner.y + offset,
-        };
-        if (hover(if (multiline) inner else r) and desktop.buttonPressed(.left)) {
-            s.message_selection.clear();
-            s.focus = focus;
-            s.syncTextInput();
-            const at = s.text.hit(e.text.items, width, position.x, position.y);
-            e.caret = at;
-            if (!desktop.keyDown(.left_shift)) e.anchor = at;
-            s.dragging = true;
-            if (s.doubleTextClick(.{ .field = .{ .focus = focus, .revision = e.revision } }))
-                s.word_drag = s.text.wordHit(e.text.items, width, position.x, position.y);
-        }
-        if (s.dragging and e.preedit.items.len == 0 and s.focus == focus and
-            (desktop.buttonDown(.left) or desktop.buttonReleased(.left))) s.dragTextSelection(
-            e.text.items,
-            width,
-            position,
-            &e.anchor,
-            &e.caret,
-        );
-        if (desktop.buttonReleased(.left)) s.dragging = false;
-        if (!input_obscured and !desktop.composing() and s.focus == focus and (pressed(.up) or pressed(.down))) {
-            const at = s.text.hit(
-                e.text.items,
-                width,
-                caret.x,
-                caret.y + (if (pressed(.up)) -1 else caret.height + 1),
-            );
-            e.caret = at;
-            if (!desktop.keyDown(.left_shift)) e.anchor = at;
-        }
-        if (e.caret != previous_caret) {
-            visible = e.display(&buffer);
-            caret = s.text.caret(visible.text, width, visible.caret);
-            if (multiline) {
-                s.revealComposerCaret(caret, inner.height);
-                offset = s.composer_scroll;
-            } else if (settings_field) offset = @max(0, caret.y + caret.height - inner.height);
-        }
+        const offset = if (multiline) s.composer_scroll else if (settings_field) @max(0, caret.y + caret.height - inner.height) else 0;
+        s.addControl(if (multiline) inner else r, .{ .editor = .{
+            .focus = focus,
+            .origin = .{ .x = inner.x, .y = inner.y },
+            .width = width,
+            .offset = offset,
+        } });
         if (multiline) {
             s.composer_revision = e.revision + e.preedit_revision;
             s.composer_caret = e.caret;
@@ -4335,7 +4631,6 @@ const App = struct {
             .height = caret.height,
         };
         if (!input_obscured and s.focusedEditor() == e) {
-            s.syncTextInput();
             var area = caret_box;
             area.x = std.math.clamp(area.x, inner.x, inner.x + inner.width - area.width);
             area.y = std.math.clamp(area.y, inner.y, inner.y + inner.height - @min(area.height, inner.height));
@@ -4362,7 +4657,17 @@ const App = struct {
         const text_size = s.text.lineSize(label, button_font_size, button_label_width);
         return .{ .x = text_size.x + 2 * button_padding.x, .y = text_size.y + 2 * button_padding.y };
     }
-    fn button(s: *App, id: []const u8, bounds: graphics.Rect, label: []const u8, primary: bool) bool {
+    fn button(s: *App, comptime id: []const u8, bounds: graphics.Rect, label: []const u8, primary: bool) void {
+        const action = comptime action: {
+            var name: [id.len]u8 = id[0..id.len].*;
+            for (&name) |*ch| if (ch.* == '-') {
+                ch.* = '_';
+            };
+            break :action std.meta.stringToEnum(ButtonAction, &name).?;
+        };
+        s.actionButton(id, bounds, label, primary, .{ .button = action });
+    }
+    fn actionButton(s: *App, id: []const u8, bounds: graphics.Rect, label: []const u8, primary: bool, action: Action) void {
         const size = s.buttonSize(label);
         const r = graphics.Rect{
             .x = bounds.x + (bounds.width - size.x) / 2,
@@ -4381,7 +4686,7 @@ const App = struct {
         const hot = hover(r);
         if (hot) desktop.setCursor(.pointing_hand);
         const background = if (primary) (if (hot) theme.colors.accent_hover else theme.colors.accent) else if (hot) theme.colors.line else theme.colors.incoming;
-        shapes.drawRectangle(r, 0.22, background);
+        shapes.drawRectangle(r, 4, background);
         s.text.drawLine(
             label,
             r.x + button_padding.x,
@@ -4391,16 +4696,9 @@ const App = struct {
             if (primary) theme.colors.on_accent else theme.colors.muted,
             background,
         );
-        return hot and desktop.buttonPressed(.left);
+        s.addControl(r, action);
     }
 };
-fn scrollbarInput() Scrollbar.Input {
-    return .{
-        .mouse = desktop.mouse(),
-        .pressed = !input_obscured and desktop.buttonPressed(.left),
-        .down = !input_obscured and desktop.buttonDown(.left),
-    };
-}
 fn yesNo(value: bool) []const u8 {
     return if (value) "yes" else "no";
 }
@@ -4410,9 +4708,6 @@ fn elapsed(ar: u.Allocator, when: i64) []const u8 {
     if (seconds < 60) return std.fmt.allocPrint(ar, "{d}s ago", .{seconds}) catch "";
     if (seconds < 3600) return std.fmt.allocPrint(ar, "{d}m ago", .{@divTrunc(seconds, 60)}) catch "";
     return std.fmt.allocPrint(ar, "{d}h ago", .{@divTrunc(seconds, 3600)}) catch "";
-}
-fn pressed(key: desktop.Key) bool {
-    return desktop.keyPressed(key) or desktop.keyRepeated(key);
 }
 var input_obscured = false;
 fn hover(r: graphics.Rect) bool {
@@ -4440,12 +4735,7 @@ fn beginClip(requested: graphics.Rect) void {
     applyClip(r);
 }
 fn applyClip(r: graphics.Rect) void {
-    graphics.clip(
-        @intFromFloat(r.x),
-        @intFromFloat(r.y),
-        @intFromFloat(@max(0, r.width)),
-        @intFromFloat(@max(0, r.height)),
-    );
+    graphics.clip(r);
 }
 fn endClip() void {
     std.debug.assert(clip_depth > 0);
@@ -4689,15 +4979,8 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     try std.testing.expectEqual(@as(c_int, 0), @intFromBool(desktop.wait(0)));
     desktop.poll();
     // Test frames advance explicitly; a display-rate cap only adds idle time.
-    desktop.setFrameLimit(0);
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    _ = clay.initialize(
-        .init(try arena.allocator().alloc(u8, clay.minMemorySize())),
-        // Initialize Clay to the same logical dimensions as the window.
-        .{ .w = 1120, .h = 780 },
-        .{ .error_handler_function = clayError },
-    );
     var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/zimbr-ui-test" } };
     defer worker.shutdown();
     var chats: [32]Store.Chat = undefined;
@@ -4739,10 +5022,11 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
         .worker = &worker,
         .view = view,
         .key = try a.dupe(u8, "fixture-0"),
+        .loaded_key = try a.dupe(u8, "fixture-0"),
         .focus = .none,
     };
     defer app.deinit();
-    for (0..4) |_| app.draw(WindowMetrics.current().scale);
+    for (0..4) |_| testDraw(&app, WindowMetrics.current().scale);
     const before = try captureTestFrame(&app, WindowMetrics.current().scale);
     defer graphics.destroyImage(before);
     const scale = WindowMetrics.current().scale;
@@ -4762,8 +5046,8 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
         while (y < bottom) : (y += 1) {
             var x: i32 = 0;
             while (x < right) : (x += 1) try std.testing.expectEqual(
-                before.color(x, y),
-                after.color(x, y),
+                graphics.imageColor(before, x, y),
+                graphics.imageColor(after, x, y),
             );
         }
         try std.testing.expectEqual(@as(usize, 0), clip_depth);
@@ -4772,31 +5056,31 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     defer graphics.destroyImage(dark);
     try std.testing.expectEqual(
         theme.colors.rail,
-        dark.color(@intFromFloat(5 * scale), @intFromFloat(50 * scale)),
+        graphics.imageColor(dark, @intFromFloat(5 * scale), @intFromFloat(50 * scale)),
     );
     try std.testing.expectEqual(
         theme.colors.sidebar,
-        dark.color(@intFromFloat(70 * scale), @intFromFloat(50 * scale)),
+        graphics.imageColor(dark, @intFromFloat(70 * scale), @intFromFloat(50 * scale)),
     );
     try std.testing.expectEqual(
         theme.colors.paper,
-        dark.color(@intFromFloat(320 * scale), @intFromFloat(50 * scale)),
+        graphics.imageColor(dark, @intFromFloat(320 * scale), @intFromFloat(50 * scale)),
     );
     app.toggleDetails();
-    app.draw(scale);
+    testDraw(&app, scale);
     try std.testing.expect(app.details_height > 0);
     app.details_scroll = 100000;
-    app.draw(scale);
+    testDraw(&app, scale);
     try std.testing.expect(app.details_scroll < 100000);
     try std.testing.expectEqual(@as(usize, 0), clip_depth);
     app.toggleDetails();
-    app.draw(scale);
+    testDraw(&app, scale);
     try std.testing.expect(!app.show_details);
     // A narrow, short window exercises wrapping and the diagnostics scroll path.
     desktop.setSize(780, 560);
-    for (0..4) |_| app.draw(WindowMetrics.current().scale);
+    for (0..4) |_| testDraw(&app, WindowMetrics.current().scale);
     app.toggleDetails();
-    app.draw(WindowMetrics.current().scale);
+    testDraw(&app, WindowMetrics.current().scale);
     try std.testing.expectEqual(@as(usize, 0), clip_depth);
 
     // Exercise every scrollbar with overflowing content, including a draft
@@ -4822,7 +5106,7 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     view.snapshot.messages = &group_messages;
     view.generation += 1;
     try app.composer.set("A longer draft line\n" ** 20);
-    app.draw(WindowMetrics.current().scale);
+    testDraw(&app, WindowMetrics.current().scale);
     try std.testing.expect(app.composer_scroll > 0);
     app.composer_scroll = 0;
     {
@@ -4860,7 +5144,8 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
             const y = areas.history.y + @as(f32, @floatCast(row.top - app.scroll)) + 17;
             if (y < areas.history.y or y >= areas.history.y + areas.history.height) continue;
             const style = theme.participant(m.sender, chats[0].value.participants);
-            const pixel = shot.color(
+            const pixel = graphics.imageColor(
+                shot,
                 @intFromFloat((areas.history.x + 24) * WindowMetrics.current().scale),
                 @intFromFloat(y * WindowMetrics.current().scale),
             );
@@ -4869,7 +5154,7 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
         }
         try std.testing.expect(checked >= 2);
         app.toggleDetails();
-        app.draw(WindowMetrics.current().scale);
+        testDraw(&app, WindowMetrics.current().scale);
         const details = try captureTestFrame(&app, WindowMetrics.current().scale);
         defer graphics.destroyImage(details);
         try expectScrollbarPixel(details, .{
@@ -4881,15 +5166,15 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
         app.toggleDetails();
     }
     app.composer.caret = 0;
-    app.draw(WindowMetrics.current().scale);
+    testDraw(&app, WindowMetrics.current().scale);
     app.composer.caret = app.composer.text.items.len;
-    app.draw(WindowMetrics.current().scale);
+    testDraw(&app, WindowMetrics.current().scale);
     try std.testing.expect(app.composer_scroll > 0);
     try app.composer.set("");
 
     // Drive the actual mouse path: drag backwards within a message, release,
     // and verify the selected range stays highlighted and ready to copy.
-    app.draw(scale);
+    testDraw(&app, scale);
     const selection_before = try captureTestFrame(&app, scale);
     defer graphics.destroyImage(selection_before);
     const areas = layout.frame(
@@ -4905,7 +5190,7 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     const end = app.text.caret(row.text, text_width, "A message".len);
     testInput(.{ .motion = .{ .x = @intFromFloat(text_x + end.x), .y = @intFromFloat(text_y + end.y + end.height / 2) } });
     testInput(.{ .button_down = .left });
-    app.draw(scale);
+    testDraw(&app, scale);
     testInput(.{ .motion = .{ .x = @intFromFloat(text_x + start.x), .y = @intFromFloat(text_y + start.y + start.height / 2) } });
     const selection_after = try captureTestFrame(&app, scale);
     defer graphics.destroyImage(selection_after);
@@ -4916,14 +5201,14 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
         var px: i32 = @intFromFloat((text_x + start.x) * scale);
         while (px < @as(i32, @intFromFloat((text_x + end.x) * scale))) : (px += 1) {
             if (!std.meta.eql(
-                selection_before.color(px, py),
-                selection_after.color(px, py),
+                graphics.imageColor(selection_before, px, py),
+                graphics.imageColor(selection_after, px, py),
             )) highlighted += 1;
         }
     }
     try std.testing.expect(highlighted > 100);
     testInput(.{ .button_up = .left });
-    app.draw(scale);
+    testDraw(&app, scale);
     try std.testing.expect(!app.message_selection.dragging);
     try std.testing.expectEqualStrings("message", app.message_selection.selected());
 
@@ -4934,7 +5219,7 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     clickTestFrame(&app, word_x, word_y);
     clickTestFrame(&app, word_x, word_y);
     try std.testing.expectEqualStrings("message", app.message_selection.selected());
-    app.draw(scale);
+    testDraw(&app, scale);
     try std.testing.expectEqualStrings("message", app.message_selection.selected());
 
     clickTestFrame(&app, text_x + 1, text_y + 1);
@@ -4962,7 +5247,7 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     }};
     view.snapshot.pending = &pending;
     view.generation += 1;
-    app.draw(scale);
+    testDraw(&app, scale);
     const pending_row = app.history_rows[app.history_rows.len - 2];
     try std.testing.expect(pending_row.pending);
     try std.testing.expectEqualStrings(
@@ -4979,7 +5264,7 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     try std.testing.expect(app.duplicate_risk);
 
     try app.composer.set("A follow-up, don’t stop.");
-    app.draw(scale);
+    testDraw(&app, scale);
     const composer_box = App.composerEditor(App.composerBox(areas.composer));
     const composer_width = composer_box.width - 22 - Scrollbar.gutter;
     const hyphen = app.text.caret(app.composer.text.items, composer_width, "A follow".len);
@@ -4993,13 +5278,13 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     try std.testing.expectEqualStrings("follow-up", app.composer.selected());
     const contraction = app.text.caret(app.composer.text.items, composer_width, "A follow-up, do".len);
     testInput(.{ .motion = .{ .x = @intFromFloat(composer_x + contraction.x + 1), .y = @intFromFloat(hyphen_y) } });
-    app.draw(scale);
+    testDraw(&app, scale);
     try std.testing.expectEqualStrings("follow-up, don’t", app.composer.selected());
     testInput(.{ .motion = .{ .x = @intFromFloat(composer_x + 1), .y = @intFromFloat(hyphen_y) } });
-    app.draw(scale);
+    testDraw(&app, scale);
     try std.testing.expectEqualStrings("A follow-up", app.composer.selected());
     testInput(.{ .button_up = .left });
-    app.draw(scale);
+    testDraw(&app, scale);
     try std.testing.expectEqualStrings("A follow-up", app.composer.selected());
     try app.composer.insert("One");
     try std.testing.expectEqualStrings("One, don’t stop.", app.composer.text.items);
@@ -5021,18 +5306,20 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     }) |state| {
         pending[0].state = state;
         view.generation += 1;
-        app.draw(scale);
+        testDraw(&app, scale);
         const recent_row = app.history_rows[app.history_rows.len - 1];
         try std.testing.expect(recent_row.pending);
         const copy_x = areas.history.x + 66 + App.historyTextWidth(areas.history) - 59;
         const copy_y = areas.history.y + @as(f32, @floatCast(recent_row.top - app.scroll)) + 8;
         const recent = try captureTestFrame(&app, scale);
         defer graphics.destroyImage(recent);
-        try std.testing.expectEqual(theme.colors.selected, recent.color(
+        try std.testing.expectEqual(theme.colors.selected, graphics.imageColor(
+            recent,
             @intFromFloat((areas.history.x + 37) * scale),
             @intFromFloat((areas.history.y + @as(f32, @floatCast(recent_row.top - app.scroll)) + 4) * scale),
         ));
-        try std.testing.expectEqual(theme.colors.paper, recent.color(
+        try std.testing.expectEqual(theme.colors.paper, graphics.imageColor(
+            recent,
             @intFromFloat(copy_x * scale),
             @intFromFloat(copy_y * scale),
         ));
@@ -5041,11 +5328,12 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     }
     pending[0].state = "failed";
     view.generation += 1;
-    app.draw(scale);
+    testDraw(&app, scale);
     const failed_row = app.history_rows[app.history_rows.len - 1];
     const failed = try captureTestFrame(&app, scale);
     defer graphics.destroyImage(failed);
-    try std.testing.expectEqual(theme.colors.incoming, failed.color(
+    try std.testing.expectEqual(theme.colors.incoming, graphics.imageColor(
+        failed,
         @intFromFloat((areas.history.x + 37) * scale),
         @intFromFloat((areas.history.y + @as(f32, @floatCast(failed_row.top - app.scroll)) + 4) * scale),
     ));
@@ -5074,7 +5362,7 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     app.send_wait = true;
     // Reconnect now scrolls with the status row instead of staying in the header.
     app.details_scroll = 0;
-    app.draw(scale);
+    testDraw(&app, scale);
     clickTestFrame(
         &app,
         areas.sidebar.x + 32 + 122 + app.text.lineSize(view.status, 14, 400).x + 6 + 12,
@@ -5117,7 +5405,7 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     defer graphics.destroyImage(disabled);
     try std.testing.expectEqual(
         theme.colors.incoming,
-        disabled.color(@intFromFloat((disabled_box.x + 5) * scale), @intFromFloat((disabled_box.y + disabled_box.height / 2) * scale)),
+        graphics.imageColor(disabled, @intFromFloat((disabled_box.x + 5) * scale), @intFromFloat((disabled_box.y + disabled_box.height / 2) * scale)),
     );
     clickTestFrame(
         &app,
@@ -5143,6 +5431,8 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     chats[0].value.sendable = true;
     view.online = false;
     view.reply_existing = false;
+    // Publish the changed fixture capabilities before clicking its retained controls.
+    testDraw(&app, scale);
     clickTestFrame(&app, disabled_box.x + 40, disabled_box.y + 16);
     try std.testing.expect(app.focus == .composer);
     app.composer.caret = app.composer.text.items.len;
@@ -5186,23 +5476,23 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     };
     view.snapshot.messages = &messages;
     view.generation += 1;
-    app.draw(WindowMetrics.current().scale);
+    testDraw(&app, WindowMetrics.current().scale);
     try std.testing.expect(app.layout_pending);
     try std.testing.expect(app.heights.count() <= App.max_height_work);
     const newest = messageText(arena.allocator(), messages[messages.len - 1]);
     try std.testing.expect(app.heights.contains(std.hash.Wyhash.hash(0, newest)));
     var frames: usize = 0;
-    while (app.layout_pending and frames < 200) : (frames += 1) app.draw(WindowMetrics.current().scale);
+    while (app.layout_pending and frames < 200) : (frames += 1) testDraw(&app, WindowMetrics.current().scale);
     try std.testing.expect(!app.layout_pending);
     try std.testing.expectEqual(messages.len, app.heights.count());
     // A settled frame retains geometry while viewport changes still keep the
     // latest message at the bottom. New content invalidates that geometry.
     try std.testing.expect(!app.history_needs_position and !app.history_needs_measurement);
     const settled_rows = app.history_rows.ptr;
-    app.draw(WindowMetrics.current().scale);
+    testDraw(&app, WindowMetrics.current().scale);
     try std.testing.expectEqual(settled_rows, app.history_rows.ptr);
     try app.composer.set("A taller\nthree-line\ncomposer");
-    app.draw(WindowMetrics.current().scale);
+    testDraw(&app, WindowMetrics.current().scale);
     const history = layout.frame(
         @floatFromInt(desktop.width()),
         @floatFromInt(desktop.height()),
@@ -5212,7 +5502,7 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     const settled_height = app.content_height;
     messages[messages.len - 1].text = "Changed\nMore\nLines\nTo\nMeasure";
     view.generation += 1;
-    app.draw(WindowMetrics.current().scale);
+    testDraw(&app, WindowMetrics.current().scale);
     try std.testing.expect(app.content_height != settled_height);
     try std.testing.expect(app.text.texture_bytes <= 32 * 1024 * 1024);
     try std.testing.expectEqual(@as(usize, 0), clip_depth);
@@ -5221,7 +5511,8 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
 fn expectScrollbarPixel(shot: graphics.Image, viewport: graphics.Rect, content: f64, offset: f64) !void {
     const g = Scrollbar.geometry(viewport, content, offset) orelse return error.MissingScrollbar;
     const scale = WindowMetrics.current().scale;
-    const pixel = shot.color(
+    const pixel = graphics.imageColor(
+        shot,
         @intFromFloat((g.thumb.x + g.thumb.width / 2) * scale),
         @intFromFloat((g.thumb.y + g.thumb.height / 2) * scale),
     );
@@ -5262,7 +5553,8 @@ test "sidebar highlight stays selected while Messages and Hidden wait for histor
             defer graphics.destroyImage(shot);
             const color = if (app.show_hidden) theme.colors.line else theme.colors.selected;
             for (0..2) |row| {
-                const pixel = shot.color(
+                const pixel = graphics.imageColor(
+                    shot,
                     @intFromFloat((viewport.x + viewport.width - 40) * scale),
                     @intFromFloat((viewport.y + @as(f32, @floatFromInt(row)) * App.sidebar_row_height + 16) * scale),
                 );
@@ -5270,20 +5562,9 @@ test "sidebar highlight stays selected while Messages and Hidden wait for histor
             }
         }
     };
-    const reset_context: *const fn (?*clay.Context) callconv(.c) void = @ptrCast(&clay.setCurrentContext);
-    reset_context(null);
-    defer reset_context(null);
     try openWindow(1120, 780, "Zimbr sidebar selection checks");
     defer closeWindow();
     desktop.poll();
-    const clay_memory = try std.testing.allocator.alloc(u8, clay.minMemorySize());
-    defer std.testing.allocator.free(clay_memory);
-    _ = clay.initialize(
-        .init(clay_memory),
-        // Initialize Clay to the same logical dimensions as the window.
-        .{ .w = 1120, .h = 780 },
-        .{ .error_handler_function = clayError },
-    );
     var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
     defer worker.shutdown();
     var chats: [4]Store.Chat = undefined;
@@ -5306,7 +5587,7 @@ test "sidebar highlight stays selected while Messages and Hidden wait for histor
     var app = App{ .worker = &worker };
     defer app.deinit();
     try fixture.publish(&app, &chats, "visible-first");
-    for (0..4) |_| app.draw(WindowMetrics.current().scale);
+    for (0..4) |_| testDraw(&app, WindowMetrics.current().scale);
     const areas = layout.frame(1120, 780, app.composerHeight());
     const viewport = App.sidebarViewport(areas.sidebar);
     try fixture.expectHighlight(&app, viewport, 0);
@@ -5389,28 +5670,17 @@ test "conversation switches keep the previous frame until the latest selection i
             while (y < @as(i32, @intFromFloat((r.y + r.height) * scale))) : (y += 1) {
                 var x: i32 = @intFromFloat(@ceil(r.x * scale));
                 while (x < @as(i32, @intFromFloat((r.x + r.width) * scale))) : (x += 1) {
-                    const pixel = before.color(x, y);
+                    const pixel = graphics.imageColor(before, x, y);
                     if (!std.meta.eql(pixel, theme.colors.paper)) ink += 1;
-                    try std.testing.expectEqual(pixel, after.color(x, y));
+                    try std.testing.expectEqual(pixel, graphics.imageColor(after, x, y));
                 }
             }
             try std.testing.expect(ink > 100);
         }
     };
-    const reset_context: *const fn (?*clay.Context) callconv(.c) void = @ptrCast(&clay.setCurrentContext);
-    reset_context(null);
-    defer reset_context(null);
     try openWindow(1120, 780, "Zimbr conversation switch checks");
     defer closeWindow();
     desktop.poll();
-    const clay_memory = try std.testing.allocator.alloc(u8, clay.minMemorySize());
-    defer std.testing.allocator.free(clay_memory);
-    _ = clay.initialize(
-        .init(clay_memory),
-        // Initialize Clay to the same logical dimensions as the window.
-        .{ .w = 1120, .h = 780 },
-        .{ .error_handler_function = clayError },
-    );
     var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
     defer worker.shutdown();
     var app = App{ .worker = &worker };
@@ -5418,7 +5688,7 @@ test "conversation switches keep the previous frame until the latest selection i
     worker.view = try fixture.view("new:first", 1);
     try app.update();
     const scale = WindowMetrics.current().scale;
-    for (0..4) |_| app.draw(scale);
+    for (0..4) |_| testDraw(&app, scale);
     app.following = false;
     app.scroll = 150;
     app.focus = .none;
@@ -5544,8 +5814,6 @@ test "shared message presentations survive replaced views and refresh edited tex
 }
 
 test "send status and echo transitions preserve message positions and heights" {
-    const reset_context: *const fn (?*clay.Context) callconv(.c) void = @ptrCast(&clay.setCurrentContext);
-    reset_context(null);
     const SharedSnapshot = @import("client.zig").SharedSnapshot;
     const fixture = struct {
         fn draw(app: *App, store: Store, generation: u64, scale: f32) !void {
@@ -5571,7 +5839,7 @@ test "send status and echo transitions preserve message positions and heights" {
             };
             if (app.view) |old| old.destroy();
             app.view = view;
-            app.draw(scale);
+            testDraw(app, scale);
         }
 
         fn expectPositions(app: *App, positions: [2]f64, height: f64) !void {
@@ -5586,13 +5854,7 @@ test "send status and echo transitions preserve message positions and heights" {
     defer closeWindow();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    defer reset_context(null);
     const ar = arena.allocator();
-    _ = clay.initialize(
-        .init(try ar.alloc(u8, clay.minMemorySize())),
-        .{ .w = 780, .h = 560 },
-        .{ .error_handler_function = clayError },
-    );
     const epoch = "EjRWeBI0EjQSNBI0VniQEg";
     for ([_]f32{ 1, 1.25, 2 }) |scale| for ([_][]const u8{
         "A short reply",
@@ -5901,19 +6163,19 @@ test "offscreen measurements match drawing metrics without evicting layouts" {
 fn pressTestFrame(app: *App, x: f32, y: f32) void {
     testInput(.{ .motion = .{ .x = @intFromFloat(x), .y = @intFromFloat(y) } });
     testInput(.{ .button_down = .left });
-    app.draw(WindowMetrics.current().scale);
+    testDraw(app, WindowMetrics.current().scale);
 }
 
 fn clickTestFrame(app: *App, x: f32, y: f32) void {
     pressTestFrame(app, x, y);
     testInput(.{ .button_up = .left });
-    app.draw(WindowMetrics.current().scale);
+    testDraw(app, WindowMetrics.current().scale);
 }
 
 fn captureTestFrame(app: *App, scale: f32) !graphics.Image {
     app.capture_frame = true;
     defer app.capture_frame = false;
-    app.draw(scale);
+    testDraw(app, scale);
     const shot = app.captured orelse return error.ScreenshotFailed;
     app.captured = null;
     return shot;
@@ -5955,8 +6217,8 @@ test "message header keeps sender and timestamp pixels stable across send status
             }, graphics.Color.white, graphics.Color.black);
             graphics.resetScale();
             graphics.endTarget();
-            var shot = try graphics.readTexture(target.texture);
-            shot.flip();
+            const shot = try graphics.readTexture(target);
+
             if (reference) |before| {
                 defer graphics.destroyImage(shot);
                 const right = 10 + app.text.lineSize("You", 14, 110).x + 6 +
@@ -5964,8 +6226,8 @@ test "message header keeps sender and timestamp pixels stable across send status
                 for (0..@as(usize, @intFromFloat(32 * scale))) |y| {
                     for (0..@as(usize, @intFromFloat(right * scale))) |x| {
                         try std.testing.expectEqual(
-                            before.color(@intCast(x), @intCast(y)),
-                            shot.color(@intCast(x), @intCast(y)),
+                            graphics.imageColor(before, @intCast(x), @intCast(y)),
+                            graphics.imageColor(shot, @intCast(x), @intCast(y)),
                         );
                     }
                 }
@@ -5977,18 +6239,13 @@ test "message header keeps sender and timestamp pixels stable across send status
 test "message dates keep font alignment across glyphs and fractional row positions" {
     const Ink = struct {
         fn center(shot: graphics.Image, left: i32, right: i32, top: i32, bottom: i32) !f32 {
-            const width: usize = @intCast(shot.width);
-            const data = shot.pixels;
-            const pixels = data[0 .. width * @as(usize, @intCast(shot.height))];
-            const left_column: usize = @intCast(left);
-            const right_column: usize = @intCast(right);
             var first = bottom;
             var last = top;
             var y = top;
             while (y < bottom) : (y += 1) {
-                const offset = @as(usize, @intCast(y)) * width;
-                const row = pixels[offset + left_column .. offset + right_column];
-                for (row) |pixel| {
+                var x = left;
+                while (x < right) : (x += 1) {
+                    const pixel = graphics.imageColor(shot, x, y);
                     if (@max(pixel.r, pixel.g, pixel.b) <= 32) continue;
                     first = @min(first, y);
                     last = @max(last, y);
@@ -6053,9 +6310,9 @@ test "message dates keep font alignment across glyphs and fractional row positio
             app.text.drawLine(stamp, stamp_x, 400 / scale, 11, 250, theme.colors.muted, graphics.Color.black);
             graphics.resetScale();
             graphics.endTarget();
-            var shot = try graphics.readTexture(target.texture);
+            const shot = try graphics.readTexture(target);
             defer graphics.destroyImage(shot);
-            shot.flip();
+
             var first_offset: ?f32 = null;
             for (0..8) |i| {
                 const top: i32 = 10 + @as(i32, @intCast(i)) * 40;
@@ -6102,20 +6359,12 @@ test "message dates keep font alignment across glyphs and fractional row positio
 }
 
 test "text and attachment messages retain identical sender and date alignment" {
-    const reset_context: *const fn (?*clay.Context) callconv(.c) void = @ptrCast(&clay.setCurrentContext);
-    reset_context(null);
-    defer reset_context(null);
     try openWindow(1120, 900, "Zimbr mixed message checks");
     defer closeWindow();
     desktop.poll();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const ar = arena.allocator();
-    _ = clay.initialize(
-        .init(try ar.alloc(u8, clay.minMemorySize())),
-        .{ .w = 1120, .h = 900 },
-        .{ .error_handler_function = clayError },
-    );
     var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
     defer worker.shutdown();
     const attachments = [_]t.Attachment{.{
@@ -6184,7 +6433,7 @@ test "text and attachment messages retain identical sender and date alignment" {
     };
     defer app.deinit();
     const scale = WindowMetrics.current().scale;
-    for (0..4) |_| app.draw(scale);
+    for (0..4) |_| testDraw(&app, scale);
     const shot = try captureTestFrame(&app, scale);
     defer graphics.destroyImage(shot);
     const areas = layout.frame(
@@ -6204,8 +6453,8 @@ test "text and attachment messages retain identical sender and date alignment" {
         while (dy < @as(i32, @intFromFloat(21 * scale))) : (dy += 1) {
             var x: i32 = @intFromFloat((areas.history.x + 66) * scale);
             while (x < @as(i32, @intFromFloat((areas.history.x + 330) * scale))) : (x += 1) {
-                const left = shot.color(x, plain_y + dy);
-                const right = shot.color(x, attached_y + dy);
+                const left = graphics.imageColor(shot, x, plain_y + dy);
+                const right = graphics.imageColor(shot, x, attached_y + dy);
                 const left_ink = @max(left.r, left.g, left.b) > 80;
                 const right_ink = @max(right.r, right.g, right.b) > 80;
                 try std.testing.expectEqual(left_ink, right_ink);
@@ -6268,17 +6517,17 @@ test "text remains intact when layouts evict textures queued in the same frame" 
     defer for (images) |shot| graphics.destroyImage(shot);
     const before = images[0];
     const after = images[1];
-    try std.testing.expectEqual(before.width, after.width);
-    try std.testing.expectEqual(before.height, after.height);
+    try std.testing.expectEqual(before.w, after.w);
+    try std.testing.expectEqual(before.h, after.h);
     var ink: usize = 0;
     var y: i32 = 0;
-    while (y < before.height) : (y += 1) {
+    while (y < before.h) : (y += 1) {
         var x: i32 = 0;
-        while (x < before.width) : (x += 1) {
-            if (!std.meta.eql(graphics.Color.white, before.color(x, y))) ink += 1;
+        while (x < before.w) : (x += 1) {
+            if (!std.meta.eql(graphics.Color.white, graphics.imageColor(before, x, y))) ink += 1;
             try std.testing.expectEqual(
-                before.color(x, y),
-                after.color(x, y),
+                graphics.imageColor(before, x, y),
+                graphics.imageColor(after, x, y),
             );
         }
     }
@@ -6302,11 +6551,11 @@ test "text remains intact when layouts evict textures queued in the same frame" 
     graphics.endFrame();
     defer graphics.destroyImage(tall);
     ink = 0;
-    y = @divTrunc(tall.height * 3, 4);
-    while (y < tall.height) : (y += 1) {
+    y = @divTrunc(tall.h * 3, 4);
+    while (y < tall.h) : (y += 1) {
         var x: i32 = 0;
-        while (x < tall.width) : (x += 1) {
-            if (!std.meta.eql(graphics.Color.white, tall.color(x, y))) ink += 1;
+        while (x < tall.w) : (x += 1) {
+            if (!std.meta.eql(graphics.Color.white, graphics.imageColor(tall, x, y))) ink += 1;
         }
     }
     try std.testing.expect(ink > 100);
@@ -6325,21 +6574,12 @@ test "enriched messages render captions, photos, cards and chips with keyboard v
             return true;
         }
     };
-    // Clay keeps a process-global pointer; prior tests have freed their arena.
-    const reset_context: *const fn (?*clay.Context) callconv(.c) void = @ptrCast(&clay.setCurrentContext);
-    reset_context(null);
-    defer reset_context(null);
     try openWindow(1120, 900, "Zimbr enrichment checks");
     defer closeWindow();
     desktop.poll();
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const ar = arena.allocator();
-    _ = clay.initialize(
-        .init(try ar.alloc(u8, clay.minMemorySize())),
-        .{ .w = 1120, .h = 900 },
-        .{ .error_handler_function = clayError },
-    );
     var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/zimbr-rich-ui-test" } };
     defer worker.shutdown();
     var media = Media{ .io = std.testing.io, .config = .{ .data = "" } };
@@ -6475,11 +6715,9 @@ test "enriched messages render captions, photos, cards and chips with keyboard v
     for ([_]t.AssetRef{ photo, avatar }, [_]graphics.Color{ graphics.Color.red, graphics.Color.sky_blue }) |asset, color| {
         const pixels = try graphics.solidImage(160, 90, color);
         defer graphics.destroyImage(pixels);
-        const texture = try graphics.upload(@ptrCast(pixels.pixels.ptr), pixels.width, pixels.height, .linear);
+        const texture = try graphics.upload(@ptrCast(pixels.pixels.?), pixels.w, pixels.h, .linear);
         try app.images.entries.put(std.heap.c_allocator, media.key(asset), .{
-            .texture = texture,
-            .bytes = 160 * 90 * 4,
-            .state = .ready,
+            .content = .{ .ready = texture },
         });
         app.images.bytes += 160 * 90 * 4;
     }
@@ -6488,7 +6726,7 @@ test "enriched messages render captions, photos, cards and chips with keyboard v
         1.25,
         2,
     }) |scale| {
-        for (0..3) |_| app.draw(scale);
+        for (0..3) |_| testDraw(&app, scale);
         try std.testing.expectEqual(@as(usize, 1), app.history_rows.len);
         try std.testing.expect(app.rich_count >= 4);
         try std.testing.expect(app.images.bytes <= Media.texture_budget);
@@ -6557,7 +6795,7 @@ test "enriched messages render captions, photos, cards and chips with keyboard v
     const dpi = WindowMetrics.current().scale;
     try std.testing.expectEqual(
         graphics.Color.red,
-        shot.color(@intFromFloat((image_r.x + 80) * dpi), @intFromFloat((image_r.y + 45) * dpi)),
+        graphics.imageColor(shot, @intFromFloat((image_r.x + 80) * dpi), @intFromFloat((image_r.y + 45) * dpi)),
     );
     clickTestFrame(&app, image_r.x + 80, image_r.y + 45);
     try std.testing.expectEqualStrings("target", app.viewer_message);
@@ -6580,7 +6818,7 @@ test "enriched messages render captions, photos, cards and chips with keyboard v
     messages[0].reactions = &.{};
     messages[0].revision = "3";
     view.generation += 1;
-    app.draw(1);
+    testDraw(&app, 1);
     for (app.history_rows[0].blocks) |block| try std.testing.expect(block.value != .reactions);
 }
 
@@ -6742,6 +6980,9 @@ test "attachment updates preserve the visible part through history preparation a
         const viewport = graphics.Rect{ .x = 0, .y = 0, .width = 500, .height = 80 };
 
         fn draw(s: *App) void {
+            s.processEvents() catch unreachable;
+            s.controls.clearRetainingCapacity();
+            _ = s.control_arena.reset(.retain_capacity);
             s.text.nextFrame(1);
             _ = s.frame_arena.reset(.retain_capacity);
             graphics.beginFrame();
@@ -6896,9 +7137,6 @@ test "required settings block navigation and invalid saves keep setup open" {
 }
 
 test "settings reset waits for relay confirmation before stopping the session for deletion" {
-    const reset_context: *const fn (?*clay.Context) callconv(.c) void = @ptrCast(&clay.setCurrentContext);
-    reset_context(null);
-    defer reset_context(null);
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -6916,11 +7154,6 @@ test "settings reset waits for relay confirmation before stopping the session fo
     try openWindow(780, 560, "Zimbr reset checks");
     defer closeWindow();
     desktop.poll();
-    _ = clay.initialize(
-        .init(try ar.alloc(u8, clay.minMemorySize())),
-        .{ .w = 780, .h = 560 },
-        .{ .error_handler_function = clayError },
-    );
     var app = App{
         .worker = &worker,
         .settings = try Settings.init(worker.config),
@@ -6930,23 +7163,23 @@ test "settings reset waits for relay confirmation before stopping the session fo
     try app.settings.fields[0].set("https://unsaved.example");
     // This inert worker stands in for a configured connection in the UI test.
     app.settings.required = false;
-    app.draw(WindowMetrics.current().scale);
-    const x = clay.getElementData(.ID("sidebar")).bounding_box.x + 32;
+    testDraw(&app, WindowMetrics.current().scale);
+    const x = layout.frame(1120, 780, 0).sidebar.x + 32;
     const y = @as(f32, @floatFromInt(desktop.height())) - 120;
     const reset_size = app.buttonSize("Reset client and relay…");
     clickTestFrame(&app, x + reset_size.x / 2, y + reset_size.y / 2);
     try std.testing.expect(app.settings.confirm_reset and app.next_config == null);
     app.settings_scroll = std.math.inf(f32);
-    app.draw(WindowMetrics.current().scale);
+    testDraw(&app, WindowMetrics.current().scale);
     const confirm_size = app.buttonSize("Reset and resync");
     const keep_size = app.buttonSize("Keep local data");
     clickTestFrame(&app, x + confirm_size.x + 12 + keep_size.x / 2, y + keep_size.y / 2);
     try std.testing.expect(!app.settings.confirm_reset and app.next_config == null);
     app.settings_scroll = std.math.inf(f32);
-    app.draw(WindowMetrics.current().scale);
+    testDraw(&app, WindowMetrics.current().scale);
     clickTestFrame(&app, x + reset_size.x / 2, y + reset_size.y / 2);
     app.settings_scroll = std.math.inf(f32);
-    app.draw(WindowMetrics.current().scale);
+    testDraw(&app, WindowMetrics.current().scale);
     clickTestFrame(&app, x + confirm_size.x / 2, y + confirm_size.y / 2);
     // The contract now requires a relay acknowledgment before any local wipe.
     try std.testing.expect(app.next_config == null and app.settings.reset_pending);
@@ -6994,20 +7227,11 @@ fn testKey(key: desktop.Key, down: bool) void {
 }
 
 test "Details streams logs, preserves scrollback, and supports latest copy and clear" {
-    const reset_context: *const fn (?*clay.Context) callconv(.c) void = @ptrCast(&clay.setCurrentContext);
-    reset_context(null);
     try openWindow(1120, 780, "Zimbr log checks");
     defer closeWindow();
     desktop.poll();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    defer reset_context(null);
-    _ = clay.initialize(
-        .init(try arena.allocator().alloc(u8, clay.minMemorySize())),
-        // Initialize Clay to the same logical dimensions as the window.
-        .{ .w = 1120, .h = 780 },
-        .{ .error_handler_function = clayError },
-    );
     var logs: LogBuffer = .{};
     for (0..LogBuffer.capacity) |i| logs.append(.info, .fixture, "Image {d}: disk cache hit", .{i});
     var worker = Worker{ .io = std.testing.io, .config = .{ .data = "" } };
@@ -7015,12 +7239,13 @@ test "Details streams logs, preserves scrollback, and supports latest copy and c
     var app = App{ .worker = &worker, .show_details = true, .logs = &logs };
     defer app.deinit();
     const scale = WindowMetrics.current().scale;
-    app.draw(scale);
+    testDraw(&app, scale);
     try std.testing.expect(app.logs_limit > 0);
     try std.testing.expectEqual(app.logs_limit, app.logs_scroll);
     const shot = try captureTestFrame(&app, scale);
     defer graphics.destroyImage(shot);
-    try std.testing.expectEqual(theme.colors.surface, shot.color(
+    try std.testing.expectEqual(theme.colors.surface, graphics.imageColor(
+        shot,
         @intFromFloat(100 * scale),
         @intFromFloat(160 * scale),
     ));
@@ -7034,14 +7259,14 @@ test "Details streams logs, preserves scrollback, and supports latest copy and c
     const anchor = app.logs_anchor;
     const offset = app.logs_anchor_offset;
     logs.append(.info, .fixture, "New download while reading earlier logs", .{});
-    app.draw(scale);
+    testDraw(&app, scale);
     try std.testing.expectEqual(anchor, app.logs_anchor);
     try std.testing.expectApproxEqAbs(offset, app.logs_anchor_offset, 0.01);
 
     // Focused keyboard scrolling uses the textbox rather than the page.
     testKey(.home, true);
     try app.update();
-    app.draw(scale);
+    testDraw(&app, scale);
     testKey(.home, false);
     try std.testing.expectEqual(@as(f32, 0), app.logs_scroll);
     try std.testing.expectEqual(details_scroll, app.details_scroll);
@@ -7049,7 +7274,7 @@ test "Details streams logs, preserves scrollback, and supports latest copy and c
     try std.testing.expect(app.logs_follow);
     try std.testing.expectEqual(app.logs_limit, app.logs_scroll);
     logs.append(.info, .fixture, "Newest visible event", .{});
-    app.draw(scale);
+    testDraw(&app, scale);
     try std.testing.expectEqual(app.logs_limit, app.logs_scroll);
 
     clickTestFrame(&app, width - 142, 128);
@@ -7063,7 +7288,7 @@ test "Details streams logs, preserves scrollback, and supports latest copy and c
     try std.testing.expectEqual(@as(f32, 0), app.logs_scroll);
     try std.testing.expect(app.logs_follow);
     logs.append(.info, .fixture, "Streaming resumes after clear", .{});
-    app.draw(scale);
+    testDraw(&app, scale);
     try std.testing.expect(app.logs_anchor != null);
     try std.testing.expectEqual(@as(usize, 0), clip_depth);
 }
@@ -7097,11 +7322,6 @@ test "settings validate credentials and commit through the pane before unlocking
     try openWindow(780, 560, "Zimbr settings checks");
     defer closeWindow();
     desktop.poll();
-    _ = clay.initialize(
-        .init(try ar.alloc(u8, clay.minMemorySize())),
-        .{ .w = 780, .h = 560 },
-        .{ .error_handler_function = clayError },
-    );
     var app = App{
         .worker = &worker,
         .settings = try Settings.init(worker.config),
@@ -7109,7 +7329,7 @@ test "settings validate credentials and commit through the pane before unlocking
         .focus = .settings_relay,
     };
     defer app.deinit();
-    app.draw(WindowMetrics.current().scale);
+    testDraw(&app, WindowMetrics.current().scale);
     // SDL events reach the same input consumer used by App.update.
     testKey(.escape, true);
     try app.update();
@@ -7330,7 +7550,7 @@ test "Korean preedit wraps scrolls and positions the native candidate area at th
     defer graphics.destroyImage(shot);
     var accented: usize = 0;
     for (50..104) |y| for (51..189) |x| {
-        const color = shot.color(@intFromFloat(@as(f32, @floatFromInt(x)) * scale), @intFromFloat(@as(f32, @floatFromInt(y)) * scale));
+        const color = graphics.imageColor(shot, @intFromFloat(@as(f32, @floatFromInt(x)) * scale), @intFromFloat(@as(f32, @floatFromInt(y)) * scale));
         if (std.meta.eql(color, theme.colors.accent)) accented += 1;
     };
     // The underline spans text, beyond the narrow insertion caret.
@@ -7341,6 +7561,11 @@ test "Korean reset echoes are discarded once and fresh identical input is preser
     try openWindow(780, 560, "Korean reset commits");
     defer closeWindow();
     desktop.poll();
+    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
+    defer worker.shutdown();
+    var app = App{ .worker = &worker, .focus = .search };
+    defer app.deinit();
+    try app.update();
     const sdl = desktop.c;
     const id = sdl.SDL_GetWindowID(desktop.window());
     var edit = std.mem.zeroes(sdl.SDL_Event);
@@ -7353,31 +7578,40 @@ test "Korean reset echoes are discarded once and fresh identical input is preser
     commit.text.windowID = id;
     commit.text.text = "한";
     try std.testing.expect(sdl.SDL_PushEvent(&edit));
-    desktop.poll();
+    try app.update();
+    app.rememberReset(&app.search);
+    app.search.cancelPreedit();
     desktop.resetTextInput(true);
     try std.testing.expect(sdl.SDL_PushEvent(&commit));
-    desktop.poll();
-    try std.testing.expectEqualStrings("", desktop.takeText());
+    try app.update();
+    try std.testing.expectEqualStrings("", app.search.text.items);
     try std.testing.expect(sdl.SDL_PushEvent(&commit));
-    desktop.poll();
-    try std.testing.expectEqualStrings("한", desktop.takeText());
+    try app.update();
+    try std.testing.expectEqualStrings("한", app.search.text.items);
+    try app.search.set("");
 
     // Engines that cancel on reset produce no echo. Fresh typing must still work.
     try std.testing.expect(sdl.SDL_PushEvent(&edit));
-    desktop.poll();
+    try app.update();
+    app.rememberReset(&app.search);
+    app.search.cancelPreedit();
     desktop.resetTextInput(true);
     testKey(.a, true);
     try std.testing.expect(sdl.SDL_PushEvent(&commit));
-    desktop.poll();
-    try std.testing.expectEqualStrings("한", desktop.takeText());
+    try app.update();
+    try std.testing.expectEqualStrings("한", app.search.text.items);
+    try app.search.set("");
     testKey(.a, false);
     try std.testing.expect(sdl.SDL_PushEvent(&edit));
-    desktop.poll();
+    try app.update();
+    app.rememberReset(&app.search);
+    app.search.cancelPreedit();
     desktop.resetTextInput(true);
     try std.testing.expect(sdl.SDL_PushEvent(&edit));
     try std.testing.expect(sdl.SDL_PushEvent(&commit));
-    desktop.poll();
-    try std.testing.expectEqualStrings("한", desktop.takeText());
+    try app.update();
+    try std.testing.expectEqualStrings("한", app.search.text.items);
+    try app.search.set("");
 }
 
 test "SDL commits complete Unicode strings and preserves long clipboard pastes" {
@@ -7427,6 +7661,7 @@ test "SDL commits complete Unicode strings and preserves long clipboard pastes" 
     event.key.windowID = window_id;
     event.key.scancode = sdl.SDL_SCANCODE_RETURN;
     event.key.key = sdl.SDLK_RETURN;
+    event.key.key = sdl.SDLK_RETURN;
     event.key.down = true;
     try std.testing.expect(sdl.SDL_PushEvent(&event));
     desktop.poll();
@@ -7451,20 +7686,12 @@ test "SDL commits complete Unicode strings and preserves long clipboard pastes" 
 }
 
 test "composer consumes file drops and waits for reviewed attachments before an attachment-only send" {
-    const reset_context: *const fn (?*clay.Context) callconv(.c) void = @ptrCast(&clay.setCurrentContext);
-    reset_context(null);
     // Four samples smooth rounded shapes at fractional display scales.
     try openWindow(780, 560, "Attachment composer");
     defer closeWindow();
     desktop.poll();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    defer reset_context(null);
-    _ = clay.initialize(
-        .init(try arena.allocator().alloc(u8, clay.minMemorySize())),
-        .{ .w = 780, .h = 560 },
-        .{ .error_handler_function = clayError },
-    );
     const key = "new:peer@example.invalid";
     const files = [_]outgoing_attachments.Upload{
         .{
@@ -7511,7 +7738,7 @@ test "composer consumes file drops and waits for reviewed attachments before an 
         .loaded_key = try a.dupe(u8, key),
     };
     defer app.deinit();
-    app.draw(WindowMetrics.current().scale);
+    testDraw(&app, WindowMetrics.current().scale);
     const empty_height = app.composerHeight();
     const scale = WindowMetrics.current().scale;
     const empty_box = App.composerBox(layout.frame(780, 560, empty_height).composer);
@@ -7522,14 +7749,14 @@ test "composer consumes file drops and waits for reviewed attachments before an 
     {
         const shot = try captureTestFrame(&app, scale);
         defer graphics.destroyImage(shot);
-        try std.testing.expectEqual(theme.colors.drop_surface, shot.color(sample_x, sample_y));
+        try std.testing.expectEqual(theme.colors.drop_surface, graphics.imageColor(shot, sample_x, sample_y));
         // A solid outline has no gaps; a missing outline has no blue dots.
         var dots: usize = 0;
         var gaps: usize = 0;
         var previous_blue = false;
         var x: i32 = @intFromFloat((empty_box.x + 12) * scale);
         while (x < @as(i32, @intFromFloat((empty_box.x + empty_box.width - 12) * scale))) : (x += 1) {
-            const pixel = shot.color(x, @intFromFloat((empty_box.y - 1) * scale));
+            const pixel = graphics.imageColor(shot, x, @intFromFloat((empty_box.y - 1) * scale));
             const blue = pixel.b > 100 and pixel.b > pixel.r;
             if (blue and !previous_blue) dots += 1;
             if (!blue) gaps += 1;
@@ -7537,20 +7764,20 @@ test "composer consumes file drops and waits for reviewed attachments before an 
         }
         try std.testing.expect(dots > 10 and gaps > 10);
         if (u.c.getenv("ZIMBR_GUI_DROP_SCREENSHOT")) |path|
-            try shot.save(std.mem.span(path));
+            try graphics.saveImage(shot, std.mem.span(path));
     }
     bridge.zc_drop_set_hovered(0);
     {
         const shot = try captureTestFrame(&app, scale);
         defer graphics.destroyImage(shot);
-        try std.testing.expectEqual(theme.colors.surface, shot.color(sample_x, sample_y));
+        try std.testing.expectEqual(theme.colors.surface, graphics.imageColor(shot, sample_x, sample_y));
     }
     bridge.zc_drop_set_hovered(1);
     app.send_wait = true;
     {
         const shot = try captureTestFrame(&app, scale);
         defer graphics.destroyImage(shot);
-        try std.testing.expectEqual(theme.colors.surface, shot.color(sample_x, sample_y));
+        try std.testing.expectEqual(theme.colors.surface, graphics.imageColor(shot, sample_x, sample_y));
     }
     app.send_wait = false;
     const paths = [_][*c]const u8{ "/tmp/photo 👋.png", "/tmp/empty.txt" };
@@ -7574,11 +7801,11 @@ test "composer consumes file drops and waits for reviewed attachments before an 
     view.preparing_draft = false;
     try std.testing.expect(app.canSend());
     try std.testing.expectEqual(empty_height + 80, app.composerHeight());
-    app.draw(WindowMetrics.current().scale);
+    testDraw(&app, WindowMetrics.current().scale);
     if (u.c.getenv("ZIMBR_GUI_SCREENSHOT")) |path| {
         const shot = try captureTestFrame(&app, WindowMetrics.current().scale);
         defer graphics.destroyImage(shot);
-        try shot.save(std.mem.span(path));
+        try graphics.saveImage(shot, std.mem.span(path));
     }
     const areas = layout.frame(780, 560, app.composerHeight());
     const box = App.composerBox(areas.composer);
@@ -7633,7 +7860,7 @@ test "composer consumes file drops and waits for reviewed attachments before an 
         .phase = "transfer",
     };
     view.generation += 1;
-    app.draw(WindowMetrics.current().scale);
+    testDraw(&app, WindowMetrics.current().scale);
     try std.testing.expectEqual(@as(usize, 3), app.history_rows[0].blocks.len);
     try std.testing.expect(!display.canCopyPending("uploading", pending[0].sent_at, u.now()));
     const history = layout.frame(780, 560, app.composerHeight()).history;
@@ -7647,7 +7874,7 @@ test "composer consumes file drops and waits for reviewed attachments before an 
     view.command_serial = app.files_serial;
     pending[0].state = "cancelled";
     view.generation += 1;
-    app.draw(WindowMetrics.current().scale);
+    testDraw(&app, WindowMetrics.current().scale);
     clickTestFrame(&app, action_x, action_y);
     try std.testing.expectEqualStrings("Caption", app.composer.text.items);
     try std.testing.expect(!app.duplicate_risk);
@@ -7679,18 +7906,10 @@ test "native file drops reach the synthetic relay with reviewed original bytes" 
         paths: []const [:0]const u8,
     }, arena.allocator(), try reader.interface.takeDelimiterInclusive('\n'), .{ .allocate = .alloc_always });
 
-    const reset_context: *const fn (?*clay.Context) callconv(.c) void = @ptrCast(&clay.setCurrentContext);
-    reset_context(null);
     // Four samples smooth rounded shapes at fractional display scales.
     try openWindow(780, 560, "Attachment integration");
     defer closeWindow();
     desktop.poll();
-    defer reset_context(null);
-    _ = clay.initialize(
-        .init(try arena.allocator().alloc(u8, clay.minMemorySize())),
-        .{ .w = 780, .h = 560 },
-        .{ .error_handler_function = clayError },
-    );
     var worker = Worker{ .io = io, .config = ready.config };
     var media = Media{ .io = io, .config = ready.config };
     var app = App{ .worker = &worker, .media = &media };
@@ -7720,9 +7939,9 @@ test "native file drops reach the synthetic relay with reviewed original bytes" 
     try std.testing.expectEqualStrings("262144", app.draftFiles()[2].bytes);
     while (true) {
         try attachmentTestFrame(&app, stage_deadline);
-        if (app.images.getLocal(&media, app.draftFiles()[0])) |entry| if (entry.texture) |texture| {
-            try std.testing.expectEqual(@as(i32, 2), texture.width);
-            try std.testing.expectEqual(@as(i32, 3), texture.height);
+        if (app.images.getLocal(&media, app.draftFiles()[0])) |entry| if (entry.availableTexture()) |texture| {
+            try std.testing.expectEqual(@as(i32, 2), texture.w);
+            try std.testing.expectEqual(@as(i32, 3), texture.h);
             break;
         };
     }
@@ -7734,7 +7953,7 @@ test "native file drops reach the synthetic relay with reviewed original bytes" 
     if (u.c.getenv("ZIMBR_GUI_ATTACHMENT_SCREENSHOT")) |path| {
         const shot = try captureTestFrame(&app, WindowMetrics.current().scale);
         defer graphics.destroyImage(shot);
-        try shot.save(std.mem.span(path));
+        try graphics.saveImage(shot, std.mem.span(path));
     }
     testKey(.left_control, false);
     testKey(.right_control, false);
@@ -7780,14 +7999,24 @@ fn attachmentTestFrame(app: *App, deadline: i64) !void {
     }
     try app.update();
     app.deliverNotifications();
-    app.draw(WindowMetrics.current().scale);
+    testDraw(app, WindowMetrics.current().scale);
     desktop.sleep(0.01);
+}
+
+fn testDraw(app: *App, scale: f32) void {
+    app.processEvents() catch unreachable;
+    app.draw(scale);
+    graphics.endFrame();
 }
 
 fn openWindow(width: i32, height: i32, title: [:0]const u8) !void {
     try desktop.open(width, height, title);
     errdefer desktop.close();
     try graphics.init();
+    if (comptime builtin.is_test) {
+        test_pointer = .{ .x = 0, .y = 0 };
+        test_modifiers = 0;
+    }
 }
 fn closeWindow() void {
     graphics.deinit();
@@ -7802,12 +8031,15 @@ const TestInput = union(enum) {
     key_up: desktop.Key,
     wheel: f32,
 };
+var test_pointer: graphics.Point = .{ .x = 0, .y = 0 };
+var test_modifiers: desktop.c.SDL_Keymod = 0;
 fn testInput(input: TestInput) void {
     const sdl = desktop.c;
     var event = std.mem.zeroes(sdl.SDL_Event);
     const id = sdl.SDL_GetWindowID(desktop.window());
     switch (input) {
         .motion => |point| {
+            test_pointer = .{ .x = @floatFromInt(point.x), .y = @floatFromInt(point.y) };
             event.motion.type = sdl.SDL_EVENT_MOUSE_MOTION;
             event.motion.windowID = id;
             event.motion.x = @floatFromInt(point.x);
@@ -7818,19 +8050,35 @@ fn testInput(input: TestInput) void {
             event.button.windowID = id;
             event.button.button = @intCast(@intFromEnum(button));
             event.button.down = input == .button_down;
-            event.button.x = desktop.mouse().x;
-            event.button.y = desktop.mouse().y;
+            event.button.x = test_pointer.x;
+            event.button.y = test_pointer.y;
         },
         .key_down, .key_up => |key| {
             event.key.type = if (input == .key_down) sdl.SDL_EVENT_KEY_DOWN else sdl.SDL_EVENT_KEY_UP;
             event.key.windowID = id;
-            event.key.scancode = @intCast(@intFromEnum(key));
+            const bit: sdl.SDL_Keymod = switch (key) {
+                .left_control => sdl.SDL_KMOD_LCTRL,
+                .right_control => sdl.SDL_KMOD_RCTRL,
+                .left_shift => sdl.SDL_KMOD_LSHIFT,
+                .right_shift => sdl.SDL_KMOD_RSHIFT,
+                .left_alt => sdl.SDL_KMOD_LALT,
+                .right_alt => sdl.SDL_KMOD_RALT,
+                .left_super => sdl.SDL_KMOD_LGUI,
+                .right_super => sdl.SDL_KMOD_RGUI,
+                else => 0,
+            };
+            if (input == .key_down) test_modifiers |= bit else test_modifiers &= ~bit;
+            event.key.mod = test_modifiers;
+            event.key.key = @intFromEnum(key);
+            event.key.scancode = sdl.SDL_GetScancodeFromKey(@intFromEnum(key), null);
             event.key.down = input == .key_down;
         },
         .wheel => |delta| {
             event.wheel.type = sdl.SDL_EVENT_MOUSE_WHEEL;
             event.wheel.windowID = id;
             event.wheel.y = delta;
+            event.wheel.mouse_x = test_pointer.x;
+            event.wheel.mouse_y = test_pointer.y;
         },
     }
     std.debug.assert(sdl.SDL_PushEvent(&event));
@@ -7845,59 +8093,126 @@ fn automationOverlay(bounds: zrct.Rect, label: []const u8) void {
     text.drawLine(label, bounds.x, bounds.y, 12, bounds.width, .{ .r = 255, .g = 255, .b = 0, .a = 255 }, null);
 }
 
-test "SDL input batches retain short clicks, repeat, wheel precision and focus release" {
-    try openWindow(640, 480, "SDL input batches");
+test "SDL event queue retains short clicks repeat wheel precision and focus release" {
+    try openWindow(640, 480, "SDL event ordering");
     defer closeWindow();
     desktop.poll();
-    const sdl = desktop.c;
-    const id = sdl.SDL_GetWindowID(desktop.window());
-    var event = std.mem.zeroes(sdl.SDL_Event);
-    event.button = .{
-        .type = sdl.SDL_EVENT_MOUSE_BUTTON_DOWN,
-        .windowID = id,
-        .button = sdl.SDL_BUTTON_LEFT,
-        .down = true,
-        .x = 31.5,
-        .y = 40.25,
-    };
-    try std.testing.expect(sdl.SDL_PushEvent(&event));
-    event.button.type = sdl.SDL_EVENT_MOUSE_BUTTON_UP;
+    while (desktop.nextEvent() != null) {}
+    const c = desktop.c;
+    const id = c.SDL_GetWindowID(desktop.window());
+    var event = std.mem.zeroes(c.SDL_Event);
+    event.button = .{ .type = c.SDL_EVENT_MOUSE_BUTTON_DOWN, .windowID = id, .button = c.SDL_BUTTON_LEFT, .down = true, .x = 31.5, .y = 40.25 };
+    try std.testing.expect(c.SDL_PushEvent(&event));
+    event.button.type = c.SDL_EVENT_MOUSE_BUTTON_UP;
     event.button.down = false;
-    try std.testing.expect(sdl.SDL_PushEvent(&event));
-    desktop.poll();
-    try std.testing.expect(desktop.buttonPressed(.left));
-    try std.testing.expect(desktop.buttonReleased(.left));
-    try std.testing.expect(!desktop.buttonDown(.left));
+    event.button.x = 90;
+    try std.testing.expect(c.SDL_PushEvent(&event));
+    const down = desktop.nextEvent().?;
+    try std.testing.expectEqual(@as(u32, c.SDL_EVENT_MOUSE_BUTTON_DOWN), down.type);
+    try std.testing.expect(desktop.leftDown());
     try std.testing.expectEqual(graphics.Point{ .x = 31.5, .y = 40.25 }, desktop.mouse());
+    const up = desktop.nextEvent().?;
+    try std.testing.expectEqual(@as(u32, c.SDL_EVENT_MOUSE_BUTTON_UP), up.type);
+    try std.testing.expect(!desktop.leftDown());
+    try std.testing.expectEqual(@as(f32, 90), desktop.mouse().x);
 
-    event = std.mem.zeroes(sdl.SDL_Event);
-    event.key.type = sdl.SDL_EVENT_KEY_DOWN;
+    event = std.mem.zeroes(c.SDL_Event);
+    event.key.type = c.SDL_EVENT_KEY_DOWN;
     event.key.windowID = id;
-    event.key.scancode = sdl.SDL_SCANCODE_BACKSPACE;
+    event.key.key = c.SDLK_BACKSPACE;
+    event.key.scancode = c.SDL_SCANCODE_BACKSPACE;
+    event.key.mod = c.SDL_KMOD_SHIFT;
     event.key.down = true;
-    try std.testing.expect(sdl.SDL_PushEvent(&event));
-    desktop.poll();
-    try std.testing.expect(desktop.keyDown(.backspace) and desktop.keyPressed(.backspace));
-    desktop.poll();
-    try std.testing.expect(desktop.keyDown(.backspace) and !desktop.keyPressed(.backspace));
+    try std.testing.expect(c.SDL_PushEvent(&event));
     event.key.repeat = true;
-    try std.testing.expect(sdl.SDL_PushEvent(&event));
-    desktop.poll();
-    try std.testing.expect(desktop.keyRepeated(.backspace) and !desktop.keyPressed(.backspace));
-    event = std.mem.zeroes(sdl.SDL_Event);
-    event.wheel.type = sdl.SDL_EVENT_MOUSE_WHEEL;
+    try std.testing.expect(c.SDL_PushEvent(&event));
+    try std.testing.expect(!desktop.nextEvent().?.key.repeat);
+    try std.testing.expect(desktop.nextEvent().?.key.repeat);
+    try std.testing.expectEqual(@as(c.SDL_Keymod, c.SDL_KMOD_SHIFT), desktop.modifiers());
+    event = std.mem.zeroes(c.SDL_Event);
+    event.wheel.type = c.SDL_EVENT_MOUSE_WHEEL;
     event.wheel.windowID = id;
     event.wheel.y = 0.25;
-    try std.testing.expect(sdl.SDL_PushEvent(&event));
-    try std.testing.expect(sdl.SDL_PushEvent(&event));
-    desktop.poll();
-    try std.testing.expectEqual(@as(f32, 0.5), desktop.wheel());
-    event = std.mem.zeroes(sdl.SDL_Event);
-    event.window.type = sdl.SDL_EVENT_WINDOW_FOCUS_LOST;
+    for (0..2) |_| try std.testing.expect(c.SDL_PushEvent(&event));
+    for (0..2) |_| try std.testing.expectEqual(@as(f32, 0.25), desktop.nextEvent().?.wheel.y);
+    event = std.mem.zeroes(c.SDL_Event);
+    event.window.type = c.SDL_EVENT_WINDOW_FOCUS_LOST;
     event.window.windowID = id;
-    try std.testing.expect(sdl.SDL_PushEvent(&event));
-    desktop.poll();
-    try std.testing.expect(!desktop.keyDown(.backspace) and !desktop.keyRepeated(.backspace));
-    try std.testing.expectEqual(@as(f32, 0), desktop.wheel());
-    try std.testing.expect(!desktop.buttonPressed(.left) and !desktop.buttonReleased(.left));
+    try std.testing.expect(c.SDL_PushEvent(&event));
+    _ = desktop.nextEvent();
+    try std.testing.expectEqual(@as(c.SDL_Keymod, 0), desktop.modifiers());
+    try std.testing.expect(!desktop.leftDown());
+}
+
+test "text shortcuts and repeated keys preserve SDL event order and modifiers" {
+    try openWindow(780, 560, "Ordered editing");
+    defer closeWindow();
+    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
+    defer worker.shutdown();
+    var app = App{ .worker = &worker, .focus = .search };
+    defer app.deinit();
+    try app.update();
+    try app.search.set("abc");
+    const c = desktop.c;
+    var text = std.mem.zeroes(c.SDL_Event);
+    text.text.type = c.SDL_EVENT_TEXT_INPUT;
+    text.text.windowID = c.SDL_GetWindowID(desktop.window());
+    testKey(.left, true);
+    text.text.text = "X";
+    try std.testing.expect(c.SDL_PushEvent(&text));
+    testKey(.left, false);
+    testKey(.left, true);
+    text.text.text = "Y";
+    try std.testing.expect(c.SDL_PushEvent(&text));
+    try app.update();
+    try std.testing.expectEqualStrings("abYXc", app.search.text.items);
+    try std.testing.expectEqual(@as(usize, 3), app.search.caret);
+
+    var repeated = std.mem.zeroes(c.SDL_Event);
+    repeated.key.type = c.SDL_EVENT_KEY_DOWN;
+    repeated.key.key = c.SDLK_BACKSPACE;
+    repeated.key.down = true;
+    repeated.key.repeat = true;
+    for (0..2) |_| try std.testing.expect(c.SDL_PushEvent(&repeated));
+    try app.update();
+    try std.testing.expectEqualStrings("aXc", app.search.text.items);
+    testKey(.left_control, true);
+    testKey(.a, true);
+    testKey(.a, false);
+    testKey(.left_control, false);
+    try app.update();
+    try std.testing.expectEqualStrings("aXc", app.search.selected());
+
+    // Semantic shortcuts follow the translated key, even on a different physical key.
+    var shortcut = std.mem.zeroes(c.SDL_Event);
+    shortcut.key.type = c.SDL_EVENT_KEY_DOWN;
+    shortcut.key.key = c.SDLK_N;
+    shortcut.key.scancode = c.SDL_SCANCODE_Q;
+    shortcut.key.mod = c.SDL_KMOD_CTRL;
+    shortcut.key.down = true;
+    try std.testing.expect(c.SDL_PushEvent(&shortcut));
+    text.text.text = "new@example.invalid";
+    try std.testing.expect(c.SDL_PushEvent(&text));
+    try app.update();
+    try std.testing.expect(app.new_mode);
+    try std.testing.expectEqualStrings("new@example.invalid", app.recipient.text.items);
+    try std.testing.expectEqualStrings("aXc", app.search.text.items);
+
+    testDraw(&app, WindowMetrics.current().scale);
+    try app.search.set("");
+    try app.recipient.set("");
+    // Both clicks and commits arrive before another frame; each event owns its target.
+    for ([_]App.Focus{ .search, .recipient }, [_][*:0]const u8{ "Find", "peer@example.invalid" }) |focus, committed| {
+        const bounds = for (app.controls.items) |control| {
+            if (control.action == .editor and control.action.editor.focus == focus) break control.bounds;
+        } else return error.TestUnexpectedResult;
+        testInput(.{ .motion = .{ .x = @intFromFloat(bounds.x + 8), .y = @intFromFloat(bounds.y + 8) } });
+        testInput(.{ .button_down = .left });
+        testInput(.{ .button_up = .left });
+        text.text.text = committed;
+        try std.testing.expect(c.SDL_PushEvent(&text));
+    }
+    try app.update();
+    try std.testing.expectEqualStrings("Find", app.search.text.items);
+    try std.testing.expectEqualStrings("peer@example.invalid", app.recipient.text.items);
 }

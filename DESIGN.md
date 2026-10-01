@@ -13,7 +13,7 @@ Contacts names/photos, images, stored link previews, and reactions. The
 
 Build a small, self-hosted system that uses an always-on Mac mini, signed into
 Messages, to send and receive iMessages from a graphical Linux application.
-Implement the relay and client in Zig, with Clay layout and application-owned OpenGL rendering.
+Implement the relay and client in Zig, with application-owned layout and SDL3 rendering.
 
 The first version serves one person and one Apple account. It supports listing
 conversations, reading text history, receiving new messages, starting a direct
@@ -460,7 +460,7 @@ packaging/
   linux/
 ```
 
-Only the client build imports Clay, SDL3, and OpenGL. Only the real relay adapter imports
+Only the client build imports SDL3. Only the real relay adapter imports
 macOS integration code. Shared protocol, journal, send-state behavior, and fake
 adapters should build and test on Linux.
 
@@ -600,7 +600,7 @@ server that no longer has its idempotency record.
 
 ### 2.4. Graphical application
 
-Build a desktop window using SDL3, Clay, and OpenGL, following the reusable parts of
+Build a desktop window using SDL3, following the reusable parts of
 Flamez: window setup, scaling, layout, theme organization, and render-loop
 structure. Linux uses Wayland exclusively.
 
@@ -654,9 +654,10 @@ Do not confuse code-point boundaries with user-visible character boundaries.
 Use a maintained Unicode implementation or system text facilities for segmentation
 and shaping rather than growing a hand-written special-case list.
 
-Clay owns layout; the text engine owns shaping, measurement, glyph rendering, and
-editing semantics. Pango/Cairo shapes and rasterizes text into RGBA textures;
-the application-owned OpenGL renderer presents them at framebuffer resolution.
+The application owns layout; the text engine owns shaping, measurement, glyph
+rendering, and editing semantics. Pango/Cairo rasterizes native premultiplied ARGB
+tiles; SDL3 uploads them with their row pitch and presents them at framebuffer
+resolution.
 Keep editing and shaping independent of the window and renderer.
 
 The first text milestone should support ordinary keyboard input, paste, and common
@@ -668,7 +669,7 @@ support based only on ASCII examples.
 
 ### 2.6. Client ownership, I/O, and persistence
 
-Keep window/input processing, Clay layout, and OpenGL rendering on the main thread.
+Keep SDL event processing, application layout, and SDL rendering on the main thread.
 A background connection worker owns HTTP requests, the SSE connection, retry
 timing, and the client store. It must service command requests concurrently with
 the long-lived stream, using the chosen I/O implementation's concurrency support.

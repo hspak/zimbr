@@ -34,7 +34,8 @@ def main():
         root = Path(temporary)
         for name, source in sources.items():
             subprocess.run(['zig', 'cc', '-O3', '-march=native', '-std=c11', '-Wall', '-Wextra', '-Werror',
-                            '-I', str(ROOT/'src'), '-I', str(ROOT/'src/client'),
+                            '-DZIMBR_TEXT_NATIVE_ARGB=' + str(int('zc_text_pitch' in (source/'bridge.c').read_text())),
+                            '-I', str(source), '-I', str(ROOT/'src'), '-I', str(ROOT/'src/client'),
                             str(ROOT/'tests/client_simd_bench.c'), str(source/'bridge.c'), str(source/'media.c'),
                             str(ROOT/'src/platform.c'), *flags, '-lm', '-o', str(root/name)], env=env, check=True)
             checksums[name] = {file: hashlib.sha256((source/file).read_bytes()).hexdigest() for file in ['bridge.c', 'media.c']}

@@ -1,6 +1,7 @@
 /* Complete client operations, synthetic data only; no display or network. */
 #define _GNU_SOURCE
 #include "bridge.h"
+#include "client_raster.h"
 #include <stdio.h>
 #include <jpeglib.h>
 #include <stdint.h>
@@ -41,9 +42,12 @@ static char *repeat(const char *phrase, size_t count) {
 }
 static uint64_t raster_checksum(ZcText *text, unsigned background) {
     int height=zc_text_height(text); if (height>2048) height=2048;
-    const unsigned char *pixels=zc_text_pixels_on(text,0xe9d8c7ff,0,0,0,height,background);
+    unsigned char *pixels=zc_text_pixels_on(text,0xe9d8c7ff,0,0,0,height,background);
     require(pixels!=NULL);
-    uint64_t value=hash(pixels,(size_t)zc_text_width(text)*height*4);
+    int pitch=comparable_text_pixels(text,pixels,height);
+    uint64_t value=14695981039346656037ull;
+    for (int y=0;y<height;y++) for (int x=0;x<zc_text_width(text)*4;x++)
+        value=(value^pixels[(size_t)y*pitch+x])*1099511628211ull;
     zc_text_clear_pixels(text);
     return value ^ (uint64_t)zc_text_height(text);
 }

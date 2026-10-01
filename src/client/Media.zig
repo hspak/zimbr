@@ -7,6 +7,7 @@ const t = @import("../protocol.zig").types;
 const attachments = @import("../protocol.zig").attachments;
 const c = @import("c.zig").api;
 const Config = @import("Config.zig");
+pub const Key = @import("Media/Key.zig");
 pub const DiskCache = @import("Media/DiskCache.zig");
 const Media = @This();
 const a = if (builtin.is_test) std.testing.allocator else std.heap.c_allocator;
@@ -45,8 +46,7 @@ evict_avatars: bool = false,
 dir: c_int = -1,
 
 pub const Result = struct {
-    // Media keys are 64 hexadecimal SHA-256 characters plus a C terminator.
-    key: [64:0]u8,
+    key: Key,
     generation: u64,
     pixels: c.ZcPixels = std.mem.zeroes(c.ZcPixels),
     state: enum {
@@ -71,8 +71,7 @@ const Request = struct {
     variant: @FieldType(t.AssetRef, "variant"),
     retired: bool,
     expected_bytes: usize,
-    // Media keys are 64 hexadecimal SHA-256 characters plus a C terminator.
-    key: [64:0]u8,
+    key: Key,
     generation: u64,
     wanted_at: i64,
     local: bool = false,
@@ -175,7 +174,7 @@ pub fn context(
 }
 /// Cache keys are scoped to the configured relay, CA and epoch. Variant has a
 /// reserved first nibble so permission loss can evict all private avatar bytes.
-pub fn key(s: *Media, asset: t.AssetRef) [64:0]u8 {
+pub fn key(s: *Media, asset: t.AssetRef) Key {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     for ([_][]const u8{
         s.config.relay_url,
@@ -191,26 +190,17 @@ pub fn key(s: *Media, asset: t.AssetRef) [64:0]u8 {
     // SHA-256 output is 32 bytes, rendered as two hex digits per byte.
     var digest: [32]u8 = undefined;
     hash.final(&digest);
-    // One variant nibble plus 63 digest nibbles; the sentinel supports native file APIs.
-    var output: [64:0]u8 = undefined;
-    const hex = "0123456789abcdef";
-    for (digest, 0..) |byte, i| {
-        output[2 * i] = hex[byte >> 4];
-        output[2 * i + 1] = hex[byte & 15];
-    }
-    output[0] = switch (asset.variant) {
-        .avatar => 'a',
-        .inline_image => 'b',
-        .viewer => 'c',
-    };
-    output[64] = 0;
-    return output;
+    return .init(digest, switch (asset.variant) {
+        .avatar => .avatar,
+        .inline_image => .inline_image,
+        .viewer => .viewer,
+    });
 }
 pub const RequestError = u.Allocator.Error || error{InvalidAssetReference};
 pub const LocalRequestError = u.Allocator.Error || attachments.ValidateError;
 
 /// Local preview identity includes the private storage root and immutable bytes.
-pub fn localKey(s: *Media, file: attachments.Upload) [64:0]u8 {
+pub fn localKey(s: *Media, file: attachments.Upload) Key {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     for ([_][]const u8{
         s.config.data,
@@ -223,12 +213,7 @@ pub fn localKey(s: *Media, file: attachments.Upload) [64:0]u8 {
     // SHA-256 output is 32 bytes, rendered as two hex digits per byte.
     var digest: [32]u8 = undefined;
     hash.final(&digest);
-    // One local-preview nibble plus 63 digest nibbles; the sentinel supports native file APIs.
-    var output: [64:0]u8 = undefined;
-    @memcpy(output[0..64], &std.fmt.bytesToHex(digest, .lower));
-    output[0] = 'd';
-    output[64] = 0;
-    return output;
+    return .init(digest, .local);
 }
 
 /// Queue a bounded preview of a staged original, including while offline.
@@ -272,18 +257,15 @@ pub fn request(s: *Media, asset: t.AssetRef) RequestError!void {
 // The caller holds the queue mutex; requests copy only fixed-size metadata.
 fn enqueue(s: *Media, request_value: Request) u.Allocator.Error!void {
     const cache_key = request_value.key;
-    for (s.active) |active| if (active) |r| if (r.generation == s.generation and u.eq(
-        &r.key,
-        &cache_key,
-    )) {
+    for (s.active) |active| if (active) |r| if (r.generation == s.generation and r.key.eql(cache_key)) {
         r.wanted_at = u.now();
         return;
     };
-    for (s.queue.items) |r| if (u.eq(&r.key, &cache_key)) {
+    for (s.queue.items) |r| if (r.key.eql(cache_key)) {
         r.wanted_at = u.now();
         return;
     };
-    if (s.result) |r| if (r.generation == s.generation and u.eq(&r.key, &cache_key)) return;
+    if (s.result) |r| if (r.generation == s.generation and r.key.eql(cache_key)) return;
     // 128 queued requests absorbs visible-row bursts while bounding stale offscreen work.
     if (s.queue.items.len >= 128) return;
     const r = try a.create(Request);
@@ -322,7 +304,7 @@ pub fn release(s: *Media, result: *Result) void {
 }
 fn deliver(s: *Media, request_value: *Request, result: *Result, lane: usize) void {
     if (result.state != .ready) log.debug("Image {s}: {s} ({s})", .{
-        result.key,
+        result.key.hex(),
         @tagName(result.state),
         std.mem.sliceTo(&result.reason, 0),
     });
@@ -380,7 +362,7 @@ fn work(s: *Media) !void {
             if (net) |n| c.zc_net_free(n);
             net = null;
             for (&s.active) |*active| if (active.*) |r| {
-                log.debug("Image {s}: transfer cancelled after context change", .{r.key});
+                log.debug("Image {s}: transfer cancelled after context change", .{r.key.hex()});
                 r.destroy(s.dir);
                 active.* = null;
             };
@@ -389,7 +371,7 @@ fn work(s: *Media) !void {
         for (&s.active, 0..) |*active, lane| if (active.*) |r| {
             // Drop media no longer requested for two seconds so scrolling reprioritizes downloads.
             if (u.now() - r.wanted_at > 2000) {
-                log.debug("Image {s}: transfer cancelled after leaving view", .{r.key});
+                log.debug("Image {s}: transfer cancelled after leaving view", .{r.key.hex()});
                 if (net) |n| c.zc_net_ack(n, @intCast(lane + 2));
                 r.destroy(s.dir);
                 active.* = null;
@@ -412,17 +394,17 @@ fn work(s: *Media) !void {
                     c.zc_net_error(net.?, @intCast(lane + 2), &failure);
                     const status = c.zc_net_status(net.?, @intCast(lane + 2));
                     if (failure.curl_code == 0) {
-                        log.debug("Image {s}: download response HTTP {d}", .{ r.key, status });
+                        log.debug("Image {s}: download response HTTP {d}", .{ r.key.hex(), status });
                     } else {
                         log.debug("Image {s}: download response HTTP {d}, curl {d}", .{
-                            r.key,
+                            r.key.hex(),
                             status,
                             failure.curl_code,
                         });
                     }
                     if (failure.curl_code == 0 and status == 200) {
                         const installed = if (c.zc_image_read(s.dir, &r.temporary, &result.pixels) == 1) installed: {
-                            const ok = c.zc_cache_install(s.dir, &r.temporary, &r.key, r.fd) == 1;
+                            const ok = c.zc_cache_install(s.dir, &r.temporary, &r.key.hex(), r.fd) == 1;
                             // The transport verified the declared length, or enforced 8 MiB
                             // when no length was advertised. Count even a late fsync failure.
                             disk.downloaded(if (r.expected_bytes != 0) r.expected_bytes else 8 * 1024 * 1024);
@@ -430,7 +412,7 @@ fn work(s: *Media) !void {
                         } else false;
                         if (installed) {
                             result.state = .ready;
-                            log.debug("Image {s}: download saved to disk cache", .{r.key});
+                            log.debug("Image {s}: download saved to disk cache", .{r.key.hex()});
                         } else {
                             c.zc_pixels_free(&result.pixels);
                             setReason(result, "Invalid or oversized image · retry");
@@ -502,21 +484,21 @@ fn work(s: *Media) !void {
                 if (r.retired) {
                     result.state = .retired;
                     setReason(result, "Photo changed · refreshing message");
-                    c.zc_cache_remove(s.dir, &r.key);
+                    c.zc_cache_remove(s.dir, &r.key.hex());
                     s.deliver(r, result, lane);
                     break;
                 }
-                const cached = c.zc_image_read(s.dir, &r.key, &result.pixels);
+                const cached = c.zc_image_read(s.dir, &r.key.hex(), &result.pixels);
                 if (cached == 1) {
-                    log.debug("Image {s}: disk cache hit ({s})", .{ r.key, @tagName(r.variant) });
+                    log.debug("Image {s}: disk cache hit ({s})", .{ r.key.hex(), @tagName(r.variant) });
                     result.state = .ready;
                     s.deliver(r, result, lane);
                     break;
                 }
                 if (cached < 0) {
-                    log.debug("Image {s}: disk cache file rejected; removing", .{r.key});
-                    c.zc_cache_remove(s.dir, &r.key);
-                } else log.debug("Image {s}: disk cache miss ({s})", .{ r.key, @tagName(r.variant) });
+                    log.debug("Image {s}: disk cache file rejected; removing", .{r.key.hex()});
+                    c.zc_cache_remove(s.dir, &r.key.hex());
+                } else log.debug("Image {s}: disk cache miss ({s})", .{ r.key.hex(), @tagName(r.variant) });
                 if (!online) {
                     result.state = .offline;
                     setReason(result, "Photo not cached · reconnect to load");
@@ -555,7 +537,7 @@ fn work(s: *Media) !void {
                     break;
                 }
                 log.debug("Image {s}: downloading {s} version {s} ({s})", .{
-                    r.key,
+                    r.key.hex(),
                     r.id,
                     r.version,
                     @tagName(r.variant),
@@ -786,20 +768,24 @@ test "asset keys separate relay identities, epochs, versions and variants" {
     };
     const first = media.key(asset);
     media.epoch = "epoch-2";
-    try std.testing.expect(!u.eq(&first, &media.key(asset)));
+    try std.testing.expect(!first.eql(media.key(asset)));
     media.epoch = "epoch-1";
     media.config.relay_url = "https://two.invalid";
-    try std.testing.expect(!u.eq(&first, &media.key(asset)));
+    try std.testing.expect(!first.eql(media.key(asset)));
     media.config.relay_url = "https://one.invalid";
     var second = asset;
     second.version = "2";
-    try std.testing.expect(!u.eq(&first, &media.key(second)));
+    try std.testing.expect(!first.eql(media.key(second)));
     second = asset;
     second.variant = .avatar;
-    try std.testing.expect(!u.eq(&first, &media.key(second)));
-    try std.testing.expectEqual(@as(u8, 'a'), media.key(second)[0]);
+    try std.testing.expect(!first.eql(media.key(second)));
+    try std.testing.expect(media.key(second).isAvatar());
 }
 
 test {
     _ = DiskCache;
+}
+
+test {
+    _ = Key;
 }

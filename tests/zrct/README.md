@@ -1,7 +1,7 @@
 # Zimbr GUI scenarios
 
 These scenarios run the production SDL3 client with opt-in Zrct instrumentation.
-The build selects Zrct's native SDL3 backend and supplies renderer flush/overlay
+The build selects Zrct's native SDL3 backend and supplies its SDL window and renderer flush/overlay
 hooks. Mouse, key, wheel, and text playback use SDL events; reviewed attachment
 playback calls the application's ordinary native drop-delivery handler. Separate
 compositor scenarios cover actual Wayland file-drop negotiation.
@@ -12,7 +12,9 @@ headless output's actual integer scale through `wp_fractional_scale_v1`.
 Optional diagnostics in `desktop_native.py` run with
 `zig build test-sdl-desktop -Ddesktop-tests=true` without application
 instrumentation, including a framebuffer check across live 1× → 2× → 1× changes.
-Native `test-gui` regressions remain available separately. See
+The native regressions also run under `zig build test-gui-isolated`, with no
+application instrumentation. Desktop diagnostics include partial transfers,
+stalled-drop timeouts, and shutdown during a transfer. See
 [FUTURE_MIGRATION.md](../../FUTURE_MIGRATION.md) for the remaining legacy-compositor
 limitation and fractional/multi-output coverage limits.
 
@@ -46,6 +48,11 @@ supervised fixture process; the worker reuses Zimbr's synthetic TLS/attachment
 fixtures. Its child relay belongs to the same process group, so Zrct can reclaim
 it even if a scenario times out. The worker never opens a real Messages database.
 All clients run the production application loop with opt-in instrumentation.
+
+The scenarios wait for a conversation to become unobscured before editing it:
+selection acknowledgment can precede the worker publishing its history and draft.
+Native tests that replace fixture capabilities publish a new frame before
+clicking the retained controls. Their behavioral assertions are unchanged.
 
 ## Test review and migration choices
 
@@ -96,3 +103,18 @@ Each scenario owns a fresh desktop, database, credentials and processes. Restart
 within it preserve the client directory. Role/text selectors distinguish fixture
 conversations; controls use stable IDs and repeated message actions use message
 identity. Attachment mutations happen only after preparation enables Send.
+
+## Companion Zrct changes
+
+The declared local dependency includes SDL_Renderer capture through the supplied
+window, event-time modifier injection, bitmap-font scaling in the private font
+profile, configurable desktop dimensions, and a controllable partial-drop source.
+[`sdl-native.patch`](sdl-native.patch) preserves these companion changes against
+the dependency before this refactor. They are already applied in the local
+dependency; apply the patch with `patch -p1` in an equivalent older Zrct source
+checkout when reproducing the change elsewhere.
+
+The scale scenario uses a 2560×1600 test output so the application remains
+reachable by the compositor pointer at 2×. On a smaller output, Weston clamps
+pointer movement to the screen edge, which can select history instead of the
+composer. Pixel assertions and scale transitions retain their existing coverage.

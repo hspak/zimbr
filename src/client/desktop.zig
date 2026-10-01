@@ -1,4 +1,4 @@
-//! SDL window, input batches, clipboard, and worker wakeups for the GUI thread.
+//! SDL window, ordered events, clipboard, and worker wakeups for the GUI thread.
 const std = @import("std");
 const log = std.log.scoped(.client_desktop);
 const geometry = @import("geometry.zig");
@@ -22,40 +22,6 @@ pub fn clipboardText() ?[]const u8 {
 pub fn setClipboardText(text: [:0]const u8) void {
     _ = c.zc_desktop_set_clipboard(text);
 }
-/// Consume this event batch's committed UTF-8. Borrowed until the next event poll.
-pub fn takeText() []const u8 {
-    var length: usize = 0;
-    const text = c.zc_desktop_take_text(&length);
-    return text[0..length];
-}
-pub fn discardText() void {
-    _ = takeText();
-}
-pub fn textRejected() bool {
-    return c.zc_desktop_text_error() != 0;
-}
-pub fn composing() bool {
-    return c.zc_desktop_composing() != 0;
-}
-pub const Preedit = struct {
-    text: []const u8,
-    start: i32,
-    length: i32,
-};
-/// The last composition update in this batch, borrowed until the next poll.
-/// An empty update cancels preedit; null leaves the existing preedit unchanged.
-pub fn preedit() ?Preedit {
-    if (c.zc_desktop_preedit_changed() == 0) return null;
-    var length: usize = 0;
-    var start: c_int = 0;
-    var selection: c_int = 0;
-    const text = c.zc_desktop_preedit(&length, &start, &selection);
-    return .{
-        .text = text[0..length],
-        .start = start,
-        .length = selection,
-    };
-}
 pub fn resetTextInput(enabled: bool) void {
     c.zc_desktop_reset_input(@intFromBool(enabled));
 }
@@ -76,9 +42,11 @@ pub fn open(w: i32, h: i32, title: [:0]const u8) OpenError!void {
         log.err("SDL window: {s}", .{c.SDL_GetError()});
         return error.WindowUnavailable;
     }
-    target_seconds = 0;
-    frame_seconds = 0;
-    frame_start = time();
+    closing = false;
+    pointer = .{ .x = 0, .y = 0 };
+    buttons = 0;
+    key_modifiers = 0;
+    refreshMetrics();
 }
 pub fn close() void {
     for (&cursors) |*cursor| {
@@ -90,41 +58,55 @@ pub fn close() void {
 pub fn window() ?*c.SDL_Window {
     return c.zc_desktop_window();
 }
-pub const poll = c.zc_desktop_poll;
-pub fn shouldClose() bool {
-    return c.zc_desktop_closing() != 0;
+pub fn poll() void {
+    if (window() == null) return;
+    c.zc_desktop_poll();
+    refreshMetrics();
 }
-pub fn resized() bool {
-    return c.zc_desktop_resized() != 0;
+
+pub const Metrics = struct {
+    width: i32 = 0,
+    height: i32 = 0,
+    render_width: i32 = 0,
+    render_height: i32 = 0,
+    scale: f32 = 1,
+
+    pub fn current() Metrics {
+        return metrics;
+    }
+};
+var metrics = Metrics{};
+/// Snapshot the logical and physical window sizes once after processing events.
+pub fn refreshMetrics() void {
+    if (window() == null) return;
+    _ = c.SDL_GetWindowSize(window(), &metrics.width, &metrics.height);
+    _ = c.SDL_GetWindowSizeInPixels(window(), &metrics.render_width, &metrics.render_height);
+    metrics.scale = @as(f32, @floatFromInt(metrics.render_width)) / @as(f32, @floatFromInt(@max(1, metrics.width)));
+}
+pub fn shouldClose() bool {
+    return closing;
 }
 pub fn width() i32 {
-    var n: c_int = 0;
-    _ = c.SDL_GetWindowSize(window(), &n, null);
-    return n;
+    return metrics.width;
 }
 pub fn height() i32 {
-    var n: c_int = 0;
-    _ = c.SDL_GetWindowSize(window(), null, &n);
-    return n;
+    return metrics.height;
 }
 pub fn pixelWidth() i32 {
-    var n: c_int = 0;
-    _ = c.SDL_GetWindowSizeInPixels(window(), &n, null);
-    return n;
+    return metrics.render_width;
 }
 pub fn pixelHeight() i32 {
-    var n: c_int = 0;
-    _ = c.SDL_GetWindowSizeInPixels(window(), null, &n);
-    return n;
+    return metrics.render_height;
 }
 pub fn scale() geometry.Point {
     return .{
-        .x = @as(f32, @floatFromInt(pixelWidth())) / @as(f32, @floatFromInt(@max(1, width()))),
-        .y = @as(f32, @floatFromInt(pixelHeight())) / @as(f32, @floatFromInt(@max(1, height()))),
+        .x = metrics.scale,
+        .y = @as(f32, @floatFromInt(metrics.render_height)) / @as(f32, @floatFromInt(@max(1, metrics.height))),
     };
 }
 pub fn setSize(w: i32, h: i32) void {
     _ = c.SDL_SetWindowSize(window(), w, h);
+    refreshMetrics();
 }
 pub fn setMinSize(w: i32, h: i32) void {
     _ = c.SDL_SetWindowMinimumSize(window(), w, h);
@@ -147,101 +129,118 @@ pub fn time() f64 {
 pub fn sleep(seconds: f64) void {
     c.SDL_DelayNS(@intFromFloat(@max(0, seconds) * 1e9));
 }
-var target_seconds: f64 = 0;
-var frame_start: f64 = 0;
-var frame_seconds: f64 = 0;
-pub fn setFrameLimit(limit: u32) void {
-    target_seconds = if (limit == 0) 0 else 1 / @as(f64, @floatFromInt(limit));
-}
-pub fn fps() i32 {
-    return if (frame_seconds > 0) @intFromFloat(@round(1 / frame_seconds)) else 0;
-}
+pub const ticks = c.SDL_GetTicksNS;
+/// Present the completed frame. Event processing and waiting belong to the main loop.
 pub fn present() void {
-    _ = c.SDL_GL_SwapWindow(window());
-    const elapsed = time() - frame_start;
-    if (elapsed < target_seconds) sleep(target_seconds - elapsed);
-    const now = time();
-    frame_seconds = now - frame_start;
-    frame_start = now;
-    poll();
+    _ = c.SDL_RenderPresent(c.SDL_GetRenderer(window()));
 }
-pub const Key = enum(c_int) {
-    a = 4,
-    b = 5,
-    c = 6,
-    d = 7,
-    e = 8,
-    f = 9,
-    g = 10,
-    h = 11,
-    i = 12,
-    j = 13,
-    k = 14,
-    l = 15,
-    m = 16,
-    n = 17,
-    o = 18,
-    p = 19,
-    q = 20,
-    r = 21,
-    s = 22,
-    t = 23,
-    u = 24,
-    v = 25,
-    w = 26,
-    x = 27,
-    y = 28,
-    z = 29,
-    enter = 40,
-    escape = 41,
-    backspace = 42,
-    tab = 43,
-    space = 44,
-    comma = 54,
-    home = 74,
-    page_up = 75,
-    delete = 76,
-    end = 77,
-    page_down = 78,
-    right = 79,
-    left = 80,
-    down = 81,
-    up = 82,
-    kp_enter = 88,
-    left_control = 224,
-    left_shift = 225,
-    left_alt = 226,
-    left_super = 227,
-    right_control = 228,
-    right_shift = 229,
-    right_alt = 230,
-    right_super = 231,
+pub const Key = enum(c.SDL_Keycode) {
+    a = c.SDLK_A,
+    b = c.SDLK_B,
+    c = c.SDLK_C,
+    d = c.SDLK_D,
+    e = c.SDLK_E,
+    f = c.SDLK_F,
+    g = c.SDLK_G,
+    h = c.SDLK_H,
+    i = c.SDLK_I,
+    j = c.SDLK_J,
+    k = c.SDLK_K,
+    l = c.SDLK_L,
+    m = c.SDLK_M,
+    n = c.SDLK_N,
+    o = c.SDLK_O,
+    p = c.SDLK_P,
+    q = c.SDLK_Q,
+    r = c.SDLK_R,
+    s = c.SDLK_S,
+    t = c.SDLK_T,
+    u = c.SDLK_U,
+    v = c.SDLK_V,
+    w = c.SDLK_W,
+    x = c.SDLK_X,
+    y = c.SDLK_Y,
+    z = c.SDLK_Z,
+    enter = c.SDLK_RETURN,
+    escape = c.SDLK_ESCAPE,
+    backspace = c.SDLK_BACKSPACE,
+    tab = c.SDLK_TAB,
+    space = c.SDLK_SPACE,
+    comma = c.SDLK_COMMA,
+    home = c.SDLK_HOME,
+    page_up = c.SDLK_PAGEUP,
+    delete = c.SDLK_DELETE,
+    end = c.SDLK_END,
+    page_down = c.SDLK_PAGEDOWN,
+    right = c.SDLK_RIGHT,
+    left = c.SDLK_LEFT,
+    down = c.SDLK_DOWN,
+    up = c.SDLK_UP,
+    kp_enter = c.SDLK_KP_ENTER,
+    left_control = c.SDLK_LCTRL,
+    left_shift = c.SDLK_LSHIFT,
+    left_alt = c.SDLK_LALT,
+    left_super = c.SDLK_LGUI,
+    right_control = c.SDLK_RCTRL,
+    right_shift = c.SDLK_RSHIFT,
+    right_alt = c.SDLK_RALT,
+    right_super = c.SDLK_RGUI,
 };
-pub fn keyDown(key: Key) bool {
-    return c.zc_desktop_key(@intFromEnum(key), 0) != 0;
-}
-pub fn keyPressed(key: Key) bool {
-    return c.zc_desktop_key(@intFromEnum(key), 1) != 0;
-}
-pub fn keyRepeated(key: Key) bool {
-    return c.zc_desktop_key(@intFromEnum(key), 3) != 0;
-}
-pub const Button = enum(c_int) { left = 1, middle = 2, right = 3 };
-pub fn buttonDown(button: Button) bool {
-    return c.zc_desktop_button(@intFromEnum(button), 0) != 0;
-}
-pub fn buttonPressed(button: Button) bool {
-    return c.zc_desktop_button(@intFromEnum(button), 1) != 0;
-}
-pub fn buttonReleased(button: Button) bool {
-    return c.zc_desktop_button(@intFromEnum(button), 2) != 0;
-}
+pub const KeyPress = struct {
+    code: c.SDL_Keycode,
+    modifiers: c.SDL_Keymod,
+    repeat: bool,
+
+    pub fn pressed(key: KeyPress, expected: Key) bool {
+        return !key.repeat and key.matches(expected);
+    }
+    pub fn matches(key: KeyPress, expected: Key) bool {
+        return key.code == @intFromEnum(expected);
+    }
+};
+pub const Button = enum(u8) { left = c.SDL_BUTTON_LEFT, middle = c.SDL_BUTTON_MIDDLE, right = c.SDL_BUTTON_RIGHT };
+var pointer: geometry.Point = .{ .x = 0, .y = 0 };
+var buttons: c.SDL_MouseButtonFlags = 0;
+var key_modifiers: c.SDL_Keymod = 0;
+var closing = false;
+
 pub fn mouse() geometry.Point {
-    var p: geometry.Point = undefined;
-    c.zc_desktop_mouse(&p.x, &p.y);
-    return p;
+    return pointer;
 }
-pub const wheel = c.zc_desktop_wheel;
+pub fn modifiers() c.SDL_Keymod {
+    return key_modifiers;
+}
+pub fn leftDown() bool {
+    return buttons & c.SDL_BUTTON_LMASK != 0;
+}
+/// Borrow event strings until the next pump. Drain with PeepEvents so an SDL
+/// poll sentinel left by WaitEventTimeout cannot hide later injected events.
+pub fn nextEvent() ?c.SDL_Event {
+    if (window() == null) return null;
+    var event: c.SDL_Event = undefined;
+    while (c.SDL_PeepEvents(&event, 1, c.SDL_GETEVENT, c.SDL_EVENT_FIRST, c.SDL_EVENT_LAST) > 0) {
+        switch (event.type) {
+            c.SDL_EVENT_QUIT, c.SDL_EVENT_WINDOW_CLOSE_REQUESTED => closing = true,
+            c.SDL_EVENT_KEY_DOWN, c.SDL_EVENT_KEY_UP => key_modifiers = event.key.mod,
+            c.SDL_EVENT_MOUSE_MOTION => pointer = .{ .x = event.motion.x, .y = event.motion.y },
+            c.SDL_EVENT_MOUSE_BUTTON_DOWN, c.SDL_EVENT_MOUSE_BUTTON_UP => {
+                pointer = .{ .x = event.button.x, .y = event.button.y };
+                if (event.button.button > 0 and event.button.button <= 32) {
+                    const mask = @as(u32, 1) << @as(u5, @intCast(event.button.button - 1));
+                    if (event.button.down) buttons |= mask else buttons &= ~mask;
+                }
+            },
+            c.SDL_EVENT_MOUSE_WHEEL => pointer = .{ .x = event.wheel.mouse_x, .y = event.wheel.mouse_y },
+            c.SDL_EVENT_WINDOW_FOCUS_LOST => {
+                buttons = 0;
+                key_modifiers = 0;
+            },
+            else => {},
+        }
+        return event;
+    }
+    return null;
+}
 pub const Cursor = enum { default, pointing_hand, ibeam };
 var cursors: [3]?*c.SDL_Cursor = @splat(null);
 pub fn setCursor(cursor: Cursor) void {

@@ -78,6 +78,9 @@ int zc_text_height(ZcText *text);
 double zc_text_baseline(ZcText *text);
 double zc_text_ink_center_x(ZcText *text);
 double zc_text_ink_center_y(ZcText *text);
+// Raster bytes are borrowed native-endian premultiplied ARGB32 until clear/free/next raster.
+// Use zc_text_pitch for the row stride; color arguments remain packed RGBA.
+int zc_text_pitch(ZcText *text);
 unsigned char *zc_text_pixels(ZcText *text, unsigned color, int start, int end, int top, int height);
 unsigned char *zc_text_pixels_on(ZcText *text, unsigned color, int start, int end, int top, int height, unsigned background);
 // Colors are packed RGBA; zero selection keeps the default highlight.

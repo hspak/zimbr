@@ -59,8 +59,8 @@ class NativeDesktop(TestCase):
 
     def test_clipboard_keys_and_resize(self):
         probe = self.launch_probe()
-        self.tell(probe, "samples")
-        self.expect_line(probe, "samples 4")
+        self.tell(probe, "pixels")
+        self.expect_line(probe, "pixels 17 93 201 255")
         self.tell(probe, "size")
         self.expect_line(probe, "size 780 560 780 560 1.000")
         self.tell(probe, "resize")
@@ -121,3 +121,50 @@ class NativeDesktop(TestCase):
                 self.assertEqual(1, probe.stdout_path.read_text().count("drop "))
         self.tell(probe, "quit")
         probe.wait(5)
+
+    def start_held_drop(self, probe):
+        source = self.context.desktop.launch("held-drop", [
+            str(platform_directory() / "zrct-drop-client"), "file:///tmp/held.png\r\n", "--hold"],
+            stdin=subprocess.PIPE)
+        self.expect_line(source, "ready")
+        self.command("activate zrct-dnd")
+        self.command("move zrct-dnd 120 50")
+        self.command("button 272 1")
+        self.expect_line(source, "dragging")
+        self.command("move zimbr 300 250")
+        self.expect_line(probe, "hover 1")
+        self.command("button 272 0")
+        self.expect_line(source, "sending")
+        return source
+
+    def test_partial_drop_keeps_rendering_and_completes_after_release(self):
+        probe = self.launch_probe()
+        source = self.start_held_drop(probe)
+        self.tell(probe, "pixels")
+        until(lambda: "pixels 17 93 201 255" in probe.stdout_path.read_text(), timeout=1,
+              condition="render during a partial drop", health=probe.check)
+        self.assertNotIn("drop ", probe.stdout_path.read_text())
+        self.tell(source, "release")
+        self.expect_line(probe, "drop 1")
+        self.expect_line(probe, "path " + b"/tmp/held.png".hex())
+        source.wait(5)
+        self.tell(probe, "quit")
+        probe.wait(5)
+
+    def test_stalled_drop_times_out_without_accepting_partial_paths(self):
+        probe = self.launch_probe()
+        source = self.start_held_drop(probe)
+        self.expect_line(probe, "rejected")
+        self.assertNotIn("drop ", probe.stdout_path.read_text())
+        self.tell(source, "release")
+        source.wait(5)
+        self.tell(probe, "quit")
+        probe.wait(5)
+
+    def test_shutdown_closes_an_unfinished_drop(self):
+        probe = self.launch_probe()
+        source = self.start_held_drop(probe)
+        self.tell(probe, "quit")
+        probe.wait(1)
+        self.tell(source, "release")
+        source.wait(5)

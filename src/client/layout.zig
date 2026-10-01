@@ -1,4 +1,4 @@
-const clay = @import("zclay");
+//! Pure pane geometry in logical window coordinates.
 const Rect = @import("geometry.zig").Rect;
 pub const Areas = struct {
     rail: Rect,
@@ -8,15 +8,6 @@ pub const Areas = struct {
     history: Rect,
     composer: Rect,
 };
-fn rect(name: []const u8) Rect {
-    const b = clay.getElementData(.ID(name)).bounding_box;
-    return .{
-        .x = b.x,
-        .y = b.y,
-        .width = b.width,
-        .height = b.height,
-    };
-}
 // 32 logical pixels fits the connection status and its vertical padding.
 pub const footer_height: f32 = 32;
 // Eight pixels keeps the final sidebar row clear of the footer.
@@ -48,30 +39,41 @@ pub fn footer(r: Rect) Rect {
 }
 
 pub fn frame(width: f32, height: f32, composer_height: f32) Areas {
-    clay.setLayoutDimensions(.{ .w = width, .h = height });
-    clay.beginLayout();
-    clay.UI()(.{ .id = .ID("root"), .layout = .{ .sizing = .grow, .direction = .top_to_bottom } })({
-        clay.UI()(.{ .layout = .{ .sizing = .grow, .direction = .left_to_right } })({
-            clay.UI()(.{ .id = .ID("rail"), .layout = .{ .sizing = .{ .w = .fixed(rail_width), .h = .grow } } })({});
-            clay.UI()(.{ .layout = .{ .sizing = .{ .w = .fixed(sidebar_width), .h = .grow }, .direction = .top_to_bottom } })({
-                clay.UI()(.{ .id = .ID("sidebar"), .layout = .{ .sizing = .grow } })({});
-                clay.UI()(.{ .id = .ID("sidebar_footer"), .layout = .{ .sizing = .{ .w = .grow, .h = .fixed(footer_height) } } })({});
-            });
-            clay.UI()(.{ .layout = .{ .sizing = .grow, .direction = .top_to_bottom } })({
-                // The 64-pixel header fits an avatar plus two lines of conversation information.
-                clay.UI()(.{ .id = .ID("header"), .layout = .{ .sizing = .{ .w = .grow, .h = .fixed(64) } } })({});
-                clay.UI()(.{ .id = .ID("history"), .layout = .{ .sizing = .grow } })({});
-                clay.UI()(.{ .id = .ID("composer"), .layout = .{ .sizing = .{ .w = .grow, .h = .fixed(composer_height) } } })({});
-            });
-        });
-    });
-    _ = clay.endLayout();
+    const conversation_x = rail_width + sidebar_width;
+    const conversation_width = @max(0, width - conversation_x);
+    const header_height = @min(64, height);
+    const composer = @min(composer_height, @max(0, height - header_height));
     return .{
-        .rail = rect("rail"),
-        .sidebar = rect("sidebar"),
-        .sidebar_footer = rect("sidebar_footer"),
-        .header = rect("header"),
-        .history = rect("history"),
-        .composer = rect("composer"),
+        .rail = .{ .x = 0, .y = 0, .width = rail_width, .height = height },
+        .sidebar = .{
+            .x = rail_width,
+            .y = 0,
+            .width = sidebar_width,
+            .height = @max(0, height - footer_height),
+        },
+        .sidebar_footer = .{
+            .x = rail_width,
+            .y = @max(0, height - footer_height),
+            .width = sidebar_width,
+            .height = @min(footer_height, height),
+        },
+        .header = .{
+            .x = conversation_x,
+            .y = 0,
+            .width = conversation_width,
+            .height = header_height,
+        },
+        .history = .{
+            .x = conversation_x,
+            .y = header_height,
+            .width = conversation_width,
+            .height = @max(0, height - header_height - composer),
+        },
+        .composer = .{
+            .x = conversation_x,
+            .y = height - composer,
+            .width = conversation_width,
+            .height = composer,
+        },
     };
 }

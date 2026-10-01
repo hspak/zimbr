@@ -199,11 +199,8 @@ fn client(
         .{},
     ).step);
     const step = b.step("client", "Build the Linux desktop client");
-    const clay = b.lazyDependency("zclay", .{ .target = target, .optimize = optimize }) orelse return;
     const m = clientModule(b, target, optimize, "src/client_main.zig", options);
     addDesktop(b, m);
-    m.linkSystemLibrary("GL", .{});
-    m.addImport("zclay", clay.module("zclay"));
 
     const desktop_probe = b.createModule(.{
         .target = target,
@@ -213,7 +210,6 @@ fn client(
     desktop_probe.addIncludePath(b.path("src/client"));
     desktop_probe.addCSourceFiles(.{ .files = &.{ "tests/client_desktop_probe.c", "src/client/drop.c" }, .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
     addDesktop(b, desktop_probe);
-    desktop_probe.linkSystemLibrary("GL", .{});
     const desktop_exe = b.addExecutable(.{ .name = "client-desktop-probe", .root_module = desktop_probe });
     b.step("client-desktop-probe", "Build the native desktop integration probe").dependOn(&b.addInstallArtifact(desktop_exe, .{}).step);
     if (b.option(bool, "desktop-tests", "Enable optional compositor diagnostics") orelse false) {
@@ -240,6 +236,14 @@ fn client(
     const gui_tests = b.addTest(.{ .root_module = m, .filters = if (gui_filter) |filter| &.{filter} else &.{} });
     const install_gui = b.addInstallArtifact(gui_tests, .{ .dest_sub_path = "zimbr-gui-tests" });
     b.step("gui-test-exe", "Install the GUI regression executable without running it").dependOn(&install_gui.step);
+    const isolated_gui = @import("zrct").addRun(b, b.dependency("zrct", .{}), .{
+        .suite = b.path("tests/zrct/native.py"),
+        .executable = gui_tests,
+        .python_extras = &.{"zimbr"},
+        .args = b.args orelse &.{},
+    });
+    isolated_gui.step.dependOn(&b.top_level_steps.get("fake-relay").?.step);
+    b.step("test-gui-isolated", "Run native GUI regressions in an isolated Wayland session").dependOn(&isolated_gui.step);
     const gui_run = b.addRunArtifact(gui_tests);
     gui_run.step.dependOn(&b.top_level_steps.get("fake-relay").?.step);
     b.step("test-gui", "Test rendering and client interactions on Wayland").dependOn(&gui_run.step);

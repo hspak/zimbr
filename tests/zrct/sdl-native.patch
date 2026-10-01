@@ -1,0 +1,231 @@
+--- a/platform/drop_client.c
++++ b/platform/drop_client.c
+@@ -10,6 +10,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <errno.h>
++#include <signal.h>
+ 
+ struct helper {
+     struct wl_display *display;
+@@ -26,7 +27,7 @@
+     struct xdg_surface *xdg;
+     struct xdg_toplevel *top;
+     const char *uris;
+-    int done, ready;
++    int done, ready, hold;
+ };
+ static void ping(void *data, struct xdg_wm_base *wm, uint32_t serial) { (void)data; xdg_wm_base_pong(wm, serial); }
+ static const struct xdg_wm_base_listener wm_listener = { .ping = ping };
+@@ -68,6 +69,13 @@
+     (void)s; struct helper*h=d;
+     if (m && !strcmp(m,"text/uri-list")) {
+         size_t length=strlen(h->uris), offset=0;
++        if (h->hold) {
++            /* Keep a partial URI pending until the test releases stdin. */
++            if (length && write(fd,h->uris,1)==1) offset=1;
++            puts("sending"); fflush(stdout);
++            char release;
++            while (read(STDIN_FILENO,&release,1)<0 && errno==EINTR);
++        }
+         while(offset<length){ssize_t n=write(fd,h->uris+offset,length-offset);if(n<0&&errno==EINTR)continue;if(n<=0)break;offset+=(size_t)n;}
+     }
+     close(fd); puts("sent"); fflush(stdout);
+@@ -103,8 +111,9 @@
+ static void seat_name(void*d,struct wl_seat*s,const char*n){(void)d;(void)s;(void)n;}
+ static const struct wl_seat_listener seat_listener={capabilities,seat_name};
+ int main(int argc,char **argv){
+-    if(argc!=2||strlen(argv[1])>16384)return 2;
+-    struct helper h={.uris=argv[1]};
++    if((argc!=2 && (argc!=3 || strcmp(argv[2],"--hold")))||strlen(argv[1])>16384)return 2;
++    signal(SIGPIPE,SIG_IGN);
++    struct helper h={.uris=argv[1],.hold=argc==3};
+     h.display=wl_display_connect(NULL);if(!h.display)return 3;
+     struct wl_registry*r=wl_display_get_registry(h.display);wl_registry_add_listener(r,&registry_listener,&h);
+     if(wl_display_roundtrip(h.display)<0||!h.compositor||!h.shm||!h.seat||!h.wm||!h.manager)return 4;
+--- a/src/engine.zig
++++ b/src/engine.zig
+@@ -166,6 +166,7 @@
+     flush(client);
+ }
+ fn glString(name: c_uint) []const u8 {
++    if (comptime options.native_sdl) if (host.renderingInfo(name)) |value| return value;
+     const address = input.getProcAddress("glGetString") orelse return "unavailable";
+     const get_string: *const fn (c_uint) callconv(.c) ?[*:0]const u8 = @ptrCast(address);
+     return if (get_string(name)) |value| std.mem.span(value) else "unavailable";
+--- a/src/host_sdl.zig
++++ b/src/host_sdl.zig
+@@ -1,4 +1,4 @@
+-//! Native SDL window/input and OpenGL capture; application hooks flush and overlay.
++//! Native SDL input and capture, with SDL_Renderer and OpenGL window support.
+ const std = @import("std");
+ const registry = @import("registry.zig");
+ const c = @cImport({
+@@ -6,6 +6,8 @@
+ });
+ const a = std.heap.page_allocator;
+ pub const Renderer = struct {
++    /// Borrowed SDL_Window for consumers without a current OpenGL context.
++    window: ?*anyopaque = null,
+     flush: *const fn () void,
+     overlay: *const fn (registry.Rect, []const u8) void,
+ };
+@@ -97,7 +99,8 @@
+     right_alt = 230,
+     right_super = 231,
+ };
+-fn window() ?*c.SDL_Window {
++pub fn window() ?*c.SDL_Window {
++    if (renderer) |hooks| if (hooks.window) |handle| return @ptrCast(handle);
+     return c.SDL_GL_GetCurrentWindow();
+ }
+ pub fn width() i32 {
+@@ -140,12 +143,26 @@
+     event.button.y = mouse_y;
+     _ = c.SDL_PushEvent(&event);
+ }
++var modifiers: c.SDL_Keymod = 0;
+ pub fn key(value: Key, down: bool) void {
++    const bit: c.SDL_Keymod = switch (value) {
++        .left_control => c.SDL_KMOD_LCTRL,
++        .right_control => c.SDL_KMOD_RCTRL,
++        .left_shift => c.SDL_KMOD_LSHIFT,
++        .right_shift => c.SDL_KMOD_RSHIFT,
++        .left_alt => c.SDL_KMOD_LALT,
++        .right_alt => c.SDL_KMOD_RALT,
++        .left_super => c.SDL_KMOD_LGUI,
++        .right_super => c.SDL_KMOD_RGUI,
++        else => 0,
++    };
++    if (down) modifiers |= bit else modifiers &= ~bit;
+     var event = std.mem.zeroes(c.SDL_Event);
+     event.key.type = if (down) c.SDL_EVENT_KEY_DOWN else c.SDL_EVENT_KEY_UP;
+     event.key.windowID = c.SDL_GetWindowID(window());
+     event.key.scancode = @intCast(@intFromEnum(value));
+     event.key.key = c.SDL_GetKeyFromScancode(event.key.scancode, 0, false);
++    event.key.mod = modifiers;
+     event.key.down = down;
+     _ = c.SDL_PushEvent(&event);
+ }
+@@ -153,6 +170,8 @@
+     var event = std.mem.zeroes(c.SDL_Event);
+     event.wheel.type = c.SDL_EVENT_MOUSE_WHEEL;
+     event.wheel.windowID = c.SDL_GetWindowID(window());
++    event.wheel.mouse_x = mouse_x;
++    event.wheel.mouse_y = mouse_y;
+     event.wheel.x = x;
+     event.wheel.y = y;
+     _ = c.SDL_PushEvent(&event);
+@@ -171,6 +190,7 @@
+     var w: c_int = 0;
+     var h: c_int = 0;
+     if (!c.SDL_GetWindowSizeInPixels(window(), &w, &h) or w <= 0 or h <= 0 or w > 16384 or h > 16384) return error.InvalidDimensions;
++    if (c.SDL_GetRenderer(window())) |native| return captureRenderer(native);
+     const address = c.SDL_GL_GetProcAddress("glReadPixels") orelse return error.CaptureUnavailable;
+     const read: *const fn (c_int, c_int, c_int, c_int, c_uint, c_uint, *anyopaque) callconv(.c) void = @ptrCast(address);
+     const stride = @as(usize, @intCast(w)) * 4;
+@@ -188,3 +208,27 @@
+ pub fn overlay(bounds: registry.Rect, label: []const u8) void {
+     if (renderer) |hooks| hooks.overlay(bounds, label);
+ }
++
++fn captureRenderer(native: *c.SDL_Renderer) !Image {
++    const source: *c.SDL_Surface = c.SDL_RenderReadPixels(native, null) orelse return error.CaptureUnavailable;
++    defer c.SDL_DestroySurface(source);
++    const rgba: *c.SDL_Surface = c.SDL_ConvertSurface(source, c.SDL_PIXELFORMAT_RGBA32) orelse return error.CaptureUnavailable;
++    defer c.SDL_DestroySurface(rgba);
++    if (rgba.w <= 0 or rgba.h <= 0 or rgba.w > 16384 or rgba.h > 16384) return error.InvalidDimensions;
++    const stride = @as(usize, @intCast(rgba.w)) * 4;
++    const row_count: usize = @intCast(rgba.h);
++    const pixels = try a.alloc(u8, stride * row_count);
++    const bytes: [*]const u8 = @ptrCast(rgba.pixels.?);
++    for (0..row_count) |y| @memcpy(pixels[y * stride ..][0..stride], bytes[y * @as(usize, @intCast(rgba.pitch)) ..][0..stride]);
++    return .{ .width = rgba.w, .height = rgba.h, .pixels = pixels };
++}
++
++pub fn renderingInfo(name: c_uint) ?[]const u8 {
++    const native = c.SDL_GetRenderer(window()) orelse return null;
++    return switch (name) {
++        0x1f00 => "SDL",
++        0x1f01 => if (c.SDL_GetRendererName(native)) |value| std.mem.span(value) else "unavailable",
++        0x1f02 => "SDL3",
++        else => null,
++    };
++}
+--- a/src/input_sdl.zig
++++ b/src/input_sdl.zig
+@@ -1,5 +1,6 @@
+ //! Queue input for the application's existing SDL event consumer. Never drain its queue.
+ const std = @import("std");
++const options = @import("zrct_options");
+ const c = @cImport({
+     @cInclude("SDL3/SDL.h");
+ });
+@@ -17,7 +18,10 @@
+ }
+ 
+ fn windowId() !c.SDL_WindowID {
+-    const window = c.SDL_GL_GetCurrentWindow() orelse return error.WindowUnavailable;
++    const window: *c.SDL_Window = if (comptime options.native_sdl)
++        @ptrCast(@import("host_sdl.zig").window() orelse return error.WindowUnavailable)
++    else
++        c.SDL_GL_GetCurrentWindow() orelse return error.WindowUnavailable;
+     return c.SDL_GetWindowID(window);
+ }
+ 
+--- a/src/root.zig
++++ b/src/root.zig
+@@ -5,7 +5,8 @@
+ pub const Target = @import("registry.zig").Target;
+ pub const enabled = options.enabled;
+ pub const Renderer = @import("host_sdl.zig").Renderer;
+-/// Native SDL consumers supply drawing hooks; capture uses their current GL back buffer.
++/// Native SDL consumers supply drawing hooks and their window when using SDL_Renderer.
++/// Capture reads the SDL renderer target or the current OpenGL back buffer.
+ pub fn setRenderer(renderer: Renderer) void {
+     if (comptime enabled and options.native_sdl) @import("host_sdl.zig").renderer = renderer;
+ }
+--- a/zrct/environment.py
++++ b/zrct/environment.py
+@@ -190,6 +190,19 @@
+                           f'<cachedir>{escape(str(self.root / "cache/fonts"))}</cachedir>'
+                           '<alias><family>sans-serif</family><prefer><family>DejaVu Sans</family></prefer></alias>'
+                           '<alias><family>monospace</family><prefer><family>DejaVu Sans Mono</family></prefer></alias>'
++                          # Color bitmap fonts need the same strike scaling as ordinary
++                          # Fontconfig configurations; otherwise emoji render at 109 px.
++                          '<match target="font"><test name="outline"><bool>false</bool></test>'
++                          '<edit name="pixelsizefixupfactor" mode="assign"><divide>'
++                          '<name target="pattern">pixelsize</name><name target="font">pixelsize</name>'
++                          '</divide></edit></match>'
++                          '<match target="font"><test name="outline"><bool>false</bool></test>'
++                          '<test name="pixelsizefixupfactor" compare="not_eq"><double>1.0</double></test>'
++                          '<edit name="matrix" mode="assign"><times><name>matrix</name><matrix>'
++                          '<name>pixelsizefixupfactor</name><double>0</double><double>0</double>'
++                          '<name>pixelsizefixupfactor</name></matrix></times></edit>'
++                          '<edit name="size" mode="assign"><divide><name>size</name>'
++                          '<name>pixelsizefixupfactor</name></divide></edit></match>'
+                           '</fontconfig>')
+         self.env["FONTCONFIG_FILE"] = str(config)
+         self.bundle.manifest["metadata"]["fonts"] = fingerprints
+--- a/zrct/runner.py
++++ b/zrct/runner.py
+@@ -71,7 +71,7 @@
+     signal.setitimer(signal.ITIMER_REAL, suite.timeout + pause)
+     try:
+         with ExitStack() as stack:
+-            desktop = stack.enter_context(Desktop(bundle, scale=suite.scale, input=suite.desktop_input, display=suite.display))
++            desktop = stack.enter_context(Desktop(bundle, width=suite.width, height=suite.height, scale=suite.scale, input=suite.desktop_input, display=suite.display))
+             context = Session(suite, desktop, bundle, record=record, pause=pause)
+             try:
+                 if suite.setup:
+--- a/zrct/suite.py
++++ b/zrct/suite.py
+@@ -26,6 +26,8 @@
+     scale: int = 1
+     desktop_input: bool = False
+     display: bool = False
++    width: int = 1280
++    height: int = 800
+ 
+ 
+ class TestCase(unittest.TestCase):

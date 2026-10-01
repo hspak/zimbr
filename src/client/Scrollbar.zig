@@ -93,11 +93,11 @@ pub fn draw(s: Scrollbar, viewport: Rect, content: f64, offset: f64) void {
         .y = g.track.y,
         .width = 4,
         .height = g.track.height,
-    }, 1, theme.colors.line);
+    }, 2, theme.colors.line);
     const hot = g.track.contains(desktop.mouse());
     shapes.drawRectangle(
         g.thumb,
-        1,
+        3,
         if (s.dragging or hot) theme.colors.accent else theme.colors.muted,
     );
 }

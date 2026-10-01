@@ -1581,9 +1581,11 @@ test "RGB glyph edges use opaque backgrounds and transparent text stays grayscal
             if ((background == 0x000000ff or background == 0xffffffff) and
                 (pixels[i] != pixels[i + 1] or pixels[i + 1] != pixels[i + 2])) chromatic += 1;
         }
-        try std.testing.expectEqual(@as(u8, @intCast(background >> 24)), pixels[0]);
-        try std.testing.expectEqual(@as(u8, @truncate(background >> 16)), pixels[1]);
-        try std.testing.expectEqual(@as(u8, @truncate(background >> 8)), pixels[2]);
+        // The raster API exposes Cairo's native ARGB32; inspect channels by integer bits.
+        const native = std.mem.readInt(u32, pixels[0..4], @import("builtin").cpu.arch.endian());
+        try std.testing.expectEqual(@as(u8, @intCast(background >> 24)), @as(u8, @truncate(native >> 16)));
+        try std.testing.expectEqual(@as(u8, @truncate(background >> 16)), @as(u8, @truncate(native >> 8)));
+        try std.testing.expectEqual(@as(u8, @truncate(background >> 8)), @as(u8, @truncate(native)));
     }
     const gray = c.zc_text_new(text.ptr, text.len, 16, 300, 1) orelse return error.NoLayout;
     defer c.zc_text_free(gray);

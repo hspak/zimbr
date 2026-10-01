@@ -13,7 +13,8 @@ REPOSITORY = Path(__file__).resolve().parents[2]
 PREFIX = os.environ.get("ZRCT_OPENSSL_PREFIX", str(REPOSITORY / ".tools/openssl-3.5"))
 SUITE = Suite("zimbr", REPOSITORY,
               ("zig", "build", "client", "fake-relay", "-Dautomation=true", f"-Dopenssl-prefix={PREFIX}"),
-              "zig-out/bin/zimbr", setup=relay, timeout=90, desktop_input=True)
+              "zig-out/bin/zimbr", setup=relay, timeout=90, desktop_input=True,
+              width=2560, height=1600)
 
 
 class Messages(TestCase):
@@ -22,7 +23,7 @@ class Messages(TestCase):
         self.app = self.relay.launch()
         self.app.target(role="row", text="alice").expect_visible(timeout=15)
         self.app.target(role="row", text="alice").click()
-        self.app.target("composer").expect_visible()
+        self.app.target("composer").expect(visible=True, obscured=False)
 
     def test_send_unicode_and_persist(self):
         text = "Hello 👋 👩‍💻 é — a character queue longer than sixteen characters."
@@ -43,7 +44,7 @@ class Messages(TestCase):
         self.app.press("left_control+n")
         self.app.type_text("peer@example.invalid")
         self.app.press("enter")
-        self.app.target("composer").expect_visible()
+        self.app.target("composer").expect(visible=True, obscured=False)
         text = "Reviewed caption 👋"
         self.app.target("composer").drop(self.relay.paths)
         self.app.target("send-button").expect(enabled=True)
@@ -253,7 +254,7 @@ class Desktop(TestCase):
         self.app.target(role="row", text="alice").expect_visible(timeout=15)
         self.desktop.activate()
         self.desktop.click(self.app.target(role="row", text="alice").resolve()["id"])
-        self.app.target("composer").expect_visible()
+        self.app.target("composer").expect(visible=True, obscured=False)
 
     def test_clipboard_round_trip_resize_and_scale_preserve_draft(self):
         text = "External clipboard 👩‍💻 é\nSecond line 한글"

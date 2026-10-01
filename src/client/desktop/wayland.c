@@ -6,7 +6,6 @@
 #include <wayland-client.h>
 #include <string.h>
 #include <stdlib.h>
-#include <poll.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
@@ -29,6 +28,16 @@ typedef struct Offer {
     uint32_t action;
 } Offer;
 static Offer *offers, *drag;
+
+/* The UI owns at most one nonblocking transfer. The offer outlives drag leave
+ * until EOF, rejection, timeout or shutdown releases it. */
+static struct {
+    Offer *offer;
+    int fd;
+    char *text;
+    size_t length;
+    Uint64 deadline;
+} transfer = { .fd = -1 };
 
 static void destroy_offer(Offer *offer) {
     if (!offer) return;
@@ -89,43 +98,60 @@ static void leave(void *data, struct wl_data_device *dev) {
 static void motion(void *data, struct wl_data_device *dev, uint32_t time, wl_fixed_t x, wl_fixed_t y) {
     (void)data; (void)dev; (void)time; (void)x; (void)y;
 }
-static void receive_offer(struct wl_data_offer *offer) {
-    int fds[2];
-    if (pipe2(fds, O_CLOEXEC | O_NONBLOCK) < 0) { zc_drop_reject(); return; }
-    char *text = malloc(ZC_DROP_BYTES + 1);
-    if (!text) { close(fds[0]); close(fds[1]); zc_drop_reject(); return; }
-    fcntl(fds[1], F_SETFL, fcntl(fds[1], F_GETFL) & ~O_NONBLOCK);
-    wl_data_offer_receive(offer, "text/uri-list", fds[1]);
-    wl_display_flush(display);
-    close(fds[1]);
-    const Uint64 deadline = SDL_GetTicks() + 2000;
-    size_t length = 0;
-    int complete = 0;
-    while (SDL_GetTicks() < deadline) {
-        const Uint64 now = SDL_GetTicks();
-        if (now >= deadline) break;
-        struct pollfd ready = { .fd = fds[0], .events = POLLIN };
-        const int status = poll(&ready, 1, (int)(deadline - now));
-        if (status < 0 && errno == EINTR) continue;
-        if (status <= 0) break;
-        const ssize_t n = read(fds[0], text + length, ZC_DROP_BYTES + 1 - length);
-        if (n == 0) { complete = 1; break; }
-        if (n < 0 && (errno == EINTR || errno == EAGAIN)) continue;
-        if (n < 0 || memchr(text + length, 0, (size_t)n)) break;
-        length += (size_t)n;
-        if (length > ZC_DROP_BYTES) break;
+static void finish_transfer(int complete) {
+    if (!transfer.offer) return;
+    if (complete) zc_drop_offer(transfer.text, transfer.length);
+    else zc_drop_reject();
+    if (wl_data_offer_get_version(transfer.offer->proxy) >= 3 &&
+        transfer.offer->action == WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY)
+        wl_data_offer_finish(transfer.offer->proxy);
+    close(transfer.fd);
+    free(transfer.text);
+    destroy_offer(transfer.offer);
+    memset(&transfer, 0, sizeof(transfer));
+    transfer.fd = -1;
+}
+void zc_wayland_poll(void) {
+    if (!transfer.offer) return;
+    if (SDL_GetTicks() >= transfer.deadline) { finish_transfer(0); return; }
+    while (transfer.length <= ZC_DROP_BYTES) {
+        const ssize_t n = read(transfer.fd, transfer.text + transfer.length,
+                               ZC_DROP_BYTES + 1 - transfer.length);
+        if (n == 0) { finish_transfer(1); return; }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && errno == EAGAIN) return;
+        if (n < 0 || memchr(transfer.text + transfer.length, 0, (size_t)n)) {
+            finish_transfer(0); return;
+        }
+        transfer.length += (size_t)n;
     }
-    close(fds[0]);
-    if (complete) zc_drop_offer(text, length); else zc_drop_reject();
-    free(text);
+    finish_transfer(0);
+}
+int zc_wayland_wait_limit(int timeout_ms) {
+    // SDL owns Wayland dispatch; only an active raw pipe needs this short cadence.
+    return transfer.offer && (timeout_ms < 0 || timeout_ms > 10) ? 10 : timeout_ms;
 }
 static void dropped(void *data, struct wl_data_device *dev) {
     (void)data; (void)dev;
     if (drag && zc_drop_hovered()) {
-        receive_offer(drag->proxy);
-        if (wl_data_offer_get_version(drag->proxy) >= 3 &&
-            drag->action == WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY)
-            wl_data_offer_finish(drag->proxy);
+        int fds[2];
+        char *text = NULL;
+        if (transfer.offer || pipe2(fds, O_CLOEXEC | O_NONBLOCK) < 0) {
+            zc_drop_reject();
+        } else if (!(text = malloc(ZC_DROP_BYTES + 1))) {
+            close(fds[0]); close(fds[1]); zc_drop_reject();
+        } else {
+            fcntl(fds[1], F_SETFL, fcntl(fds[1], F_GETFL) & ~O_NONBLOCK);
+            wl_data_offer_receive(drag->proxy, "text/uri-list", fds[1]);
+            wl_display_flush(display);
+            close(fds[1]);
+            transfer.offer = drag;
+            transfer.fd = fds[0];
+            transfer.text = text;
+            transfer.length = 0;
+            transfer.deadline = SDL_GetTicks() + 2000;
+            drag = NULL;
+        }
     }
     zc_drop_set_hovered(0);
     destroy_offer(drag);
@@ -167,6 +193,7 @@ static void global(void *data, struct wl_registry *reg, uint32_t name, const cha
     bind_device();
 }
 static void free_device(void) {
+    finish_transfer(0);
     while (offers) destroy_offer(offers);
     if (device) {
         if (wl_data_device_get_version(device) >= 2) wl_data_device_release(device);

@@ -1,6 +1,6 @@
 # Linux client
 
-The native Wayland desktop client uses Zig, SDL3, OpenGL, Clay, and Pango. It supports
+The native Wayland desktop client uses Zig, SDL3, and Pango/Cairo. It supports
 conversation browsing, cached history, live updates, direct messages,
 existing-conversation replies, Unicode drafts, desktop notifications, send
 recovery, contact names/photos, inline images, stored link cards, and reaction
@@ -18,9 +18,8 @@ Run source-build and test commands below from the repository root.
 
 Use Zig **0.16.0**, `pkg-config`, and development headers/libraries for SQLite,
 libcurl (8.10+ with HTTP/2 and the OpenSSL 3 backend), OpenSSL 3, Pango/Cairo (Pango 1.48+), Fontconfig, GLib/GIO,
-libpng, libjpeg, SDL3 (3.2+), OpenGL, Wayland, and xkbcommon, plus `wayland-scanner`. Clay
-is pinned in [`build.zig.zon`](../build.zig.zon); install a system
-sans-serif font and an emoji font for the scripts you use.
+libpng, libjpeg, SDL3 (3.2+), Wayland, and xkbcommon, plus `wayland-scanner`.
+Install a system sans-serif font and an emoji font for the scripts you use.
 
 The client uses system SDL3. With SDL 3.4.16, older compositors that expose only
 output-scale events may require reopening the window after changing display
@@ -425,6 +424,8 @@ python3 tests/client_attachments.py -v
 python3 tests/client_details.py
 # Requires Wayland plus Python cryptography and h2 for temporary test endpoints:
 zig build test-gui
+# The same native tests in an isolated desktop with managed Python fixtures:
+zig build test-gui-isolated
 # Focused GUI -> preparation -> upload -> synthetic Messages dispatch check:
 zig build test-gui-attachments
 python3 tests/client_desktop.py

@@ -11,8 +11,8 @@ pending: [64]?Pending = @splat(null),
 
 const Pending = struct {
     notice: *Notification,
-    // Retain the full hexadecimal Media key while awaiting the avatar download.
-    key: [64:0]u8,
+    // Retain the packed identity while awaiting the avatar download.
+    key: Media.Key,
     generation: u64,
     deadline: i64,
 };
@@ -81,7 +81,7 @@ pub fn accept(s: *Queue, media: *Media, result: *const Media.Result) void {
     if (result.generation != media.generation or !media.avatars) return;
     for (&s.pending) |*pending| {
         const p = pending.* orelse continue;
-        if (p.generation != result.generation or !std.mem.eql(u8, &p.key, &result.key)) continue;
+        if (p.generation != result.generation or !p.key.eql(result.key)) continue;
         s.show(p.notice, if (result.state == .ready) &result.pixels else null);
         pending.* = null;
     }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const desktop = @import("desktop.zig");
 const graphics = @import("graphics.zig");
 const c = @import("c.zig").api;
@@ -57,9 +58,8 @@ pub fn deinit(s: *Text) void {
 }
 fn dropTexture(s: *Text, e: *Entry) void {
     if (e.texture) |tx| {
-        // Deletion flushes pending references before reusing the texture ID.
+        s.texture_bytes -= graphics.textureBytes(tx);
         graphics.destroyTexture(tx);
-        s.texture_bytes -= @as(usize, @intCast(tx.width)) * @as(usize, @intCast(tx.height)) * 4;
         e.texture = null;
     }
 }
@@ -254,15 +254,17 @@ pub fn lineInkCenterY(s: *Text, text: []const u8, size: i32, width: f32) f32 {
     );
     if (pixels == null) return fallback;
     defer c.zc_text_clear_pixels(e.layout);
-    const stride = @as(usize, @intCast(c.zc_text_width(e.layout))) * 4;
+    const stride: usize = @intCast(c.zc_text_pitch(e.layout));
     var first = height_pixels;
     var last: i32 = 0;
     var y: i32 = 0;
     while (y < height_pixels) : (y += 1) {
         const row = pixels + @as(usize, @intCast(y)) * stride;
         var x: usize = 0;
-        while (x < stride) : (x += 4) {
-            if (row[x] | row[x + 1] | row[x + 2] == 0) continue;
+        const pixel_width: usize = @intCast(c.zc_text_width(e.layout));
+        while (x < pixel_width * 4) : (x += 4) {
+            const argb = std.mem.readInt(u32, row[x..][0..4], builtin.target.cpu.arch.endian());
+            if (argb & 0x00ffffff == 0) continue;
             first = @min(first, y);
             last = y;
             break;
@@ -362,7 +364,7 @@ fn drawEntry(
         // Match the native raster cap while allowing tall windows to draw several bounded tiles.
         const tile_height = @min(visible_end - top, 2048);
         if (tile_height <= 0) return;
-        if (e.texture != null and (e.tile_top != top or e.texture.?.height != tile_height or !std.meta.eql(
+        if (e.texture != null and (e.tile_top != top or e.texture.?.h != tile_height or !std.meta.eql(
             e.color,
             color,
         ) or !std.meta.eql(
@@ -398,7 +400,13 @@ fn drawEntry(
                 return;
             }
             defer c.zc_text_clear_pixels(e.layout);
-            e.texture = graphics.upload(pixels, c.zc_text_width(e.layout), tile_height, .nearest) catch {
+            e.texture = graphics.uploadPixels(.{
+                .bytes = pixels,
+                .width = c.zc_text_width(e.layout),
+                .height = tile_height,
+                .pitch = c.zc_text_pitch(e.layout),
+                .format = .cairo_argb,
+            }, .nearest) catch {
                 e.raster_failed = true;
                 return;
             };
@@ -407,13 +415,9 @@ fn drawEntry(
             // 1:1 so texture filtering does not add another blur pass.
         }
         const tx = e.texture.?;
-        // Like Flamez's label alignment, but snap to physical pixels so fractional
-        // Wayland scaling and scrolling never place the texture between pixels.
-        graphics.drawTexture(tx, .{
-            .x = @round(x * s.scale) / s.scale,
-            .y = (@round(y * s.scale) + @as(f32, @floatFromInt(top))) / s.scale,
-            .width = @as(f32, @floatFromInt(tx.width)) / s.scale,
-            .height = @as(f32, @floatFromInt(tx.height)) / s.scale,
+        graphics.drawRaster(tx, .{
+            .x = x,
+            .y = y + @as(f32, @floatFromInt(top)) / s.scale,
         });
         top += tile_height;
     }

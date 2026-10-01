@@ -1,6 +1,7 @@
 /* Synthetic pixel boundary checks; run under ASan/UBSan via client_pixel_safety.py. */
 #define _GNU_SOURCE
 #include "bridge.h"
+#include "client_raster.h"
 #include <assert.h>
 #include <stdio.h>
 #include <jpeglib.h>
@@ -94,9 +95,16 @@ static void text_pixels(int width, double scale) {
         height-=top; if (height>257) height=257;
         unsigned char *pixels=zc_text_pixels_on(text,0xfedcba80,0,8,top,height,background);
         assert(pixels);
-        size_t length=(size_t)zc_text_width(text)*height*4;
-        if (background) for (size_t i=3;i<length;i+=4) assert(pixels[i]==255);
-        hash(pixels,length); tiles++;
+        const size_t width=(size_t)zc_text_width(text), pitch=(size_t)comparable_text_pixels(text,pixels,height);
+        assert(pitch>=width*4);
+        for (int y=0;y<height;y++) {
+            const unsigned char *row=pixels+(size_t)y*pitch;
+            if (background) for (size_t x=0;x<width;x++) {
+                assert(row[x*4+3]==255);
+            }
+            hash(row,width*4);
+        }
+        tiles++;
         assert(!zc_text_pixels_on(text,0xffffffff,0,0,-1,1,background));
         assert(!zc_text_pixels_on(text,0xffffffff,0,0,0,2049,background));
         zc_text_free(text);

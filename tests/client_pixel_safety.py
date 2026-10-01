@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare sanitized pixel paths with the security-pass baseline; synthetic data only."""
+"""Compare sanitized pixel paths with the pre-SDL-renderer baseline; synthetic data only."""
 import argparse
 import os
 from pathlib import Path
@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--baseline', default='1aa4f0b621091726db1ba35e02df0fff0db0d669', help='Git revision before the performance changes')
+    parser.add_argument('--baseline', default='b914b1cb70ca51159010be37617efae13ec48627', help='Git revision providing the reference pixel behavior')
     args = parser.parse_args()
     flags = shlex.split(subprocess.check_output(['pkg-config', '--cflags', '--libs', 'libcurl', 'openssl', 'pangocairo', 'pangoft2', 'fontconfig', 'gio-2.0', 'libpng', 'libjpeg'], text=True))
     env = os.environ.copy()
@@ -26,19 +26,21 @@ def main():
         before.mkdir()
         for file in ['bridge.c', 'bridge.h', 'media.c']:
             (before/file).write_bytes(subprocess.check_output(['git', 'show', args.baseline+':src/client/'+file], cwd=ROOT))
+        (root/'tls_policy.h').write_bytes((ROOT/'src/tls_policy.h').read_bytes())
         outputs = []
         for name, source in [('before', before), ('after', ROOT/'src/client')]:
             binary = root/name if name == 'after' else root/'baseline'
             subprocess.run([os.environ.get('CC', 'clang'), '-O2', '-march=native', '-g', '-std=c11', '-Wall', '-Wextra', '-Werror',
                             '-fsanitize=address,undefined', '-fno-sanitize-recover=all', '-fno-omit-frame-pointer',
+                            '-DZIMBR_TEXT_NATIVE_ARGB=' + str(int('zc_text_pitch' in (source/'bridge.c').read_text())),
                             '-I', str(source), '-I', str(ROOT/'src'), str(ROOT/'tests/client_pixel_safety.c'),
                             str(source/'bridge.c'), str(source/'media.c'), str(ROOT/'src/platform.c'), *flags, '-lm', '-o', str(binary)], check=True)
             output = subprocess.check_output([str(binary)], env=env, text=True, timeout=180).strip()
             outputs.append(output)
             print(name+': '+output, flush=True)
         if outputs[0] != outputs[1]:
-            raise RuntimeError('Pixel output or rejection behavior changed from the security baseline')
-        print('PASS: ASan/UBSan pixel checks match the security baseline')
+            raise RuntimeError('Pixel output or rejection behavior changed from the reference baseline')
+        print('PASS: ASan/UBSan pixel checks match the reference baseline')
 
 
 if __name__ == '__main__':

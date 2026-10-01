@@ -661,6 +661,7 @@ ZcText *zc_text_new(const char *text, int length, double size, int width, double
 ZcText *zc_text_new_line(const char *text, int length, double size, int width, double scale) {
     return zc_text_new_with_options(text, length, size, width, scale, 1, 0);
 }
+int zc_text_pitch(ZcText *t) { return t->surface ? cairo_image_surface_get_stride(t->surface) : 0; }
 void zc_text_clear_pixels(ZcText *t) { if (t->surface) cairo_surface_destroy(t->surface); t->surface = NULL; }
 void zc_text_free(ZcText *t) { if (!t) return; zc_text_clear_pixels(t); free(t->lines); g_object_unref(t->layout); free(t); }
 int zc_text_width(ZcText *t) { return t->width; }
@@ -744,29 +745,6 @@ unsigned char *zc_text_pixels_with_selection(ZcText *t, unsigned color, int star
     cairo_destroy(cr); cairo_surface_flush(t->surface);
     if (status != CAIRO_STATUS_SUCCESS) { zc_text_clear_pixels(t); return NULL; }
     unsigned char *pixels = cairo_image_surface_get_data(t->surface) + (top - raster_top)*cairo_image_surface_get_stride(t->surface);
-    // Cairo is premultiplied native ARGB; GPU textures use straight RGBA.
-    const int width = t->width;
-    const int stride = cairo_image_surface_get_stride(t->surface);
-    if ((background & 255) == 255) {
-        // A whole-pixel expression lets the compiler use SIMD shuffles.
-        // memcpy keeps unaligned access and C aliasing rules well defined.
-        for (int y=0; y<height; ++y) for (int x=0; x<width; ++x) {
-            unsigned char *p = pixels+y*stride+x*4;
-            uint32_t pixel; memcpy(&pixel,p,sizeof(pixel));
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-            pixel=(pixel & 0xff00ff00u) | ((pixel & 0xffu)<<16) | ((pixel>>16)&0xffu);
-#else
-            pixel=(pixel<<8) | (pixel>>24);
-#endif
-            memcpy(p,&pixel,sizeof(pixel));
-        }
-    } else {
-        for (int y=0; y<height; ++y) for (int x=0; x<t->width; ++x) {
-            unsigned char *p = pixels+y*stride+x*4;
-            unsigned b=p[0], g=p[1], r=p[2], a=p[3];
-            p[0]=a ? (unsigned char)(r*255/a) : 0; p[1]=a ? (unsigned char)(g*255/a) : 0; p[2]=a ? (unsigned char)(b*255/a) : 0;
-        }
-    }
     return pixels;
 }
 void zc_text_ranges(ZcText *t, int start, int end, void (*visit)(void *, double, double, double, double), void *user) {

@@ -126,10 +126,12 @@ for permissions, restart, and deliberate send checks.
 ## GUI scenarios with Zrct
 
 Zrct instrumentation uses native SDL3 input and application renderer hooks. The build
-selects `.backend = .sdl3` without a raylib module; the driver flushes OpenGL batches
-before capture. Attachment playback uses the native drop-delivery handler.
+selects `.backend = .sdl3` and passes the SDL window to the driver, which uses
+`SDL_RenderReadPixels` for capture. Attachment playback uses the native drop-delivery handler.
 Text enters through SDL's event queue; compositor scenarios use real Wayland input.
 The native `test-gui` and `test-gui-attachments` suites remain available on Wayland.
+`test-gui-isolated` runs the same native GUI regressions in a fresh desktop with
+the managed Python fixture dependencies; it does not require instrumentation.
 
 The single-output Weston test profile provides standard surface-scale
 notifications, so SDL3 observes live 1× → 2× → 1× changes without restarting the
@@ -147,6 +149,7 @@ checkout, set that dependency's `.path` to its location relative to the manifest
 From the Zimbr checkout, run:
 
 ```sh
+zig build test-gui-isolated -Dopenssl-prefix=.tools/openssl-3.5
 zig build test-zrct -Dautomation=true -Dopenssl-prefix=.tools/openssl-3.5
 # Select a scenario and retain a recording:
 zig build test-zrct -Dautomation=true -Dopenssl-prefix=.tools/openssl-3.5 -- --filter send_unicode --record
