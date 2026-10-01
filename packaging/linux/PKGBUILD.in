@@ -22,6 +22,7 @@ depends=(
   "pango"
   "python"
   "python-cryptography"
+  "sdl3>=3.2"
   "sqlite"
   "wayland"
 )

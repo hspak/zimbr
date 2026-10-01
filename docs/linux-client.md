@@ -1,6 +1,6 @@
 # Linux client
 
-The native Wayland desktop client uses Zig, Clay, raylib, and Pango. It supports
+The native Wayland desktop client uses Zig, SDL3, OpenGL, Clay, and Pango. It supports
 conversation browsing, cached history, live updates, direct messages,
 existing-conversation replies, Unicode drafts, desktop notifications, send
 recovery, contact names/photos, inline images, stored link cards, and reaction
@@ -18,9 +18,13 @@ Run source-build and test commands below from the repository root.
 
 Use Zig **0.16.0**, `pkg-config`, and development headers/libraries for SQLite,
 libcurl (8.10+ with HTTP/2 and the OpenSSL 3 backend), OpenSSL 3, Pango/Cairo (Pango 1.48+), Fontconfig, GLib/GIO,
-libpng, libjpeg, OpenGL, Wayland, and xkbcommon, plus `wayland-scanner`. Clay
-and raylib are pinned in [`build.zig.zon`](../build.zig.zon); install a system
+libpng, libjpeg, SDL3 (3.2+), OpenGL, Wayland, and xkbcommon, plus `wayland-scanner`. Clay
+is pinned in [`build.zig.zon`](../build.zig.zon); install a system
 sans-serif font and an emoji font for the scripts you use.
+
+The client uses system SDL3. With SDL 3.4.16, older compositors that expose only
+output-scale events may require reopening the window after changing display
+scale. See [migration notes and remaining limitations](../FUTURE_MIGRATION.md).
 
 ```sh
 zig build client -Doptimize=ReleaseSafe
@@ -179,6 +183,29 @@ as in `follow-up` and `don’t`. Click a message then Ctrl+C to
 copy it in full; Ctrl+A selects the whole message. New recipients must be an
 international number or email.
 Unsupported services remain readable with sending disabled.
+
+### Korean input
+
+Enable a Korean input method in your desktop and install a font with Hangul
+coverage, such as Noto Sans CJK. Zimbr uses SDL's input-method connection; the
+two-set Korean workflow is tested with IBus and ibus-hangul.
+
+The syllable being composed appears inline with an underline. Backspace edits
+the composing syllable through the input method. Enter used to confirm a
+composition does not send the message; press Enter again to send, or use the
+configured send shortcut. Clicking Send confirms the visible syllable before
+sending. Clicking another field or conversation confirms it in the original
+field. Confirmed text participates in undo and draft persistence; intermediate
+jamo updates do not create undo steps or database writes.
+Clipboard and undo shortcuts confirm the current composition before acting.
+
+Input methods retain their own mode-switch and cancellation shortcuts. Candidate
+UI is supplied by the input method and positioned using the visible caret.
+Chinese/Japanese conversion workflows and other Korean input-method engines have
+not received the same end-to-end coverage. Surrounding-text reconversion is not
+implemented.
+
+### Text rendering
 
 Pango supplies shaping, font fallback, wrapping, and grapheme boundaries. Text is
 rasterized at the Wayland display scale and aligned to physical pixels, including

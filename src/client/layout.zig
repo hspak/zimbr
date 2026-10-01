@@ -1,14 +1,14 @@
 const clay = @import("zclay");
-const rl = @import("raylib");
+const Rect = @import("geometry.zig").Rect;
 pub const Areas = struct {
-    rail: rl.Rectangle,
-    sidebar: rl.Rectangle,
-    sidebar_footer: rl.Rectangle,
-    header: rl.Rectangle,
-    history: rl.Rectangle,
-    composer: rl.Rectangle,
+    rail: Rect,
+    sidebar: Rect,
+    sidebar_footer: Rect,
+    header: Rect,
+    history: Rect,
+    composer: Rect,
 };
-fn rect(name: []const u8) rl.Rectangle {
+fn rect(name: []const u8) Rect {
     const b = clay.getElementData(.ID(name)).bounding_box;
     return .{
         .x = b.x,
@@ -38,7 +38,7 @@ pub fn conversationWidth(width: f32) f32 {
     return width - rail_width - sidebar_width;
 }
 
-pub fn footer(r: rl.Rectangle) rl.Rectangle {
+pub fn footer(r: Rect) Rect {
     return .{
         .x = r.x,
         .y = r.y + r.height - footer_height,

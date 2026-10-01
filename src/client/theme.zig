@@ -1,6 +1,6 @@
 const std = @import("std");
-const rl = @import("raylib");
-pub fn color(hex: u32) rl.Color {
+const Color = @import("geometry.zig").Color;
+pub fn color(hex: u32) Color {
     return .{
         // Palette literals use 0xRRGGBBAA; shifts and 8-bit masks extract each channel.
         .r = @intCast(hex >> 24),
@@ -10,26 +10,26 @@ pub fn color(hex: u32) rl.Color {
     };
 }
 pub const Palette = struct {
-    ink: rl.Color,
-    muted: rl.Color,
-    disabled: rl.Color,
-    accent: rl.Color,
-    accent_hover: rl.Color,
-    on_accent: rl.Color,
-    paper: rl.Color,
-    sidebar: rl.Color,
-    line: rl.Color,
-    incoming: rl.Color,
-    selected: rl.Color,
-    selection: rl.Color,
-    avatar: rl.Color,
-    focus: rl.Color,
-    drop: rl.Color,
-    drop_surface: rl.Color,
-    danger: rl.Color,
-    rail: rl.Color,
-    surface: rl.Color,
-    success: rl.Color,
+    ink: Color,
+    muted: Color,
+    disabled: Color,
+    accent: Color,
+    accent_hover: Color,
+    on_accent: Color,
+    paper: Color,
+    sidebar: Color,
+    line: Color,
+    incoming: Color,
+    selected: Color,
+    selection: Color,
+    avatar: Color,
+    focus: Color,
+    drop: Color,
+    drop_surface: Color,
+    danger: Color,
+    rail: Color,
+    surface: Color,
+    success: Color,
 };
 pub const colors = Palette{
     // Near-white, muted, and disabled lavender establish the text-emphasis hierarchy.
@@ -65,7 +65,7 @@ pub const colors = Palette{
     .danger = color(0xeeb099ff),
 };
 
-pub const Participant = struct { bubble: rl.Color, label: rl.Color };
+pub const Participant = struct { bubble: Color, label: Color };
 // Reserved for read-only conversation avatars; never part of the participant palette.
 pub const read_only_avatar = Participant{
     .bubble = color(0x302d36ff),

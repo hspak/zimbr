@@ -3,6 +3,14 @@
 This is a zig project that is two components: a linux wayland client and a macOS
 relay service for iMessages.
 
+## GUI scenarios with zrct
+
+For zrct integration, GUI scenario authoring, test execution, or failure
+investigation, read `SKILL.md` at the zrct dependency declared in `build.zig.zon`.
+Resolve its location from that declaration. Zimbr's build options and test command
+are documented in
+[docs/development.md](docs/development.md#gui-scenarios-with-zrct).
+
 # Zig Coding Style Guide
 
 Shared conventions, including the [Zig language reference style

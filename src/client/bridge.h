@@ -12,11 +12,6 @@ int zc_notifications_images(ZcNotifications *);
 void zc_notifications_show(ZcNotifications *, const char *chat, const char *summary, const char *body, const ZcPixels *image);
 void zc_notifications_dismiss(ZcNotifications *, const char *chat);
 void zc_notifications_free(ZcNotifications *);
-void zc_activation_init(void);
-void zc_activation_wake(void);
-int zc_activation_wait(int timeout_ms);
-int zc_activation_activate(void *surface, const char *token);
-void zc_activation_free(void);
 typedef struct ZcNet ZcNet;
 /* Complete request URL capacity, including the null terminator. */
 // 8 KiB leaves room for the configured origin, endpoint, and escaped pagination tokens.
@@ -91,6 +86,8 @@ void zc_text_clear_pixels(ZcText *text);
 int zc_local_time(const char *timestamp, char *output, size_t size, int compact);
 int zc_timestamp_ms(const char *timestamp, size_t length, int64_t *output);
 void zc_text_caret(ZcText *text, int index, int *x, int *y, int *height);
+// Visit visual rectangles for a UTF-8 byte range, in logical layout coordinates.
+void zc_text_ranges(ZcText *text, int start, int end, void (*visit)(void *, double, double, double, double), void *user);
 int zc_text_hit(ZcText *text, int x, int y);
 // Returns UTF-8 byte bounds for the word, whitespace run, or grapheme under the pointer.
 void zc_text_word_hit(ZcText *text, int x, int y, int *start, int *end);

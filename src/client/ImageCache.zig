@@ -1,6 +1,7 @@
 //! GUI-thread textures; immutable bytes and decoding belong to Media's worker.
 const std = @import("std");
-const rl = @import("raylib");
+const desktop = @import("desktop.zig");
+const graphics = @import("graphics.zig");
 const Media = @import("Media.zig");
 const t = @import("../protocol.zig").types;
 const attachments = @import("../protocol.zig").attachments;
@@ -16,7 +17,7 @@ frame: u64 = 0,
 changed: bool = false,
 
 pub const Entry = struct {
-    texture: ?rl.Texture2D = null,
+    texture: ?graphics.Texture = null,
     bytes: usize = 0,
     used: u64 = 0,
     state: @FieldType(Media.Result, "state") = .pending,
@@ -26,14 +27,14 @@ pub const Entry = struct {
     // Match Media.Result's bounded, NUL-terminated diagnostic text.
     reason: [128:0]u8 = @splat(0),
     refresh_owner: bool = false,
-    pub fn availableTexture(entry: Entry) ?rl.Texture2D {
+    pub fn availableTexture(entry: Entry) ?graphics.Texture {
         return if (entry.state == .retired) null else entry.texture;
     }
 };
 
 pub fn deinit(s: *ImageCache) void {
     var it = s.entries.valueIterator();
-    while (it.next()) |entry| if (entry.texture) |texture| rl.unloadTexture(texture);
+    while (it.next()) |entry| if (entry.texture) |texture| graphics.destroyTexture(texture);
     s.entries.deinit(a);
     s.* = undefined;
 }
@@ -42,7 +43,7 @@ pub fn contextChanged(s: *ImageCache, avatars: bool) void {
     while (it.next()) |entry| {
         if ((!avatars and entry.key_ptr[0] == 'a') or entry.value_ptr.texture == null) {
             if (entry.value_ptr.texture) |texture| {
-                rl.unloadTexture(texture);
+                graphics.destroyTexture(texture);
                 s.bytes -= entry.value_ptr.bytes;
             }
             entry.value_ptr.* = .{};
@@ -54,7 +55,7 @@ pub fn accept(s: *ImageCache, result: *const Media.Result) void {
     if (s.entries.getPtr(result.key)) |entry| {
         const attempts = entry.attempts;
         if (entry.texture) |texture| {
-            rl.unloadTexture(texture);
+            graphics.destroyTexture(texture);
             s.bytes -= entry.bytes;
         }
         entry.* = .{
@@ -68,16 +69,8 @@ pub fn accept(s: *ImageCache, result: *const Media.Result) void {
         if (result.pixels.data != null and result.state == .ready) {
             const bytes = result.pixels.bytes;
             s.makeRoom(bytes);
-            const image = rl.Image{
-                .data = result.pixels.data,
-                .width = result.pixels.width,
-                .height = result.pixels.height,
-                .mipmaps = 1,
-                .format = .uncompressed_r8g8b8a8,
-            };
             // makeRoom only clears entries; pointers remain valid.
-            const texture = rl.loadTextureFromImage(image) catch return;
-            rl.setTextureFilter(texture, .bilinear);
+            const texture = graphics.upload(@ptrCast(result.pixels.data.?), result.pixels.width, result.pixels.height, .linear) catch return;
             entry.texture = texture;
             entry.bytes = bytes;
             entry.attempts = 0;
@@ -111,7 +104,7 @@ pub fn nextFrame(s: *ImageCache) void {
         const removed = s.entries.fetchRemove(cache_key).?.value;
         log.debug("Image {s}: memory cache entry evicted at entry limit", .{cache_key});
         if (removed.texture) |texture| {
-            rl.unloadTexture(texture);
+            graphics.destroyTexture(texture);
             s.bytes -= removed.bytes;
         }
     }
@@ -128,7 +121,7 @@ fn makeRoom(s: *ImageCache, bytes: usize) void {
             entry.bytes,
             Media.texture_budget,
         });
-        rl.unloadTexture(entry.texture.?);
+        graphics.destroyTexture(entry.texture.?);
         s.bytes -= entry.bytes;
         entry.* = .{};
     }
@@ -182,89 +175,77 @@ pub fn getLocal(s: *ImageCache, media: *Media, file: attachments.Upload) ?*Entry
     }
     return entry;
 }
-pub fn draw(texture: rl.Texture2D, bounds: rl.Rectangle) void {
+pub fn draw(texture: graphics.Texture, bounds: graphics.Rect) void {
     const scale = @min(
         bounds.width / @as(f32, @floatFromInt(texture.width)),
         bounds.height / @as(f32, @floatFromInt(texture.height)),
     );
     const w = @as(f32, @floatFromInt(texture.width)) * scale;
     const h = @as(f32, @floatFromInt(texture.height)) * scale;
-    rl.drawTexturePro(texture, .{
-        .x = 0,
-        .y = 0,
-        .width = @floatFromInt(texture.width),
-        .height = @floatFromInt(texture.height),
-    }, .{
+    graphics.drawTexture(texture, .{
         .x = bounds.x + (bounds.width - w) / 2,
         .y = bounds.y + (bounds.height - h) / 2,
         .width = w,
         .height = h,
-    }, .{ .x = 0, .y = 0 }, 0, rl.Color.white);
+    });
 }
 
 /// Draws a circular, center-cropped photo, or a solid tint when texture is null.
-pub fn drawAvatar(texture: ?rl.Texture2D, bounds: rl.Rectangle, tint: rl.Color) void {
+pub fn drawAvatar(texture: ?graphics.Texture, bounds: graphics.Rect, tint: graphics.Color) void {
     const radius = @min(bounds.width, bounds.height) / 2;
     if (radius <= 0) return;
     if (texture) |photo| if (photo.width <= 0 or photo.height <= 0) return;
-    const center = rl.Vector2{ .x = bounds.x + bounds.width / 2, .y = bounds.y + bounds.height / 2 };
+    const center = graphics.Point{ .x = bounds.x + bounds.width / 2, .y = bounds.y + bounds.height / 2 };
     // Center-crop rectangular photos to fill the circle without stretching.
-    const uv: rl.Vector2 = if (texture) |photo| crop: {
+    const uv: graphics.Point = if (texture) |photo| crop: {
         const size: f32 = @floatFromInt(@min(photo.width, photo.height));
         break :crop .{
             .x = size / @as(f32, @floatFromInt(photo.width)) / 2,
             .y = size / @as(f32, @floatFromInt(photo.height)) / 2,
         };
     } else .{ .x = 0, .y = 0 };
-    const inner = @max(0, radius - 1 / @max(1, rl.getWindowScaleDPI().x));
+    const inner = @max(0, radius - 1 / @max(1, desktop.scale().x));
     var transparent = tint;
     transparent.a = 0;
     // 64 radial segments keep avatars smooth at ordinary and high display scales.
     const segments = 64;
-    rl.gl.rlSetTexture(if (texture) |photo| photo.id else rl.gl.rlGetTextureIdDefault());
-    rl.gl.rlBegin(rl.gl.rl_triangles);
-    rl.gl.rlNormal3f(0, 0, 1);
     for (0..segments) |i| {
         const angle = -2 * std.math.pi * @as(f32, @floatFromInt(i)) / segments;
         const next = -2 * std.math.pi * @as(f32, @floatFromInt(i + 1)) / segments;
-        const p = rl.Vector2{ .x = @cos(angle), .y = @sin(angle) };
-        const q = rl.Vector2{ .x = @cos(next), .y = @sin(next) };
-        avatarVertex(center, .{ .x = 0, .y = 0 }, radius, uv, 0, tint);
-        avatarVertex(center, p, radius, uv, inner, tint);
-        avatarVertex(center, q, radius, uv, inner, tint);
+        const p = graphics.Point{ .x = @cos(angle), .y = @sin(angle) };
+        const q = graphics.Point{ .x = @cos(next), .y = @sin(next) };
+        const center_vertex = avatarVertex(center, .{ .x = 0, .y = 0 }, radius, uv, 0, tint);
+        const inner_p = avatarVertex(center, p, radius, uv, inner, tint);
+        const inner_q = avatarVertex(center, q, radius, uv, inner, tint);
+        const outer_p = avatarVertex(center, p, radius, uv, radius, transparent);
+        const outer_q = avatarVertex(center, q, radius, uv, radius, transparent);
         // A one-pixel transparent fringe smooths the edge at every DPI.
-        avatarVertex(center, p, radius, uv, inner, tint);
-        avatarVertex(center, p, radius, uv, radius, transparent);
-        avatarVertex(center, q, radius, uv, radius, transparent);
-        avatarVertex(center, p, radius, uv, inner, tint);
-        avatarVertex(center, q, radius, uv, radius, transparent);
-        avatarVertex(center, q, radius, uv, inner, tint);
+        graphics.triangles(texture, &.{
+            center_vertex, inner_p, inner_q,
+            inner_p,       outer_p, outer_q,
+            inner_p,       outer_q, inner_q,
+        });
     }
-    rl.gl.rlEnd();
-    rl.gl.rlSetTexture(0);
 }
 
 fn avatarVertex(
-    center: rl.Vector2,
-    direction: rl.Vector2,
+    center: graphics.Point,
+    direction: graphics.Point,
     radius: f32,
-    uv: rl.Vector2,
+    uv: graphics.Point,
     distance: f32,
-    color: rl.Color,
-) void {
-    rl.gl.rlColor4ub(color.r, color.g, color.b, color.a);
-    rl.gl.rlTexCoord2f(
-        0.5 + direction.x * uv.x * distance / radius,
-        0.5 + direction.y * uv.y * distance / radius,
-    );
-    rl.gl.rlVertex2f(center.x + direction.x * distance, center.y + direction.y * distance);
+    color: graphics.Color,
+) graphics.Vertex {
+    return .{
+        .position = .{ .x = center.x + direction.x * distance, .y = center.y + direction.y * distance },
+        .uv = .{ .x = 0.5 + direction.x * uv.x * distance / radius, .y = 0.5 + direction.y * uv.y * distance / radius },
+        .color = color,
+    };
 }
 
 test "local previews queue offline and transfer decoded pixels into bounded textures" {
-    rl.setTraceLogLevel(.none);
-    rl.setConfigFlags(.{ .window_highdpi = true, .msaa_4x_hint = true });
-    rl.initWindow(780, 560, "Local attachment preview");
-    defer rl.closeWindow();
+    try openWindow(780, 560, "Local attachment preview");
+    defer closeWindow();
     var media = Media{ .io = std.testing.io, .config = .{ .data = "" } };
     defer media.shutdown();
     _ = try media.context("", "draft", 0, false, true);
@@ -301,15 +282,64 @@ test "local previews queue offline and transfer decoded pixels into bounded text
     images.accept(&result);
     const ready = images.getLocal(&media, file) orelse return error.TestUnexpectedResult;
     const texture = ready.availableTexture() orelse return error.TestUnexpectedResult;
-    const image = try rl.loadImageFromTexture(texture);
-    defer rl.unloadImage(image);
-    try std.testing.expectEqual(rl.Color{
+    const image = try graphics.readTexture(texture);
+    defer graphics.destroyImage(image);
+    try std.testing.expectEqual(graphics.Color{
         .r = 12,
         .g = 34,
         .b = 56,
         .a = 255,
-    }, rl.getImageColor(image, 0, 0));
+    }, image.color(0, 0));
     try std.testing.expectEqual(@as(usize, 4), images.bytes);
     images.contextChanged(false);
     try std.testing.expect(images.getLocal(&media, file).?.availableTexture() != null);
+}
+
+fn openWindow(width: i32, height: i32, title: [:0]const u8) !void {
+    try desktop.open(width, height, title);
+    errdefer desktop.close();
+    try graphics.init();
+}
+fn closeWindow() void {
+    graphics.deinit();
+    desktop.close();
+}
+
+test "circular photos crop rectangular sources and respect scaled clipping" {
+    try openWindow(640, 480, "Circular photo clipping");
+    defer closeWindow();
+    var pixels: [6 * 2]graphics.Color = undefined;
+    for (&pixels, 0..) |*pixel, i| pixel.* = if (i % 6 == 0) .red else if (i % 6 == 5) .sky_blue else .{
+        .r = 0,
+        .g = 255,
+        .b = 0,
+        .a = 255,
+    };
+    const texture = try graphics.upload(@ptrCast(&pixels), 6, 2, .linear);
+    defer graphics.destroyTexture(texture);
+    const target = try graphics.createTarget(128, 128);
+    defer graphics.destroyTarget(target);
+    for ([_]f32{
+        1,
+        1.25,
+        2,
+    }) |scale| {
+        graphics.beginTarget(target);
+        graphics.setScale(scale);
+        graphics.clear(.black);
+        graphics.clip(0, 0, 32, 64);
+        drawAvatar(texture, .{ .x = 8, .y = 8, .width = 48, .height = 48 }, .white);
+        graphics.endClip();
+        graphics.endTarget();
+        const shot = try graphics.readTexture(target.texture);
+        defer graphics.destroyImage(shot);
+        shot.flip();
+        try std.testing.expectEqual(graphics.Color{ .r = 0, .g = 255, .b = 0, .a = 255 }, shot.color(
+            @intFromFloat(16 * scale),
+            @intFromFloat(32 * scale),
+        ));
+        // Corner pixels exclude the quad outside the circle; the right half is clipped.
+        try std.testing.expectEqual(graphics.Color.black, shot.color(@intFromFloat(9 * scale), @intFromFloat(9 * scale)));
+        try std.testing.expectEqual(graphics.Color.black, shot.color(@intFromFloat(40 * scale), @intFromFloat(32 * scale)));
+    }
 }

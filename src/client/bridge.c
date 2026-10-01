@@ -744,7 +744,7 @@ unsigned char *zc_text_pixels_with_selection(ZcText *t, unsigned color, int star
     cairo_destroy(cr); cairo_surface_flush(t->surface);
     if (status != CAIRO_STATUS_SUCCESS) { zc_text_clear_pixels(t); return NULL; }
     unsigned char *pixels = cairo_image_surface_get_data(t->surface) + (top - raster_top)*cairo_image_surface_get_stride(t->surface);
-    // Cairo is premultiplied native ARGB; raylib expects straight RGBA.
+    // Cairo is premultiplied native ARGB; GPU textures use straight RGBA.
     const int width = t->width;
     const int stride = cairo_image_surface_get_stride(t->surface);
     if ((background & 255) == 255) {
@@ -768,6 +768,22 @@ unsigned char *zc_text_pixels_with_selection(ZcText *t, unsigned color, int star
         }
     }
     return pixels;
+}
+void zc_text_ranges(ZcText *t, int start, int end, void (*visit)(void *, double, double, double, double), void *user) {
+    for (int i = 0; i < t->line_count; ++i) {
+        PangoLayoutLine *line = t->lines[i].layout;
+        const int first = MAX(start, line->start_index);
+        const int last = MIN(end, line->start_index + line->length);
+        if (first >= last) continue;
+        int *ranges, count;
+        pango_layout_line_get_x_ranges(line, first, last, &ranges, &count);
+        const PangoRectangle logical = t->lines[i].logical;
+        for (int j = 0; j < count; ++j) visit(user,
+            ranges[j * 2] / (double)PANGO_SCALE, logical.y / (double)PANGO_SCALE,
+            (ranges[j * 2 + 1] - ranges[j * 2]) / (double)PANGO_SCALE,
+            logical.height / (double)PANGO_SCALE);
+        g_free(ranges);
+    }
 }
 void zc_text_caret(ZcText *t, int index, int *x, int *y, int *height) {
     const char *text = pango_layout_get_text(t->layout);

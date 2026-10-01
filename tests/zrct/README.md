@@ -1,0 +1,98 @@
+# Zimbr GUI scenarios
+
+These scenarios run the production SDL3 client with opt-in Zrct instrumentation.
+The build selects Zrct's native SDL3 backend and supplies renderer flush/overlay
+hooks. Mouse, key, wheel, and text playback use SDL events; reviewed attachment
+playback calls the application's ordinary native drop-delivery handler. Separate
+compositor scenarios cover actual Wayland file-drop negotiation.
+
+All 13 scenarios pass with SDL 3.4.16 and Zrct's Weston surface-scale extension,
+including the unchanged live output-scale scenario. The extension reports the
+headless output's actual integer scale through `wp_fractional_scale_v1`.
+Optional diagnostics in `desktop_native.py` run with
+`zig build test-sdl-desktop -Ddesktop-tests=true` without application
+instrumentation, including a framebuffer check across live 1× → 2× → 1× changes.
+Native `test-gui` regressions remain available separately. See
+[FUTURE_MIGRATION.md](../../FUTURE_MIGRATION.md) for the remaining legacy-compositor
+limitation and fractional/multi-output coverage limits.
+
+`ime.py` is an optional real Korean input-method suite, run with
+`zig build test-ime -Dautomation=true -Dopenssl-prefix=/path/to/openssl-3.5`.
+It requires IBus, ibus-hangul, their configuration helper/schemas, and a Hangul
+font. `ZIMBR_IBUS_PREFIX` can select an extracted installation. Each test owns a
+private IBus daemon and engine in addition to the isolated desktop and relay.
+Keystrokes pass through Wayland and SDL's IBus backend, covering syllable
+composition/deletion, Enter confirmation, Send-button confirmation, draft
+persistence, paste during composition, and focus changes without committing text
+into the wrong field.
+The input method itself supplies preedit; these tests do not inject composed
+SDL text events. The suite adds the selected Korean font to its recorded profile.
+
+Run from the repository root with the pinned Zig toolchain:
+
+```sh
+zig build test-zrct -Dautomation=true -Dopenssl-prefix=/path/to/openssl-3.5
+zig build test-zrct -Dautomation=true -Dopenssl-prefix=/path/to/openssl-3.5 -- --filter Desktop
+zig build test-zrct -Dautomation=true -Dopenssl-prefix=/path/to/openssl-3.5 -- --repeat 3
+zig build test-zrct -Dautomation=true -Dopenssl-prefix=/path/to/openssl-3.5 -- --filter History --record
+```
+
+See [development setup](../../docs/development.md#gui-scenarios-with-zrct) for host
+prerequisites and artifact locations. Resolve and read Zrct's `SKILL.md` using the
+dependency in `build.zig.zon` before authoring or investigating a scenario.
+
+`scenarios.py` owns the suite. `support.py` launches `relay_worker.py` as a
+supervised fixture process; the worker reuses Zimbr's synthetic TLS/attachment
+fixtures. Its child relay belongs to the same process group, so Zrct can reclaim
+it even if a scenario times out. The worker never opens a real Messages database.
+All clients run the production application loop with opt-in instrumentation.
+
+## Test review and migration choices
+
+The repository already has substantial store, worker, protocol, transport,
+security, rendering, packaging, and macOS coverage. The largest GUI testing cost
+was in manually constructing `App`/`Worker.View`, invoking methods, injecting
+low-level events, and assigning scroll positions in `src/client_main.zig`.
+These are useful implementation checks but cannot prove a whole user workflow.
+
+| Existing coverage | Zrct coverage added or retained | Coverage still needed at the original level |
+| --- | --- | --- |
+| Editor grapheme deletion and undo in `src/client_tests.zig` | Unicode keyboard editing, undo/redo, multiline insertion, and Ctrl+Enter delivery | Invalid input, allocation failure, shaping and raster boundaries |
+| Hidden conversations and drafts in Store and `client_main.zig` | Two independent drafts, switching, search exclusion, hide, live incoming message, restart, restore | Atomic merges and immutable snapshots |
+| Settings methods and coordinate-driven pane tests | First-launch navigation gate, invalid URL and credentials, clipped form scrolling, save, restart, Enter preference, cancellation of settings/reset | Failed database commits, reset acknowledgment ordering, credential file policy |
+| Native drop-delivery and attachment pipeline tests | Reviewed bytes retained after source removal/replacement, removal of the middle file, restart, actual Wayland attachment-only drop | Upload interruption, quotas, partial dispatch, uncertain outcomes and retry idempotency |
+| Worker offline persistence and reconnect tests | Cached conversation and editable draft after offline restart; no send until explicit action after reconnect | Transport fault matrix and cursor rollback |
+| Native Details clipboard and hidden-editor checks | External Wayland clipboard reader, log copy/clear, hidden composer remains unchanged | Log ring capacity, scrollback anchoring and concurrent writers |
+| Native layout and text scale checks | Clipboard draft survives resize and live scale changes, then sends to the correct chat | Fractional pixel alignment, texture eviction and exact raster checks |
+| `tests/client_desktop.py` | Same application-ID and installed-icon assertions inside an isolated desktop | Standalone script remains usable against a packaged, uninstrumented client |
+| Three scenarios formerly loaded from Zrct's example suite | Owned Unicode send/restart, reviewed attachments, and recorded history/incoming anchor checks; added navigation to the new message | Existing regression assertions are retained |
+
+Native tests were not removed: these scenarios cover more of the application, but
+do not replace their error injection and rendering contracts. macOS adapter,
+permission, signing, notification-daemon, and package tests remain separate.
+The synthetic relay checks dispatch and observed delivery in its fixture, not
+delivery through Apple's service.
+
+## Assertion boundaries
+
+- `Messages`, `Settings`, and `History` use normal application input. The two
+  reviewed-attachment scenarios additionally invoke the native drop-delivery handler.
+- `Desktop` uses real compositor activation, clipboard ownership, keyboard/mouse
+  events, and Wayland drag-and-drop negotiation. Clicks synchronize application
+  activation first, including after clipboard helper or drag-source focus. Window resize still uses the
+  driver's application resize operation; output scale changes use Weston.
+- Draft/settings persistence checks read the committed client database without
+  modifying it. Sends are checked against both the relay journal and synthetic
+  Messages rows, including destination, count, ordered attachment names and bytes.
+- Negative-send checks observe half a second; completed sends remain under
+  observation for at least three quarters of a second to catch late duplicates.
+  These bounded windows do not prove absence forever. No sleep establishes UI
+  readiness: target properties and committed effects supply those barriers.
+- History retains the original lossless recording/visual anchor assertion through
+  older-history loading and incoming messages, then checks that the new-message
+  button reveals the incoming message.
+
+Each scenario owns a fresh desktop, database, credentials and processes. Restarts
+within it preserve the client directory. Role/text selectors distinguish fixture
+conversations; controls use stable IDs and repeated message actions use message
+identity. Attachment mutations happen only after preparation enables Send.

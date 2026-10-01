@@ -13,7 +13,7 @@ Contacts names/photos, images, stored link previews, and reactions. The
 
 Build a small, self-hosted system that uses an always-on Mac mini, signed into
 Messages, to send and receive iMessages from a graphical Linux application.
-Implement the relay and client in Zig, with Clay layout and raylib rendering.
+Implement the relay and client in Zig, with Clay layout and application-owned OpenGL rendering.
 
 The first version serves one person and one Apple account. It supports listing
 conversations, reading text history, receiving new messages, starting a direct
@@ -460,7 +460,7 @@ packaging/
   linux/
 ```
 
-Only the client build imports Clay and raylib. Only the real relay adapter imports
+Only the client build imports Clay, SDL3, and OpenGL. Only the real relay adapter imports
 macOS integration code. Shared protocol, journal, send-state behavior, and fake
 adapters should build and test on Linux.
 
@@ -600,7 +600,7 @@ server that no longer has its idempotency record.
 
 ### 2.4. Graphical application
 
-Build a desktop window using Clay and raylib, following the reusable parts of
+Build a desktop window using SDL3, Clay, and OpenGL, following the reusable parts of
 Flamez: window setup, scaling, layout, theme organization, and render-loop
 structure. Linux uses Wayland exclusively.
 
@@ -655,9 +655,9 @@ Use a maintained Unicode implementation or system text facilities for segmentati
 and shaping rather than growing a hand-written special-case list.
 
 Clay owns layout; the text engine owns shaping, measurement, glyph rendering, and
-editing semantics. Raylib can present the resulting graphics. If its basic text
-path cannot meet the spike's requirements, add a text-library/C interop layer
-behind this boundary. Keep this choice explicit until tested.
+editing semantics. Pango/Cairo shapes and rasterizes text into RGBA textures;
+the application-owned OpenGL renderer presents them at framebuffer resolution.
+Keep editing and shaping independent of the window and renderer.
 
 The first text milestone should support ordinary keyboard input, paste, and common
 Unicode/emoji messages correctly. Full bidirectional editing, input-method
@@ -668,7 +668,7 @@ support based only on ASCII examples.
 
 ### 2.6. Client ownership, I/O, and persistence
 
-Keep window/input processing, Clay layout, and raylib rendering on the main thread.
+Keep window/input processing, Clay layout, and OpenGL rendering on the main thread.
 A background connection worker owns HTTP requests, the SSE connection, retry
 timing, and the client store. It must service command requests concurrently with
 the long-lived stream, using the chosen I/O implementation's concurrency support.

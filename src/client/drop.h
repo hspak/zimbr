@@ -12,6 +12,11 @@ typedef struct {
     char paths[ZC_DROP_FILES][ZC_DROP_PATH];
 } ZcDrop;
 int zc_drop_parse(const char *text, size_t length, ZcDrop *output);
+/* All-or-none delivery. The pending batch is replaced, never partially appended. */
+void zc_drop_offer(const char *text, size_t length);
+void zc_drop_paths(int count, const char *const *paths);
+int zc_drop_pending(void);
+int zc_drop_take(ZcDrop *output);
 void zc_drop_reject(void);
 int zc_drop_take_error(void);
 // Accepted file offers only; all access stays on the GUI thread.

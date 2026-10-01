@@ -122,3 +122,86 @@ profile (port 8732). The default credentials are under
 Open **Details** (Ctrl+D) to check authentication and sync. Setup sends no messages.
 See [TLS operation](linux-mtls.md) for renewal and [Mac validation](mac-validation.md)
 for permissions, restart, and deliberate send checks.
+
+## GUI scenarios with Zrct
+
+Zrct instrumentation uses native SDL3 input and application renderer hooks. The build
+selects `.backend = .sdl3` without a raylib module; the driver flushes OpenGL batches
+before capture. Attachment playback uses the native drop-delivery handler.
+Text enters through SDL's event queue; compositor scenarios use real Wayland input.
+The native `test-gui` and `test-gui-attachments` suites remain available on Wayland.
+
+The single-output Weston test profile provides standard surface-scale
+notifications, so SDL3 observes live 1× → 2× → 1× changes without restarting the
+window. The original scale/draft scenario passes unchanged. The native desktop
+probe also checks logical and framebuffer dimensions independently of Zrct
+instrumentation. See [the migration notes](../FUTURE_MIGRATION.md) for the remaining
+limitation on compositors that only send legacy output-scale notifications.
+
+Optional SDL compositor diagnostics run without application instrumentation:
+`zig build test-sdl-desktop -Ddesktop-tests=true`. These are independent of the
+normal client build and native test steps.
+
+Resolve Zrct from the dependency declared in `build.zig.zon`. For a local
+checkout, set that dependency's `.path` to its location relative to the manifest.
+From the Zimbr checkout, run:
+
+```sh
+zig build test-zrct -Dautomation=true -Dopenssl-prefix=.tools/openssl-3.5
+# Select a scenario and retain a recording:
+zig build test-zrct -Dautomation=true -Dopenssl-prefix=.tools/openssl-3.5 -- --filter send_unicode --record
+```
+
+`-Dopenssl-prefix` selects the OpenSSL 3.5 LTS static libraries for the synthetic
+relay; replace the example prefix with your installation. Zrct's Zig build
+integration builds the instrumented client and fixture relay, provisions pinned
+uv, Weston, FFmpeg, and ImageMagick, and runs with uv-managed Python 3.14 and
+locked relay dependencies. The native tool packages currently require Linux
+x86-64 with compatible Arch Linux shared libraries. Keep the application's native
+build dependencies, zlib, `dbus-daemon`, `wayland-info`, `fc-match`, and fonts on the host.
+
+Zimbr owns its scenarios and fixture under [`tests/zrct/`](../tests/zrct/README.md).
+They cover Unicode editing and sends, independent conversation drafts, hiding and
+restoring conversations, offline restart/reconnect, settings validation and
+persistence, attachment review/removal and original bytes, and the reading
+position while history and incoming messages load. Desktop scenarios also exercise
+real Wayland clipboard exchange, file-drop negotiation, window resizing and output
+scale changes. The application-ID check verifies the installed desktop identity.
+
+Each scenario uses a private headless Wayland desktop and synthetic TLS relay; it
+does not need a Mac or account credentials. Desktop input additionally requires
+`wl-clipboard`, a C compiler, pkg-config, and Wayland development files/protocols,
+xkbcommon, libdrm, and Pixman; the build provisions Zrct's Weston helpers.
+The build supplies the repository and executable paths. Up to four scenarios run
+concurrently in separate desktops; `--jobs 1` runs serially. Arguments after `--`
+go to the runner, including
+`--filter`, `--repeat`, `--record`, `--json`, and `--output`. Repetitions complete
+one batch before starting the next.
+
+Reports, logs, screenshots, and requested recordings appear under `artifacts/`.
+The Python environment and managed tools use build caches. Automation remains
+opt-in through `-Dautomation=true`; normal client builds omit the Zrct driver.
+Existing native and protocol suites remain useful for fault injection, allocation
+failures, and precise rendering checks; GUI scenarios supplement those contracts.
+
+### Korean input-method scenarios
+
+Install IBus, ibus-hangul, their GLib schemas/configuration helper, and a Hangul
+font. The optional suite starts a private IBus daemon, Hangul engine, Wayland
+desktop, and synthetic relay. It does not use the desktop's running input method
+or change the user's input-method settings.
+
+```sh
+zig build test-ime -Dautomation=true -Dopenssl-prefix=/path/to/openssl-3.5
+zig build test-ime -Dautomation=true -Dopenssl-prefix=/path/to/openssl-3.5 -- --repeat 3
+```
+
+For an extracted IBus installation, `ZIMBR_IBUS_PREFIX` selects its prefix
+(containing `bin`, `lib`, and `share`); the default is `/usr`. The suite adds a
+Korean font to its private rendering profile and records the font fingerprint.
+It exercises real two-set keystrokes, jamo deletion, inline preedit, confirmation
+without sending, paste during composition, exact relay delivery, and field changes
+without duplicate text.
+Native `test-gui -Dgui-test-filter=Korean` tests also cover selection replacement,
+cancellation, wrapping, scrolling, and the SDL candidate area. Headless editor
+tests cover UTF-8 offsets, size limits, undo/redo, and allocation failures.

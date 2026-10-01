@@ -1,5 +1,7 @@
 const std = @import("std");
-const rl = @import("raylib");
+const desktop = @import("desktop.zig");
+const Point = @import("geometry.zig").Point;
+const Rect = @import("geometry.zig").Rect;
 const theme = @import("theme.zig");
 const shapes = @import("shapes.zig");
 const Scrollbar = @This();
@@ -13,19 +15,19 @@ pub const gutter: f32 = 16;
 pub const wheel_scale: f32 = 1.25;
 
 pub const Input = struct {
-    mouse: rl.Vector2,
+    mouse: Point,
     pressed: bool,
     down: bool,
 };
 pub const Geometry = struct {
-    track: rl.Rectangle,
-    thumb: rl.Rectangle,
+    track: Rect,
+    thumb: Rect,
     limit: f64,
 };
 
-pub fn geometry(viewport: rl.Rectangle, content: f64, offset: f64) ?Geometry {
+pub fn geometry(viewport: Rect, content: f64, offset: f64) ?Geometry {
     if (viewport.height <= 0 or content <= viewport.height) return null;
-    const track = rl.Rectangle{
+    const track = Rect{
         .x = viewport.x + viewport.width - gutter,
         .y = viewport.y,
         .width = gutter,
@@ -57,7 +59,7 @@ pub fn geometry(viewport: rl.Rectangle, content: f64, offset: f64) ?Geometry {
 // Keep pointer capture until release, including when it leaves the track.
 // Store the grab point as a fraction so resizing or deferred history layout
 // can change the thumb's height without losing the user's place on it.
-pub fn update(s: *Scrollbar, viewport: rl.Rectangle, content: f64, offset: f64, input: Input) ?f64 {
+pub fn update(s: *Scrollbar, viewport: Rect, content: f64, offset: f64, input: Input) ?f64 {
     const g = geometry(viewport, content, offset) orelse {
         s.dragging = false;
         return null;
@@ -66,7 +68,7 @@ pub fn update(s: *Scrollbar, viewport: rl.Rectangle, content: f64, offset: f64, 
         s.dragging = false;
         return null;
     }
-    if (input.pressed and rl.checkCollisionPointRec(input.mouse, g.track)) {
+    if (input.pressed and g.track.contains(input.mouse)) {
         s.dragging = true;
         s.grab = if (input.mouse.y >= g.thumb.y and input.mouse.y <= g.thumb.y + g.thumb.height)
             (input.mouse.y - g.thumb.y) / g.thumb.height
@@ -83,7 +85,7 @@ pub fn update(s: *Scrollbar, viewport: rl.Rectangle, content: f64, offset: f64, 
     ) * g.limit;
 }
 
-pub fn draw(s: Scrollbar, viewport: rl.Rectangle, content: f64, offset: f64) void {
+pub fn draw(s: Scrollbar, viewport: Rect, content: f64, offset: f64) void {
     const g = geometry(viewport, content, offset) orelse return;
     shapes.drawRectangle(.{
         // Center the four-pixel rail beneath the six-pixel thumb.
@@ -92,7 +94,7 @@ pub fn draw(s: Scrollbar, viewport: rl.Rectangle, content: f64, offset: f64) voi
         .width = 4,
         .height = g.track.height,
     }, 1, theme.colors.line);
-    const hot = rl.checkCollisionPointRec(rl.getMousePosition(), g.track);
+    const hot = g.track.contains(desktop.mouse());
     shapes.drawRectangle(
         g.thumb,
         1,
@@ -101,7 +103,7 @@ pub fn draw(s: Scrollbar, viewport: rl.Rectangle, content: f64, offset: f64) voi
 }
 
 test "scrollbars jump, drag outside the track, release, and clamp after resizing" {
-    const viewport = rl.Rectangle{
+    const viewport = Rect{
         .x = 20,
         .y = 40,
         .width = 300,

@@ -200,18 +200,16 @@ The Wayland backend now validates local file URIs before converting them to
 paths. It accepts escaped Unicode names and local authorities, rejects remote
 authorities, malformed escapes, embedded NULs and oversized paths, and bounds
 offers to 16 paths and 256 KiB. A stalled offer has a two-second deadline. The
-raylib callback copies complete paths instead of silently truncating them.
-Generated dependency copies keep the pinned download untouched and fail the
-build if the patched function boundaries change.
+application-owned delivery handler copies complete paths without truncation.
+SDL owns the Wayland connection and dispatch; a native data device retains the
+raw URI validation boundary.
 
-Drop validation passed 141 client tests and the desktop build. The GUI check
-calls the actual GLFW parser and raylib callback, verifies the resulting file
-list, and checks remote URI and long-path rejection. An isolated virtual
-Wayland display passed 105 of 106 GUI tests and the desktop application-ID
-check. The remaining rounded-shape antialiasing assertion also fails in the
-unchanged baseline on that software renderer; its coverage was left intact.
-This validates the native input boundary, not yet a compositor-driven drag
-through the completed composer.
+Native GUI tests inject complete batches through the delivery handler, verify
+remote URI and long-path rejection, and send reviewed original bytes to the
+synthetic relay. Zrct compositor scenarios separately exercise actual Wayland
+drag negotiation and attachment-only sends. Rendering regression expectations
+remain unchanged; see the [migration validation](../FUTURE_MIGRATION.md) for
+software-renderer limitations.
 
 Local originals can now use the existing background image worker and bounded
 texture cache, including with no relay epoch or connection. PNG/JPEG decoding

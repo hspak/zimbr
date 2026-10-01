@@ -4,6 +4,33 @@
 // Wayland callbacks and the composer consume this on the GUI thread.
 static int rejected;
 static int hovered;
+static ZcDrop pending;
+int zc_drop_pending(void) { return pending.count != 0; }
+int zc_drop_take(ZcDrop *output) {
+    if (!pending.count) return 0;
+    *output = pending;
+    pending.count = 0;
+    return 1;
+}
+void zc_drop_offer(const char *text, size_t length) {
+    hovered = 0;
+    (void)zc_drop_parse(text, length, &pending);
+}
+void zc_drop_paths(int count, const char *const *paths) {
+    hovered = 0;
+    pending.count = 0;
+    if (count <= 0 || count > ZC_DROP_FILES) { zc_drop_reject(); return; }
+    for (int i = 0; i < count; i++) {
+        if (!paths[i] || paths[i][0] != '/' || strlen(paths[i]) >= ZC_DROP_PATH) {
+            zc_drop_reject();
+            return;
+        }
+        for (const unsigned char *p = (const unsigned char *)paths[i]; *p; p++)
+            if (*p < 32 || *p == 127) { zc_drop_reject(); return; }
+        strcpy(pending.paths[i], paths[i]);
+    }
+    pending.count = count;
+}
 void zc_drop_set_hovered(int active) { hovered = active; }
 int zc_drop_hovered(void) { return hovered; }
 void zc_drop_reject(void) { rejected = 1; }

@@ -1,7 +1,12 @@
-//! Bounded local file-manager offers. URI parsing precedes GLFW's path callback
-//! so authorities, escapes and path lengths cannot be lost by the backend.
+//! Bounded local file-manager offers. Raw URI validation and delivery are
+//! independent of the renderer and preserve whole-drop rejection semantics.
 const std = @import("std");
 const c = @import("c.zig").api;
+
+pub fn take() ?c.ZcDrop {
+    var files: c.ZcDrop = undefined;
+    return if (c.zc_drop_take(&files) != 0) files else null;
+}
 
 /// Whether a file offer is over the window, before it is dropped or leaves.
 /// Read only on the GUI thread.

@@ -98,7 +98,7 @@ pub fn build(b: *std.Build) !void {
             "Test native Contacts normalization without reading the address book",
         ).dependOn(&b.addRunArtifact(native_tests).step);
     }
-    if (target.result.os.tag == .linux) try client(b, target, optimize, profile_name);
+    if (target.result.os.tag == .linux) client(b, target, optimize, profile_name);
 }
 
 fn clientModule(
@@ -148,13 +148,15 @@ fn client(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     profile: ProfileName,
-) !void {
+) void {
     const fps_counter = b.option(
         bool,
         "fps-counter",
         "Show the FPS counter in the bottom-right corner",
     ) orelse false;
+    const automation = b.option(bool, "automation", "Enable private Zrct GUI instrumentation") orelse false;
     const options = b.addOptions();
+    options.addOption(bool, "automation", automation);
     options.addOption([]const u8, "version", manifest.version);
     options.addOption(bool, "fps_counter", fps_counter);
     options.addOption(ProfileName, "profile", profile);
@@ -198,52 +200,46 @@ fn client(
     ).step);
     const step = b.step("client", "Build the Linux desktop client");
     const clay = b.lazyDependency("zclay", .{ .target = target, .optimize = optimize }) orelse return;
-    const ray = b.lazyDependency("raylib_zig", .{
+    const m = clientModule(b, target, optimize, "src/client_main.zig", options);
+    addDesktop(b, m);
+    m.linkSystemLibrary("GL", .{});
+    m.addImport("zclay", clay.module("zclay"));
+
+    const desktop_probe = b.createModule(.{
         .target = target,
         .optimize = optimize,
-        .raudio = false,
-        .rmodels = false,
-        .linux_display_backend = .Wayland,
-    }) orelse return;
-    const ray_module = ray.module("raylib");
-    const artifact = ray.artifact("raylib");
-    artifact.root_module.addCMacro("RAYLIB_WAYLAND_APP_ID", "\"zimbr\"");
-    try patchRaylibWayland(b, artifact);
-    // Zig 0.16 must link Linux shared libraries at the executable, not archive them.
-    var retained: usize = 0;
-    for (artifact.root_module.link_objects.items) |object| switch (object) {
-        .system_lib => |lib| ray_module.linkSystemLibrary(lib.name, .{
-            .needed = lib.needed,
-            .weak = lib.weak,
-            .use_pkg_config = lib.use_pkg_config,
-            .preferred_link_mode = lib.preferred_link_mode,
-            .search_strategy = lib.search_strategy,
-        }),
-        .static_path, .other_step, .assembly_file, .c_source_file, .c_source_files, .win32_resource_file => {
-            artifact.root_module.link_objects.items[retained] = object;
-            retained += 1;
-        },
-    };
-    artifact.root_module.link_objects.items.len = retained;
-    const m = clientModule(b, target, optimize, "src/client_main.zig", options);
-    // Use the protocol XML already pinned with raylib/GLFW.
-    const activation_xml = artifact.root_module.owner.path("src/external/glfw/deps/wayland/xdg-activation-v1.xml");
-    const activation_header = b.addSystemCommand(&.{ "wayland-scanner", "client-header" });
-    activation_header.addFileArg(activation_xml);
-    m.addIncludePath(activation_header.addOutputFileArg("xdg-activation-v1-client-protocol.h").dirname());
-    const activation_code = b.addSystemCommand(&.{ "wayland-scanner", "private-code" });
-    activation_code.addFileArg(activation_xml);
-    m.addCSourceFile(.{ .file = activation_code.addOutputFileArg("xdg-activation-v1-protocol.c") });
-    m.addCSourceFile(.{ .file = b.path("src/client/activation.c"), .flags = &.{
-        "-std=c11",
-        "-Wall",
-        "-Wextra",
-        "-Werror",
-    } });
-    m.linkSystemLibrary("wayland-client", .{});
-    m.addImport("raylib", ray_module);
-    m.addImport("zclay", clay.module("zclay"));
-    const gui_tests = b.addTest(.{ .root_module = m });
+        .link_libc = true,
+    });
+    desktop_probe.addIncludePath(b.path("src/client"));
+    desktop_probe.addCSourceFiles(.{ .files = &.{ "tests/client_desktop_probe.c", "src/client/drop.c" }, .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+    addDesktop(b, desktop_probe);
+    desktop_probe.linkSystemLibrary("GL", .{});
+    const desktop_exe = b.addExecutable(.{ .name = "client-desktop-probe", .root_module = desktop_probe });
+    b.step("client-desktop-probe", "Build the native desktop integration probe").dependOn(&b.addInstallArtifact(desktop_exe, .{}).step);
+    if (b.option(bool, "desktop-tests", "Enable optional compositor diagnostics") orelse false) {
+        const desktop_suite = @import("zrct").addRun(b, b.dependency("zrct", .{}), .{
+            .suite = b.path("tests/zrct/desktop_native.py"),
+            .executable = desktop_exe,
+            .desktop = true,
+            .args = b.args orelse &.{},
+        });
+        b.step("test-sdl-desktop", "Test SDL services through a real Wayland compositor").dependOn(&desktop_suite.step);
+    }
+
+    // Native SDL input and renderer hooks exist only in instrumented builds.
+    if (automation) {
+        const zrct_dep = b.dependency("zrct", .{});
+        const zrct_module = @import("zrct").createModule(b, zrct_dep, .{
+            .backend = .sdl3,
+            .target = target,
+            .optimize = optimize,
+        });
+        m.addImport("zrct", zrct_module);
+    }
+    const gui_filter = b.option([]const u8, "gui-test-filter", "Filter existing GUI regressions");
+    const gui_tests = b.addTest(.{ .root_module = m, .filters = if (gui_filter) |filter| &.{filter} else &.{} });
+    const install_gui = b.addInstallArtifact(gui_tests, .{ .dest_sub_path = "zimbr-gui-tests" });
+    b.step("gui-test-exe", "Install the GUI regression executable without running it").dependOn(&install_gui.step);
     const gui_run = b.addRunArtifact(gui_tests);
     gui_run.step.dependOn(&b.top_level_steps.get("fake-relay").?.step);
     b.step("test-gui", "Test rendering and client interactions on Wayland").dependOn(&gui_run.step);
@@ -255,6 +251,27 @@ fn client(
     attachment_run.step.dependOn(&b.top_level_steps.get("fake-relay").?.step);
     b.step("test-gui-attachments", "Send native file drops through the GUI to a synthetic relay").dependOn(&attachment_run.step);
     const exe = b.addExecutable(.{ .name = "zimbr", .root_module = m });
+    if (automation) {
+        const zrct_dep = b.dependency("zrct", .{});
+        const gui = @import("zrct").addRun(b, zrct_dep, .{
+            .suite = b.path("tests/zrct/scenarios.py"),
+            .executable = exe,
+            .desktop = true,
+            .python_extras = &.{"zimbr"},
+            .args = b.args orelse &.{},
+        });
+        gui.step.dependOn(&b.top_level_steps.get("fake-relay").?.step);
+        b.step("test-zrct", "Run isolated GUI scenarios with Zrct").dependOn(&gui.step);
+        const ime = @import("zrct").addRun(b, zrct_dep, .{
+            .suite = b.path("tests/zrct/ime.py"),
+            .executable = exe,
+            .desktop = true,
+            .python_extras = &.{"zimbr"},
+            .args = b.args orelse &.{},
+        });
+        ime.step.dependOn(&b.top_level_steps.get("fake-relay").?.step);
+        b.step("test-ime", "Test Korean composition with an isolated IBus/Hangul engine").dependOn(&ime.step);
+    }
     const install = b.addInstallArtifact(exe, .{});
     step.dependOn(&install.step);
     b.getInstallStep().dependOn(&install.step);
@@ -277,101 +294,23 @@ fn client(
     b.getInstallStep().dependOn(&icon.step);
 }
 
-fn patchRaylibWayland(b: *std.Build, artifact: *std.Build.Step.Compile) !void {
-    const dependency = artifact.root_module.owner;
-    const platform_path = dependency.path("src/platforms/rcore_desktop_glfw.c");
-    const source = try std.Io.Dir.cwd().readFileAlloc(
-        b.graph.io,
-        platform_path.getPath(b),
-        b.allocator,
-        // A 1 MiB read cap bounds pinned dependency source patching; larger files need review.
-        .limited(1024 * 1024),
-    );
-    // Flamez's workaround: raylib clears GLFW hints before creating its window.
-    // Keep the patch in the build so clean package builds get the same app ID.
-    const hint =
-        "#if defined(_GLFW_WAYLAND) && defined(RAYLIB_WAYLAND_APP_ID)\n" ++
-        "    glfwWindowHintString(GLFW_WAYLAND_APP_ID, RAYLIB_WAYLAND_APP_ID);\n" ++
-        "#endif\n";
-    const defaults = "    glfwDefaultWindowHints();                       // Set default windows hints\n";
-    // Existing development dependency trees may already carry Flamez's patch.
-    const unpatched = try std.mem.replaceOwned(u8, b.allocator, source, hint, "");
-    if (std.mem.count(u8, unpatched, defaults) != 1) return error.RaylibWindowHintsChanged;
-    const with_hint = try std.mem.replaceOwned(u8, b.allocator, unpatched, defaults, defaults ++ hint);
-    const patched = try replaceCSection(
-        b.allocator,
-        with_hint,
-        "static void WindowDropCallback(GLFWwindow *window, int count, const char **paths)\n{",
-        "// GLFW3: Keyboard callback, runs on key pressed",
-        @embedFile("src/client/drop/window.h"),
-    );
-    const files = b.addWriteFiles();
-    _ = files.add("platforms/rcore_desktop_glfw.c", patched);
-    const core = files.addCopyFile(dependency.path("src/rcore.c"), "rcore.c");
-    artifact.root_module.addIncludePath(dependency.path("src"));
-    artifact.root_module.addIncludePath(dependency.path("src/external/glfw/src"));
-    artifact.root_module.addIncludePath(b.path("src/client"));
-
-    // A 1 MiB read cap bounds pinned dependency source patching; larger files need review.
-    const init_source = try std.Io.Dir.cwd().readFileAlloc(b.graph.io, dependency.path("src/external/glfw/src/init.c").getPath(b), b.allocator, .limited(1024 * 1024));
-    _ = files.add("external/glfw/src/init.c", try replaceCSection(
-        b.allocator,
-        init_source,
-        "char** _glfwParseUriList(char* text, int* count)\n{",
-        "char* _glfw_strdup(const char* source)",
-        @embedFile("src/client/drop/uri_list.h"),
-    ));
-    // A 1 MiB read cap bounds pinned dependency source patching; larger files need review.
-    const wayland_source = try std.Io.Dir.cwd().readFileAlloc(b.graph.io, dependency.path("src/external/glfw/src/wl_window.c").getPath(b), b.allocator, .limited(1024 * 1024));
-    const reader = "static char* readDataOfferAsString(struct wl_data_offer* offer, const char* mimeType)\n{";
-    if (std.mem.count(u8, wayland_source, reader) != 1) return error.GlfwDropReaderChanged;
-    const with_reader = try std.mem.replaceOwned(
-        u8,
-        b.allocator,
-        wayland_source,
-        reader,
-        @embedFile("src/client/drop/offer.h") ++ reader ++ "\n    if (!strcmp(mimeType, \"text/uri-list\")) return readDropOffer(offer);",
-    );
-    _ = files.add("external/glfw/src/wl_window.c", try replaceCSection(
-        b.allocator,
-        with_reader,
-        "const struct wl_data_device_listener dataDeviceListener =\n{",
-        "static void xdgActivationHandleDone(void* userData,",
-        @embedFile("src/client/drop/hover.h"),
-    ));
-    const glfw = files.addCopyFile(dependency.path("src/rglfw.c"), "rglfw.c");
-    try replaceCSource(b, artifact, "src/rcore.c", core);
-    try replaceCSource(b, artifact, "src/rglfw.c", glfw);
-}
-
-fn replaceCSection(a: std.mem.Allocator, source: []const u8, start: []const u8, end: []const u8, replacement: []const u8) ![]const u8 {
-    if (std.mem.count(u8, source, start) != 1 or std.mem.count(u8, source, end) != 1)
-        return error.DropBackendChanged;
-    const first = std.mem.indexOf(u8, source, start).?;
-    const last = std.mem.indexOfPos(u8, source, first, end) orelse return error.DropBackendChanged;
-    return std.mem.concat(a, u8, &.{ source[0..first], replacement, source[last..] });
-}
-
-fn replaceCSource(b: *std.Build, artifact: *std.Build.Step.Compile, name: []const u8, replacement: std.Build.LazyPath) !void {
-    // Compile the generated copy; leave the downloaded dependency untouched.
-    for (artifact.root_module.link_objects.items) |object| {
-        if (object != .c_source_files) continue;
-        const sources = object.c_source_files;
-        for (sources.files, 0..) |file, index| {
-            if (!std.mem.eql(u8, file, name)) continue;
-            const remaining = try b.allocator.alloc([]const u8, sources.files.len - 1);
-            @memcpy(remaining[0..index], sources.files[0..index]);
-            @memcpy(remaining[index..], sources.files[index + 1 ..]);
-            sources.files = remaining;
-            artifact.root_module.addCSourceFile(.{
-                .file = replacement,
-                .flags = sources.flags,
-                .language = sources.language,
-            });
-            return;
-        }
-    }
-    return error.RaylibSourceNotFound;
+fn addDesktop(b: *std.Build, m: *std.Build.Module) void {
+    // Keep native protocol bindings independent of the rendering dependency.
+    const activation_xml = b.path("src/client/desktop/xdg-activation-v1.xml");
+    const activation_header = b.addSystemCommand(&.{ "wayland-scanner", "client-header" });
+    activation_header.addFileArg(activation_xml);
+    m.addIncludePath(activation_header.addOutputFileArg("xdg-activation-v1-client-protocol.h").dirname());
+    const activation_code = b.addSystemCommand(&.{ "wayland-scanner", "private-code" });
+    activation_code.addFileArg(activation_xml);
+    m.addCSourceFile(.{ .file = activation_code.addOutputFileArg("xdg-activation-v1-protocol.c") });
+    m.addCSourceFiles(.{ .files = &.{ "src/client/desktop.c", "src/client/desktop/wayland.c" }, .flags = &.{
+        "-std=c11",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+    } });
+    m.linkSystemLibrary("wayland-client", .{});
+    m.linkSystemLibrary("sdl3", .{});
 }
 
 fn module(

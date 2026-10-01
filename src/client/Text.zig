@@ -1,5 +1,6 @@
 const std = @import("std");
-const rl = @import("raylib");
+const desktop = @import("desktop.zig");
+const graphics = @import("graphics.zig");
 const c = @import("c.zig").api;
 const display = @import("display.zig");
 const theme = @import("theme.zig");
@@ -30,7 +31,7 @@ const Entry = struct {
     hash: u64,
     text: []const u8,
     layout: *c.ZcText,
-    texture: ?rl.Texture2D = null,
+    texture: ?graphics.Texture = null,
     tile_top: i32 = -1,
     used: u64 = 0,
     width: f32,
@@ -38,8 +39,8 @@ const Entry = struct {
     ink_center_y: ?f32 = null,
     fallback: bool = false,
     raster_failed: bool = false,
-    color: rl.Color = rl.Color.white,
-    background: ?rl.Color = null,
+    color: graphics.Color = graphics.Color.white,
+    background: ?graphics.Color = null,
     start: usize = 0,
     end: usize = 0,
 };
@@ -56,10 +57,8 @@ pub fn deinit(s: *Text) void {
 }
 fn dropTexture(s: *Text, e: *Entry) void {
     if (e.texture) |tx| {
-        // raylib batches draws until EndDrawing. An evicted texture may still
-        // be referenced by this frame; flush before deleting/reusing its GL id.
-        rl.gl.rlDrawRenderBatchActive();
-        rl.unloadTexture(tx);
+        // Deletion flushes pending references before reusing the texture ID.
+        graphics.destroyTexture(tx);
         s.texture_bytes -= @as(usize, @intCast(tx.width)) * @as(usize, @intCast(tx.height)) * 4;
         e.texture = null;
     }
@@ -181,8 +180,8 @@ pub fn draw(
     y: f32,
     size: i32,
     width: f32,
-    color: rl.Color,
-    background: ?rl.Color,
+    color: graphics.Color,
+    background: ?graphics.Color,
 ) void {
     s.drawSelection(text, x, y, size, width, color, 0, 0, background);
 }
@@ -193,8 +192,8 @@ pub fn drawLine(
     y: f32,
     size: i32,
     width: f32,
-    color: rl.Color,
-    background: ?rl.Color,
+    color: graphics.Color,
+    background: ?graphics.Color,
 ) void {
     s.drawLineStyled(text, x, y, .{ .size = size }, width, color, background);
 }
@@ -206,8 +205,8 @@ pub fn drawLineStyled(
     y: f32,
     style: Style,
     width: f32,
-    color: rl.Color,
-    background: ?rl.Color,
+    color: graphics.Color,
+    background: ?graphics.Color,
 ) void {
     const e = s.getStyled(text, style, width, true, isOpaque(background)) catch return;
     s.drawEntry(e, x, y, color, 0, 0, background);
@@ -215,10 +214,10 @@ pub fn drawLineStyled(
 pub fn drawLineCentered(
     s: *Text,
     text: []const u8,
-    bounds: rl.Rectangle,
+    bounds: graphics.Rect,
     size: i32,
-    color: rl.Color,
-    background: ?rl.Color,
+    color: graphics.Color,
+    background: ?graphics.Color,
 ) void {
     const e = s.get(text, size, bounds.width, true, isOpaque(background)) catch return;
     // Center the visible glyphs, excluding font bearings and texture padding.
@@ -226,11 +225,11 @@ pub fn drawLineCentered(
     const y = bounds.y + bounds.height / 2 - @as(f32, @floatCast(c.zc_text_ink_center_y(e.layout)));
     s.drawEntry(e, x, y, color, 0, 0, background);
 }
-pub fn lineSize(s: *Text, text: []const u8, size: i32, width: f32) rl.Vector2 {
+pub fn lineSize(s: *Text, text: []const u8, size: i32, width: f32) graphics.Point {
     return s.lineSizeStyled(text, .{ .size = size }, width);
 }
 /// Measures one ellipsized line with the same metrics used by drawLineStyled.
-pub fn lineSizeStyled(s: *Text, text: []const u8, style: Style, width: f32) rl.Vector2 {
+pub fn lineSizeStyled(s: *Text, text: []const u8, style: Style, width: f32) graphics.Point {
     const e = s.getStyled(text, style, width, true, true) catch return .{ .x = 0, .y = 18 };
     return .{ .x = e.width, .y = e.height };
 }
@@ -297,18 +296,44 @@ pub fn drawSelection(
     y: f32,
     size: i32,
     width: f32,
-    color: rl.Color,
+    color: graphics.Color,
     start: usize,
     end: usize,
-    background: ?rl.Color,
+    background: ?graphics.Color,
 ) void {
     const e = s.get(text, size, width, false, isOpaque(background)) catch return;
     s.drawEntry(e, x, y, color, start, end, background);
 }
-fn isOpaque(background: ?rl.Color) bool {
+fn isOpaque(background: ?graphics.Color) bool {
     return if (background) |color| color.a == 255 else false;
 }
-fn rgba(color: rl.Color) u32 {
+const Underline = struct {
+    origin: graphics.Point,
+    scale: f32,
+    color: graphics.Color,
+
+    fn draw(user: ?*anyopaque, x: f64, y: f64, width: f64, line_height: f64) callconv(.c) void {
+        const line: *const Underline = @ptrCast(@alignCast(user.?));
+        graphics.rectangle(.{
+            .x = @round((line.origin.x + @as(f32, @floatCast(x))) * line.scale) / line.scale,
+            .y = @round((line.origin.y + @as(f32, @floatCast(y + line_height)) - 1) * line.scale) / line.scale,
+            .width = @floatCast(width),
+            .height = 1 / line.scale,
+        }, line.color);
+    }
+};
+/// Underline an IME range through wrapping and bidirectional layout using the same shaped text.
+pub fn underline(s: *Text, text: []const u8, origin: graphics.Point, width: f32, range: Range) void {
+    const e = s.get(text, 16, width, false, true) catch return;
+    if (e.fallback) return;
+    var line = Underline{
+        .origin = origin,
+        .scale = s.scale,
+        .color = theme.colors.accent,
+    };
+    c.zc_text_ranges(e.layout, @intCast(range.start), @intCast(range.end), Underline.draw, &line);
+}
+fn rgba(color: graphics.Color) u32 {
     return (@as(u32, color.r) << 24) | (@as(u32, color.g) << 16) | (@as(u32, color.b) << 8) | color.a;
 }
 fn drawEntry(
@@ -316,12 +341,12 @@ fn drawEntry(
     e: *Entry,
     x: f32,
     y: f32,
-    color: rl.Color,
+    color: graphics.Color,
     start: usize,
     end: usize,
-    background: ?rl.Color,
+    background: ?graphics.Color,
 ) void {
-    if (e.raster_failed or y >= @as(f32, @floatFromInt(rl.getScreenHeight())) or y + e.height <= 0) return;
+    if (e.raster_failed or y >= @as(f32, @floatFromInt(desktop.height())) or y + e.height <= 0) return;
     const full_height = c.zc_text_height(e.layout);
     // Align tiles to 256-pixel bands so small scroll movements reuse cached rasterization.
     var top: i32 = @intFromFloat(@floor(@min(
@@ -330,7 +355,7 @@ fn drawEntry(
     ) / 256) * 256);
     const visible_end: i32 = @intFromFloat(@min(
         @as(f32, @floatFromInt(full_height)),
-        @ceil((@as(f32, @floatFromInt(rl.getScreenHeight())) - y) * s.scale / 256) * 256,
+        @ceil((@as(f32, @floatFromInt(desktop.height())) - y) * s.scale / 256) * 256,
     ));
     // Very tall/high-DPI windows can span several bounded texture tiles.
     while (top < visible_end) {
@@ -373,39 +398,27 @@ fn drawEntry(
                 return;
             }
             defer c.zc_text_clear_pixels(e.layout);
-            e.texture = rl.loadTextureFromImage(.{
-                .data = pixels,
-                .width = c.zc_text_width(e.layout),
-                .height = tile_height,
-                .mipmaps = 1,
-                .format = .uncompressed_r8g8b8a8,
-            }) catch {
+            e.texture = graphics.upload(pixels, c.zc_text_width(e.layout), tile_height, .nearest) catch {
                 e.raster_failed = true;
                 return;
             };
             s.texture_bytes += bytes;
             // Pango already antialiases at framebuffer resolution. Copy its pixels
             // 1:1 so texture filtering does not add another blur pass.
-            rl.setTextureFilter(e.texture.?, .point);
         }
         const tx = e.texture.?;
         // Like Flamez's label alignment, but snap to physical pixels so fractional
         // Wayland scaling and scrolling never place the texture between pixels.
-        rl.drawTexturePro(tx, .{
-            .x = 0,
-            .y = 0,
-            .width = @floatFromInt(tx.width),
-            .height = @floatFromInt(tx.height),
-        }, .{
+        graphics.drawTexture(tx, .{
             .x = @round(x * s.scale) / s.scale,
             .y = (@round(y * s.scale) + @as(f32, @floatFromInt(top))) / s.scale,
             .width = @as(f32, @floatFromInt(tx.width)) / s.scale,
             .height = @as(f32, @floatFromInt(tx.height)) / s.scale,
-        }, .{ .x = 0, .y = 0 }, 0, rl.Color.white);
+        });
         top += tile_height;
     }
 }
-pub fn caret(s: *Text, text: []const u8, width: f32, index: usize) rl.Rectangle {
+pub fn caret(s: *Text, text: []const u8, width: f32, index: usize) graphics.Rect {
     const e = s.get(text, 16, width, false, true) catch return .{
         .x = 0,
         .y = 0,
