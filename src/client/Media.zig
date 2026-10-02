@@ -2,6 +2,7 @@
 //! decoding; the GUI receives at most one bounded decoded image at a time.
 const std = @import("std");
 const builtin = @import("builtin");
+const a = if (builtin.is_test) std.testing.allocator else std.heap.c_allocator;
 const u = @import("../common.zig");
 const t = @import("../protocol.zig").types;
 const attachments = @import("../protocol.zig").attachments;
@@ -10,7 +11,6 @@ const Config = @import("Config.zig");
 pub const Key = @import("Media/Key.zig");
 pub const DiskCache = @import("Media/DiskCache.zig");
 const Media = @This();
-const a = if (builtin.is_test) std.testing.allocator else std.heap.c_allocator;
 const log = std.log.scoped(.client_media);
 const asset_path_capacity = capacity: {
     var variant_length: usize = 0;

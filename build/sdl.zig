@@ -6,6 +6,7 @@ const manifest = @import("../build.zig.zon");
 pub const Library = struct {
     artifact: *std.Build.Step.Compile,
     source: *std.Build.Dependency,
+    protocol_headers: std.Build.LazyPath,
 
     pub fn link(library: Library, module: *std.Build.Module) void {
         module.addIncludePath(library.source.path("include"));
@@ -45,7 +46,11 @@ pub fn addLibrary(
     module.addCMacro("MESA_EGL_NO_X11_HEADERS", "1");
     module.addCMacro("_REENTRANT", "1");
     if (optimize != .Debug) module.addCMacro("NDEBUG", "1");
-    for ([_][]const u8{ "m", "dl", "pthread" }) |name| {
+    for ([_][]const u8{
+        "m",
+        "dl",
+        "pthread",
+    }) |name| {
         module.linkSystemLibrary(name, .{ .use_pkg_config = .no });
     }
 
@@ -79,68 +84,6 @@ pub fn addLibrary(
     module.addCMacro("HAVE_LIBDECOR_H", "1");
     module.addCMacro("SDL_VIDEO_DRIVER_WAYLAND_DYNAMIC_LIBDECOR", "\"libdecor-0.so.0\"");
 
-    const Driver = struct {
-        package: []const u8,
-        enabled: []const u8,
-        dynamic: []const u8,
-        soname: []const u8,
-    };
-    for ([_]Driver{
-        .{
-            .package = "alsa",
-            .enabled = "SDL_AUDIO_DRIVER_ALSA",
-            .dynamic = "SDL_AUDIO_DRIVER_ALSA_DYNAMIC",
-            .soname = "libasound.so.2",
-        },
-        .{
-            .package = "jack",
-            .enabled = "SDL_AUDIO_DRIVER_JACK",
-            .dynamic = "SDL_AUDIO_DRIVER_JACK_DYNAMIC",
-            .soname = "libjack.so.0",
-        },
-        .{
-            .package = "libpipewire-0.3 >= 0.3.44",
-            .enabled = "SDL_AUDIO_DRIVER_PIPEWIRE",
-            .dynamic = "SDL_AUDIO_DRIVER_PIPEWIRE_DYNAMIC",
-            .soname = "libpipewire-0.3.so.0",
-        },
-        .{
-            .package = "libpulse",
-            .enabled = "SDL_AUDIO_DRIVER_PULSEAUDIO",
-            .dynamic = "SDL_AUDIO_DRIVER_PULSEAUDIO_DYNAMIC",
-            .soname = "libpulse.so.0",
-        },
-        .{
-            .package = "sndio",
-            .enabled = "SDL_AUDIO_DRIVER_SNDIO",
-            .dynamic = "SDL_AUDIO_DRIVER_SNDIO_DYNAMIC",
-            .soname = "libsndio.so.7",
-        },
-        .{
-            .package = "libusb-1.0",
-            .enabled = "HAVE_LIBUSB",
-            .dynamic = "SDL_LIBUSB_DYNAMIC",
-            .soname = "libusb-1.0.so.0",
-        },
-        .{
-            .package = "libudev",
-            .enabled = "HAVE_LIBUDEV_H",
-            .dynamic = "SDL_UDEV_DYNAMIC",
-            .soname = "libudev.so.1",
-        },
-    }) |driver| {
-        if (!addHeaderFlags(b, &flags, driver.package)) continue;
-        module.addCMacro(driver.enabled, "1");
-        module.addCMacro(driver.dynamic, b.fmt("\"{s}\"", .{driver.soname}));
-        if (std.mem.eql(u8, driver.enabled, "SDL_AUDIO_DRIVER_PIPEWIRE")) {
-            module.addCMacro("SDL_CAMERA_DRIVER_PIPEWIRE", "1");
-            module.addCMacro("SDL_CAMERA_DRIVER_PIPEWIRE_DYNAMIC", "\"libpipewire-0.3.so.0\"");
-        }
-    }
-    if (addHeaderFlags(b, &flags, "liburing-ffi >= 2.3")) {
-        module.addCMacro("HAVE_LIBURING_H", "1");
-    }
-
     for (sources.protocols) |name| {
         const xml = source.path(b.fmt("wayland-protocols/{s}.xml", .{name}));
         const header = b.addSystemCommand(&.{ "wayland-scanner", "client-header" });
@@ -169,6 +112,7 @@ pub fn addLibrary(
     return .{
         .artifact = artifact,
         .source = source,
+        .protocol_headers = protocols.getDirectory(),
     };
 }
 
@@ -189,11 +133,7 @@ fn patchRenderer(b: *std.Build, source: *std.Build.Dependency) std.Build.LazyPat
     return renderer;
 }
 
-fn addHeaderFlags(
-    b: *std.Build,
-    flags: *std.ArrayList([]const u8),
-    package: []const u8,
-) bool {
+fn addHeaderFlags(b: *std.Build, flags: *std.ArrayList([]const u8), package: []const u8) bool {
     const output = queryPackage(b, "--cflags", package) orelse return false;
     var args = std.process.Args.IteratorGeneral(.{ .single_quotes = true }).init(b.allocator, output) catch @panic("OOM");
     defer args.deinit();
@@ -210,7 +150,11 @@ fn addVersion(
 ) void {
     const output = queryPackage(b, "--modversion", package) orelse minimum;
     var parts = std.mem.tokenizeAny(u8, output, ". \t\r\n");
-    for ([_][]const u8{ "MAJOR", "MINOR", "PATCH" }) |suffix| {
+    for ([_][]const u8{
+        "MAJOR",
+        "MINOR",
+        "PATCH",
+    }) |suffix| {
         const part = parts.next() orelse std.process.fatal("invalid {s} version: {s}", .{ package, output });
         const number = std.fmt.parseInt(u32, part, 10) catch std.process.fatal("invalid {s} version: {s}", .{ package, output });
         module.addCMacro(b.fmt("{s}_{s}", .{ prefix, suffix }), b.fmt("{d}", .{number}));
@@ -223,6 +167,8 @@ fn revisionHeader(b: *std.Build) *std.Build.Step.ConfigHeader {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hash.update(manifest.dependencies.sdl.hash);
     hash.update(@embedFile("sdl/vulkan.patch"));
+    hash.update(@embedFile("sdl/SDL_build_config.h"));
+    hash.update(@embedFile("sdl/sources.zig"));
     hash.final(&digest);
     return b.addConfigHeader(.{ .include_path = "SDL3/SDL_revision.h" }, .{
         .SDL_REVISION = b.fmt("release-3.4.16-zimbr-vulkan-{s}", .{
@@ -237,7 +183,11 @@ fn pkgConfig(b: *std.Build) []const u8 {
 
 fn queryPackage(b: *std.Build, option: []const u8, package: []const u8) ?[]const u8 {
     var exit_code: u8 = undefined;
-    return b.runAllowFail(&.{ pkgConfig(b), option, package }, &exit_code, .ignore) catch |err| switch (err) {
+    return b.runAllowFail(&.{
+        pkgConfig(b),
+        option,
+        package,
+    }, &exit_code, .ignore) catch |err| switch (err) {
         error.ExitCodeFailure, error.FileNotFound => null,
         else => std.process.fatal("cannot query SDL dependency {s}: {t}", .{ package, err }),
     };

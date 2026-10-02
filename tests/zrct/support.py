@@ -1,13 +1,41 @@
-"""Owned relay fixture, durable-effect assertions, and reading-anchor selection."""
+"""Shared rendering profile, owned relay fixture, and durable-effect assertions."""
 from contextlib import closing, contextmanager
 from dataclasses import replace
+import json
+import os
 from pathlib import Path
+import shlex
 import sys
 import sqlite3
 
-from zrct.errors import ExpectationFailed
+from zrct.errors import ExpectationFailed, ZrctError
 from zrct.fixture import FixtureProcess
 from zrct.process import until
+
+
+def configure_rendering(context):
+    if context.suite.display or context.desktop.sdl_renderer != "vulkan":
+        return
+    root = context.desktop.env.get("ZIMBR_LAVAPIPE_ROOT")
+    if not root:
+        raise ZrctError("Run the suite through zig build to provision the pinned Lavapipe driver")
+    root = Path(root).resolve()
+    package = json.loads((root / "zrct-package.json").read_text())
+    context.desktop.env["VK_DRIVER_FILES"] = str(root / "usr/share/vulkan/icd.d/lvp_icd.json")
+    libraries = [str(root / "usr/lib")]
+    if previous := context.desktop.env.get("LD_LIBRARY_PATH"):
+        libraries.append(previous)
+    context.desktop.env["LD_LIBRARY_PATH"] = os.pathsep.join(libraries)
+    # Hardware buffers can fail to import into Weston's software GL compositor.
+    # Lavapipe keeps the application's Vulkan path usable without a GPU.
+    driver_filter = "*lvp*"
+    context.desktop.env["VK_LOADER_DRIVERS_SELECT"] = driver_filter
+    context.bundle.manifest["metadata"]["rendering_profile"]["vulkan_driver_filter"] = driver_filter
+    context.bundle.manifest["metadata"]["rendering_profile"]["vulkan_driver_package"] = package
+    # Zrct records its own tool variables; retain this consumer-owned tool as well.
+    reproduction = context.bundle.manifest["reproduction"]
+    context.bundle.manifest["reproduction"] = (
+        shlex.join(["env", f"ZIMBR_LAVAPIPE_ROOT={root}"]) + " " + reproduction)
 
 
 class Relay:
@@ -94,6 +122,7 @@ class Relay:
 
 @contextmanager
 def relay(context):
+    configure_rendering(context)
     fixture = Relay(context)
     try:
         yield fixture

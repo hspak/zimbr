@@ -268,7 +268,11 @@ test "attachment outbox ownership commits atomically and rejects changed drafts 
     try testBytes(files, file, "");
     var parts = [_]t.SendPart{
         .{ .kind = .text, .state = .delivered },
-        .{ .kind = .attachment, .attachment_id = file.id, .state = .delivered },
+        .{
+            .kind = .attachment,
+            .attachment_id = file.id,
+            .state = .delivered,
+        },
     };
     var delivered: t.SendRequest = .{
         .request_id = input.request_id,

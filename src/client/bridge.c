@@ -687,9 +687,6 @@ ZcText *zc_text_new_with_options(const char *text, int length, double size, int 
 ZcText *zc_text_new(const char *text, int length, double size, int width, double scale) {
     return zc_text_new_with_options(text, length, size, width, scale, 0, 0);
 }
-ZcText *zc_text_new_line(const char *text, int length, double size, int width, double scale) {
-    return zc_text_new_with_options(text, length, size, width, scale, 1, 0);
-}
 int zc_text_pitch(ZcText *t) { return t->surface ? cairo_image_surface_get_stride(t->surface) : 0; }
 void zc_text_clear_pixels(ZcText *t) { if (t->surface) cairo_surface_destroy(t->surface); t->surface = NULL; }
 void zc_text_free(ZcText *t) { if (!t) return; zc_text_clear_pixels(t); free(t->lines); g_object_unref(t->layout); free(t); }

@@ -34,13 +34,13 @@ class Workflows(TestCase):
 
     def test_startup(self):
         app = self.context.benchmark.startup("startup_to_conversations", self.relay.launch,
-                    ready=dict(role="row", text="alice", enabled=True), timeout=30)
+                    ready=dict(role="row", text="alice@example.invalid", enabled=True), timeout=30)
         app.target(role="row", text="Fixture group").expect_visible()
-        app.target(role="row", text="alice").expect_interactable()
+        app.target(role="row", text="alice@example.invalid").expect_interactable()
 
     def test_first_open_large_history(self):
         app = self.launch()
-        alice = app.target(role="row", text="alice")
+        alice = app.target(role="row", text="alice@example.invalid")
         self.context.benchmark.action("first_open_large_history", alice.click,
                     ready=dict(role="message", text="Reading anchor 9999"), timeout=30)
         alice.expect(selected=True)
@@ -49,7 +49,7 @@ class Workflows(TestCase):
 
     def test_cached_conversation_switch(self):
         app = self.launch()
-        alice = app.target(role="row", text="alice")
+        alice = app.target(role="row", text="alice@example.invalid")
         alice.click()
         app.target(role="message", text="Reading anchor 9999").expect_visible(timeout=30)
         app.target("composer").type_text("Retained cached draft 👋")
@@ -70,11 +70,11 @@ class Workflows(TestCase):
         self.context.benchmark.action("search_to_matching_row", lambda: app.type_text("Fixture group"),
                     ready=dict(role="row", text="Fixture group", enabled=True))
         search.expect(value="Fixture group")
-        app.target(role="row", text="alice").expect_absent()
+        app.target(role="row", text="alice@example.invalid").expect_absent()
 
     def test_send_to_delivered(self):
         app = self.launch()
-        app.target(role="row", text="alice").click()
+        app.target(role="row", text="alice@example.invalid").click()
         app.target(role="message", text="Reading anchor 9999").expect_visible(timeout=30)
         text = "Measured send 👩‍💻"
         app.target("composer").type_text(text)

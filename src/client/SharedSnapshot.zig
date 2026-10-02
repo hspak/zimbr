@@ -2,6 +2,7 @@
 //! can publish without copying/reparsing the selected conversation's history.
 const std = @import("std");
 const builtin = @import("builtin");
+const a = if (builtin.is_test) std.testing.allocator else std.heap.page_allocator;
 const Store = @import("Store.zig");
 const MessageHistory = @import("MessageHistory.zig");
 const SharedSnapshot = @This();
@@ -25,7 +26,6 @@ pub const Transport = struct {
     expires: []const u8 = "",
     expiring: bool = false,
 };
-const a = if (builtin.is_test) std.testing.allocator else std.heap.page_allocator;
 
 pub const CreateError = std.json.ParseError(std.json.Scanner) || error{
     DatabaseBusy,

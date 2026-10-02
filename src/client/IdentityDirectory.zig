@@ -52,18 +52,21 @@ pub fn avatar(s: IdentityDirectory, service: []const u8, address: []const u8) ?t
 pub fn actor(s: IdentityDirectory, value: t.ReactionActor) []const u8 {
     return if (value.is_self) "You" else s.name(value.service, value.address orelse "");
 }
-pub fn conversation(s: IdentityDirectory, a: std.mem.Allocator, chat: t.Conversation) []const u8 {
+/// Borrow explicit titles, single-participant names, and fixed labels. Group
+/// titles allocate a result owned by a; errors leave the directory unchanged.
+pub fn conversation(s: IdentityDirectory, a: std.mem.Allocator, chat: t.Conversation) std.mem.Allocator.Error![]const u8 {
     if (chat.is_self) return "You";
     if (chat.title.len > 0) return chat.title;
     if (chat.participants.len == 0) return "Conversation";
     if (chat.participants.len == 1) return s.name(chat.service, chat.participants[0]);
-    var names: std.ArrayList([]const u8) = .empty;
-    defer names.deinit(a);
-    for (chat.participants[0..@min(3, chat.participants.len)]) |address|
-        names.append(a, s.name(chat.service, address)) catch return "Group conversation";
-    const joined = std.mem.join(a, ", ", names.items) catch return "Group conversation";
-    if (chat.participants.len <= 3) return joined;
-    return std.fmt.allocPrint(a, "{s} +{d}", .{ joined, chat.participants.len - 3 }) catch joined;
+    var names: [3][]const u8 = undefined;
+    const count = @min(names.len, chat.participants.len);
+    for (chat.participants[0..count], names[0..count]) |address, *name_text|
+        name_text.* = s.name(chat.service, address);
+    const joined = try std.mem.join(a, ", ", names[0..count]);
+    if (chat.participants.len <= names.len) return joined;
+    defer a.free(joined);
+    return std.fmt.allocPrint(a, "{s} +{d}", .{ joined, chat.participants.len - names.len });
 }
 pub fn matches(s: IdentityDirectory, chat: t.Conversation, query: []const u8) bool {
     if (chat.is_self and contains("You", query)) return true;
@@ -90,14 +93,14 @@ test "directory preserves routes, explicit titles, ambiguity and permission clea
         .match_state = .matched,
     });
     const chat = t.Conversation{ .service = "imessage", .participants = &.{"+14155550123"} };
-    try std.testing.expectEqualStrings("Zoë 👋", s.conversation(a, chat));
+    try std.testing.expectEqualStrings("Zoë 👋", try s.conversation(a, chat));
     try std.testing.expect(s.matches(chat, "Zoë") and s.matches(chat, "5550123"));
     try std.testing.expectEqualStrings("+14155550123", s.name("sms", "+14155550123"));
     var titled = chat;
     titled.title = "Our title";
-    try std.testing.expectEqualStrings("Our title", s.conversation(a, titled));
+    try std.testing.expectEqualStrings("Our title", try s.conversation(a, titled));
     s.available = false;
-    try std.testing.expectEqualStrings("+14155550123", s.conversation(a, chat));
+    try std.testing.expectEqualStrings("+14155550123", try s.conversation(a, chat));
     s.available = true;
     try s.put(a, .{
         .id = "1",
@@ -106,6 +109,27 @@ test "directory preserves routes, explicit titles, ambiguity and permission clea
         .display_name = "Do not show",
         .match_state = .ambiguous,
     });
-    try std.testing.expectEqualStrings("+14155550123", s.conversation(a, chat));
+    try std.testing.expectEqualStrings("+14155550123", try s.conversation(a, chat));
     try std.testing.expectEqualStrings("You", s.actor(.{ .service = "imessage", .is_self = true }));
+}
+
+test "group titles propagate allocation failures and release temporary storage" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkGroupTitle, .{});
+}
+
+fn checkGroupTitle(a: std.mem.Allocator) !void {
+    const directory: IdentityDirectory = .{};
+    const chat: t.Conversation = .{
+        .service = "imessage",
+        .participants = &.{
+            "Alice",
+            "Bob",
+            "Carol",
+            "Diana",
+        },
+    };
+    const result: std.mem.Allocator.Error![]const u8 = directory.conversation(a, chat);
+    const title = try result;
+    defer a.free(title);
+    try std.testing.expectEqualStrings("Alice, Bob, Carol +1", title);
 }

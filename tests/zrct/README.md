@@ -6,8 +6,22 @@ hooks. Mouse, key, wheel, and text playback use SDL events; reviewed attachment
 playback calls the application's ordinary native drop-delivery handler. Separate
 compositor scenarios cover actual Wayland file-drop negotiation.
 Explicit scenario boundaries are retained across application launches and restarts.
-`SDL_RENDER_DRIVER` selects the suite's renderer; reports record that selection and
+Suites select SDL's direct Vulkan renderer by default, matching the release
+client's preferred backend and using the same patched SDL library. Vulkan must
+initialize; tests do not silently fall back to OpenGL. `SDL_RENDER_DRIVER`
+overrides the selection for diagnostics. Reports record that selection and
 instrumented applications report the actual backend in their handshake.
+Headless runs select Mesa Lavapipe with `VK_LOADER_DRIVERS_SELECT=*lvp*` and record
+that filter and the pinned package identity in the rendering profile. Zig's GUI
+test steps download, verify, cache, and install Lavapipe from
+[`build/native-tools.json`](../../build/native-tools.json), using Zrct's managed
+Python provisioner. The build supplies the driver location to the suite; no
+manual download, system Lavapipe installation, or `VK_DRIVER_FILES` override is
+needed. Reproduction commands retain the managed driver location.
+Weston still uses software OpenGL for compositing. `ZRCT_DISPLAY_SMOKE=1` leaves
+Vulkan driver selection alone for hardware runs in a visible nested compositor.
+The pinned native tools require Linux x86-64 and compatible Arch Linux shared
+library ABIs, including the host Vulkan loader and Mesa/LLVM dependencies.
 
 The desktop scenarios use SDL 3.4.16 and Zrct's Weston surface-scale extension,
 including the live output-scale scenario. The extension reports the
@@ -15,10 +29,10 @@ headless output's actual integer scale through `wp_fractional_scale_v1`.
 Optional diagnostics in `desktop_native.py` run with
 `zig build test-sdl-desktop -Ddesktop-tests=true` without application
 instrumentation, including a framebuffer check across live 1× → 2× → 1× changes.
-The native regressions also run under `zig build test-gui-isolated`, with no
+The native regressions also run under `zig build test-gui-isolated -Ddesktop-tests=true`, with no
 application instrumentation. Desktop diagnostics include partial transfers,
 stalled-drop timeouts, and shutdown during a transfer. See
-[FUTURE_MIGRATION.md](../../FUTURE_MIGRATION.md) for the remaining legacy-compositor
+[display compatibility](../../docs/linux-client.md#display-compatibility) for the legacy-compositor
 limitation and fractional/multi-output coverage limits.
 
 `ime.py` is an optional real Korean input-method suite, run with
@@ -65,6 +79,10 @@ The scenarios wait for a conversation to become unobscured before editing it:
 selection acknowledgment can precede the worker publishing its history and draft.
 Native tests that replace fixture capabilities publish a new frame before
 clicking the retained controls. Their behavioral assertions are unchanged.
+Conversation selectors use the fixture's full `alice@example.invalid` label
+because Zrct's `text=` queries require an exact match.
+Attachment scenarios retain the restart boundary assertion using Zrct's current
+`application_drop_handler+sdl3_events` names.
 
 ## Test review and migration choices
 
@@ -88,7 +106,7 @@ These are useful implementation checks but cannot prove a whole user workflow.
 | Native long-editor workspace tests | Large multiline Unicode Wayland clipboard round trip, full-content digest/readback, resize, and restart | Grapheme boundary matrix, shaping/raster details, and editor allocation failures |
 | Native Details clipboard and hidden-editor checks | External Wayland clipboard reader, log copy/clear, hidden composer remains unchanged | Log ring capacity, scrollback anchoring and concurrent writers |
 | Native layout and text scale checks | Clipboard draft survives resize and live scale changes, then sends to the correct chat | Fractional pixel alignment, texture eviction and exact raster checks |
-| `tests/client_desktop.py` | Same application-ID and installed-icon assertions inside an isolated desktop | Standalone script remains usable against a packaged, uninstrumented client |
+| Wayland application ID and desktop icon | `Application.test_wayland_identity_matches_installed_desktop_entry` checks the actual Wayland ID and desktop icon | Duplicate standalone script removed; run `zig build test-zrct -Dautomation=true -- --filter Application` |
 | Three scenarios formerly loaded from Zrct's example suite | Owned Unicode send/restart, reviewed attachments, and recorded history/incoming anchor checks; added navigation to the new message | Existing regression assertions are retained |
 
 Native tests were not removed: these scenarios cover more of the application, but

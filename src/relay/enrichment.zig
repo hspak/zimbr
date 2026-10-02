@@ -390,10 +390,7 @@ pub fn page(
             break;
         }
         bytes += q.bytes(1).len + 1;
-        try items.append(
-            a,
-            try Json.init(a, try q.text(a, 1)),
-        );
+        try items.append(a, try Json.init(a, try q.text(a, 1)));
         position = q.int(0);
     }
     return .{

@@ -198,26 +198,25 @@
 #define HAVE_INOTIFY 1
 #define HAVE_O_CLOEXEC 1
 
-#define HAVE_LINUX_INPUT_H 1
-
-/* Enable various audio drivers */
-#define SDL_AUDIO_DRIVER_DISK 1
+/* Zimbr initializes only video/events. Keep SDL's public API stubs without
+ * audio, camera, controller, sensor, tray, or raw input device integrations. */
+#define SDL_AUDIO_DISABLED 1
 #define SDL_AUDIO_DRIVER_DUMMY 1
-
-/* Enable various input drivers */
-#define SDL_INPUT_LINUXEV 1
-#define SDL_INPUT_LINUXKD 1
-#define SDL_JOYSTICK_HIDAPI 1
-#define SDL_JOYSTICK_LINUX 1
-#define SDL_JOYSTICK_VIRTUAL 1
-
-#define SDL_HAPTIC_LINUX 1
-
-/* Enable various process implementations */
-#define SDL_PROCESS_POSIX 1
-
-/* Enable various sensor drivers */
+#define SDL_CAMERA_DISABLED 1
+#define SDL_JOYSTICK_DISABLED 1
+#define SDL_JOYSTICK_DUMMY 1
+#define SDL_HAPTIC_DISABLED 1
+#define SDL_HAPTIC_DUMMY 1
+#define SDL_HIDAPI_DISABLED 1
+#define SDL_SENSOR_DISABLED 1
 #define SDL_SENSOR_DUMMY 1
+#define SDL_POWER_DISABLED 1
+#define SDL_DIALOG_DISABLED 1
+#define SDL_TRAY_DISABLED 1
+#define SDL_TRAY_DUMMY 1
+
+/* Wayland message boxes and URL opening use the POSIX process implementation. */
+#define SDL_PROCESS_POSIX 1
 
 /* Enable various shared object loading systems */
 #define SDL_LOADSO_DLOPEN 1
@@ -233,8 +232,6 @@
 #define SDL_TIMER_UNIX 1
 
 /* Enable various video drivers */
-#define SDL_VIDEO_DRIVER_DUMMY 1
-#define SDL_VIDEO_DRIVER_OFFSCREEN 1
 #define SDL_VIDEO_DRIVER_WAYLAND 1
 #define SDL_VIDEO_DRIVER_WAYLAND_DYNAMIC "libwayland-client.so.0"
 #define SDL_VIDEO_DRIVER_WAYLAND_DYNAMIC_CURSOR "libwayland-cursor.so.0"
@@ -244,11 +241,9 @@
 #define SDL_VIDEO_RENDER_GPU 1
 #define SDL_VIDEO_RENDER_VULKAN 1
 #define SDL_VIDEO_RENDER_OGL 1
-#define SDL_VIDEO_RENDER_OGL_ES2 1
 
 /* Enable OpenGL support */
 #define SDL_VIDEO_OPENGL 1
-#define SDL_VIDEO_OPENGL_ES2 1
 #define SDL_VIDEO_OPENGL_EGL 1
 
 /* Enable Vulkan support */
@@ -257,21 +252,11 @@
 /* Enable GPU support */
 #define SDL_GPU_VULKAN 1
 
-/* Enable system power support */
-#define SDL_POWER_LINUX 1
-
 /* Enable system filesystem support */
 #define SDL_FILESYSTEM_UNIX 1
 
-/* Enable system storage support */
-#define SDL_STORAGE_STEAM 1
-
 /* Enable system FSops support */
 #define SDL_FSOPS_POSIX 1
-
-/* Enable camera subsystem */
-#define SDL_CAMERA_DRIVER_DUMMY 1
-#define SDL_CAMERA_DRIVER_V4L2 1
 
 /* Whether SDL_DYNAMIC_API needs dlopen */
 #define DYNAPI_NEEDS_DLOPEN 1

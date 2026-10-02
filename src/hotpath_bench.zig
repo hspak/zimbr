@@ -85,9 +85,9 @@ fn diskMaintenance(initial_entries: usize) !struct {
         }
     }
     if (@hasDecl(Media, "DiskCache")) {
-        const usage = cache.usage orelse return error.CacheMaintenanceFailed;
+        const usage = cache.usage orelse return error.CacheUsageUnavailable;
         if (usage.bytes > cache.limits.bytes or usage.entries > cache.limits.entries)
-            return error.CacheMaintenanceFailed;
+            return error.CacheUsageMismatch;
     }
     return .{
         .initial_entries = initial_entries,
@@ -122,7 +122,7 @@ pub fn main(init: std.process.Init) !void {
     bytes[bytes.len - 1] = '"';
     // Repeat mixed Unicode across six lines to exercise shaping, fallback, and rasterization.
     const body = "Opaque text, é 👩‍💻 and Unicode fallback.\n" ** 6;
-    const layout = c.zc_text_new_with_options(body.ptr, body.len, 16, 480, 1.25, 0, 1) orelse return error.LayoutFailed;
+    const layout = c.zc_text_new_with_options(body.ptr, body.len, 16, 480, 1.25, 0, 1) orelse return error.TextLayoutUnavailable;
     defer c.zc_text_free(layout);
     const height = @min(2048, c.zc_text_height(layout));
     var sql: [samples]f64 = undefined;
@@ -192,7 +192,7 @@ pub fn main(init: std.process.Init) !void {
         const json_us = (clock() - started) / 500;
         started = clock();
         for (0..100) |_| {
-            if (c.zc_text_pixels_on(layout, 0xffffffff, 0, 0, 0, height, 0x202020ff) == null) return error.RasterFailed;
+            if (c.zc_text_pixels_on(layout, 0xffffffff, 0, 0, 0, height, 0x202020ff) == null) return error.TextRasterUnavailable;
             c.zc_text_clear_pixels(layout);
         }
         const raster_us = (clock() - started) / 100;

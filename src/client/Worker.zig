@@ -342,7 +342,11 @@ fn work(s: *Worker) !void {
     defer a.free(path);
     s.store = try Store.open(path);
     defer s.store.close();
-    s.preparation = .{ .io = s.io, .data = s.config.data, .parent_wake = s.wake_pipe[1] };
+    s.preparation = .{
+        .io = s.io,
+        .data = s.config.data,
+        .parent_wake = s.wake_pipe[1],
+    };
     s.preparation.?.start() catch |err| {
         log.warn("Attachment storage unavailable: {s}", .{@errorName(err)});
         s.preparation = null;
@@ -1096,10 +1100,7 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
             // Poll status each second during sync and every five seconds while idle.
             s.status_at = u.now() + @as(i64, if (v.sync_activity.active()) 1000 else 5000);
             const epoch_changed = !u.eq(v.server_epoch, try s.store.get(ar, "epoch"));
-            if (epoch_changed or !u.eq(
-                try s.store.get(ar, "bootstrapped"),
-                "1",
-            )) {
+            if (epoch_changed or !u.eq(try s.store.get(ar, "bootstrapped"), "1")) {
                 if (s.stream_active) {
                     c.zc_net_cancel_stream(s.net.?);
                     s.stream_active = false;

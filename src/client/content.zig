@@ -78,7 +78,7 @@ pub fn prepare(a: u.Allocator, m: t.Message) u.Allocator.Error![]const Block {
     }
     valid_text = valid_text and text_bytes == text.len;
     if (!valid_text) if (m.text) |value| if (value.len > 0) {
-        const visible = display.message(a, value);
+        const visible = try display.message(a, value);
         if (visible.len > 0) {
             try blocks.append(a, .{ .source_text = value, .value = .{ .text = visible } });
             text_present = true;
@@ -88,7 +88,7 @@ pub fn prepare(a: u.Allocator, m: t.Message) u.Allocator.Error![]const Block {
         switch (part.kind) {
             .text => if (valid_text) {
                 const value = partText(m, part) orelse continue;
-                const visible = display.message(a, value);
+                const visible = try display.message(a, value);
                 if (visible.len == 0) continue;
                 try blocks.append(a, .{
                     .part_id = part.id,
@@ -125,7 +125,7 @@ pub fn prepare(a: u.Allocator, m: t.Message) u.Allocator.Error![]const Block {
     };
     if (blocks.items.len == 0 and !text_present) try blocks.append(
         a,
-        .{ .value = .{ .text = display.record(a, m) } },
+        .{ .value = .{ .text = try display.record(a, m) } },
     );
     // Place chips immediately below the referenced block; unresolved or absent
     // parts get one message-level group with an explicit explanation in detail.
@@ -379,16 +379,16 @@ test "unmapped attachment anchors leave captions or attachment rows and keep una
     try std.testing.expectEqual(@as(usize, 2), caption.len);
     try std.testing.expectEqualStrings("Caption 👋", caption[0].value.text);
     try std.testing.expectEqualStrings(source, caption[0].source_text.?);
-    try std.testing.expectEqualStrings("Caption 👋", display.summary(a, m));
+    try std.testing.expectEqualStrings("Caption 👋", try display.summary(a, m));
     m.text = display.object_marker ++ "\n" ++ display.object_marker;
     const photo = try prepare(a, m);
     try std.testing.expectEqual(@as(usize, 1), photo.len);
     try std.testing.expectEqualStrings("photo", photo[0].value.attachment.id);
-    try std.testing.expectEqualStrings("Photo", display.summary(a, m));
+    try std.testing.expectEqualStrings("Photo", try display.summary(a, m));
     m.attachments = &.{};
     m.metadata_deferred = true;
-    try std.testing.expectEqualStrings("Attachment · preview unavailable", display.record(a, m));
-    try std.testing.expectEqualStrings("Attachment", display.summary(a, m));
+    try std.testing.expectEqualStrings("Attachment · preview unavailable", try display.record(a, m));
+    try std.testing.expectEqualStrings("Attachment", try display.summary(a, m));
 }
 
 test "many reactions group each actor once across many target parts" {

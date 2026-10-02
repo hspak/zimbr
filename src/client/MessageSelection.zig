@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const MessageSelection = @This();
 const a = if (builtin.is_test) std.testing.allocator else std.heap.page_allocator;
+const MessageSelection = @This();
 
 // Own the text so worker snapshots can be replaced during a selection.
 id: []const u8 = "",

@@ -44,7 +44,12 @@ pub fn frame(width: f32, height: f32, composer_height: f32) Areas {
     const header_height = @min(64, height);
     const composer = @min(composer_height, @max(0, height - header_height));
     return .{
-        .rail = .{ .x = 0, .y = 0, .width = rail_width, .height = height },
+        .rail = .{
+            .x = 0,
+            .y = 0,
+            .width = rail_width,
+            .height = height,
+        },
         .sidebar = .{
             .x = rail_width,
             .y = 0,

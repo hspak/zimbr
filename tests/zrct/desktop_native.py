@@ -8,8 +8,10 @@ from zrct import Suite, TestCase
 from zrct.environment import executable, platform_directory
 from zrct.process import until
 
+from support import configure_rendering
+
 SUITE = Suite("zimbr-sdl-desktop", timeout=90, desktop_input=True, boundary="compositor_input",
-              sdl_renderer=os.environ.get("SDL_RENDER_DRIVER"))
+              sdl_renderer=os.environ.get("SDL_RENDER_DRIVER", "vulkan"))
 
 
 class NativeDesktop(TestCase):
@@ -19,10 +21,15 @@ class NativeDesktop(TestCase):
             client.connect(self.context.desktop.env["ZRCT_DESKTOP_SOCKET"])
             client.sendall(command.encode())
             result = json.loads(client.recv(4096))
+        self.context.bundle.event("desktop_command", command=command, result=result)
         self.assertNotIn("error", result, (command, result))
+        operation = command.split(" ", 1)[0]
+        if operation in ("activate", "move", "button", "key", "scale"):
+            self.context.bundle.observe_boundary("compositor_input", operation=operation)
         return result
 
     def launch_probe(self):
+        configure_rendering(self.context)
         probe = self.context.desktop.launch(
             "desktop-probe", [self.context.suite.executable],
             stdin=subprocess.PIPE, category="application")

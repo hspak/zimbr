@@ -620,7 +620,11 @@ fn prepareSend(self: *Core, a: u.Allocator) !?Work {
         try j.execute("UPDATE send_parts SET dispatch_ms=?,source_floor=?,mode=?,route=? WHERE request_id=? AND position=?", &(boundary ++ [_]Sqlite.Parameter{.{ .int = @intCast(position) }}));
     } else try j.execute("UPDATE send_requests SET dispatch_ms=?,source_floor=?,mode=?,route=? WHERE id=?", &boundary);
     try j.commit();
-    return .{ .v = v, .route = r, .part = part };
+    return .{
+        .v = v,
+        .route = r,
+        .part = part,
+    };
 }
 fn dispatchOne(self: *Core, a: u.Allocator) !bool {
     const work = (try self.prepareSend(a)) orelse return false;

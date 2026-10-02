@@ -25,17 +25,23 @@ compiled. Includes resolve against the pinned upstream tree.
 
 These are Zimbr modifications, not an unmodified upstream SDL release. The
 benchmark's SDL revision includes a SHA-256 prefix covering the upstream package
-hash followed by the patch bytes. Cached builds skip unchanged patch preparation.
+hash, patch bytes, build configuration, and source list. Cached builds skip
+unchanged patch preparation.
 
 The Linux configuration and explicit source/protocol lists are in build/sdl/.
-They enable Wayland, offscreen/dummy video, Vulkan, OpenGL, GLES2, SDL GPU,
+They enable Wayland video, Vulkan, OpenGL, SDL GPU,
 software rendering, Fcitx through D-Bus, compositor text input, and libdecor.
 The direct IBus backend is enabled when pkg-config finds ibus-1.0. Use -Dibus=false
-to disable it or -Dibus=true to require its development files. Optional audio and
-device integrations use development headers discovered by pkg-config; their
-runtime libraries are loaded by SDL. The application requires no installed SDL.
+to disable it or -Dibus=true to require its development files. Audio, camera,
+joystick, haptic, HIDAPI, sensor, power, file-dialog, and tray subsystems are
+disabled. Their public API stubs remain because SDL's dynamic API table references
+them. Raw evdev input, Steam storage, io_uring, non-Wayland video drivers, GLES2, and
+non-Linux renderers are omitted.
+The application requires no installed SDL.
 Wayland bindings are generated from the pinned XML by wayland-scanner as Zig
-build steps. Graphics loaders, drivers, and other OS services remain external.
+build steps. The application reuses SDL's activation protocol header and compiled
+interfaces for notification focus. Graphics loaders, drivers, and other OS
+services remain external.
 
 To update SDL, update the URL and content hash in build.zig.zon, rebase the
 renderer patch against that release, and reconcile build/sdl/sources.zig and
@@ -48,5 +54,5 @@ reproduces the edited file exactly and that the pristine copy stays unchanged.
 Run both renderer test suites, real IME scenarios, and rendering benchmarks.
 
 The upstream SDL license and embedded third-party notices are preserved. Binary
-packages include SDL's license, HIDAPI's original permissive license, and the
-BSD license for yuv2rgb alongside Zimbr's notices.
+packages include SDL's license and the BSD license for yuv2rgb alongside
+Zimbr's notices. HIDAPI is disabled and its third-party implementation is not linked.

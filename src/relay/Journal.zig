@@ -807,7 +807,11 @@ test "bounded pages own records and cursors across subsequent queries and reject
     try std.testing.expect(!u.eq(identity.id, other.id));
     try std.testing.expectEqual(@as(?[]const u8, null), remaining.next);
 
-    for ([_]usize{ 0, t.max_page + 1, std.math.maxInt(usize) }) |limit| {
+    for ([_]usize{
+        0,
+        t.max_page + 1,
+        std.math.maxInt(usize),
+    }) |limit| {
         try std.testing.expectError(error.InvalidRequest, j.page(a, chat, null, limit));
         try std.testing.expectError(error.InvalidRequest, j.page(a, null, null, limit));
         try std.testing.expectError(error.InvalidRequest, j.identityPage(a, null, limit));

@@ -282,17 +282,7 @@ const Xml = struct {
             const character: u21 = if (u.eq(entity, "amp")) '&' else if (u.eq(entity, "lt")) '<' else if (u.eq(
                 entity,
                 "gt",
-            )) '>' else if (u.eq(
-                entity,
-                "quot",
-            )) '"' else if (u.eq(
-                entity,
-                "apos",
-            )) '\'' else if (std.mem.startsWith(
-                u8,
-                entity,
-                "#x",
-            )) std.fmt.parseInt(
+            )) '>' else if (u.eq(entity, "quot")) '"' else if (u.eq(entity, "apos")) '\'' else if (std.mem.startsWith(u8, entity, "#x")) std.fmt.parseInt(
                 u21,
                 entity[2..],
                 16,

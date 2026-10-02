@@ -82,7 +82,11 @@ fn run(init: std.process.Init) !void {
     if (comptime client_options.automation) {
         try zrct.init("zimbr", client_options.version);
         zrct.setDropHandler(bridge.zc_drop_paths);
-        zrct.setRenderer(.{ .window = @ptrCast(desktop.window()), .flush = graphics.flush, .overlay = automationOverlay });
+        zrct.setRenderer(.{
+            .window = @ptrCast(desktop.window()),
+            .flush = graphics.flush,
+            .overlay = automationOverlay,
+        });
     }
     defer if (comptime client_options.automation) zrct.deinit();
     // Let Wayland deliver its initial scale before caching any text textures.
@@ -205,7 +209,7 @@ fn runSession(init: std.process.Init, config: Config) !?Config {
         if (app.next_config != null) break;
         if (config.frames > 0 and frames >= config.frames) {
             if (config.screenshot) |path| {
-                const shot = app.captured orelse return error.ScreenshotFailed;
+                const shot = app.captured orelse return error.ScreenshotUnavailable;
                 try graphics.saveImage(shot, path);
             }
             break;
@@ -402,7 +406,11 @@ const App = struct {
                 const offset = s.scrollOffset(scroll.pane);
                 const geometry = Scrollbar.geometry(scroll.viewport, scroll.content, offset) orelse continue;
                 if (!geometry.track.contains(point)) continue;
-                if (bar.update(scroll.viewport, scroll.content, offset, .{ .mouse = point, .pressed = true, .down = true })) |next| s.setScroll(scroll.pane, next);
+                if (bar.update(scroll.viewport, scroll.content, offset, .{
+                    .mouse = point,
+                    .pressed = true,
+                    .down = true,
+                })) |next| s.setScroll(scroll.pane, next);
                 s.dragging = false;
                 s.layout_pending = true;
                 return true;
@@ -571,7 +579,29 @@ const App = struct {
             .@"union" => return switch (item) {
                 inline else => |payload, tag| @unionInit(T, @tagName(tag), try copyControl(@TypeOf(payload), allocator, payload)),
             },
-            else => return item,
+            .type,
+            .void,
+            .bool,
+            .noreturn,
+            .int,
+            .float,
+            .pointer,
+            .array,
+            .comptime_float,
+            .comptime_int,
+            .undefined,
+            .null,
+            .optional,
+            .error_union,
+            .error_set,
+            .@"enum",
+            .@"fn",
+            .@"opaque",
+            .frame,
+            .@"anyframe",
+            .vector,
+            .enum_literal,
+            => return item,
         }
     }
     fn activate(s: *App, action: Action) void {
@@ -1425,7 +1455,11 @@ const App = struct {
                     s.reset_echo.clearRetainingCapacity();
                     const composing = composition_key or if (s.focusedEditor()) |editor| editor.preedit.items.len > 0 else false;
                     composition_key = false;
-                    try s.keyInput(.{ .code = event.key.key, .modifiers = event.key.mod, .repeat = event.key.repeat }, composing);
+                    try s.keyInput(.{
+                        .code = event.key.key,
+                        .modifiers = event.key.mod,
+                        .repeat = event.key.repeat,
+                    }, composing);
                 },
                 c.SDL_EVENT_TEXT_INPUT => {
                     const committed = if (event.text.text != null) std.mem.span(event.text.text) else "";
@@ -1471,7 +1505,11 @@ const App = struct {
                         s.click_timestamp = if (event.button.timestamp == 0) desktop.time() else @as(f64, @floatFromInt(event.button.timestamp)) / std.time.ns_per_s;
                         s.click_count = event.button.clicks;
                     }
-                    s.pointerInput(.{ .pressed = event.button.down, .released = !event.button.down, .down = desktop.leftDown() });
+                    s.pointerInput(.{
+                        .pressed = event.button.down,
+                        .released = !event.button.down,
+                        .down = desktop.leftDown(),
+                    });
                     s.syncTextInput();
                     s.layout_pending = true;
                 },
@@ -1704,7 +1742,13 @@ const App = struct {
                     .width = r.width - 64,
                     .height = 46,
                 };
-                if (comptime client_options.automation) zrct.add(.{ .id = "recipient", .role = "textbox", .label = "Recipient", .bounds = .from(field), .value = s.recipient.text.items });
+                if (comptime client_options.automation) zrct.add(.{
+                    .id = "recipient",
+                    .role = "textbox",
+                    .label = "Recipient",
+                    .bounds = .from(field),
+                    .value = s.recipient.text.items,
+                });
                 s.inputBox(
                     &s.recipient,
                     field,
@@ -1965,7 +2009,11 @@ const App = struct {
             .status = failure,
             .interactive = false,
         });
-        s.addControl(viewport, .{ .scroll = .{ .pane = .settings, .viewport = viewport, .content = content_height } });
+        s.addControl(viewport, .{ .scroll = .{
+            .pane = .settings,
+            .viewport = viewport,
+            .content = content_height,
+        } });
         s.settings_scroll = std.math.clamp(
             s.settings_scroll,
             0,
@@ -2245,7 +2293,13 @@ const App = struct {
         graphics.rectangle(r, theme.colors.sidebar);
         graphics.line(.{ .x = @trunc(r.x + r.width - 1), .y = @trunc(r.y) }, .{ .x = @trunc(r.x + r.width - 1), .y = @trunc(r.y + r.height) }, 1, theme.colors.line);
         const viewport = sidebarViewport(r);
-        if (comptime client_options.automation) zrct.add(.{ .id = "conversations", .role = "scroll", .bounds = .from(viewport), .interactive = false, .obscured = input_obscured });
+        if (comptime client_options.automation) zrct.add(.{
+            .id = "conversations",
+            .role = "scroll",
+            .bounds = .from(viewport),
+            .interactive = false,
+            .obscured = input_obscured,
+        });
         var clip = viewport;
         clip.width -= Scrollbar.gutter;
         var count: usize = 0;
@@ -2253,7 +2307,11 @@ const App = struct {
             if (s.matchesSidebar(chat)) count += 1;
         };
         const content_height = @as(f32, @floatFromInt(count)) * sidebar_row_height;
-        s.addControl(viewport, .{ .scroll = .{ .pane = .sidebar, .viewport = viewport, .content = content_height } });
+        s.addControl(viewport, .{ .scroll = .{
+            .pane = .sidebar,
+            .viewport = viewport,
+            .content = content_height,
+        } });
         s.sidebar_scroll = std.math.clamp(
             s.sidebar_scroll,
             0,
@@ -2290,7 +2348,7 @@ const App = struct {
                 else
                     theme.colors.sidebar;
                 if (selected or hot) shapes.drawRectangle(row, 4, bg);
-                const name = display.label(ar, v.snapshot.directory.conversation(ar, chat.value));
+                const name = display.label(ar, v.snapshot.directory.conversation(ar, chat.value) catch "Group conversation") catch "…";
                 if (comptime client_options.automation) zrct.add(.{
                     .id = std.fmt.allocPrint(ar, "conversation/{s}", .{chat.value.id}) catch "",
                     .role = "row",
@@ -2492,7 +2550,11 @@ const App = struct {
             0,
             @max(0, s.details_height - clip.height),
         );
-        s.addControl(viewport, .{ .scroll = .{ .pane = .details, .viewport = viewport, .content = s.details_height } });
+        s.addControl(viewport, .{ .scroll = .{
+            .pane = .details,
+            .viewport = viewport,
+            .content = s.details_height,
+        } });
         beginClip(clip);
         var y = clip.y - s.details_scroll;
         _ = s.drawLogs(clip, &y, ar);
@@ -2762,7 +2824,11 @@ const App = struct {
         } else if (s.logs_anchor != null) {
             s.logs_scroll = anchor_offset orelse 0;
         }
-        s.addControl(box, .{ .scroll = .{ .pane = .logs, .viewport = viewport, .content = total } });
+        s.addControl(box, .{ .scroll = .{
+            .pane = .logs,
+            .viewport = viewport,
+            .content = total,
+        } });
         s.logs_scroll = std.math.clamp(s.logs_scroll, 0, s.logs_limit);
         s.logs_anchor = null;
         beginClip(inner);
@@ -2818,7 +2884,7 @@ const App = struct {
             subtitle = "New iMessage conversation";
         } else if (s.view) |v| for (v.snapshot.chats) |chat| {
             if (u.eq(chat.value.id, s.key)) {
-                title = v.snapshot.directory.conversation(ar, chat.value);
+                title = v.snapshot.directory.conversation(ar, chat.value) catch "Group conversation";
                 subtitle = if (!chat.value.is_self and chat.value.participants.len > 1) std.fmt.allocPrint(
                     ar,
                     "{d} participants  ·  {s}",
@@ -2850,7 +2916,7 @@ const App = struct {
             .height = 48,
         });
         s.text.draw(
-            display.label(ar, title),
+            display.label(ar, title) catch "…",
             title_x,
             r.y + 9,
             20,
@@ -2973,7 +3039,7 @@ const App = struct {
             };
         }
         for (snapshot.pending, rows[count..][0..snapshot.pending.len], 0..) |p, *row, i| {
-            const text = display.message(ar, p.input.text);
+            const text = display.message(ar, p.input.text) catch display.unavailable;
             var message = pendingMessage(p);
             const files = try ar.alloc(t.Attachment, p.input.attachments.len);
             for (files, p.input.attachments) |*item, file| item.* = .{
@@ -3304,7 +3370,11 @@ const App = struct {
         var clip = r;
         clip.width -= Scrollbar.gutter;
         s.addControl(clip, .history_background);
-        s.addControl(r, .{ .scroll = .{ .pane = .history, .viewport = r, .content = s.content_height } });
+        s.addControl(r, .{ .scroll = .{
+            .pane = .history,
+            .viewport = r,
+            .content = s.content_height,
+        } });
         beginClip(clip);
         var participants: []const []const u8 = &.{};
         var is_group = false;
@@ -3383,7 +3453,12 @@ const App = struct {
                     .id = std.fmt.allocPrint(ar, "message/{s}", .{row.id}) catch "",
                     .role = "message",
                     .label = row.text,
-                    .bounds = .{ .x = r.x + 66, .y = y, .width = inner, .height = row.height() },
+                    .bounds = .{
+                        .x = r.x + 66,
+                        .y = y,
+                        .width = inner,
+                        .height = row.height(),
+                    },
                     .clip = .from(clip),
                     .parent = "history",
                     .interactive = false,
@@ -3419,7 +3494,7 @@ const App = struct {
                 const name = display.label(
                     ar,
                     if (outgoing) "You" else v.snapshot.directory.name(m.service, m.sender),
-                );
+                ) catch "…";
                 if (s.drawMessageHeader(
                     name,
                     localTime(ar, m.timestamp, false),
@@ -3460,7 +3535,12 @@ const App = struct {
                 .id = std.fmt.allocPrint(ar, "message/{s}", .{row.id}) catch "",
                 .role = "message",
                 .label = row.text,
-                .bounds = .{ .x = x, .y = y, .width = inner, .height = row.height() },
+                .bounds = .{
+                    .x = x,
+                    .y = y,
+                    .width = inner,
+                    .height = row.height(),
+                },
                 .clip = .from(clip),
                 .parent = "history",
                 .interactive = false,
@@ -3482,10 +3562,10 @@ const App = struct {
                 const status = if (u.eq(p.state, "uploading") and u.eq(v.upload.request_id, p.input.request_id))
                     std.fmt.allocPrint(ar, "Uploading {d}% · {s}", .{
                         if (v.upload.total == 0) 0 else @min(100, v.upload.bytes * 100 / v.upload.total),
-                        display.label(ar, v.upload.filename),
+                        display.label(ar, v.upload.filename) catch "…",
                     }) catch "Uploading…"
                 else
-                    display.pendingStatus(ar, p.state, p.detail, p.sent_at, status_now);
+                    display.pendingStatus(ar, p.state, p.detail, p.sent_at, status_now) catch "Status unavailable";
                 if (s.drawMessageHeader(
                     "You",
                     localTime(ar, p.sent_at, false),
@@ -3669,7 +3749,7 @@ const App = struct {
             .height = h,
         }, theme.colors.paper);
         s.text.drawLine(
-            display.label(ar, item.name),
+            display.label(ar, item.name) catch "…",
             24,
             20,
             16,
@@ -3967,7 +4047,7 @@ const App = struct {
                             m.conversation_id,
                         );
                         s.text.drawLine(
-                            if (asset.still_preview) "Still preview" else display.label(ar, item.name),
+                            if (asset.still_preview) "Still preview" else display.label(ar, item.name) catch "…",
                             r.x,
                             r.y + size.y + 5,
                             12,
@@ -3977,7 +4057,7 @@ const App = struct {
                         );
                     } else {
                         s.text.drawLine(
-                            display.label(ar, item.name),
+                            display.label(ar, item.name) catch "…",
                             r.x,
                             r.y,
                             14,
@@ -4023,7 +4103,7 @@ const App = struct {
                         title_x += 26;
                     }
                     s.text.drawLine(
-                        display.label(ar, card.title orelse "Shared link"),
+                        display.label(ar, card.title orelse "Shared link") catch "…",
                         title_x,
                         top,
                         16,
@@ -4209,7 +4289,11 @@ const App = struct {
             .bounds = .from(viewport),
             .interactive = false,
         });
-        s.addControl(viewport, .{ .scroll = .{ .pane = .content, .viewport = viewport, .content = content_height } });
+        s.addControl(viewport, .{ .scroll = .{
+            .pane = .content,
+            .viewport = viewport,
+            .content = content_height,
+        } });
         s.content_detail_scroll = std.math.clamp(
             s.content_detail_scroll,
             0,
@@ -4507,7 +4591,7 @@ const App = struct {
             );
         }
         s.text.drawLine(
-            display.label(ar, file.name),
+            display.label(ar, file.name) catch "…",
             bounds.x + 58,
             bounds.y + 3,
             14,
@@ -4597,7 +4681,7 @@ const App = struct {
         var notice = composerFooter(r);
         if (warning_visible) notice.height /= 2;
         graphics.rectangle(notice, theme.colors.paper);
-        s.drawFooterLabel(display.label(ar, s.notice), notice, theme.colors.muted);
+        s.drawFooterLabel(display.label(ar, s.notice) catch "…", notice, theme.colors.muted);
     }
     fn drawComposer(s: *App, r: graphics.Rect, ar: u.Allocator) void {
         graphics.rectangle(r, theme.colors.paper);
@@ -4694,7 +4778,14 @@ const App = struct {
             .height = 28,
         };
         const enabled = s.canSend();
-        if (comptime client_options.automation) zrct.add(.{ .id = "send-button", .role = "button", .label = "Send", .bounds = .from(send_button), .enabled = enabled, .obscured = input_obscured });
+        if (comptime client_options.automation) zrct.add(.{
+            .id = "send-button",
+            .role = "button",
+            .label = "Send",
+            .bounds = .from(send_button),
+            .enabled = enabled,
+            .obscured = input_obscured,
+        });
         const hot = hover(send_button);
         const bg = if (enabled)
             (if (hot) theme.colors.accent_hover else theme.colors.accent)
@@ -4834,7 +4925,11 @@ const App = struct {
                 caret,
                 inner.height,
             );
-            s.addControl(r, .{ .scroll = .{ .pane = .composer, .viewport = viewport, .content = content_height } });
+            s.addControl(r, .{ .scroll = .{
+                .pane = .composer,
+                .viewport = viewport,
+                .content = content_height,
+            } });
             s.composer_scroll = std.math.clamp(
                 s.composer_scroll,
                 0,
@@ -5030,7 +5125,7 @@ fn localTime(ar: u.Allocator, value: []const u8, compact: bool) []const u8 {
     return if (n > 0) buffer[0..@intCast(n)] else value;
 }
 fn messageText(ar: u.Allocator, m: t.Message) []const u8 {
-    return display.record(ar, m);
+    return display.record(ar, m) catch display.unavailable;
 }
 fn lineStart(text: []const u8, at: usize) usize {
     var p = at;
@@ -6413,7 +6508,11 @@ test "send status and echo transitions preserve message positions and heights" {
     defer arena.deinit();
     const ar = arena.allocator();
     const epoch = "EjRWeBI0EjQSNBI0VniQEg";
-    for ([_]f32{ 1, 1.25, 2 }) |scale| for ([_][]const u8{
+    for ([_]f32{
+        1,
+        1.25,
+        2,
+    }) |scale| for ([_][]const u8{
         "A short reply",
         "A wrapped reply 👋 " ** 12,
         "A link: https://example.invalid/page\nAnd another line",
@@ -6471,7 +6570,11 @@ test "send status and echo transitions preserve message positions and heights" {
         message.direction = .outgoing;
         message.text = body;
         message.timestamp = sent_at;
-        inline for (.{ .sent, .delivered, .failed }) |status| {
+        inline for (.{
+            .sent,
+            .delivered,
+            .failed,
+        }) |status| {
             generation += 1;
             message.revision = try std.fmt.allocPrint(ar, "{d}", .{generation});
             message.observed_status = status;
@@ -6900,7 +7003,7 @@ fn captureTestFrame(app: *App, scale: f32) !graphics.Image {
     app.capture_frame = true;
     defer app.capture_frame = false;
     testDraw(app, scale);
-    const shot = app.captured orelse return error.ScreenshotFailed;
+    const shot = app.captured orelse return error.ScreenshotUnavailable;
     app.captured = null;
     return shot;
 }
@@ -7867,7 +7970,12 @@ test "attachment updates preserve the visible part through history preparation a
     }};
     view.snapshot.messages = &messages;
     const Frame = struct {
-        const viewport = graphics.Rect{ .x = 0, .y = 0, .width = 500, .height = 80 };
+        const viewport = graphics.Rect{
+            .x = 0,
+            .y = 0,
+            .width = 500,
+            .height = 80,
+        };
 
         fn draw(s: *App) void {
             s.processEvents() catch unreachable;
@@ -8126,7 +8234,11 @@ test "Details streams logs, preserves scrollback, and supports latest copy and c
     for (0..LogBuffer.capacity) |i| logs.append(.info, .fixture, "Image {d}: disk cache hit", .{i});
     var worker = Worker{ .io = std.testing.io, .config = .{ .data = "" } };
     defer worker.shutdown();
-    var app = App{ .worker = &worker, .show_details = true, .logs = &logs };
+    var app = App{
+        .worker = &worker,
+        .show_details = true,
+        .logs = &logs,
+    };
     defer app.deinit();
     const scale = WindowMetrics.current().scale;
     testDraw(&app, scale);
@@ -8955,7 +9067,49 @@ fn testInput(input: TestInput) void {
                 .right_alt => sdl.SDL_KMOD_RALT,
                 .left_super => sdl.SDL_KMOD_LGUI,
                 .right_super => sdl.SDL_KMOD_RGUI,
-                else => 0,
+                .a,
+                .b,
+                .c,
+                .d,
+                .e,
+                .f,
+                .g,
+                .h,
+                .i,
+                .j,
+                .k,
+                .l,
+                .m,
+                .n,
+                .o,
+                .p,
+                .q,
+                .r,
+                .s,
+                .t,
+                .u,
+                .v,
+                .w,
+                .x,
+                .y,
+                .z,
+                .enter,
+                .escape,
+                .backspace,
+                .tab,
+                .space,
+                .comma,
+                .home,
+                .page_up,
+                .delete,
+                .end,
+                .page_down,
+                .right,
+                .left,
+                .down,
+                .up,
+                .kp_enter,
+                => 0,
             };
             if (input == .key_down) test_modifiers |= bit else test_modifiers &= ~bit;
             event.key.mod = test_modifiers;
@@ -8976,11 +9130,26 @@ fn testInput(input: TestInput) void {
 }
 
 fn automationOverlay(bounds: zrct.Rect, label: []const u8) void {
-    graphics.outline(.{ .x = bounds.x, .y = bounds.y, .width = bounds.width, .height = bounds.height }, 1, .{ .r = 0, .g = 255, .b = 0, .a = 255 });
+    graphics.outline(.{
+        .x = bounds.x,
+        .y = bounds.y,
+        .width = bounds.width,
+        .height = bounds.height,
+    }, 1, .{
+        .r = 0,
+        .g = 255,
+        .b = 0,
+        .a = 255,
+    });
     var text: Text = .{};
     defer text.deinit();
     text.nextFrame(desktop.scale().x);
-    text.drawLine(label, bounds.x, bounds.y, 12, bounds.width, .{ .r = 255, .g = 255, .b = 0, .a = 255 }, null);
+    text.drawLine(label, bounds.x, bounds.y, 12, bounds.width, .{
+        .r = 255,
+        .g = 255,
+        .b = 0,
+        .a = 255,
+    }, null);
 }
 
 test "SDL event queue retains short clicks repeat wheel precision and focus release" {
@@ -8991,7 +9160,14 @@ test "SDL event queue retains short clicks repeat wheel precision and focus rele
     const c = desktop.c;
     const id = c.SDL_GetWindowID(desktop.window());
     var event = std.mem.zeroes(c.SDL_Event);
-    event.button = .{ .type = c.SDL_EVENT_MOUSE_BUTTON_DOWN, .windowID = id, .button = c.SDL_BUTTON_LEFT, .down = true, .x = 31.5, .y = 40.25 };
+    event.button = .{
+        .type = c.SDL_EVENT_MOUSE_BUTTON_DOWN,
+        .windowID = id,
+        .button = c.SDL_BUTTON_LEFT,
+        .down = true,
+        .x = 31.5,
+        .y = 40.25,
+    };
     try std.testing.expect(c.SDL_PushEvent(&event));
     event.button.type = c.SDL_EVENT_MOUSE_BUTTON_UP;
     event.button.down = false;

@@ -424,6 +424,37 @@ Scope names are `snake_case` and match the subsystem (`.foo`, `.foo_detail`).
 
 ## Tests
 
+Tests must protect a project behavior that can be wrong even when the code
+builds. Before adding one, identify a plausible defect, the observable result
+that would expose it, and why existing coverage would not catch it. If there
+is no distinct failure to detect, do not add a test. A short boundary or
+ownership test can be valuable; test size and assertion count do not measure
+usefulness.
+
+Not every change needs a new test. For dependency removal, source lists, build
+flags, and build-step wiring, run the affected build, using a clean build when
+cache state matters. Do not add a permanent harness whose only assertion is
+that the same build succeeds. Build and packaging tests need a separate
+behavioral contract, such as rejecting an unsafe archive or preserving an
+installed application after a failed update.
+
+Assert outcomes using independently specified expectations: known wire bytes,
+fixture contents, public behavior, or a trusted reference. Do not copy the
+implementation's algorithm into the expected result, compare a value with
+itself, or derive both sides from the same production function. Do not test
+ordinary language or dependency behavior without exercising a project contract.
+Source-text searches, private call counts, and assertions that a freshly
+assigned field holds its assigned value do not establish runtime behavior.
+Check the resulting artifact or effect instead; exact bytes and call ordering
+belong in assertions only when they are part of the contract.
+
+Use the highest practical test level: prefer end-to-end tests over integration
+tests, and integration tests over unit tests. Use a lower level when the higher
+level cannot exercise the behavior reliably, would make the failure materially
+harder to diagnose, or is too expensive for routine validation. Do not repeat
+the same scenario at several levels by default. Retain lower-level coverage
+when it detects distinct boundary conditions, failures, or ownership errors.
+
 Unit tests live with the implementation, at the bottom of the file or just
 after the small type they exercise. Integration and end-to-end tests may live
 in separate suites that own their shared setup. Test placement does not
@@ -431,27 +462,8 @@ determine which test level to choose.
 
 Use `std.testing.allocator` for allocations owned by an in-process test and
 register cleanup immediately. Name behavioral tests with descriptive strings
-that identify the behavior and work as substring filters. For example:
-
-```zig
-const std = @import("std");
-
-test "append preserves insertion order" {
-    const testing = std.testing;
-    const gpa = testing.allocator;
-
-    var items: std.ArrayListUnmanaged(u8) = .empty;
-    defer items.deinit(gpa);
-
-    try items.append(gpa, 7);
-    try items.append(gpa, 3);
-    try testing.expectEqualSlices(
-        u8,
-        &.{ 7, 3 },
-        items.items,
-    );
-}
-```
+that identify the behavior and work as substring filters, such as
+`"failed replacement preserves text selection and undo history"`.
 
 Use the repository's test command. Direct `zig test` supports
 `--test-filter "substring"`; a `zig build` option such as `-Dtest-filter`
@@ -463,29 +475,21 @@ behavioral test cases.
 Skip unavailable platforms or features with `return error.SkipZigTest`.
 
 Tests are durable specifications. Do not delete, weaken, or rewrite an existing
-test merely to make a bug fix or behavior change pass. Change a test only when
-the intended contract changes or a refactor forces a structural change; preserve
-its behavioral coverage and state why the test had to change.
+test merely to make a bug fix or behavior change pass. Preserve meaningful
+coverage through refactors; change expectations only for a deliberate contract
+change and explain why. During test cleanup, remove tests that establish no
+project behavior, and consolidate duplicates when the retained test covers the
+same contract and failure conditions. Identify the retained coverage when
+removing a duplicate. Similar names or use of the same function do not prove
+redundancy.
 
-Regression tests are stricter still. A regression test must reproduce the
-reported failure, fail against the code before the fix, and pass after the fix
-without being changed between those runs. Afterwards, preserve the regression
-scenario and its behavioral coverage through refactors. Adapt expectations
-only for a deliberate contract change, explaining why; remove the coverage
-only when the tested contract is deliberately removed. If the failure cannot
-be demonstrated before the fix, explain why and test the nearest externally
-observable invariant.
-
-Every behavioral test must distinguish a plausible broken implementation from
-a correct one. Do not add tautological tests, assertions derived by repeating
-the production logic, or checks equivalent to proving `1 + 1 == 2`. Assert
-meaningful behavior, state transitions, side effects, error handling, or
-boundary conditions.
-
-Use the highest practical test level: prefer end-to-end tests over integration
-tests, and integration tests over unit tests. Use a lower level when the higher
-level cannot exercise the behavior reliably, would make the failure materially
-harder to diagnose, or is too expensive for routine validation.
+A behavioral regression test must reproduce the reported failure, fail against
+the code before the fix, and pass after the fix without being changed between
+those runs. Prefer extending an existing test over creating another harness.
+Preserve the regression scenario through refactors and consolidation; remove
+its coverage only when the tested contract is deliberately removed. If the
+failure cannot be demonstrated before the fix, explain the limitation. Do not
+substitute an unrelated passing check and call it regression coverage.
 
 ---
 
@@ -536,7 +540,7 @@ Keep all docs/ content generic in terms of fileystem/infra/netowrk.
 20. Give hot loops explicit inputs and choose memory layouts for their access patterns.
 21. Write useful contracts and rationale; use assumption/assertion terminology accurately.
 22. Scope log messages to their subsystem.
-23. Use the highest practical test level, appropriate placement, and behavioral assertions.
+23. Add tests only for distinct behavioral failures; use the highest practical test level.
 24. Preserve regression coverage and use the same test for the before-fix/after-fix comparison.
 25. Use the documented commit format, explain why, and keep commits to one logical change.
 26. Run `zig fmt`, keep short calls and signatures compact, wrap multi-item literals,

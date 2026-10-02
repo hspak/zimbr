@@ -16,7 +16,7 @@ SUITE = Suite("zimbr", REPOSITORY,
               ("zig", "build", "client", "fake-relay", "-Dautomation=true", f"-Dopenssl-prefix={PREFIX}"),
               "zig-out/bin/zimbr", setup=relay, timeout=90, desktop_input=True,
               width=2560, height=1600, display=os.environ.get("ZRCT_DISPLAY_SMOKE") == "1",
-              sdl_renderer=os.environ.get("SDL_RENDER_DRIVER"))
+              sdl_renderer=os.environ.get("SDL_RENDER_DRIVER", "vulkan"))
 
 
 class Emoji(TestCase):
@@ -163,8 +163,8 @@ class Messages(TestCase):
     def setUp(self):
         self.relay = self.context.fixture
         self.app = self.relay.launch()
-        self.app.target(role="row", text="alice").expect_visible(timeout=15)
-        self.app.target(role="row", text="alice").click()
+        self.app.target(role="row", text="alice@example.invalid").expect_visible(timeout=15)
+        self.app.target(role="row", text="alice@example.invalid").click()
         self.app.target("composer").expect(visible=True, obscured=False)
 
     def test_idle_skips_unchanged_frames_and_wakes_for_input_and_messages(self):
@@ -213,13 +213,13 @@ class Messages(TestCase):
         self.app.target(role="message", text=text).expect(status="delivered")
         self.relay.expect_sent_once(text)
         self.app.restart()
-        self.app.target(role="row", text="alice").expect_visible()
-        self.app.target(role="row", text="alice").click()
+        self.app.target(role="row", text="alice@example.invalid").expect_visible()
+        self.app.target(role="row", text="alice@example.invalid").click()
         self.app.target(role="message", text=text).expect_visible()
         self.relay.expect_sent_once(text)
 
     def test_reviewed_attachments(self):
-        set_boundary(self.context, "application_input+native_drop_handler")
+        set_boundary(self.context, "application_drop_handler+sdl3_events")
         self.app.press("left_control+n")
         self.app.type_text("peer@example.invalid")
         self.app.press("enter")
@@ -256,7 +256,7 @@ class Messages(TestCase):
         self.relay.expect_sent_once(text, chat=1)
 
     def test_drafts_survive_switch_hide_incoming_and_restart(self):
-        alice = self.app.target(role="row", text="alice")
+        alice = self.app.target(role="row", text="alice@example.invalid")
         group = self.app.target(role="row", text="Fixture group")
         first, second = "Alice draft 👩‍💻", "Group draft é"
         self.app.target("composer").type_text(first)
@@ -295,7 +295,7 @@ class Messages(TestCase):
         self.relay.expect_no_sends()
 
     def test_review_remove_attachment_and_restart_before_sending(self):
-        set_boundary(self.context, "application_input+native_drop_handler")
+        set_boundary(self.context, "application_drop_handler+sdl3_events")
         boundary = self.context.bundle.manifest["boundary"]
         self.app.target("composer").drop(self.relay.paths)
         self.app.target("draft-attachments").expect(value="3", label="photo 👋.png")
@@ -311,8 +311,8 @@ class Messages(TestCase):
         self.relay.expect_no_sends()
         self.app.restart()
         self.assertEqual(boundary, self.context.bundle.manifest["boundary"])
-        self.app.target(role="row", text="alice").expect_visible()
-        self.app.target(role="row", text="alice").click()
+        self.app.target(role="row", text="alice@example.invalid").expect_visible()
+        self.app.target(role="row", text="alice@example.invalid").click()
         self.app.target("composer").expect(value=text)
         self.app.target("draft-attachments").expect(value="2", label="photo 👋.png")
         self.app.target("send-button").expect(enabled=True)
@@ -326,8 +326,8 @@ class Messages(TestCase):
         self.relay.expect_draft(self.app, text)
         self.relay.command("pause")
         self.app.restart()
-        self.app.target(role="row", text="alice").expect_visible()
-        self.app.target(role="row", text="alice").click()
+        self.app.target(role="row", text="alice@example.invalid").expect_visible()
+        self.app.target(role="row", text="alice@example.invalid").click()
         self.app.target("composer").expect(value=text)
         self.app.target("send-button").expect(enabled=False)
         self.app.press("left_control+end")
@@ -384,12 +384,12 @@ class Settings(TestCase):
         app.target("settings-enter-to-send").scroll_into_view("settings-form", direction=1).click()
         app.target("settings-enter-to-send").expect(label="Enter to send: Off")
         app.target("settings-save").click()
-        app.target(role="row", text="alice").expect_visible(timeout=15)
+        app.target(role="row", text="alice@example.invalid").expect_visible(timeout=15)
         self.assertEqual(relay.client_rows("SELECT relay_url,enter_to_send FROM settings"),
                          [(values[0], 0)])
         app.restart()
-        app.target(role="row", text="alice").expect_visible(timeout=15)
-        app.target(role="row", text="alice").click()
+        app.target(role="row", text="alice@example.invalid").expect_visible(timeout=15)
+        app.target(role="row", text="alice@example.invalid").click()
         app.target("composer").type_text("Saved preference")
         app.press("enter")
         app.type_text("second line")
@@ -402,8 +402,8 @@ class Settings(TestCase):
     def test_cancel_settings_and_reset_confirmation_preserve_draft(self):
         relay = self.context.fixture
         app = relay.launch()
-        app.target(role="row", text="alice").expect_visible(timeout=15)
-        app.target(role="row", text="alice").click()
+        app.target(role="row", text="alice@example.invalid").expect_visible(timeout=15)
+        app.target(role="row", text="alice@example.invalid").click()
         draft = "Keep my unsent draft 👋"
         app.target("composer").type_text(draft)
         relay.expect_draft(app, draft)
@@ -420,8 +420,8 @@ class Settings(TestCase):
         app.target("settings_relay").expect(value=relay.ready["args"][1])
         app.target("settings-cancel").click()
         app.restart()
-        app.target(role="row", text="alice").expect_visible()
-        app.target(role="row", text="alice").click()
+        app.target(role="row", text="alice@example.invalid").expect_visible()
+        app.target(role="row", text="alice@example.invalid").click()
         app.target("composer").expect(value=draft)
         relay.expect_no_sends()
 
@@ -433,9 +433,9 @@ class Desktop(TestCase):
         self.app = self.relay.launch()
         self.assertEqual("compositor_input", self.context.bundle.manifest["boundary"])
         self.desktop = DesktopInput(self.context)
-        self.app.target(role="row", text="alice").expect_visible(timeout=15)
+        self.app.target(role="row", text="alice@example.invalid").expect_visible(timeout=15)
         self.desktop.activate()
-        self.desktop.click(self.app.target(role="row", text="alice").resolve()["id"])
+        self.desktop.click(self.app.target(role="row", text="alice@example.invalid").resolve()["id"])
         self.app.target("composer").expect(visible=True, obscured=False)
 
     def test_clipboard_round_trip_resize_and_scale_preserve_draft(self):
@@ -475,8 +475,8 @@ class Desktop(TestCase):
         self.desktop.press("left_control+c")
         self.app.expect("external clipboard contains the full selection", lambda: self.desktop.clipboard() == text)
         self.app.restart()
-        self.app.target(role="row", text="alice").expect_visible()
-        self.app.target(role="row", text="alice").click()
+        self.app.target(role="row", text="alice@example.invalid").expect_visible()
+        self.app.target(role="row", text="alice@example.invalid").click()
         composer.expect_digest(digest)
         self.assertEqual(composer.read_text(), text)
         self.relay.expect_no_sends()
@@ -519,7 +519,6 @@ class Desktop(TestCase):
 
 class Application(TestCase):
     def test_wayland_identity_matches_installed_desktop_entry(self):
-        # Preserve the assertions from tests/client_desktop.py in an isolated desktop.
         repository = self.context.suite.repository
         path = repository / "packaging/linux/zimbr.desktop"
         entry = configparser.ConfigParser(interpolation=None)
@@ -544,8 +543,8 @@ class History(TestCase):
         relay = self.context.fixture
         relay.command("history", count=400)
         app = relay.launch()
-        app.target(role="row", text="alice").expect_visible(timeout=15)
-        app.target(role="row", text="alice").click()
+        app.target(role="row", text="alice@example.invalid").expect_visible(timeout=15)
+        app.target(role="row", text="alice@example.invalid").click()
         app.target("history").scroll(100)
         app.target("load-older").expect_visible(timeout=10)
         anchor = reading_anchor(app)

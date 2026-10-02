@@ -47,7 +47,7 @@ pub fn reopen(config_path: [:0]const u8) void {
     if (comptime available) c.zr_menu_reopen(config_path, options.relay_bundle_id ++ "\x00");
 }
 
-pub const RelaunchError = error{ InvalidArguments, RestartHandoffFailed };
+pub const RelaunchError = error{ InvalidArguments, PreviousProcessUnconfirmed };
 
 /// Removes a private relaunch prefix after the previous process exits.
 /// The returned argument slices borrow the caller's storage.
@@ -57,7 +57,7 @@ pub fn resumeRestart(args: []const [:0]const u8) RelaunchError![]const [:0]const
     if (args.len < 4) return error.InvalidArguments;
     const pid = std.fmt.parseInt(c_int, args[2], 10) catch return error.InvalidArguments;
     if (pid <= 1) return error.InvalidArguments;
-    if (c.zr_menu_wait_for_exit(pid) != 0) return error.RestartHandoffFailed;
+    if (c.zr_menu_wait_for_exit(pid) != 0) return error.PreviousProcessUnconfirmed;
     return args[3..];
 }
 

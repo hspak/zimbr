@@ -2,13 +2,13 @@
 //! reparses unchanged text or pins an obsolete snapshot's entire arena.
 const std = @import("std");
 const builtin = @import("builtin");
+const allocator = if (builtin.is_test) std.testing.allocator else std.heap.c_allocator;
 const u = @import("../common.zig");
 const t = @import("../protocol.zig").types;
 const Store = @import("Store.zig");
 const display = @import("display.zig");
 const content = @import("content.zig");
 const MessageHistory = @This();
-const allocator = if (builtin.is_test) std.testing.allocator else std.heap.c_allocator;
 
 refs: std.atomic.Value(usize) = .init(1),
 arena: std.heap.ArenaAllocator,
@@ -42,7 +42,7 @@ const Record = struct {
             raw,
             .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
         );
-        const text = display.record(arena.allocator(), message);
+        const text = try display.record(arena.allocator(), message);
         const blocks = try content.prepare(arena.allocator(), message);
         record.* = .{
             .arena = arena,

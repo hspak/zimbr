@@ -1,6 +1,7 @@
 //! Correlate multipart sends against bounded source snapshots and original-byte
 //! hashes. File I/O runs on this worker, outside the journal mutex and sender.
 const std = @import("std");
+const Hash = std.crypto.hash.sha2.Sha256;
 const log = std.log.scoped(.send_observation);
 const u = @import("../../common.zig");
 const protocol = @import("../../protocol.zig");
@@ -21,7 +22,6 @@ const max_rows = 64;
 // Stop after 4,096 source rows so a busy conversation cannot cause an unbounded scan.
 const max_source_rows = 4096;
 const hash_budget = protocol.attachments.max_send_bytes;
-const Hash = std.crypto.hash.sha2.Sha256;
 const Work = struct {
     request: t.SendRequest,
     position: usize,
@@ -203,13 +203,19 @@ fn snapshot(core: *Core, a: u.Allocator, work: Work) !?Snapshot {
     }
     var digest: [32]u8 = undefined;
     fingerprint.final(&digest);
-    return .{ .fingerprint = digest, .candidates = candidates.items, .complete = complete };
+    return .{
+        .fingerprint = digest,
+        .candidates = candidates.items,
+        .complete = complete,
+    };
 }
 
 fn relative(root: []const u8, path: []const u8) ?[]const u8 {
     if (std.mem.indexOfScalar(u8, path, 0) != null or path.len > 4096) return null;
     const home_root = "~/Library/Messages/Attachments/";
-    if (!options.fake and std.mem.startsWith(u8, path, home_root)) return path[home_root.len..];
+    if (comptime !options.fake) {
+        if (std.mem.startsWith(u8, path, home_root)) return path[home_root.len..];
+    }
     if (root.len != 0 and std.mem.startsWith(u8, path, root) and path.len > root.len and path[root.len] == '/') return path[root.len + 1 ..];
     return null;
 }

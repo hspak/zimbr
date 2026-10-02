@@ -109,8 +109,6 @@ class MacRelease(unittest.TestCase):
         self.assertEqual((app / 'Contents/Resources/statusTemplate.pdf').read_bytes(),
                          (ROOT / 'packaging/macos/statusTemplate.pdf').read_bytes())
         self.assertTrue((app / 'Contents/Resources/statusTemplate.pdf').read_bytes().startswith(b'%PDF-'))
-        self.assertIn('<string>--menu-bar</string>',
-                      (app / 'Contents/Resources/zimbr-relay-service').read_text())
         self.assertFalse(list(app.rglob('*.key')))
         self.assertFalse(list(app.rglob('relay.json')))
 

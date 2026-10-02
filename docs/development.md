@@ -14,6 +14,32 @@ Dev.app**, and separate `zimbr-dev` client state. For packaged releases, use
 `release` consistently in build and administration commands, port **8731**, and
 the paths in [profiles](macos-profiles.md). Optimization does not select a profile.
 
+## SDL client architecture
+
+The client uses SDL3 for its window, ordered input events, renderer, textures,
+render targets, surfaces, and clipboard. Pango/Cairo provides text shaping and
+rasterization; the application owns pane geometry and editing semantics.
+
+`desktop.c` owns the SDL window and platform services. `desktop.zig` drains
+individual events in order, retaining translated keycodes, modifiers, repeat
+flags, and pointer coordinates. One logical/physical size snapshot serves each
+update, and focus loss clears held input. `App.processEvents` performs editing
+and control actions; drawing records owned, clipped hit regions without consuming
+input. Conversation selection waits for the worker's selected history and draft.
+
+`graphics.zig` owns an `SDL_Renderer`; SDL handles batching and texture lifetime
+synchronization. Resources use native SDL textures and surfaces. Text tiles upload
+premultiplied Cairo ARGB with their actual row pitch and SDL's premultiplied blend
+mode, retaining one physical pixel per source pixel. Logical clip edges are rounded
+once at the framebuffer boundary. Shapes use indexed contour geometry with alpha
+coverage and logical corner radii; circular avatars preserve center cropping.
+
+Image entries use a tagged lifecycle. Upload failures remain retryable and do not
+consume the resident-byte budget or report a ready texture. Media and notification
+queues use 32-byte identities, encoding the existing 64-character cache filenames
+at filesystem boundaries. Entry limits, eviction, cache names, and trust isolation
+remain enforced.
+
 ## Frame scheduling
 
 Interactive rendering uses VSync plus a deadline at the current display's refresh
@@ -52,7 +78,9 @@ development files are required. IBus support is enabled when `pkg-config` finds
 compositor-provided Wayland text input remain available. Use `-Dibus=false` to
 disable IBus explicitly or `-Dibus=true` to require it and fail if it is unavailable.
 Use `PKG_CONFIG_PATH` for development libraries outside the system prefix.
-Optional audio/device drivers are enabled when their development files are present.
+Unused audio, camera, controller, sensor, tray, and raw device backends are disabled;
+the build does not probe their development packages. SDL's core API stubs remain
+for its dynamic API table. Rendering backends used by diagnostics stay enabled.
 The patched library reuses completed upload buffers, retaining at most 8 MiB of
 buffer capacity per command buffer, and raises the upload batch limit from 32 to
 128. Driver allocation alignment and metadata are additional. Recycling waits
@@ -63,7 +91,7 @@ SDL's draw batching. Vertex and index bytes share the existing GPU buffer lifeti
 Shader constants and matching descriptor bindings are reused only within the
 current command list; an entry never mutates a descriptor used by pending draws.
 The SDL revision reported by the benchmark includes a digest of the upstream
-package hash and Vulkan patch, identifying both the release contents and local changes.
+package hash, Vulkan patch, build configuration, and source list.
 
 Text shaping shares two immutable Pango contexts per thread, one for each
 antialiasing mode. Scale or font-map changes replace the cached context while
@@ -158,7 +186,8 @@ python3 tests/rendering.py --output artifacts/resize-paced --drivers vulkan \
 Preserve the baseline binary before rebuilding if a later direct comparison is
 needed. CPU sampling with `perf record` should use a separate run so profiling
 overhead does not contaminate the timing samples. The isolated zrct headless
-profile uses software OpenGL, so use a GPU-backed desktop for hardware comparisons.
+profile uses software Vulkan for the application and software OpenGL for the compositor.
+Use a GPU-backed desktop for hardware comparisons.
 
 Shared shaped text retains up to 16 raster appearances per layout, within the
 32 MiB live text-texture limit. This avoids replacing a glyph texture whenever
@@ -285,15 +314,15 @@ selects `.backend = .sdl3` and passes the SDL window to the driver, which uses
 `SDL_RenderReadPixels` for capture. Attachment playback uses the native drop-delivery handler.
 Text enters through SDL's event queue; compositor scenarios use real Wayland input.
 The native `test-gui` and `test-gui-attachments` suites remain available on Wayland.
-`test-gui-isolated` runs the same native GUI regressions in a fresh desktop with
-the managed Python fixture dependencies; it does not require instrumentation.
+`test-gui-isolated -Ddesktop-tests=true` runs the same native GUI regressions in a
+fresh desktop with managed Python fixture dependencies; it does not require instrumentation.
 
 The single-output Weston test profile provides standard surface-scale
 notifications, so SDL3 observes live 1× → 2× → 1× changes without restarting the
 window. The original scale/draft scenario passes unchanged. The native desktop
 probe also checks logical and framebuffer dimensions independently of Zrct
-instrumentation. See [the migration notes](../FUTURE_MIGRATION.md) for the remaining
-limitation on compositors that only send legacy output-scale notifications.
+instrumentation. See [display compatibility](linux-client.md#display-compatibility)
+for the legacy-compositor limitation and fractional/multi-output coverage limits.
 
 Text and geometry use SDL's reported display scale on both axes. Rounded
 framebuffer-to-window size ratios are not font scales: at 125%, those ratios
@@ -325,12 +354,16 @@ Optional SDL compositor diagnostics run without application instrumentation:
 `zig build test-sdl-desktop -Ddesktop-tests=true`. These are independent of the
 normal client build and native test steps.
 
+Zrct is a lazy test dependency. Normal client, relay, and headless test builds
+do not load it or provision its tools. Use `-Ddesktop-tests=true` for isolated
+native tests, or `-Dautomation=true` for instrumented scenarios.
+
 Resolve Zrct from the dependency declared in `build.zig.zon`. For a local
 checkout, set that dependency's `.path` to its location relative to the manifest.
 From the Zimbr checkout, run:
 
 ```sh
-zig build test-gui-isolated -Dopenssl-prefix=.tools/openssl-3.5
+zig build test-gui-isolated -Ddesktop-tests=true -Dopenssl-prefix=.tools/openssl-3.5
 zig build test-zrct-all -Dautomation=true -Dopenssl-prefix=.tools/openssl-3.5
 zig build test-zrct -Dautomation=true -Dopenssl-prefix=.tools/openssl-3.5
 zig build test-zrct-recovery -Dautomation=true -Dopenssl-prefix=.tools/openssl-3.5
@@ -338,22 +371,45 @@ zig build test-zrct-content -Dautomation=true -Dopenssl-prefix=.tools/openssl-3.
 # Select a scenario and retain a recording:
 zig build test-zrct -Dautomation=true -Dopenssl-prefix=.tools/openssl-3.5 -- --filter send_unicode --record
 # On a GPU Wayland desktop, run the isolated suite in a nested GPU compositor:
-ZRCT_DISPLAY_SMOKE=1 SDL_RENDER_DRIVER=vulkan zig build test-gui-isolated \
+ZRCT_DISPLAY_SMOKE=1 SDL_RENDER_DRIVER=vulkan zig build test-gui-isolated -Ddesktop-tests=true \
   -Doptimize=ReleaseSafe -Dopenssl-prefix=.tools/openssl-3.5
 ZRCT_DISPLAY_SMOKE=1 SDL_RENDER_DRIVER=vulkan zig build test-zrct \
   -Dautomation=true -Doptimize=ReleaseSafe -Dopenssl-prefix=.tools/openssl-3.5 \
   -- --filter Messages
 ```
 
-The default headless suites select software OpenGL unless `SDL_RENDER_DRIVER`
-is explicitly set. The suites pass this selection through Zrct's renderer option,
-which records the requested renderer in each report's rendering profile.
+All Zrct GUI suites select SDL's direct Vulkan renderer unless `SDL_RENDER_DRIVER`
+is explicitly set, exercising the same patched backend preferred by the release
+client. Headless runs use Mesa Lavapipe, the software Vulkan driver. The GUI test
+build steps provision its pinned archive from
+[`build/native-tools.json`](../build/native-tools.json) through Zrct's managed
+Python provisioner, verifying its SHA-256 and size before extraction. Zig caches
+the package and installs it under the build's tool output directory, then supplies
+its location to every suite. No manual download, system Lavapipe installation,
+or `VK_DRIVER_FILES` override is needed. The Vulkan loader and the pinned package's
+shared-library dependencies remain host prerequisites under Zrct's Linux x86-64
+Arch Linux ABI profile.
+
+Suites select Lavapipe with `VK_LOADER_DRIVERS_SELECT=*lvp*`, requiring
+a Vulkan loader built with headers 1.3.234 or newer; see the
+[loader's driver filtering documentation](https://github.com/KhronosGroup/Vulkan-Loader/blob/main/docs/LoaderDriverInterface.md#driver-filtering).
+Failure to initialize Vulkan fails the run rather than falling back to OpenGL.
+The headless Weston compositor still uses software OpenGL independently of the
+application's renderer; selecting Lavapipe avoids importing hardware buffers into
+that software compositor.
+The suites pass their selection through Zrct's renderer option, which records the
+requested renderer, headless Vulkan driver filter, and pinned driver package
+identity in each report's rendering profile; instrumented application handshakes
+also report the actual backend. Reproduction commands retain the managed driver
+location.
+Use `SDL_RENDER_DRIVER=opengl` for an explicit fallback comparison.
 `ZRCT_DISPLAY_SMOKE=1` uses the existing GPU Wayland session
 for a visible nested compositor while keeping client data and fixtures isolated;
-it tests the application's normal renderer preference unless overridden. Hardware
-and software rendering profiles have different visual baselines. The nested profile
-does not support all compositor-control fixtures: run the `Desktop` scale, clipboard,
-and drag-and-drop scenarios in their default headless profile. Use the separate
+it uses the same SDL Vulkan backend unless overridden, with normal hardware driver
+selection instead of the Lavapipe filter. Hardware and software rendering profiles
+have different visual baselines. The nested profile does not support all
+compositor-control fixtures: run the `Desktop` scale, clipboard, and drag-and-drop
+scenarios in their default headless profile. Use the separate
 benchmark above for timings; scenario capture and instrumentation add overhead.
 
 `-Dopenssl-prefix` selects the OpenSSL 3.5 LTS static libraries for the synthetic

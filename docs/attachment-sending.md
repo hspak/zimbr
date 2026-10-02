@@ -199,17 +199,20 @@ attachment cases and the existing text-send integration suite passed.
 The Wayland backend now validates local file URIs before converting them to
 paths. It accepts escaped Unicode names and local authorities, rejects remote
 authorities, malformed escapes, embedded NULs and oversized paths, and bounds
-offers to 16 paths and 256 KiB. A stalled offer has a two-second deadline. The
-application-owned delivery handler copies complete paths without truncation.
-SDL owns the Wayland connection and dispatch; a native data device retains the
-raw URI validation boundary.
+offers to 16 paths, 4096 bytes per path, and 256 KiB total. Reads are nonblocking;
+a stalled offer has a two-second deadline. The transfer owns its offer until
+completion, rejection, timeout, or shutdown, and paths are accepted as a complete
+batch. The application-owned delivery handler copies complete paths without
+truncation. SDL owns the Wayland connection and dispatch; a native data device
+retains the raw URI validation boundary.
 
 Native GUI tests inject complete batches through the delivery handler, verify
 remote URI and long-path rejection, and send reviewed original bytes to the
 synthetic relay. Zrct compositor scenarios separately exercise actual Wayland
-drag negotiation and attachment-only sends. Rendering regression expectations
-remain unchanged; see the [migration validation](../FUTURE_MIGRATION.md) for
-software-renderer limitations.
+drag negotiation and attachment-only sends. Native compositor diagnostics cover
+partial-transfer responsiveness, stalled-drop timeouts, and shutdown during a
+transfer. See the [GUI development notes](development.md#gui-scenarios-with-zrct)
+for test commands and software/hardware rendering profiles.
 
 Local originals can now use the existing background image worker and bounded
 texture cache, including with no relay epoch or connection. PNG/JPEG decoding

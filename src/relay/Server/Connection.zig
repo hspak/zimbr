@@ -18,7 +18,7 @@ accepted: usize = 0,
 last_id: i32 = 0,
 idle_deadline: i64,
 
-pub const RunError = protocol.Error || error{ ReadFailed, WriteFailed };
+pub const RunError = protocol.Error || error{TlsTransportUnavailable};
 
 /// Borrows server and peer for the connection lifetime; releases all stream storage on exit.
 pub fn run(self: *Connection) RunError!void {
@@ -60,7 +60,7 @@ pub fn run(self: *Connection) RunError!void {
         while (sent < 256 * 1024) {
             const bytes = try self.engine.output();
             if (bytes.len == 0) break;
-            if (Tls.c.zr_tls_write(self.peer, bytes.ptr, bytes.len) != 0) return error.WriteFailed;
+            if (Tls.c.zr_tls_write(self.peer, bytes.ptr, bytes.len) != 0) return error.TlsTransportUnavailable;
             sent += bytes.len;
         }
         if (!self.engine.wantsRead()) return;
@@ -68,11 +68,11 @@ pub fn run(self: *Connection) RunError!void {
         if (active) self.idle_deadline = now + 10000 else if (now >= self.idle_deadline) return;
         // Poll every 50 ms when idle; after 256 KiB of output, service input immediately.
         const ready = if (sent >= 256 * 1024) 1 else Tls.c.zr_tls_poll(self.peer, 50);
-        if (ready < 0) return error.ReadFailed;
+        if (ready < 0) return error.TlsTransportUnavailable;
         if (ready > 0) {
             const count = Tls.c.zr_tls_receive(self.peer, &input, input.len);
             if (count == -2) continue;
-            if (count <= 0) return error.ReadFailed;
+            if (count <= 0) return error.TlsTransportUnavailable;
             const received: usize = @intCast(count);
             if (try self.engine.receive(input[0..received]) != received) return error.Protocol;
         }
@@ -214,8 +214,16 @@ pub fn closed(self: *Connection, id: i32, _: u32) void {
 
 test "stalled request arenas share a ceiling across connections and release capacity" {
     var server: Server = .{ .core = undefined, .tls = undefined };
-    var first: Connection = .{ .server = &server, .peer = undefined, .idle_deadline = 0 };
-    var second: Connection = .{ .server = &server, .peer = undefined, .idle_deadline = 0 };
+    var first: Connection = .{
+        .server = &server,
+        .peer = undefined,
+        .idle_deadline = 0,
+    };
+    var second: Connection = .{
+        .server = &server,
+        .peer = undefined,
+        .idle_deadline = 0,
+    };
     defer {
         for ([_]*Connection{ &first, &second }) |connection_owner| {
             for (connection_owner.requests) |slot| if (slot) |req| connection_owner.closed(req.id, 0);

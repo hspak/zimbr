@@ -232,7 +232,7 @@ test "self thread upgrade preserves both histories drafts unread and immutable s
         try std.testing.expectEqual(@as(usize, 2), chat.value.participants.len);
         try std.testing.expectEqualStrings(
             "You",
-            next.snapshot.directory.conversation(a, chat.value),
+            try next.snapshot.directory.conversation(a, chat.value),
         );
         try std.testing.expect(next.snapshot.directory.matches(chat.value, alias));
     };
@@ -818,10 +818,7 @@ test "outbox send times survive status updates, restart, and epoch reset" {
         sent_at,
         (try reopened.snapshot(ar, "c1")).pending[0].sent_at,
     );
-    try reopened.beginSync(
-        "IjRWeBI0EjQSNBI0VniQEg",
-        "IjRWeBI0EjQSNBI0VniQEg:0",
-    );
+    try reopened.beginSync("IjRWeBI0EjQSNBI0VniQEg", "IjRWeBI0EjQSNBI0VniQEg:0");
     try std.testing.expectEqualStrings(
         sent_at,
         (try reopened.snapshot(ar, "c1")).pending[0].sent_at,
@@ -972,10 +969,7 @@ test "provisional outgoing echoes replace uncertainty without confirming or disc
     request.revision = "6";
     request.candidate_message_id = echo.id;
     _ = try s.upsert(ar, "request", try u.json(ar, request));
-    try s.beginSync(
-        "IjRWeBI0EjQSNBI0VniQEg",
-        "IjRWeBI0EjQSNBI0VniQEg:0",
-    );
+    try s.beginSync("IjRWeBI0EjQSNBI0VniQEg", "IjRWeBI0EjQSNBI0VniQEg:0");
     _ = try s.upsert(ar, "message", try u.json(ar, echo));
     const reset = try s.snapshot(ar, "new:test@example.invalid");
     try std.testing.expectEqual(@as(usize, 1), reset.pending.len);
@@ -1590,9 +1584,11 @@ test "unbroken messages and URLs have bounded raster dimensions" {
 test "unsafe text and invalid geometry fail before shaping or allocation" {
     const c = @import("client.zig").c.api;
     for ([_][]const u8{
-        "bad\xff",          "nul\x00text",
+        "bad\xff",
+        "nul\x00text",
         "a" ++ "́" ** 1000,
-        "\u{202e}" ** 1000, "\n" ** 65536,
+        "\u{202e}" ** 1000,
+        "\n" ** 65536,
     }) |text| {
         try std.testing.expect(c.zc_text_new(text.ptr, @intCast(text.len), 16, 300, 1) == null);
     }

@@ -9,7 +9,7 @@
     // Pin exact source revisions and content hashes so builds and local dependency patches agree.
     // Lazy fetching avoids downloading platform-specific libraries for unrelated build steps.
     .dependencies = .{
-        .zrct = .{ .path = "../zrct" },
+        .zrct = .{ .path = "../zrct", .lazy = true },
         .sdl = .{
             .url = "https://github.com/libsdl-org/SDL/archive/refs/tags/release-3.4.16.tar.gz",
             .hash = "N-V-__8AABHq9wIiTHGY4qR6mw45F_TX8FSvqsQQ-Wtq1tzY",
@@ -29,6 +29,9 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        ".zigversion",
+        "LICENSE",
+        "release.sh",
         "src",
         "build",
         "vendor",
@@ -39,6 +42,5 @@
         "docs",
         "README.md",
         "DESIGN.md",
-        "FUTURE_MIGRATION.md",
     },
 }

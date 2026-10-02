@@ -13,7 +13,7 @@ from support import relay
 
 SUITE = Suite("zimbr-korean-ime", setup=relay, timeout=90,
               desktop_input=True, boundary="compositor_input+ibus-hangul",
-              sdl_renderer=os.environ.get("SDL_RENDER_DRIVER"))
+              sdl_renderer=os.environ.get("SDL_RENDER_DRIVER", "vulkan"))
 
 
 class Korean(TestCase):
@@ -79,8 +79,8 @@ class Korean(TestCase):
         address_file = desktop.root / "ibus.address"
         address_file.write_text("IBUS_ADDRESS=" + desktop.env["IBUS_ADDRESS"] + "\n")
         self.app = self.relay.launch(env={"IBUS_ADDRESS": str(address_file)})
-        self.app.target(role="row", text="alice").expect_visible(timeout=15)
-        self.app.target(role="row", text="alice").click()
+        self.app.target(role="row", text="alice@example.invalid").expect_visible(timeout=15)
+        self.app.target(role="row", text="alice@example.invalid").click()
         self.desktop = DesktopInput(self.context)
         self.desktop.click("composer")
 

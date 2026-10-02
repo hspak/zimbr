@@ -117,7 +117,9 @@ pub fn close(self: Assets) void {
 fn relative(self: Assets, path: []const u8) ?[]const u8 {
     if (std.mem.indexOfScalar(u8, path, 0) != null or path.len > 4096) return null;
     const expected = "~/Library/Messages/Attachments/";
-    if (!options.fake and std.mem.startsWith(u8, path, expected)) return path[expected.len..];
+    if (comptime !options.fake) {
+        if (std.mem.startsWith(u8, path, expected)) return path[expected.len..];
+    }
     if (std.mem.startsWith(u8, path, self.root_path) and path.len > self.root_path.len and path[self.root_path.len] == '/') return path[self.root_path.len + 1 ..];
     return null;
 }
@@ -425,13 +427,7 @@ pub fn retryable(ref: t.AssetRef) bool {
     return ref.availability == .pending or ref.availability == .not_local or (ref.availability == .unavailable and (u.eq(
         ref.reason orelse "",
         "helper_unavailable",
-    ) or u.eq(
-        ref.reason orelse "",
-        "conversion_timeout",
-    ) or u.eq(
-        ref.reason orelse "",
-        "source_unavailable",
-    )));
+    ) or u.eq(ref.reason orelse "", "conversion_timeout") or u.eq(ref.reason orelse "", "source_unavailable")));
 }
 pub fn enqueue(a: u.Allocator, j: Journal, ref: t.AssetRef, visible: bool) EnqueueError!void {
     if (!retryable(ref)) return;

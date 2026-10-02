@@ -158,7 +158,7 @@ pub const Transfer = struct {
     pub const WriteError = error{ UploadLengthMismatch, UploadStorageUnavailable };
     pub const SealError = WriteError || error{UploadHashMismatch};
 
-    /// Assume this transfer is receiving. Writes a bounded chunk without retaining it.
+    /// Assert this transfer is receiving. Writes a bounded chunk without retaining it.
     pub fn write(self: *Transfer, bytes: []const u8) WriteError!void {
         std.debug.assert(self.phase == .receiving);
         if (bytes.len > self.expected - self.received) return error.UploadLengthMismatch;
@@ -167,7 +167,7 @@ pub const Transfer = struct {
         self.received += bytes.len;
     }
 
-    /// Assume this transfer is receiving. Verify original bytes and fsync/rename
+    /// Assert this transfer is receiving. Verify original bytes and fsync/rename
     /// before the caller commits ledger readiness. Failure keeps cleanup ownership.
     pub fn seal(self: *Transfer) SealError!void {
         std.debug.assert(self.phase == .receiving);
@@ -179,7 +179,8 @@ pub const Transfer = struct {
     }
 
     /// Relinquish cleanup to the file's owner; deinit still closes the handles.
-    /// Upload receivers call this only after committing ledger completion.
+    /// Assert this transfer is sealed. Upload receivers call this only after
+    /// committing ledger completion.
     pub fn publish(self: *Transfer) void {
         std.debug.assert(self.phase == .sealed);
         self.phase = .published;

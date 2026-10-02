@@ -243,7 +243,11 @@ test "bounded row scans preserve ordering pagination and conversation filters" {
         \\INSERT INTO chat SELECT id FROM message;
         \\INSERT INTO chat_message_join SELECT id,id%2 FROM message;
     );
-    const source = MessagesDb{ .db = db, .identity = "fixture", .features = .{} };
+    const source = MessagesDb{
+        .db = db,
+        .identity = "fixture",
+        .features = .{},
+    };
     var buffer: [row_batch_size]i64 = undefined;
     const first = try source.rowsFor(&buffer, .live, 0, 0);
     try std.testing.expectEqual(buffer[0..].ptr, first.ptr);
@@ -275,7 +279,11 @@ test "row scans honor caller capacity including empty buffers" {
         \\INSERT INTO message VALUES(1),(3),(5),(7);
         \\INSERT INTO chat_message_join VALUES(1,2),(3,1),(5,2),(7,1);
     );
-    const source = MessagesDb{ .db = db, .identity = "fixture", .features = .{} };
+    const source = MessagesDb{
+        .db = db,
+        .identity = "fixture",
+        .features = .{},
+    };
     var buffer: [4]i64 = @splat(-1);
     try std.testing.expectEqualSlices(i64, &.{ 7, 5 }, try source.rowsFor(buffer[0..2], .backfill, 7, 0));
     try std.testing.expectEqual(@as(i64, -1), buffer[2]);

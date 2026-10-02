@@ -1,5 +1,6 @@
 //! GUI-thread textures; immutable bytes and decoding belong to Media's worker.
 const std = @import("std");
+const a = std.heap.c_allocator;
 const desktop = @import("desktop.zig");
 const graphics = @import("graphics.zig");
 const Media = @import("Media.zig");
@@ -7,7 +8,6 @@ const t = @import("../protocol.zig").types;
 const attachments = @import("../protocol.zig").attachments;
 const u = @import("../common.zig");
 const ImageCache = @This();
-const a = std.heap.c_allocator;
 const log = std.log.scoped(.client_images);
 
 entries: std.AutoHashMapUnmanaged(Media.Key, Entry) = .empty,
@@ -100,7 +100,11 @@ pub fn accept(s: *ImageCache, result: *const Media.Result) void {
                 var reason: [128:0]u8 = @splat(0);
                 const message = "Could not upload image · retrying";
                 @memcpy(reason[0..message.len], message);
-                entry.content = .{ .unavailable = .{ .kind = .failed, .retry_at = u.now() + delay, .reason = reason } };
+                entry.content = .{ .unavailable = .{
+                    .kind = .failed,
+                    .retry_at = u.now() + delay,
+                    .reason = reason,
+                } };
                 log.warn("Image upload: {s}", .{@errorName(err)});
                 return;
             };
@@ -235,7 +239,17 @@ pub fn drawAvatar(texture: ?graphics.Texture, bounds: graphics.Rect, tint: graph
         vertices[1 + segments + i] = avatarVertex(center, direction, radius, uv, radius, transparent);
         const p: u16 = @intCast(1 + i);
         const q: u16 = @intCast(1 + (i + 1) % segments);
-        indices[i * 9 ..][0..9].* = .{ 0, p, q, p, p + segments, q + segments, p, q + segments, q };
+        indices[i * 9 ..][0..9].* = .{
+            0,
+            p,
+            q,
+            p,
+            p + segments,
+            q + segments,
+            p,
+            q + segments,
+            q,
+        };
     }
     graphics.mesh(texture, &vertices, &indices);
 }
@@ -340,12 +354,22 @@ test "failed SDL uploads remain retryable and account only for resident textures
     defer images.deinit();
     const key: Media.Key = .init(@splat(0), .avatar);
     const entry = images.touch(key) orelse return error.OutOfMemory;
-    var pixel = [_]u8{ 12, 34, 56, 255 };
+    var pixel = [_]u8{
+        12,
+        34,
+        56,
+        255,
+    };
     const result: Media.Result = .{
         .key = key,
         .generation = 0,
         .state = .ready,
-        .pixels = .{ .data = &pixel, .width = 1, .height = 1, .bytes = pixel.len },
+        .pixels = .{
+            .data = &pixel,
+            .width = 1,
+            .height = 1,
+            .bytes = pixel.len,
+        },
     };
     graphics.deinit();
     images.accept(&result);
@@ -392,18 +416,29 @@ test "circular photos crop rectangular sources and respect scaled clipping" {
         graphics.beginTarget(target);
         graphics.setScale(scale);
         graphics.clear(.black);
-        graphics.clip(.{ .x = 0, .y = 0, .width = 32, .height = 64 });
-        drawAvatar(texture, .{ .x = 8, .y = 8, .width = 48, .height = 48 }, .white);
+        graphics.clip(.{
+            .x = 0,
+            .y = 0,
+            .width = 32,
+            .height = 64,
+        });
+        drawAvatar(texture, .{
+            .x = 8,
+            .y = 8,
+            .width = 48,
+            .height = 48,
+        }, .white);
         graphics.endClip();
         graphics.endTarget();
         const shot = try graphics.readTexture(target);
         defer graphics.destroyImage(shot);
 
-        try std.testing.expectEqual(graphics.Color{ .r = 0, .g = 255, .b = 0, .a = 255 }, graphics.imageColor(
-            shot,
-            @intFromFloat(16 * scale),
-            @intFromFloat(32 * scale),
-        ));
+        try std.testing.expectEqual(graphics.Color{
+            .r = 0,
+            .g = 255,
+            .b = 0,
+            .a = 255,
+        }, graphics.imageColor(shot, @intFromFloat(16 * scale), @intFromFloat(32 * scale)));
         // Corner pixels exclude the quad outside the circle; the right half is clipped.
         try std.testing.expectEqual(graphics.Color.black, graphics.imageColor(shot, @intFromFloat(9 * scale), @intFromFloat(9 * scale)));
         try std.testing.expectEqual(graphics.Color.black, graphics.imageColor(shot, @intFromFloat(40 * scale), @intFromFloat(32 * scale)));

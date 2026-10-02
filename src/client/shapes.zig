@@ -45,7 +45,12 @@ fn roundedPath(bounds: graphics.Rect, requested_radius: f32) Path {
 }
 
 fn expanded(bounds: graphics.Rect, amount: f32) graphics.Rect {
-    return .{ .x = bounds.x - amount, .y = bounds.y - amount, .width = bounds.width + 2 * amount, .height = bounds.height + 2 * amount };
+    return .{
+        .x = bounds.x - amount,
+        .y = bounds.y - amount,
+        .width = bounds.width + 2 * amount,
+        .height = bounds.height + 2 * amount,
+    };
 }
 
 /// Fill bounds with a corner radius measured in logical pixels, clamped to half the shorter side.
@@ -96,7 +101,14 @@ fn paint(path: Path, stroke: ?f32, color: graphics.Color) void {
         const b: u16 = @intCast(band * n + next);
         const c: u16 = @intCast((band + 1) * n + i);
         const d: u16 = @intCast((band + 1) * n + next);
-        indices[count..][0..6].* = .{ a, b, d, a, d, c };
+        indices[count..][0..6].* = .{
+            a,
+            b,
+            d,
+            a,
+            d,
+            c,
+        };
         count += 6;
     };
     if (stroke == null) {
@@ -104,7 +116,11 @@ fn paint(path: Path, stroke: ?f32, color: graphics.Color) void {
         for (path.points[0..n]) |point| center = center.add(point.scale(1 / @as(f32, @floatFromInt(n))));
         vertices[bands * n] = graphics.vertex(center, .{ .x = 0, .y = 0 }, color);
         for (0..n) |i| {
-            indices[count..][0..3].* = .{ @intCast(bands * n), @intCast(i), @intCast((i + 1) % n) };
+            indices[count..][0..3].* = .{
+                @intCast(bands * n),
+                @intCast(i),
+                @intCast((i + 1) % n),
+            };
             count += 3;
         }
     }

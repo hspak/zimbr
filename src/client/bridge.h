@@ -68,7 +68,6 @@ int zc_image_read_fd(int fd, ZcPixels *pixels);
 void zc_pixels_free(ZcPixels *pixels);
 typedef struct ZcText ZcText;
 ZcText *zc_text_new(const char *text, int length, double size, int width, double scale);
-ZcText *zc_text_new_line(const char *text, int length, double size, int width, double scale);
 ZcText *zc_text_new_with_options(const char *text, int length, double size, int width, double scale, int single_line, int subpixel);
 /* Pango weights range from 100 to 1000; 400 is normal and 600 is semibold. */
 ZcText *zc_text_new_weighted(const char *text, int length, double size, int width, double scale, int single_line, int subpixel, int weight);

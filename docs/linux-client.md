@@ -33,9 +33,6 @@ IBus development files are optional and detected through `pkg-config`. Install
 them before building to include SDL's direct IBus backend. `-Dibus=false` disables
 it explicitly; `-Dibus=true` requires the development files. Fcitx and compositor
 Wayland text input remain available in builds without IBus.
-Older compositors that expose only
-output-scale events may require reopening the window after changing display
-scale. See [migration notes and remaining limitations](../FUTURE_MIGRATION.md).
 
 ```sh
 zig build client -Doptimize=ReleaseSafe
@@ -50,6 +47,19 @@ For Arch packages and maintainer releases, see [Linux packaging](linux-packaging
 Source builds default to `-Dprofile=dev`, independently of optimization mode.
 Use `-Dprofile=release` for the official build's paths. Both `client` and `run`
 accept the option; `zig-out/bin/zimbr --help` reports the compiled profile.
+
+## Display compatibility
+
+With the pinned SDL 3.4.16, an already mapped window does not refresh its scale
+when an older compositor changes only `wl_output.scale`. Re-entering the output
+updates it; reopening the window is another workaround. Compositors providing
+`wp_fractional_scale_v1` deliver surface-scale notifications, and the isolated
+Weston tests cover live 1× → 2× → 1× changes without restarting the window.
+
+Renderer tests cover 1.25× and 1.5× transforms. They do not establish fractional
+compositor negotiation, monitor hotplug, or mixed-DPI behavior. See the
+[GUI development notes](development.md#gui-scenarios-with-zrct) for test commands
+and the distinction between software and hardware rendering profiles.
 
 ## Provisioning and configuration
 
@@ -461,10 +471,11 @@ python3 tests/client_details.py
 # Requires Wayland plus Python cryptography and h2 for temporary test endpoints:
 zig build test-gui
 # The same native tests in an isolated desktop with managed Python fixtures:
-zig build test-gui-isolated
+zig build test-gui-isolated -Ddesktop-tests=true
 # Focused GUI -> preparation -> upload -> synthetic Messages dispatch check:
 zig build test-gui-attachments
-python3 tests/client_desktop.py
+# Wayland application ID and desktop icon:
+zig build test-zrct -Dautomation=true -- --filter Application
 python3 tests/integration.py
 python3 tests/mac_acceptance_test.py
 python3 tests/mac_enrichment_packaging.py

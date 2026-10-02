@@ -67,13 +67,15 @@ pub fn messageStatus(m: t.Message, is_group: bool, now_ms: i64) MessageStatus {
     };
 }
 
+/// Borrow unchanged labels and inputs; formatted text uses the caller's arena.
+/// Partial allocations on error share that arena's lifetime.
 pub fn pendingStatus(
     a: std.mem.Allocator,
     state: []const u8,
     detail: []const u8,
     sent_at: []const u8,
     now_ms: i64,
-) []const u8 {
+) std.mem.Allocator.Error![]const u8 {
     if (std.mem.eql(u8, state, "uploading")) return if (detail.len > 0) detail else "Uploading attachments…";
     const uncertain = std.mem.eql(u8, state, "unknown") or std.mem.eql(u8, state, "unconfirmed");
     // Relay phases can change before the echo arrives. Keep their presentation
@@ -88,7 +90,7 @@ pub fn pendingStatus(
         state,
         "sending",
     )) "Saving / submitting…" else if (std.mem.eql(u8, state, "cancelled")) "Upload cancelled" else state;
-    return if (detail.len > 0) std.fmt.allocPrint(a, "{s} · {s}", .{ status, label(a, detail) }) catch status else status;
+    return if (detail.len > 0) try std.fmt.allocPrint(a, "{s} · {s}", .{ status, try label(a, detail) }) else status;
 }
 
 pub fn canCopyPending(state: []const u8, sent_at: []const u8, now_ms: i64) bool {
@@ -131,7 +133,11 @@ test "caption recovery distinguishes partial dispatch from cancelled or rejected
     try std.testing.expect(captionMayHaveSent(null, "unconfirmed"));
     var parts = [_]t.SendPart{
         .{ .kind = .text, .state = .delivered },
-        .{ .kind = .attachment, .attachment_id = "file", .state = .failed },
+        .{
+            .kind = .attachment,
+            .attachment_id = "file",
+            .state = .failed,
+        },
     };
     const request: t.SendRequest = .{
         .request_id = "request",
@@ -212,16 +218,16 @@ test "pending uncertainty and its details share a grace period based on the orig
         for ([_][]const u8{ "unknown", "unconfirmed" }) |state| {
             try std.testing.expectEqualStrings(
                 "Sending…",
-                pendingStatus(a, state, "Outcome uncertain", stamp, sent_ms + 29_999),
+                try pendingStatus(a, state, "Outcome uncertain", stamp, sent_ms + 29_999),
             );
             try std.testing.expectEqualStrings(
                 "Uncertain · not automatically resent · Outcome uncertain",
-                pendingStatus(a, state, "Outcome uncertain", stamp, sent_ms + 30_000),
+                try pendingStatus(a, state, "Outcome uncertain", stamp, sent_ms + 30_000),
             );
         }
         try std.testing.expectEqualStrings(
             "Failed · Rejected",
-            pendingStatus(a, "failed", "Rejected", stamp, sent_ms),
+            try pendingStatus(a, "failed", "Rejected", stamp, sent_ms),
         );
         for ([_][]const u8{
             "sending",
@@ -229,13 +235,13 @@ test "pending uncertainty and its details share a grace period based on the orig
             "dispatching",
             "submitted",
         }) |state| {
-            try std.testing.expectEqualStrings("Sending…", pendingStatus(a, state, "", stamp, sent_ms));
+            try std.testing.expectEqualStrings("Sending…", try pendingStatus(a, state, "", stamp, sent_ms));
         }
-        try std.testing.expectEqualStrings("delivered", pendingStatus(a, "delivered", "", stamp, sent_ms));
+        try std.testing.expectEqualStrings("delivered", try pendingStatus(a, "delivered", "", stamp, sent_ms));
     }
     try std.testing.expectEqualStrings(
         "Uncertain · not automatically resent",
-        pendingStatus(a, "unknown", "", "", sent_ms),
+        try pendingStatus(a, "unknown", "", "", sent_ms),
     );
 }
 
@@ -300,7 +306,9 @@ pub const object_marker = "\u{fffc}";
 
 /// Attachment anchors are structural text, not a user-visible caption. Keep
 /// source strings intact because part offsets and whole-message copying use them.
-pub fn withoutObjectMarkers(a: std.mem.Allocator, value: []const u8) []const u8 {
+/// Borrow value when unchanged, return static empty text when only anchors remain,
+/// or return an allocator-owned copy. Errors release temporary storage.
+pub fn withoutObjectMarkers(a: std.mem.Allocator, value: []const u8) std.mem.Allocator.Error![]const u8 {
     // Skip bytes that cannot start an anchor before comparing the UTF-8 sequence.
     // Most long messages contain no anchors and need no allocation or rewriting.
     var start: usize = 0;
@@ -308,7 +316,7 @@ pub fn withoutObjectMarkers(a: std.mem.Allocator, value: []const u8) []const u8 
         if (std.mem.startsWith(u8, value[candidate..], object_marker)) break;
         start = candidate + 1;
     } else return value;
-    const text = std.mem.replaceOwned(u8, a, value, object_marker, "") catch return unavailable;
+    const text = try std.mem.replaceOwned(u8, a, value, object_marker, "");
     if (std.mem.trim(u8, text, " \t\r\n").len == 0) {
         a.free(text);
         return "";
@@ -316,18 +324,22 @@ pub fn withoutObjectMarkers(a: std.mem.Allocator, value: []const u8) []const u8 
     return text;
 }
 
-pub fn message(a: std.mem.Allocator, value: []const u8) []const u8 {
-    const text = withoutObjectMarkers(a, value);
+/// Borrow unchanged input; shortened or cleaned text uses the caller's arena.
+/// Partial allocations on error share that arena's lifetime.
+pub fn message(a: std.mem.Allocator, value: []const u8) std.mem.Allocator.Error![]const u8 {
+    const text = try withoutObjectMarkers(a, value);
     const visible = prefix(text, max_bytes, max_lines);
     if (visible.len == text.len) return text;
-    return std.mem.concat(a, u8, &.{ visible, shortened }) catch unavailable;
+    return std.mem.concat(a, u8, &.{ visible, shortened });
 }
 
-pub fn record(a: std.mem.Allocator, m: t.Message) []const u8 {
-    return message(a, content(a, m));
+/// Borrow message text or static labels; formatted text uses the caller's arena.
+/// Partial allocations on error share that arena's lifetime.
+pub fn record(a: std.mem.Allocator, m: t.Message) std.mem.Allocator.Error![]const u8 {
+    return message(a, try content(a, m));
 }
-fn content(a: std.mem.Allocator, m: t.Message) []const u8 {
-    const text = withoutObjectMarkers(a, m.text orelse "");
+fn content(a: std.mem.Allocator, m: t.Message) std.mem.Allocator.Error![]const u8 {
+    const text = try withoutObjectMarkers(a, m.text orelse "");
     if (m.reaction_event) |event| {
         const state = switch (event.resolution) {
             .pending => "Target not available yet",
@@ -341,7 +353,7 @@ fn content(a: std.mem.Allocator, m: t.Message) []const u8 {
             state,
             if (text.len > 0) "\n" else "",
             text,
-        }) catch state;
+        });
     }
     if (text.len > 0) {
         if (m.kind == .text or m.kind == .attachment) return text;
@@ -350,13 +362,13 @@ fn content(a: std.mem.Allocator, m: t.Message) []const u8 {
                 a,
                 "{s} · {s}",
                 .{ if (m.kind == .reaction) "Reaction" else if (m.kind == .system) "Conversation update" else "Unsupported content", text },
-            ) catch text;
+            );
     }
     if (m.attachments.len > 0) return std.fmt.allocPrint(a, "Attachment · {s}\n{s} · {s} bytes\nDownloads are not available yet.", .{
         m.attachments[0].name,
         m.attachments[0].mime_type,
         m.attachments[0].bytes,
-    }) catch "Attachment";
+    });
     return switch (m.kind) {
         .attachment => "Attachment · preview unavailable",
         .reaction => "Reaction · unsupported content",
@@ -366,10 +378,11 @@ fn content(a: std.mem.Allocator, m: t.Message) []const u8 {
     };
 }
 
-pub fn label(a: std.mem.Allocator, value: []const u8) []const u8 {
+/// Borrow value when it fits; otherwise return an allocator-owned shortened copy.
+pub fn label(a: std.mem.Allocator, value: []const u8) std.mem.Allocator.Error![]const u8 {
     const visible = prefix(value, 256, 1);
     if (visible.len == value.len) return value;
-    return std.mem.concat(a, u8, &.{ visible, "…" }) catch "…";
+    return std.mem.concat(a, u8, &.{ visible, "…" });
 }
 
 test "display limits preserve UTF8 and never change full message content" {
@@ -377,22 +390,22 @@ test "display limits preserve UTF8 and never change full message content" {
     defer arena.deinit();
     const a = arena.allocator();
     const normal = "Café é 👩‍💻 🇺🇸\nשלום مرحبا <b>literal text</b>";
-    try std.testing.expectEqualStrings(normal, message(a, normal));
-    try std.testing.expectEqualStrings(normal, message(a, object_marker ++ normal ++ object_marker));
-    try std.testing.expectEqualStrings("", message(a, object_marker ++ "\n" ++ object_marker));
+    try std.testing.expectEqualStrings(normal, try message(a, normal));
+    try std.testing.expectEqualStrings(normal, try message(a, object_marker ++ normal ++ object_marker));
+    try std.testing.expectEqualStrings("", try message(a, object_marker ++ "\n" ++ object_marker));
     const long = try std.mem.concat(a, u8, &.{
         "x" ** (max_bytes - 1),
         "👩‍💻",
         "tail",
     });
-    const preview = message(a, long);
+    const preview = try message(a, long);
     try std.testing.expect(std.unicode.utf8ValidateSlice(preview));
     try std.testing.expect(std.mem.endsWith(u8, preview, shortened));
     try std.testing.expect(std.mem.endsWith(u8, long, "👩‍💻tail"));
-    try std.testing.expect(message(a, "\n" ** 1000).len < 200);
-    try std.testing.expect(message(a, "before\x00after").len < 100);
-    try std.testing.expect(std.unicode.utf8ValidateSlice(message(a, "bad\xff")));
-    try std.testing.expect(label(a, "url" ** 1000).len <= 259);
+    try std.testing.expect((try message(a, "\n" ** 1000)).len < 200);
+    try std.testing.expect((try message(a, "before\x00after")).len < 100);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(try message(a, "bad\xff")));
+    try std.testing.expect((try label(a, "url" ** 1000)).len <= 259);
     try std.testing.expectEqualStrings("a" ** 32, prefix("a" ** 32 ++ "\ntrailing", 64, 1));
     try std.testing.expectEqualStrings("a" ** 32, prefix("a" ** 32 ++ "\u{2028}trailing", 64, 1));
     try std.testing.expectEqualStrings("a" ** 32, prefix("a" ** 32 ++ "\x00trailing", 64, 2));
@@ -408,7 +421,7 @@ test "object marker removal preserves other Unicode and incomplete byte sequence
         "\xef\xef\xbf",
     };
     for (unchanged) |input| {
-        const result = withoutObjectMarkers(std.testing.failing_allocator, input);
+        const result = try withoutObjectMarkers(std.testing.failing_allocator, input);
         try std.testing.expectEqual(input.ptr, result.ptr);
         try std.testing.expectEqualStrings(input, result);
     }
@@ -422,13 +435,15 @@ test "object marker removal preserves other Unicode and incomplete byte sequence
     inline for (cases) |case| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
-        try std.testing.expectEqualStrings(case[1], withoutObjectMarkers(arena.allocator(), case[0]));
+        try std.testing.expectEqualStrings(case[1], try withoutObjectMarkers(arena.allocator(), case[0]));
     }
 }
 
 /// Captions always win; image arrival never changes notification eligibility.
-pub fn summary(a: std.mem.Allocator, m: t.Message) []const u8 {
-    const text = withoutObjectMarkers(a, m.text orelse "");
+/// Borrow message text or static labels; formatted text uses the caller's arena.
+/// Partial allocations on error share that arena's lifetime.
+pub fn summary(a: std.mem.Allocator, m: t.Message) std.mem.Allocator.Error![]const u8 {
+    const text = try withoutObjectMarkers(a, m.text orelse "");
     if (text.len > 0) return text;
     var photos: usize = 0;
     for (m.attachments) |item| if (!item.preview_artwork and (item.image != null or std.mem.startsWith(
@@ -439,7 +454,7 @@ pub fn summary(a: std.mem.Allocator, m: t.Message) []const u8 {
         photos += 1;
     };
     if (photos == 1) return "Photo";
-    if (photos > 1) return std.fmt.allocPrint(a, "{d} photos", .{photos}) catch "Photos";
+    if (photos > 1) return std.fmt.allocPrint(a, "{d} photos", .{photos});
     return switch (m.kind) {
         .attachment => "Attachment",
         .reaction => "Reaction",
@@ -452,4 +467,17 @@ pub fn summary(a: std.mem.Allocator, m: t.Message) []const u8 {
 pub fn resolvedReaction(m: t.Message) bool {
     const event = m.reaction_event orelse return false;
     return event.resolution == .resolved and event.target_message_id != null;
+}
+
+test "presentation helpers propagate allocation failures" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const a = failing.allocator();
+    const cleaned: std.mem.Allocator.Error![]const u8 = withoutObjectMarkers(a, "Caption" ++ object_marker);
+    try std.testing.expectError(error.OutOfMemory, cleaned);
+    const preview: std.mem.Allocator.Error![]const u8 = message(a, "x" ** (max_bytes + 1));
+    try std.testing.expectError(error.OutOfMemory, preview);
+    const caption: std.mem.Allocator.Error![]const u8 = label(a, "x" ** 257);
+    try std.testing.expectError(error.OutOfMemory, caption);
+    const status: std.mem.Allocator.Error![]const u8 = pendingStatus(a, "failed", "Rejected", "", 0);
+    try std.testing.expectError(error.OutOfMemory, status);
 }

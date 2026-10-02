@@ -60,7 +60,11 @@ pub fn init(a: u.Allocator, attachment_root: []const u8, original: c_int, file: 
     const path = try storage.path(a, copy);
     transfer.publish();
     errdefer comptime unreachable;
-    return .{ .storage = storage, .file = copy, .path = path };
+    return .{
+        .storage = storage,
+        .file = copy,
+        .path = path,
+    };
 }
 
 /// Keep the copy whenever automation succeeded or may have started. Messages can

@@ -52,7 +52,12 @@ pub fn init(gpa: u.Allocator, net: *c.ZcNet, payload: []const u8, may_submit: bo
     for (input.attachments) |file| total += try attachments.validate(file);
     const path = try std.fmt.allocPrintSentinel(a, "/v1/send-requests/{s}", .{input.request_id}, 0);
     if (c.zc_net_start(net, 4, path, null, 0) == 0) return error.TransportFailure;
-    return .{ .arena = arena, .input = input, .may_submit = may_submit, .total_bytes = total };
+    return .{
+        .arena = arena,
+        .input = input,
+        .may_submit = may_submit,
+        .total_bytes = total,
+    };
 }
 
 pub fn deinit(self: *Upload, net: *c.ZcNet) void {

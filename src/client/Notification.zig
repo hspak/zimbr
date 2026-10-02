@@ -1,11 +1,11 @@
 //! Owned, bounded notification content, independent of replaceable UI snapshots.
 const std = @import("std");
+const a = std.heap.page_allocator;
 const t = @import("../protocol.zig").types;
 const display = @import("display.zig");
 const Store = @import("Store.zig");
 pub const Queue = @import("Notification/Queue.zig");
 const Notification = @This();
-const a = std.heap.page_allocator;
 
 arena: std.heap.ArenaAllocator,
 chat: [:0]const u8,
@@ -36,7 +36,7 @@ pub fn create(store: Store, message: t.Message) CreateError!*Notification {
             q.bytes(0),
             .{ .ignore_unknown_fields = true },
         )).value;
-        title = directory.conversation(ar, chat);
+        title = try directory.conversation(ar, chat);
     }
     // A one-line, 256-byte title fits desktop notification headers without unbounded shaping.
     const summary = try ar.dupeZ(
@@ -44,7 +44,7 @@ pub fn create(store: Store, message: t.Message) CreateError!*Notification {
         display.prefix(if (title.len > 0) title else "New message", 256, 1),
     );
     // Limit the alert body to 1 KiB/four lines; opening the conversation reveals the full message.
-    const body = try ar.dupeZ(u8, display.prefix(display.summary(ar, message), 1024, 4));
+    const body = try ar.dupeZ(u8, display.prefix(try display.summary(ar, message), 1024, 4));
     const chat = try ar.dupeZ(u8, try store.threadKey(ar, message.conversation_id));
     const result = try a.create(Notification);
     result.* = .{

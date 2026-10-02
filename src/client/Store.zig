@@ -514,13 +514,7 @@ pub fn eventNotification(
     const kind = if (u.eq(e.type, "conversation.upsert")) "conversation" else if (u.eq(
         e.type,
         "message.upsert",
-    )) "message" else if (u.eq(
-        e.type,
-        "send_request.updated",
-    )) "request" else if (u.eq(
-        e.type,
-        "identity.upsert",
-    ) and u.eq(
+    )) "message" else if (u.eq(e.type, "send_request.updated")) "request" else if (u.eq(e.type, "identity.upsert") and u.eq(
         try s.get(a, "accepted_extensions"),
         "identity-v1",
     )) "identity" else return error.UnknownEvent;
@@ -550,7 +544,7 @@ pub fn eventNotification(
                 .revision = m.revision,
                 .timestamp = m.timestamp,
                 .kind = @tagName(m.kind),
-                .text = display.prefix(display.summary(a, m), 1024, 1),
+                .text = display.prefix(try display.summary(a, m), 1024, 1),
             };
             try s.writePreview(preview, try u.json(a, preview));
         }
@@ -727,7 +721,7 @@ pub fn snapshotWithMessages(
                 .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
             )).value;
             latest = m;
-            preview = display.summary(a, m);
+            preview = try display.summary(a, m);
         }
         if (q.bytes(3).len > 0) {
             const p = (try std.json.parseFromSlice(
@@ -750,13 +744,9 @@ pub fn snapshotWithMessages(
                 i64,
                 p.revision,
                 10,
-            )) > (try std.fmt.parseInt(
-                i64,
-                latest.?.revision,
-                10,
-            ));
+            )) > (try std.fmt.parseInt(i64, latest.?.revision, 10));
             if (newer_position or newer_revision) {
-                const text = display.withoutObjectMarkers(a, p.text);
+                const text = try display.withoutObjectMarkers(a, p.text);
                 preview = if (text.len > 0) text else if (u.eq(p.kind, "attachment")) "Attachment" else p.kind;
             }
         }
@@ -997,8 +987,16 @@ test "multipart history preserves partial outcomes and follows every confirmed e
     // A matching caption alone cannot account for the attachment operation.
     try testing.expectEqual(@as(usize, 1), (try s.snapshot(a, key)).pending.len);
     var parts = [_]t.SendPart{
-        .{ .kind = .text, .state = .delivered, .message_id = caption.id },
-        .{ .kind = .attachment, .attachment_id = file.id, .state = .unknown },
+        .{
+            .kind = .text,
+            .state = .delivered,
+            .message_id = caption.id,
+        },
+        .{
+            .kind = .attachment,
+            .attachment_id = file.id,
+            .state = .unknown,
+        },
     };
     var request: t.SendRequest = .{
         .request_id = input.request_id,

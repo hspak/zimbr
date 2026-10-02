@@ -15,8 +15,8 @@ class Content(TestCase):
         self.relay.fault(fault)
         self.app = self.relay.launch()
         self.app.resize(1120, 1200)
-        self.app.target(role="row", text="alice").expect_visible(timeout=15)
-        self.app.target(role="row", text="alice").click()
+        self.app.target(role="row", text="alice@example.invalid").expect_visible(timeout=15)
+        self.app.target(role="row", text="alice@example.invalid").click()
         message = self.app.target(role="message", text="Photos and reactions 👋")
         message.expect_visible(timeout=20)
         self.message = message.resolve()["id"]

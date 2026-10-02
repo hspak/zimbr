@@ -1,0 +1,11 @@
+{
+  "platform": "linux-x86_64",
+  "tools": {
+    "lavapipe": {
+      "version": "1:26.2.3-2",
+      "url": "https://archive.archlinux.org/packages/v/vulkan-swrast/vulkan-swrast-1%3A26.2.3-2-x86_64.pkg.tar.zst",
+      "sha256": "8799b990c326318626ca6c7a6cccb505178b045b38db1e29af8a8c8110490e1d",
+      "size": 2437968
+    }
+  }
+}

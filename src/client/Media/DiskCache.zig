@@ -20,7 +20,11 @@ pub const Limits = struct {
 pub fn init(dir: c_int, limits: Limits) DiskCache {
     std.debug.assert(limits.trim_bytes < limits.bytes);
     std.debug.assert(limits.trim_entries < limits.entries and limits.entries <= 8192);
-    var cache: DiskCache = .{ .dir = dir, .limits = limits, .usage = null };
+    var cache: DiskCache = .{
+        .dir = dir,
+        .limits = limits,
+        .usage = null,
+    };
     cache.trim(true);
     return cache;
 }

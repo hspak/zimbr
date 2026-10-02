@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const gui = @import("build/gui.zig");
 const nghttp2 = @import("build/nghttp2.zig");
 const sdl = @import("build/sdl.zig");
 const manifest = @import("build.zig.zon");
@@ -202,7 +203,7 @@ fn client(
     const step = b.step("client", "Build the Linux desktop client");
     const desktop_sdl = sdl.addLibrary(b, target, optimize) orelse return;
     const m = clientModule(b, target, optimize, "src/client_main.zig", options);
-    addDesktop(b, m, desktop_sdl);
+    addDesktop(m, desktop_sdl);
 
     const render_options = b.addOptions();
     render_options.addOption(bool, "automation", false);
@@ -210,7 +211,7 @@ fn client(
     render_options.addOption(bool, "fps_counter", false);
     render_options.addOption(ProfileName, "profile", profile);
     const render_module = clientModule(b, target, optimize, "src/render_bench.zig", render_options);
-    addDesktop(b, render_module, desktop_sdl);
+    addDesktop(render_module, desktop_sdl);
     const render_bench = b.addExecutable(.{ .name = "render-bench", .root_module = render_module });
     b.step("render-bench", "Build synthetic benchmarks of the production chat renderer").dependOn(
         &b.addInstallArtifact(render_bench, .{}).step,
@@ -222,44 +223,19 @@ fn client(
         .link_libc = true,
     });
     desktop_probe.addIncludePath(b.path("src/client"));
-    desktop_probe.addCSourceFiles(.{ .files = &.{ "tests/client_desktop_probe.c", "src/client/drop.c" }, .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-    addDesktop(b, desktop_probe, desktop_sdl);
+    desktop_probe.addCSourceFiles(.{ .files = &.{ "tests/client_desktop_probe.c", "src/client/drop.c" }, .flags = &.{
+        "-std=c11",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+    } });
+    addDesktop(desktop_probe, desktop_sdl);
     const desktop_exe = b.addExecutable(.{ .name = "client-desktop-probe", .root_module = desktop_probe });
     b.step("client-desktop-probe", "Build the native desktop integration probe").dependOn(&b.addInstallArtifact(desktop_exe, .{}).step);
-    if (b.option(bool, "desktop-tests", "Enable optional compositor diagnostics") orelse false) {
-        const desktop_suite = @import("zrct").addRun(b, b.dependency("zrct", .{}), .{
-            .suite = b.path("tests/zrct/desktop_native.py"),
-            .executable = desktop_exe,
-            .desktop = true,
-            .args = b.args orelse &.{},
-        });
-        b.step("test-sdl-desktop", "Test SDL services through a real Wayland compositor").dependOn(&desktop_suite.step);
-    }
-
-    // Native SDL input and renderer hooks exist only in instrumented builds.
-    if (automation) {
-        const zrct_dep = b.dependency("zrct", .{});
-        const zrct_module = @import("zrct").createModule(b, zrct_dep, .{
-            .backend = .sdl3,
-            .link_system_sdl = false,
-            .target = target,
-            .optimize = optimize,
-        });
-        desktop_sdl.link(zrct_module);
-        m.addImport("zrct", zrct_module);
-    }
     const gui_filter = b.option([]const u8, "gui-test-filter", "Filter existing GUI regressions");
     const gui_tests = b.addTest(.{ .root_module = m, .filters = if (gui_filter) |filter| &.{filter} else &.{} });
     const install_gui = b.addInstallArtifact(gui_tests, .{ .dest_sub_path = "zimbr-gui-tests" });
     b.step("gui-test-exe", "Install the GUI regression executable without running it").dependOn(&install_gui.step);
-    const isolated_gui = @import("zrct").addRun(b, b.dependency("zrct", .{}), .{
-        .suite = b.path("tests/zrct/native.py"),
-        .executable = gui_tests,
-        .python_extras = &.{"zimbr"},
-        .args = b.args orelse &.{},
-    });
-    isolated_gui.step.dependOn(&b.top_level_steps.get("fake-relay").?.step);
-    b.step("test-gui-isolated", "Run native GUI regressions in an isolated Wayland session").dependOn(&isolated_gui.step);
     const gui_run = b.addRunArtifact(gui_tests);
     gui_run.step.dependOn(&b.top_level_steps.get("fake-relay").?.step);
     b.step("test-gui", "Test rendering and client interactions on Wayland").dependOn(&gui_run.step);
@@ -271,20 +247,107 @@ fn client(
     attachment_run.step.dependOn(&b.top_level_steps.get("fake-relay").?.step);
     b.step("test-gui-attachments", "Send native file drops through the GUI to a synthetic relay").dependOn(&attachment_run.step);
     const exe = b.addExecutable(.{ .name = "zimbr", .root_module = m });
-    if (automation) {
-        const zrct_dep = b.dependency("zrct", .{});
-        const gui = @import("zrct").addRun(b, zrct_dep, .{
+    const desktop_tests = b.option(bool, "desktop-tests", "Enable isolated GUI and compositor tests") orelse false;
+    addGuiSuites(b, desktop_sdl, .{
+        .client = exe,
+        .native_tests = gui_tests,
+        .desktop_probe = desktop_exe,
+    }, .{ .automation = automation, .desktop_tests = desktop_tests });
+    const install = b.addInstallArtifact(exe, .{});
+    const license = b.addInstallFile(desktop_sdl.source.path("LICENSE.txt"), "share/zimbr/licenses/SDL.txt");
+    install.step.dependOn(&license.step);
+    const emoji_license = b.addInstallFile(b.path("licenses/gemoji.txt"), "share/zimbr/licenses/gemoji.txt");
+    install.step.dependOn(&emoji_license.step);
+    const yuv_license = b.addInstallFile(
+        desktop_sdl.source.path("src/video/yuv2rgb/LICENSE"),
+        "share/zimbr/licenses/SDL-yuv2rgb.txt",
+    );
+    install.step.dependOn(&yuv_license.step);
+    step.dependOn(&install.step);
+    b.getInstallStep().dependOn(&install.step);
+    const run = b.addRunArtifact(exe);
+    if (b.args) |args| run.addArgs(args);
+    b.step("run", "Run the Linux client").dependOn(&run.step);
+    const desktop = b.addInstallFileWithDir(
+        b.path("packaging/linux/zimbr.desktop"),
+        .prefix,
+        "share/applications/zimbr.desktop",
+    );
+    const icon = b.addInstallFileWithDir(
+        b.path("packaging/linux/zimbr.svg"),
+        .prefix,
+        "share/icons/hicolor/scalable/apps/zimbr.svg",
+    );
+    step.dependOn(&desktop.step);
+    step.dependOn(&icon.step);
+    b.getInstallStep().dependOn(&desktop.step);
+    b.getInstallStep().dependOn(&icon.step);
+}
+
+fn addGuiSuites(
+    b: *std.Build,
+    desktop_sdl: sdl.Library,
+    executables: struct {
+        client: *std.Build.Step.Compile,
+        native_tests: *std.Build.Step.Compile,
+        desktop_probe: *std.Build.Step.Compile,
+    },
+    options: struct { automation: bool, desktop_tests: bool },
+) void {
+    const isolated_step = b.step("test-gui-isolated", "Run native GUI regressions in an isolated Wayland session");
+    if (!options.automation and !options.desktop_tests) {
+        isolated_step.dependOn(&b.addFail("Use -Ddesktop-tests=true to enable isolated GUI test tooling").step);
+        return;
+    }
+    // Merely configuring a production build must not fetch Zrct or its native tools.
+    const zrct_dep = b.lazyDependency("zrct", .{}) orelse return;
+    const zrct = ZrctBuild() orelse {
+        isolated_step.dependOn(&b.addFail("GUI tests require the zrct dependency declared in build.zig.zon").step);
+        return;
+    };
+    if (options.desktop_tests) {
+        const desktop_suite = gui.addRun(zrct, b, zrct_dep, .{
+            .suite = b.path("tests/zrct/desktop_native.py"),
+            .executable = executables.desktop_probe,
+            .desktop = true,
+            .args = b.args orelse &.{},
+        });
+        b.step("test-sdl-desktop", "Test SDL services through a real Wayland compositor").dependOn(&desktop_suite.step);
+    }
+
+    // Native SDL input and renderer hooks exist only in instrumented builds.
+    if (options.automation) {
+        const m = executables.client.root_module;
+        const zrct_module = zrct.createModule(b, zrct_dep, .{
+            .backend = .sdl3,
+            .link_system_sdl = false,
+            .target = m.resolved_target.?,
+            .optimize = m.optimize.?,
+        });
+        desktop_sdl.link(zrct_module);
+        m.addImport("zrct", zrct_module);
+    }
+    const isolated_gui = gui.addRun(zrct, b, zrct_dep, .{
+        .suite = b.path("tests/zrct/native.py"),
+        .executable = executables.native_tests,
+        .python_extras = &.{"zimbr"},
+        .args = b.args orelse &.{},
+    });
+    isolated_gui.step.dependOn(&b.top_level_steps.get("fake-relay").?.step);
+    isolated_step.dependOn(&isolated_gui.step);
+    if (options.automation) {
+        const scenarios = gui.addRun(zrct, b, zrct_dep, .{
             .suite = b.path("tests/zrct/scenarios.py"),
-            .executable = exe,
+            .executable = executables.client,
             .desktop = true,
             .python_extras = &.{"zimbr"},
             .args = b.args orelse &.{},
         });
-        gui.step.dependOn(&b.top_level_steps.get("fake-relay").?.step);
-        b.step("test-zrct", "Run isolated GUI scenarios with Zrct").dependOn(&gui.step);
-        const all_gui = @import("zrct").addRun(b, zrct_dep, .{
+        scenarios.step.dependOn(&b.top_level_steps.get("fake-relay").?.step);
+        b.step("test-zrct", "Run isolated GUI scenarios with Zrct").dependOn(&scenarios.step);
+        const all_gui = gui.addRun(zrct, b, zrct_dep, .{
             .suite = b.path("tests/zrct/all_scenarios.py"),
-            .executable = exe,
+            .executable = executables.client,
             .desktop = true,
             .python_extras = &.{"zimbr"},
             .args = b.args orelse &.{},
@@ -308,9 +371,9 @@ fn client(
                 .benchmark = true,
             },
         }) |suite| {
-            const run_suite = @import("zrct").addRun(b, zrct_dep, .{
+            const run_suite = gui.addRun(zrct, b, zrct_dep, .{
                 .suite = b.path(suite.path),
-                .executable = exe,
+                .executable = executables.client,
                 .benchmark = suite.benchmark,
                 .python_extras = &.{"zimbr"},
                 .args = b.args orelse &.{},
@@ -322,9 +385,9 @@ fn client(
                 "Run isolated GUI workflow scenarios";
             b.step(suite.name, description).dependOn(&run_suite.step);
         }
-        const ime = @import("zrct").addRun(b, zrct_dep, .{
+        const ime = gui.addRun(zrct, b, zrct_dep, .{
             .suite = b.path("tests/zrct/ime.py"),
-            .executable = exe,
+            .executable = executables.client,
             .desktop = true,
             .python_extras = &.{"zimbr"},
             .args = b.args orelse &.{},
@@ -332,51 +395,24 @@ fn client(
         ime.step.dependOn(&b.top_level_steps.get("fake-relay").?.step);
         b.step("test-ime", "Test Korean composition with an isolated IBus/Hangul engine").dependOn(&ime.step);
     }
-    const install = b.addInstallArtifact(exe, .{});
-    const license = b.addInstallFile(desktop_sdl.source.path("LICENSE.txt"), "share/zimbr/licenses/SDL.txt");
-    install.step.dependOn(&license.step);
-    const emoji_license = b.addInstallFile(b.path("licenses/gemoji.txt"), "share/zimbr/licenses/gemoji.txt");
-    install.step.dependOn(&emoji_license.step);
-    for ([_][2][]const u8{
-        .{ "src/hidapi/LICENSE-orig.txt", "SDL-HIDAPI.txt" },
-        .{ "src/video/yuv2rgb/LICENSE", "SDL-yuv2rgb.txt" },
-    }) |notice| {
-        const dependency_license = b.addInstallFile(
-            desktop_sdl.source.path(notice[0]),
-            b.fmt("share/zimbr/licenses/{s}", .{notice[1]}),
-        );
-        install.step.dependOn(&dependency_license.step);
-    }
-    step.dependOn(&install.step);
-    b.getInstallStep().dependOn(&install.step);
-    const run = b.addRunArtifact(exe);
-    if (b.args) |args| run.addArgs(args);
-    b.step("run", "Run the Linux client").dependOn(&run.step);
-    const desktop = b.addInstallFileWithDir(
-        b.path("packaging/linux/zimbr.desktop"),
-        .prefix,
-        "share/applications/zimbr.desktop",
-    );
-    const icon = b.addInstallFileWithDir(
-        b.path("packaging/linux/zimbr.svg"),
-        .prefix,
-        "share/icons/hicolor/scalable/apps/zimbr.svg",
-    );
-    step.dependOn(&desktop.step);
-    step.dependOn(&icon.step);
-    b.getInstallStep().dependOn(&desktop.step);
-    b.getInstallStep().dependOn(&icon.step);
 }
 
-fn addDesktop(b: *std.Build, m: *std.Build.Module, desktop_sdl: sdl.Library) void {
-    // Keep native protocol bindings independent of the rendering dependency.
-    const activation_xml = b.path("src/client/desktop/xdg-activation-v1.xml");
-    const activation_header = b.addSystemCommand(&.{ "wayland-scanner", "client-header" });
-    activation_header.addFileArg(activation_xml);
-    m.addIncludePath(activation_header.addOutputFileArg("xdg-activation-v1-client-protocol.h").dirname());
-    const activation_code = b.addSystemCommand(&.{ "wayland-scanner", "private-code" });
-    activation_code.addFileArg(activation_xml);
-    m.addCSourceFile(.{ .file = activation_code.addOutputFileArg("xdg-activation-v1-protocol.c") });
+fn ZrctBuild() ?type {
+    // Zig's --system mode marks even omitted lazy packages available. lazyImport
+    // then raises a compile error for their absent build.zig, before options run.
+    const dependencies = @import("root").dependencies;
+    inline for (dependencies.root_deps) |dependency| {
+        if (comptime std.mem.eql(u8, dependency[0], "zrct")) {
+            const package = @field(dependencies.packages, dependency[1]);
+            return if (@hasDecl(package, "build_zig")) package.build_zig else null;
+        }
+    }
+    return null;
+}
+
+fn addDesktop(m: *std.Build.Module, desktop_sdl: sdl.Library) void {
+    // SDL already compiles these protocol interfaces into its static library.
+    m.addIncludePath(desktop_sdl.protocol_headers);
     m.addCSourceFiles(.{ .files = &.{ "src/client/desktop.c", "src/client/desktop/wayland.c" }, .flags = &.{
         "-std=c11",
         "-Wall",

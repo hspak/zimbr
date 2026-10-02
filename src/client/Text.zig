@@ -1,12 +1,12 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const a = std.heap.page_allocator;
 const desktop = @import("desktop.zig");
 const graphics = @import("graphics.zig");
 const c = @import("c.zig").api;
 const display = @import("display.zig");
 const theme = @import("theme.zig");
 const Text = @This();
-const a = std.heap.page_allocator;
 
 entries: std.ArrayList(Entry) = .empty,
 texture_bytes: usize = 0,
@@ -96,7 +96,7 @@ fn getStyled(s: *Text, text: []const u8, style: Style, width: f32, single_line: 
     hash.update(std.mem.asBytes(&style.weight));
     hash.update(std.mem.asBytes(&single_line));
     hash.update(std.mem.asBytes(&subpixel));
-    if (!std.math.isFinite(width) or !std.math.isFinite(s.scale) or s.scale < 0.5 or s.scale > 8) return error.TextLayoutFailed;
+    if (!std.math.isFinite(width) or !std.math.isFinite(s.scale) or s.scale < 0.5 or s.scale > 8) return error.InvalidTextGeometry;
     // Stay below the native 4096-pixel raster width after scale and two pixels of layout margin.
     const w: i32 = @intFromFloat(std.math.clamp(width, 1, 4096 / s.scale - 2));
     hash.update(std.mem.asBytes(&w));
@@ -125,7 +125,7 @@ fn getStyled(s: *Text, text: []const u8, style: Style, width: f32, single_line: 
         @intFromBool(single_line),
         @intFromBool(subpixel),
         @intFromEnum(style.weight),
-    ) orelse return error.TextLayoutFailed;
+    ) orelse return error.TextLayoutUnavailable;
     errdefer c.zc_text_free(layout);
     const copy = try a.dupe(u8, text);
     errdefer a.free(copy);
@@ -260,15 +260,7 @@ pub fn lineInkCenterY(s: *Text, text: []const u8, size: i32, width: f32) f32 {
     if (height_pixels > 2048) return fallback;
     // Hinting and fallback fonts can put ink outside Pango's reported extents.
     // Measure a neutral raster once per cached layout at its actual display scale.
-    const pixels = c.zc_text_pixels_on(
-        e.layout,
-        0xffffffff,
-        0,
-        0,
-        0,
-        height_pixels,
-        0x000000ff,
-    );
+    const pixels = c.zc_text_pixels_on(e.layout, 0xffffffff, 0, 0, 0, height_pixels, 0x000000ff);
     if (pixels == null) return fallback;
     defer c.zc_text_clear_pixels(e.layout);
     const stride: usize = @intCast(c.zc_text_pitch(e.layout));

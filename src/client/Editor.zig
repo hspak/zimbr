@@ -157,12 +157,7 @@ pub fn move(s: *Editor, direction: c_int, select: bool) void {
     if (!select and s.anchor != s.caret) s.caret = if (direction < 0) @min(s.caret, s.anchor) else @max(
         s.caret,
         s.anchor,
-    ) else s.caret = c.zc_text_boundary(
-        s.text.items.ptr,
-        s.text.items.len,
-        s.caret,
-        direction,
-    );
+    ) else s.caret = c.zc_text_boundary(s.text.items.ptr, s.text.items.len, s.caret, direction);
     if (!select) s.anchor = s.caret;
 }
 pub fn delete(s: *Editor, back: bool) DeleteError!void {

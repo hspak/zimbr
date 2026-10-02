@@ -146,7 +146,11 @@ pub fn main(init: std.process.Init) !void {
                 };
                 last_start = start;
             }
-            try output(gpa, .{ .kind = "workload", .name = @tagName(workload), .frames = samples });
+            try output(gpa, .{
+                .kind = "workload",
+                .name = @tagName(workload),
+                .frames = samples,
+            });
         }
     }
 }

@@ -154,10 +154,7 @@ test "vector string scanning matches scalar bounds across escapes and tails" {
     for (0..4000) |_| {
         const len = random.random().uintLessThan(usize, bytes.len + 1);
         for (bytes[0..len]) |*byte| byte.* = alphabet[
-            random.random().uintLessThan(
-                usize,
-                alphabet.len,
-            )
+            random.random().uintLessThan(usize, alphabet.len)
         ];
         const tokens = random.random().uintLessThan(usize, 40);
         const expected: ?CheckError = if (checkImpl(false, bytes[0..len], bytes.len, tokens)) null else |err| err;

@@ -1,6 +1,7 @@
 //! SDL rendering in logical coordinates. SDL owns batching, textures and render targets.
 //! Resource creation, drawing and destruction belong to the GUI thread.
 const std = @import("std");
+const a = std.heap.page_allocator;
 const desktop = @import("desktop.zig");
 const geometry = @import("geometry.zig");
 const TexturePool = @import("graphics/TexturePool.zig");
@@ -11,7 +12,6 @@ const c = desktop.c;
 const png = @cImport({
     @cInclude("png.h");
 });
-const a = std.heap.page_allocator;
 const log = std.log.scoped(.client_graphics);
 
 pub const Texture = *c.SDL_Texture;
@@ -142,7 +142,11 @@ fn solid(point: Point, color: Color) Vertex {
     return vertex(point, .{ .x = 0, .y = 0 }, color);
 }
 pub fn triangle(p: Point, q: Point, r: Point, color: Color) void {
-    triangles(null, &.{ solid(p, color), solid(q, color), solid(r, color) });
+    triangles(null, &.{
+        solid(p, color),
+        solid(q, color),
+        solid(r, color),
+    });
 }
 pub fn rectangle(bounds: Rect, color: Color) void {
     setColor(color);
@@ -151,10 +155,30 @@ pub fn rectangle(bounds: Rect, color: Color) void {
 }
 pub fn outline(r: Rect, thickness: f32, color: Color) void {
     const t = @min(thickness, @min(r.width, r.height) / 2);
-    rectangle(.{ .x = r.x, .y = r.y, .width = r.width, .height = t }, color);
-    rectangle(.{ .x = r.x, .y = r.y + r.height - t, .width = r.width, .height = t }, color);
-    rectangle(.{ .x = r.x, .y = r.y + t, .width = t, .height = r.height - 2 * t }, color);
-    rectangle(.{ .x = r.x + r.width - t, .y = r.y + t, .width = t, .height = r.height - 2 * t }, color);
+    rectangle(.{
+        .x = r.x,
+        .y = r.y,
+        .width = r.width,
+        .height = t,
+    }, color);
+    rectangle(.{
+        .x = r.x,
+        .y = r.y + r.height - t,
+        .width = r.width,
+        .height = t,
+    }, color);
+    rectangle(.{
+        .x = r.x,
+        .y = r.y + t,
+        .width = t,
+        .height = r.height - 2 * t,
+    }, color);
+    rectangle(.{
+        .x = r.x + r.width - t,
+        .y = r.y + t,
+        .width = t,
+        .height = r.height - 2 * t,
+    }, color);
 }
 pub fn line(start: Point, end: Point, thickness: f32, color: Color) void {
     const delta = end.subtract(start);
@@ -162,16 +186,31 @@ pub fn line(start: Point, end: Point, thickness: f32, color: Color) void {
     if (length == 0 or thickness <= 0) return;
     const side: Point = .{ .x = -delta.y * thickness / (2 * length), .y = delta.x * thickness / (2 * length) };
     const points = [_]Vertex{
-        solid(start.subtract(side), color), solid(start.add(side), color),
-        solid(end.add(side), color),        solid(end.subtract(side), color),
+        solid(start.subtract(side), color),
+        solid(start.add(side), color),
+        solid(end.add(side), color),
+        solid(end.subtract(side), color),
     };
-    mesh(null, &points, &.{ 0, 1, 2, 0, 2, 3 });
+    mesh(null, &points, &.{
+        0,
+        1,
+        2,
+        0,
+        2,
+        3,
+    });
 }
 
 /// Copies tightly packed straight RGBA bytes. Caller owns the resulting SDL texture.
 pub fn upload(pixels: [*]const u8, width: i32, height: i32, filter: Filter) ResourceError!Texture {
     if (width <= 0 or width > std.math.maxInt(i32) / 4) return error.InvalidDimensions;
-    return uploadPixels(.{ .bytes = pixels, .width = width, .height = height, .pitch = width * 4, .format = .rgba }, filter);
+    return uploadPixels(.{
+        .bytes = pixels,
+        .width = width,
+        .height = height,
+        .pitch = width * 4,
+        .format = .rgba,
+    }, filter);
 }
 /// Borrows pixels until return. Cairo bytes retain their native ARGB layout and premultiplied alpha.
 pub fn uploadPixels(pixels: Pixels, filter: Filter) ResourceError!Texture {
@@ -315,7 +354,12 @@ test "SDL rendering preserves clipping and queued textures through uploads and d
         return err;
     };
     defer destroyTexture(second);
-    clip(.{ .x = 40, .y = 10, .width = 16, .height = 20 });
+    clip(.{
+        .x = 40,
+        .y = 10,
+        .width = 16,
+        .height = 20,
+    });
     drawTexture(second, .{
         .x = 32,
         .y = 0,
@@ -404,7 +448,12 @@ test "native Cairo uploads respect row pitch and premultiplied alpha" {
     defer destroyTarget(target);
     beginTarget(target);
     setScale(1);
-    clear(.{ .r = 0, .g = 0, .b = 255, .a = 255 });
+    clear(.{
+        .r = 0,
+        .g = 0,
+        .b = 255,
+        .a = 255,
+    });
     drawRaster(texture, .{ .x = 0, .y = 0 });
     endTarget();
     const shot = try readTexture(target);
@@ -414,7 +463,12 @@ test "native Cairo uploads respect row pitch and premultiplied alpha" {
     try std.testing.expectEqual(@as(u8, 0), mixed.g);
     try std.testing.expect(mixed.b >= 126 and mixed.b <= 128);
     try std.testing.expectEqual(@as(u8, 255), mixed.a);
-    try std.testing.expectEqual(Color{ .r = 0, .g = 255, .b = 0, .a = 255 }, imageColor(shot, 0, 1));
+    try std.testing.expectEqual(Color{
+        .r = 0,
+        .g = 255,
+        .b = 0,
+        .a = 255,
+    }, imageColor(shot, 0, 1));
 }
 
 test "retired textures respect count and byte limits and exclude render targets" {

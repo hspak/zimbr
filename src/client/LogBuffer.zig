@@ -31,7 +31,11 @@ pub fn append(
     comptime format: []const u8,
     args: anytype,
 ) void {
-    var entry: Entry = .{ .serial = 0, .storage = undefined, .length = 0 };
+    var entry: Entry = .{
+        .serial = 0,
+        .storage = undefined,
+        .length = 0,
+    };
     const marker = " … [truncated]";
     var writer = std.Io.Writer.fixed(entry.storage[0 .. entry.storage.len - marker.len]);
     // The 19-byte local date/time plus two hundredths digits needs 21 bytes and a C terminator.
