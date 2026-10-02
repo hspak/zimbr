@@ -3,7 +3,7 @@
     // Keep Zig's package identity stable across releases and dependency consumers.
     .fingerprint = 0x9aa1f6bc7ed51f5b,
     // Shared release identity consumed by the binaries and packaging tools.
-    .version = "0.4.0",
+    .version = "0.4.1",
     // The build and std.Io APIs require the toolchain pinned in .zigversion.
     .minimum_zig_version = "0.16.0",
     // Pin exact source revisions and content hashes so builds and local dependency patches agree.
