@@ -34,9 +34,11 @@ The macOS relay is distributed as the `zimbr-relay` Homebrew cask. Every release
 publishes both components at the version in `build.zig.zon`, even when only one
 component changed.
 
-Only needed Zig dependencies are fetched during `prepare()`; GUI automation
-tooling and macOS-only dependencies are excluded. `build()` and `check()` use
-the extracted `zig-pkg` directory in offline system mode. Package checks run
+During `prepare()`, `zig build --help` configures the Linux build graph and fetches
+its lazy dependencies without compiling application artifacts. `--fetch=needed`
+does not evaluate that graph, so it leaves those dependencies unfetched. GUI
+automation tooling and macOS-only dependencies are excluded. `build()` and `check()`
+use the extracted `zig-pkg` directory in offline system mode. Package checks run
 the headless client unit tests, validate the desktop entry, and exercise the
 provisioning helper's CLI. They do not launch the GUI or contact a live relay.
 

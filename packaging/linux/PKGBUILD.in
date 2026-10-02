@@ -47,8 +47,10 @@ sha256sums=("@SHA256@")
 prepare() {
   cd "$pkgname-$_ref"
   export ZIG_GLOBAL_CACHE_DIR="$srcdir/zig-cache"
-  zig build -Dprofile=release client --fetch=needed -Doptimize=ReleaseSafe -Dcpu=baseline \
-    -Dibus=true
+  # --fetch=needed skips lazy dependencies without evaluating the build graph.
+  # Help configures that graph and fetches its dependencies without running build steps.
+  zig build -Dprofile=release client --help -Doptimize=ReleaseSafe -Dcpu=baseline \
+    -Dibus=true >/dev/null
 }
 
 build() {
