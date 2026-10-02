@@ -198,6 +198,19 @@ copy it in full; Ctrl+A selects the whole message. New recipients must be an
 international number or email.
 Unsupported services remain readable with sending disabled.
 
+Type a Unicode emoji shortcode such as `:smile:`, `:thumbsup:`, or
+`:woman_technologist:` in the composer to replace it with the emoji. After the
+first character following `:`, a suggestion bubble appears above the draft.
+Tab/Shift+Tab or Down/Up cycle through matches; Enter or a mouse click inserts the
+selected emoji. Enter accepts the suggestion without sending. Escape dismisses
+the bubble; Ctrl+Enter keeps its send behavior. Type more of the name to narrow
+the list, or cycle past the last visible row to see further matches.
+
+Shortcodes also expand when pasted. Ctrl+Z restores their literal spelling.
+Unknown names and URL-like text stay unchanged. The bundled Unicode names work
+offline; custom emoji are not supported. Appearance depends on the installed
+emoji font.
+
 ### Korean input
 
 Enable a Korean input method in your desktop and install a font with Hangul

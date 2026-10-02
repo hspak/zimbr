@@ -99,6 +99,11 @@ delivery through Apple's service.
 
 ## Assertion boundaries
 
+`Emoji` covers shortcode expansion, completion paging and keyboard/mouse
+selection, cancellation, undo/redo, draft persistence, and Unicode relay delivery.
+Its clipboard scenario also uses real Wayland paste/copy and pointer selection
+at the minimum window size and 2× scale. The other emoji scenarios use SDL input.
+
 - `Messages`, `Settings`, and `History` use normal application input. The two
   reviewed-attachment scenarios additionally invoke the native drop-delivery handler.
 - `Desktop` uses real compositor activation, clipboard ownership, keyboard/mouse

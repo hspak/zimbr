@@ -30,6 +30,9 @@ own deadlines; background services are still polled at least every 25 ms while
 idle. With `-Dfps-counter=true`, the counter shows `Idle` for idle refreshes and
 excludes idle waiting from the next active FPS sample.
 
+See [Frame pacing](../FRAME_PACING.md) for the implementation rationale, timer
+ownership rules, regression coverage, and measured resize/interaction results.
+
 ## Rendering benchmarks
 
 Linux GUI builds fetch [pinned SDL 3.4.16 sources](../vendor/sdl/README.zimbr),

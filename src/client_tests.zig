@@ -14,6 +14,7 @@ test {
     _ = @import("client.zig").Worker;
     _ = @import("client.zig").display;
     _ = @import("client.zig").drop;
+    _ = @import("client.zig").emoji;
     _ = @import("client.zig").MessageSelection;
     _ = @import("client.zig").outgoing.Files;
 }

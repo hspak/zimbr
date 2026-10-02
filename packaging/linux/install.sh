@@ -6,7 +6,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 install -Dm755 "$root/zig-out/bin/zimbr" "$prefix/bin/zimbr"
 install -Dm755 "$root/packaging/linux/provision.py" "$prefix/bin/zimbr-provision"
 install -Dm644 "$root/packaging/linux/zimbr.svg" "$prefix/share/icons/hicolor/scalable/apps/zimbr.svg"
-for notice in "$root"/zig-out/share/zimbr/licenses/SDL*.txt; do
+for notice in "$root"/zig-out/share/zimbr/licenses/SDL*.txt "$root"/zig-out/share/zimbr/licenses/gemoji.txt; do
   install -Dm644 "$notice" "$prefix/share/licenses/zimbr/${notice##*/}"
 done
 # Quote the absolute executable path so the launcher works without a modified PATH.

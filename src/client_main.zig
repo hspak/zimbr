@@ -15,6 +15,7 @@ const Store = @import("client.zig").Store;
 const Worker = @import("client.zig").Worker;
 const Notification = @import("client.zig").Notification;
 const Editor = @import("client.zig").Editor;
+const emoji = @import("client.zig").emoji;
 const MessageSelection = @import("client.zig").MessageSelection;
 const MessageHistory = @import("client.zig").MessageHistory;
 const Text = @import("client.zig").Text;
@@ -260,6 +261,7 @@ const App = struct {
     height_budget: usize = 0,
     height_deadline: u64 = 0,
     composer: Editor = .{},
+    emoji_completion: emoji.Completion = .{},
     recipient: Editor = .{},
     search: Editor = .{},
     focus: Focus = .composer,
@@ -363,6 +365,7 @@ const App = struct {
         reaction: struct { message: []const u8, part: []const u8, label: []const u8 },
         enrichment: struct { message: []const u8, revision: []const u8, section: []const u8 },
         editor: struct { focus: Focus, origin: graphics.Point, width: f32, offset: f32 },
+        emoji: ?usize,
         message: struct { id: []const u8, pending: bool, text: []const u8, full: []const u8, origin: graphics.Point, width: f32 },
         scroll: struct { pane: ScrollPane, viewport: graphics.Rect, content: f64 },
         history_background,
@@ -390,6 +393,7 @@ const App = struct {
             const control = s.controls.items[i];
             if (!control.bounds.contains(point)) continue;
             if (control.clip) |clip| if (!clip.contains(point)) continue;
+            if (control.action != .emoji) s.emoji_completion.dismissed = true;
             if (control.action != .editor and control.action != .message) s.text_click = null;
             if (control.action == .scroll) {
                 const scroll = control.action.scroll;
@@ -426,13 +430,21 @@ const App = struct {
             s.dragging = false;
             s.message_selection.dragging = false;
             s.logs_focused = false;
-            if (!s.clickControl(point)) s.text_click = null;
+            if (!s.clickControl(point)) {
+                s.text_click = null;
+                s.emoji_completion.dismissed = true;
+            }
         }
         if (input.wheel != 0) {
             var i = s.controls.items.len;
             while (i > 0) {
                 i -= 1;
                 const control = s.controls.items[i];
+                if (control.action == .emoji and control.bounds.contains(point)) {
+                    s.emoji_completion.cycle(input.wheel > 0);
+                    s.layout_pending = true;
+                    break;
+                }
                 if (control.action != .scroll or !control.bounds.contains(point)) continue;
                 if (control.clip) |clip| if (!clip.contains(point)) continue;
                 const scroll = control.action.scroll;
@@ -481,7 +493,7 @@ const App = struct {
                     .down = input.down,
                 })) |offset| s.setScroll(scroll.pane, offset);
             },
-            .button, .recover, .rail, .select, .retry, .link, .viewer, .detail, .reaction, .enrichment, .history_background => {},
+            .button, .recover, .rail, .select, .retry, .link, .viewer, .detail, .reaction, .enrichment, .emoji, .history_background => {},
         };
         if (s.text_click) |click| if ((input.down or input.released) and !click.near(point)) {
             s.text_click = null;
@@ -564,6 +576,7 @@ const App = struct {
     }
     fn activate(s: *App, action: Action) void {
         switch (action) {
+            .emoji => |index| if (index) |selected| s.chooseEmoji(selected),
             .editor => |field| {
                 s.message_selection.clear();
                 s.focus = field.focus;
@@ -1172,6 +1185,23 @@ const App = struct {
                 if (key.matches(.page_up) or key.matches(.up)) s.content_detail_scroll -= 100;
                 return;
             }
+            s.updateEmojiCompletion();
+            if (!composing and !ctrl and s.emoji_completion.visible()) {
+                if (key.matches(.tab) or key.matches(.up) or key.matches(.down)) {
+                    s.emoji_completion.cycle(key.matches(.up) or (key.matches(.tab) and shift));
+                    s.layout_pending = true;
+                    return;
+                }
+                if (!shift and (key.pressed(.enter) or key.pressed(.kp_enter))) {
+                    s.chooseEmoji(s.emoji_completion.selected);
+                    return;
+                }
+                if (key.pressed(.escape)) {
+                    s.emoji_completion.dismissed = true;
+                    s.layout_pending = true;
+                    return;
+                }
+            }
             if (!composing and s.pending_key == null and key.pressed(.tab) and s.rich_count > 0) {
                 s.focus = .none;
                 const old = s.rich_focus orelse (if (shift) 0 else s.rich_count - 1);
@@ -1260,7 +1290,7 @@ const App = struct {
             }
             if (ctrl and key.pressed(.v)) {
                 if (desktop.clipboardText()) |clip| {
-                    e.insert(clip) catch s.info("Text exceeds the 16 KiB limit or has invalid encoding.");
+                    s.insertText(e, clip) catch s.info("Text exceeds the 16 KiB limit or has invalid encoding.");
                 } else s.info("Could not read the clipboard.");
             }
             if (ctrl and key.pressed(.z)) try e.history(shift);
@@ -1311,6 +1341,30 @@ const App = struct {
             // Discard typing while an input is disabled instead of replaying
             // it when a writable conversation gains focus.
         }
+    }
+    fn insertText(s: *App, editor: *Editor, text: []const u8) Editor.InsertError!void {
+        const start = @min(editor.caret, editor.anchor);
+        const composing = editor.preedit.items.len > 0;
+        try editor.insert(text);
+        if (editor == &s.composer and !composing) {
+            emoji.expand(editor, start) catch s.info("Could not replace emoji; the shortcode is kept in your draft.");
+        }
+    }
+    fn updateEmojiCompletion(s: *App) void {
+        s.emoji_completion.update(&s.composer, s.focusedEditor() == &s.composer);
+    }
+    fn chooseEmoji(s: *App, index: usize) void {
+        s.updateEmojiCompletion();
+        const completion = &s.emoji_completion;
+        if (!completion.visible() or index >= completion.items.len) return;
+        s.composer.replace(completion.range, completion.items[index].text) catch {
+            s.info("Could not insert emoji; the draft is unchanged.");
+            return;
+        };
+        completion.* = .{};
+        s.draft_dirty = true;
+        s.draft_at = u.now();
+        s.layout_pending = true;
     }
     fn focusedEditor(s: *App) ?*Editor {
         if (s.settings.visible) return if (s.settingsFocus()) |index| &s.settings.fields[index] else null;
@@ -1383,7 +1437,7 @@ const App = struct {
                     if (s.focusedEditor()) |editor| {
                         composition_key = composition_key or editor.preedit.items.len > 0;
                         const revision = editor.revision;
-                        editor.insert(committed) catch {
+                        s.insertText(editor, committed) catch {
                             s.info("Text exceeds the 16 KiB limit or has invalid encoding.");
                             editor.cancelPreedit();
                             desktop.resetTextInput(true);
@@ -3799,6 +3853,7 @@ const App = struct {
                 .detail,
                 .enrichment,
                 .editor,
+                .emoji,
                 .message,
                 .scroll,
                 .history_background,
@@ -4659,6 +4714,67 @@ const App = struct {
         );
         if (hot and enabled) desktop.setCursor(.pointing_hand);
         if (enabled) s.addControl(send_button, .{ .button = .send });
+        s.drawEmojiCompletion(editor, ar);
+    }
+    fn drawEmojiCompletion(s: *App, editor: graphics.Rect, ar: std.mem.Allocator) void {
+        s.updateEmojiCompletion();
+        const completion = &s.emoji_completion;
+        if (!completion.visible()) return;
+        // Keep all matches reachable in pages of six, without covering the draft.
+        const page_size = 6;
+        const first = completion.selected / page_size * page_size;
+        const last = @min(first + page_size, completion.items.len);
+        const rows: f32 = @floatFromInt(last - first);
+        const width = @min(390, editor.width);
+        const caret = s.text.caret(s.composer.text.items, editor.width - 22 - Scrollbar.gutter, s.composer.caret);
+        const panel = graphics.Rect{
+            .x = std.math.clamp(editor.x + 11 + caret.x, editor.x, editor.x + editor.width - width),
+            .y = editor.y - (rows * 34 + 58) - 6,
+            .width = width,
+            .height = rows * 34 + 58,
+        };
+        shapes.drawRectangle(panel, 8, theme.colors.surface);
+        shapes.drawRectangleLines(panel, 8, 1, theme.colors.line);
+        s.addControl(panel, .{ .emoji = null });
+        if (comptime client_options.automation) zrct.add(.{
+            .id = "emoji-completion",
+            .role = "listbox",
+            .label = "Emoji",
+            .bounds = .from(panel),
+        });
+        s.text.drawLine("Emoji", panel.x + 12, panel.y + 7, 12, width - 24, theme.colors.muted, theme.colors.surface);
+        for (completion.items[first..last], first..) |entry, index| {
+            const row = graphics.Rect{
+                .x = panel.x + 5,
+                .y = panel.y + 28 + @as(f32, @floatFromInt(index - first)) * 34,
+                .width = width - 10,
+                .height = 34,
+            };
+            const selected = index == completion.selected;
+            const hot = hover(row);
+            const background = if (selected or hot) theme.colors.selected else theme.colors.surface;
+            if (selected or hot) shapes.drawRectangle(row, 4, background);
+            if (selected) shapes.drawRectangleLines(row, 4, 1, theme.colors.focus);
+            s.text.drawLine(entry.text, row.x + 8, row.y + 4, 20, 32, theme.colors.ink, background);
+            const label = std.fmt.allocPrint(ar, ":{s}:", .{entry.name}) catch entry.name;
+            s.text.drawLine(label, row.x + 45, row.y + 7, 14, row.width - 53, theme.colors.ink, background);
+            s.addControl(row, .{ .emoji = index });
+            if (hot) desktop.setCursor(.pointing_hand);
+            if (comptime client_options.automation) zrct.add(.{
+                .id = std.fmt.allocPrint(ar, "emoji/{s}", .{entry.name}) catch "",
+                .role = "option",
+                .parent = "emoji-completion",
+                .label = label,
+                .value = entry.text,
+                .selected = selected,
+                .bounds = .from(row),
+            });
+        }
+        const hint = std.fmt.allocPrint(ar, "Tab ↹ · Enter to insert · Esc · {d}/{d}", .{
+            completion.selected + 1,
+            completion.items.len,
+        }) catch "Tab ↹ · Enter to insert · Esc";
+        s.text.drawLine(hint, panel.x + 12, panel.y + panel.height - 23, 11, width - 24, theme.colors.muted, theme.colors.surface);
     }
     // 11-pixel side insets separate text from the border; multiline inputs use ten-pixel vertical
     // insets.

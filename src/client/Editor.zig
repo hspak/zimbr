@@ -130,10 +130,19 @@ fn checkpoint(s: *Editor) !void {
     clear(a, &s.redo);
 }
 pub fn insert(s: *Editor, value: []const u8) InsertError!void {
-    const a = s.allocator;
-    if (!std.unicode.utf8ValidateSlice(value) or std.mem.indexOfScalar(u8, value, 0) != null) return error.InvalidText;
     const start = @min(s.caret, s.anchor);
     const end = @max(s.caret, s.anchor);
+    try s.replace(.{ .start = start, .end = end }, value);
+}
+/// Replace a UTF-8 range as one undo step, leaving the caret after the inserted text.
+/// Assume range endpoints are document character boundaries and value does not alias text.
+/// On error, preserve the document, selection, and history.
+pub fn replace(s: *Editor, range: Range, value: []const u8) InsertError!void {
+    const a = s.allocator;
+    const start = range.start;
+    const end = range.end;
+    std.debug.assert(start <= end and end <= s.text.items.len);
+    if (!std.unicode.utf8ValidateSlice(value) or std.mem.indexOfScalar(u8, value, 0) != null) return error.InvalidText;
     if (s.text.items.len - (end - start) + value.len > t.max_text) return error.TextTooLarge;
     try s.text.ensureTotalCapacity(a, s.text.items.len - (end - start) + value.len);
     try s.checkpoint();

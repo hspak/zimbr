@@ -335,6 +335,8 @@ fn client(
     const install = b.addInstallArtifact(exe, .{});
     const license = b.addInstallFile(desktop_sdl.source.path("LICENSE.txt"), "share/zimbr/licenses/SDL.txt");
     install.step.dependOn(&license.step);
+    const emoji_license = b.addInstallFile(b.path("licenses/gemoji.txt"), "share/zimbr/licenses/gemoji.txt");
+    install.step.dependOn(&emoji_license.step);
     for ([_][2][]const u8{
         .{ "src/hidapi/LICENSE-orig.txt", "SDL-HIDAPI.txt" },
         .{ "src/video/yuv2rgb/LICENSE", "SDL-yuv2rgb.txt" },
