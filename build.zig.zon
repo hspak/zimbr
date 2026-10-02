@@ -10,6 +10,11 @@
     // Lazy fetching avoids downloading platform-specific libraries for unrelated build steps.
     .dependencies = .{
         .zrct = .{ .path = "../zrct" },
+        .sdl = .{
+            .url = "https://github.com/libsdl-org/SDL/archive/refs/tags/release-3.4.16.tar.gz",
+            .hash = "N-V-__8AABHq9wIiTHGY4qR6mw45F_TX8FSvqsQQ-Wtq1tzY",
+            .lazy = true,
+        },
         .nghttp2 = .{
             .url = "https://github.com/nghttp2/nghttp2/releases/download/v1.70.0/nghttp2-1.70.0.tar.xz",
             .hash = "N-V-__8AACay2gDbHrByjNGWvyH8G9Gp30uRgZqobYOF1nhb",
@@ -26,6 +31,7 @@
         "build.zig.zon",
         "src",
         "build",
+        "vendor",
         "licenses",
         "tests",
         "packaging",

@@ -12,7 +12,8 @@ from zrct.process import until
 from support import relay
 
 SUITE = Suite("zimbr-korean-ime", setup=relay, timeout=90,
-              desktop_input=True, boundary="compositor_input+ibus-hangul")
+              desktop_input=True, boundary="compositor_input+ibus-hangul",
+              sdl_renderer=os.environ.get("SDL_RENDER_DRIVER"))
 
 
 class Korean(TestCase):

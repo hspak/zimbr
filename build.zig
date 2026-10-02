@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const nghttp2 = @import("build/nghttp2.zig");
+const sdl = @import("build/sdl.zig");
 const manifest = @import("build.zig.zon");
 const log = std.log.scoped(.build);
 const ProfileName = enum { dev, release };
@@ -199,8 +200,21 @@ fn client(
         .{},
     ).step);
     const step = b.step("client", "Build the Linux desktop client");
+    const desktop_sdl = sdl.addLibrary(b, target, optimize) orelse return;
     const m = clientModule(b, target, optimize, "src/client_main.zig", options);
-    addDesktop(b, m);
+    addDesktop(b, m, desktop_sdl);
+
+    const render_options = b.addOptions();
+    render_options.addOption(bool, "automation", false);
+    render_options.addOption([]const u8, "version", manifest.version);
+    render_options.addOption(bool, "fps_counter", false);
+    render_options.addOption(ProfileName, "profile", profile);
+    const render_module = clientModule(b, target, optimize, "src/render_bench.zig", render_options);
+    addDesktop(b, render_module, desktop_sdl);
+    const render_bench = b.addExecutable(.{ .name = "render-bench", .root_module = render_module });
+    b.step("render-bench", "Build synthetic benchmarks of the production chat renderer").dependOn(
+        &b.addInstallArtifact(render_bench, .{}).step,
+    );
 
     const desktop_probe = b.createModule(.{
         .target = target,
@@ -209,7 +223,7 @@ fn client(
     });
     desktop_probe.addIncludePath(b.path("src/client"));
     desktop_probe.addCSourceFiles(.{ .files = &.{ "tests/client_desktop_probe.c", "src/client/drop.c" }, .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-    addDesktop(b, desktop_probe);
+    addDesktop(b, desktop_probe, desktop_sdl);
     const desktop_exe = b.addExecutable(.{ .name = "client-desktop-probe", .root_module = desktop_probe });
     b.step("client-desktop-probe", "Build the native desktop integration probe").dependOn(&b.addInstallArtifact(desktop_exe, .{}).step);
     if (b.option(bool, "desktop-tests", "Enable optional compositor diagnostics") orelse false) {
@@ -227,9 +241,11 @@ fn client(
         const zrct_dep = b.dependency("zrct", .{});
         const zrct_module = @import("zrct").createModule(b, zrct_dep, .{
             .backend = .sdl3,
+            .link_system_sdl = false,
             .target = target,
             .optimize = optimize,
         });
+        desktop_sdl.link(zrct_module);
         m.addImport("zrct", zrct_module);
     }
     const gui_filter = b.option([]const u8, "gui-test-filter", "Filter existing GUI regressions");
@@ -277,6 +293,18 @@ fn client(
         b.step("test-ime", "Test Korean composition with an isolated IBus/Hangul engine").dependOn(&ime.step);
     }
     const install = b.addInstallArtifact(exe, .{});
+    const license = b.addInstallFile(desktop_sdl.source.path("LICENSE.txt"), "share/zimbr/licenses/SDL.txt");
+    install.step.dependOn(&license.step);
+    for ([_][2][]const u8{
+        .{ "src/hidapi/LICENSE-orig.txt", "SDL-HIDAPI.txt" },
+        .{ "src/video/yuv2rgb/LICENSE", "SDL-yuv2rgb.txt" },
+    }) |notice| {
+        const dependency_license = b.addInstallFile(
+            desktop_sdl.source.path(notice[0]),
+            b.fmt("share/zimbr/licenses/{s}", .{notice[1]}),
+        );
+        install.step.dependOn(&dependency_license.step);
+    }
     step.dependOn(&install.step);
     b.getInstallStep().dependOn(&install.step);
     const run = b.addRunArtifact(exe);
@@ -298,7 +326,7 @@ fn client(
     b.getInstallStep().dependOn(&icon.step);
 }
 
-fn addDesktop(b: *std.Build, m: *std.Build.Module) void {
+fn addDesktop(b: *std.Build, m: *std.Build.Module, desktop_sdl: sdl.Library) void {
     // Keep native protocol bindings independent of the rendering dependency.
     const activation_xml = b.path("src/client/desktop/xdg-activation-v1.xml");
     const activation_header = b.addSystemCommand(&.{ "wayland-scanner", "client-header" });
@@ -314,7 +342,7 @@ fn addDesktop(b: *std.Build, m: *std.Build.Module) void {
         "-Werror",
     } });
     m.linkSystemLibrary("wayland-client", .{});
-    m.linkSystemLibrary("sdl3", .{});
+    desktop_sdl.link(m);
 }
 
 fn module(

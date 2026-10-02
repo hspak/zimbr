@@ -1,0 +1,428 @@
+--- a/src/render/vulkan/SDL_render_vulkan.c
++++ b/src/render/vulkan/SDL_render_vulkan.c
+@@ -18,6 +18,9 @@
+      misrepresented as being the original software.
+   3. This notice may not be removed or altered from any source distribution.
+ */
++
++/* Zimbr's modified SDL renderer: bounded upload reuse, indexed geometry, and
++   command-list-local constant/descriptor reuse. See vendor/sdl/README.zimbr. */
+ #include "SDL_internal.h"
+ 
+ #ifdef SDL_VIDEO_RENDER_VULKAN
+@@ -26,7 +29,7 @@
+ #define SDL_VULKAN_NUM_VERTEX_BUFFERS           256
+ #define SDL_VULKAN_VERTEX_BUFFER_DEFAULT_SIZE   65536
+ #define SDL_VULKAN_CONSTANT_BUFFER_DEFAULT_SIZE 65536
+-#define SDL_VULKAN_NUM_UPLOAD_BUFFERS           32
++#define SDL_VULKAN_NUM_UPLOAD_BUFFERS           128
+ #define SDL_VULKAN_MAX_DESCRIPTOR_SETS          4096
+ 
+ #define SDL_VULKAN_VALIDATION_LAYER_NAME        "VK_LAYER_KHRONOS_validation"
+@@ -68,6 +71,8 @@
+     VULKAN_DEVICE_FUNCTION(vkCmdClearColorImage)                        \
+     VULKAN_DEVICE_FUNCTION(vkCmdCopyBufferToImage)                      \
+     VULKAN_DEVICE_FUNCTION(vkCmdCopyImageToBuffer)                      \
++    VULKAN_DEVICE_FUNCTION(vkCmdBindIndexBuffer)                       \
++    VULKAN_DEVICE_FUNCTION(vkCmdDrawIndexed)                           \
+     VULKAN_DEVICE_FUNCTION(vkCmdDraw)                                   \
+     VULKAN_DEVICE_FUNCTION(vkCmdEndRenderPass)                          \
+     VULKAN_DEVICE_FUNCTION(vkCmdPipelineBarrier)                        \
+@@ -280,11 +285,28 @@
+     VkPipelineLayout pipelineLayout;
+     VkDescriptorSetLayout descriptorSetLayout;
+     VkPipeline pipeline;
++    Uint64 constantGeneration;
++    VkBuffer constantBuffer;
++    VkDeviceSize constantOffset;
+ } VULKAN_PipelineState;
+ 
+ typedef struct
+ {
++    Uint64 generation;
++    VkDescriptorSetLayout layout;
++    VkBuffer buffer;
++    VkDeviceSize offset;
++    int imageCount;
++    VkImageView images[2];
++    VkSampler samplers[2];
++    VkDescriptorSet set;
++} VULKAN_DescriptorBinding;
++
++typedef struct
++{
+     VkBuffer vertexBuffer;
++    VkDeviceSize indexOffset;
++    bool indexed;
+ } VULKAN_DrawStateCache;
+ 
+ // Private renderer data
+@@ -326,6 +348,11 @@
+     VkDescriptorSetLayout descriptorSetLayout;
+     VkPipelineLayout pipelineLayout;
+ 
++    // CPU indices refer to the shared vertex stream until RunCommandQueue consumes it.
++    Uint32 *queuedIndices;
++    size_t queuedIndexCount;
++    size_t queuedIndexCapacity;
++
+     // Vertex buffer data
+     VULKAN_Buffer vertexBuffers[SDL_VULKAN_NUM_VERTEX_BUFFERS];
+     VULKAN_VertexShaderConstants vertexShaderConstantsData;
+@@ -345,6 +372,10 @@
+     uint32_t *numDescriptorPools;
+     uint32_t currentDescriptorPoolIndex;
+     uint32_t currentDescriptorSetIndex;
++
++    // Entries are immutable on the GPU and valid only until this command list completes.
++    Uint64 bindingGeneration;
++    VULKAN_DescriptorBinding bindings[256];
+ 
+     int pipelineStateCount;
+     VULKAN_PipelineState *pipelineStates;
+@@ -669,7 +700,7 @@
+ 
+     if (rendererData->currentUploadBuffer) {
+         for (uint32_t i = 0; i < rendererData->swapchainImageCount; ++i) {
+-            for (int j = 0; j < rendererData->currentUploadBuffer[i]; ++j) {
++            for (int j = 0; j < SDL_VULKAN_NUM_UPLOAD_BUFFERS; ++j) {
+                 VULKAN_DestroyBuffer(rendererData, &rendererData->uploadBuffers[i][j]);
+             }
+             SDL_free(rendererData->uploadBuffers[i]);
+@@ -1059,6 +1090,10 @@
+     if (stateCache->vertexBuffer != VK_NULL_HANDLE) {
+         VkDeviceSize offset = 0;
+         vkCmdBindVertexBuffers(rendererData->currentCommandBuffer, 0, 1, &stateCache->vertexBuffer, &offset);
++        if (stateCache->indexed) {
++            vkCmdBindIndexBuffer(rendererData->currentCommandBuffer, stateCache->vertexBuffer,
++                                stateCache->indexOffset, VK_INDEX_TYPE_UINT32);
++        }
+     }
+ 
+     return true;
+@@ -1072,6 +1107,7 @@
+ 
+ static void VULKAN_ResetCommandList(VULKAN_RenderData *rendererData)
+ {
++    ++rendererData->bindingGeneration;
+     vkResetCommandBuffer(rendererData->currentCommandBuffer, 0);
+     for (uint32_t i = 0; i < rendererData->numDescriptorPools[rendererData->currentCommandBufferIndex]; i++) {
+         vkResetDescriptorPool(rendererData->device, rendererData->descriptorPools[rendererData->currentCommandBufferIndex][i], 0);
+@@ -1091,9 +1127,16 @@
+     rendererData->currentConstantBufferOffset = -1;
+     rendererData->currentConstantBufferIndex = 0;
+ 
+-    // Release any upload buffers that were inflight
+-    for (int i = 0; i < rendererData->currentUploadBuffer[rendererData->currentCommandBufferIndex]; ++i) {
+-        VULKAN_DestroyBuffer(rendererData, &rendererData->uploadBuffers[rendererData->currentCommandBufferIndex][i]);
++    // This command buffer's fence (or queue idle) has completed.
++    // Retain at most 8 MiB per command buffer, and overwrite only after that completion.
++    VkDeviceSize retained = 0;
++    for (int i = 0; i < SDL_VULKAN_NUM_UPLOAD_BUFFERS; ++i) {
++        VULKAN_Buffer *buffer = &rendererData->uploadBuffers[rendererData->currentCommandBufferIndex][i];
++        if (buffer->size > 8 * 1024 * 1024 - retained) {
++            VULKAN_DestroyBuffer(rendererData, buffer);
++        } else {
++            retained += buffer->size;
++        }
+     }
+     rendererData->currentUploadBuffer[rendererData->currentCommandBufferIndex] = 0;
+ }
+@@ -1154,6 +1197,7 @@
+             vkDeviceWaitIdle(rendererData->device);
+             VULKAN_DestroyAll(renderer);
+         }
++        SDL_free(rendererData->queuedIndices);
+         SDL_free(rendererData);
+     }
+ }
+@@ -1343,6 +1387,7 @@
+     if (!pipelineStates) {
+         return NULL;
+     }
++    pipelineStates[rendererData->pipelineStateCount].constantGeneration = 0;
+     pipelineStates[rendererData->pipelineStateCount].shader = shader;
+     pipelineStates[rendererData->pipelineStateCount].blendMode = blendMode;
+     pipelineStates[rendererData->pipelineStateCount].topology = topology;
+@@ -1397,7 +1442,7 @@
+     VULKAN_DestroyBuffer(rendererData, &rendererData->vertexBuffers[vbidx]);
+ 
+     result = VULKAN_AllocateBuffer(rendererData, size,
+-        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
++        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+@@ -2870,14 +2915,19 @@
+     int currentUploadBufferIndex = rendererData->currentUploadBuffer[rendererData->currentCommandBufferIndex];
+     VULKAN_Buffer *uploadBuffer = &rendererData->uploadBuffers[rendererData->currentCommandBufferIndex][currentUploadBufferIndex];
+ 
+-    rc = VULKAN_AllocateBuffer(rendererData, uploadBufferSize,
+-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+-        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+-        uploadBuffer);
+-    if (rc != VK_SUCCESS) {
+-        return false;
++    if (uploadBuffer->buffer != VK_NULL_HANDLE && uploadBuffer->size < uploadBufferSize) {
++        VULKAN_DestroyBuffer(rendererData, uploadBuffer);
++    }
++    if (uploadBuffer->buffer == VK_NULL_HANDLE) {
++        rc = VULKAN_AllocateBuffer(rendererData, uploadBufferSize,
++            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
++            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
++            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
++            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
++            uploadBuffer);
++        if (rc != VK_SUCCESS) {
++            return false;
++        }
+     }
+ 
+     src = (const Uint8 *)pixels;
+@@ -3236,62 +3286,80 @@
+                                int num_vertices, const void *indices, int num_indices, int size_indices,
+                                float scale_x, float scale_y)
+ {
+-    int i;
+-    int count = indices ? num_indices : num_vertices;
+-    VULKAN_VertexPositionColor *verts = (VULKAN_VertexPositionColor *)SDL_AllocateRenderVertices(renderer, count * sizeof(VULKAN_VertexPositionColor), 0, &cmd->data.draw.first);
+-    bool convert_color = SDL_RenderingLinearSpace(renderer);
+-    VULKAN_TextureData *textureData = texture ? (VULKAN_TextureData *)texture->internal : NULL;
+-    float u_scale = textureData ? (float)texture->w / textureData->width : 0.0f;
+-    float v_scale = textureData ? (float)texture->h / textureData->height : 0.0f;
+-
++    VULKAN_RenderData *data = (VULKAN_RenderData *)renderer->internal;
++    const int count = indices ? num_indices : num_vertices;
++    size_t needed, indexBytes, first;
++    if (!SDL_size_add_check_overflow(data->queuedIndexCount, (size_t)count, &needed) ||
++        needed > SDL_MAX_UINT32 || !SDL_size_mul_check_overflow(needed, sizeof(Uint32), &indexBytes) ||
++        (size_t)num_vertices > SDL_MAX_UINT32 / sizeof(VULKAN_VertexPositionColor)) {
++        return SDL_SetError("Vulkan geometry is too large");
++    }
++    if (needed > data->queuedIndexCapacity) {
++        size_t capacity = needed, grown;
++        if (SDL_size_add_check_overflow(data->queuedIndexCapacity, data->queuedIndexCapacity / 2 + 1024, &grown) &&
++            grown <= SDL_SIZE_MAX / sizeof(Uint32)) {
++            capacity = SDL_max(capacity, grown);
++        }
++        Uint32 *next = (Uint32 *)SDL_realloc(data->queuedIndices, capacity * sizeof(Uint32));
++        if (!next) {
++            return false;
++        }
++        data->queuedIndices = next;
++        data->queuedIndexCapacity = capacity;
++    }
++    VULKAN_VertexPositionColor *verts = (VULKAN_VertexPositionColor *)SDL_AllocateRenderVertices(
++        renderer, (size_t)num_vertices * sizeof(*verts), 0, &first);
+     if (!verts) {
+         return false;
+     }
+-
++    if (first / sizeof(*verts) > SDL_MAX_UINT32 - (size_t)num_vertices) {
++        return SDL_SetError("Vulkan vertex offset is too large");
++    }
++    const Uint32 base = (Uint32)(first / sizeof(*verts));
++    Uint32 *output = data->queuedIndices + data->queuedIndexCount;
++    cmd->data.draw.first = data->queuedIndexCount * sizeof(Uint32);
+     cmd->data.draw.count = count;
+-    size_indices = indices ? size_indices : 0;
+-
+-    for (i = 0; i < count; i++) {
+-        int j;
+-        float *xy_;
+-        if (size_indices == 4) {
+-            j = ((const Uint32 *)indices)[i];
+-        } else if (size_indices == 2) {
+-            j = ((const Uint16 *)indices)[i];
+-        } else if (size_indices == 1) {
+-            j = ((const Uint8 *)indices)[i];
++    data->queuedIndexCount = needed;
++    // Normalize all index widths once, retaining contiguous indices for SDL draw batching.
++    if (!indices) {
++        for (int i = 0; i < count; i++) output[i] = base + i;
++    } else if (size_indices == 4) {
++        for (int i = 0; i < count; i++) output[i] = base + ((const Uint32 *)indices)[i];
++    } else if (size_indices == 2) {
++        for (int i = 0; i < count; i++) output[i] = base + ((const Uint16 *)indices)[i];
++    } else {
++        for (int i = 0; i < count; i++) output[i] = base + ((const Uint8 *)indices)[i];
++    }
++    const bool convert_color = SDL_RenderingLinearSpace(renderer);
++    VULKAN_TextureData *textureData = texture ? (VULKAN_TextureData *)texture->internal : NULL;
++    const float u_scale = textureData ? (float)texture->w / textureData->width : 0.0f;
++    const float v_scale = textureData ? (float)texture->h / textureData->height : 0.0f;
++    for (int i = 0; i < num_vertices; i++, verts++) {
++        const float *position = (const float *)((const char *)xy + i * xy_stride);
++        verts->pos[0] = position[0] * scale_x;
++        verts->pos[1] = position[1] * scale_y;
++        verts->color = *(const SDL_FColor *)((const char *)color + i * color_stride);
++        if (convert_color) SDL_ConvertToLinear(&verts->color);
++        if (texture) {
++            const float *texcoord = (const float *)((const char *)uv + i * uv_stride);
++            verts->tex[0] = texcoord[0] * u_scale;
++            verts->tex[1] = texcoord[1] * v_scale;
+         } else {
+-            j = i;
+-        }
+-
+-        xy_ = (float *)((char *)xy + j * xy_stride);
+-
+-        verts->pos[0] = xy_[0] * scale_x;
+-        verts->pos[1] = xy_[1] * scale_y;
+-        verts->color = *(SDL_FColor *)((char *)color + j * color_stride);
+-        if (convert_color) {
+-            SDL_ConvertToLinear(&verts->color);
+-        }
+-
+-        if (texture) {
+-            float *uv_ = (float *)((char *)uv + j * uv_stride);
+-            verts->tex[0] = uv_[0] * u_scale;
+-            verts->tex[1] = uv_[1] * v_scale;
+-        } else {
+-            verts->tex[0] = 0.0f;
+-            verts->tex[1] = 0.0f;
+-        }
+-
+-        verts += 1;
++            verts->tex[0] = verts->tex[1] = 0.0f;
++        }
+     }
+     return true;
+ }
+ 
+ static bool VULKAN_UpdateVertexBuffer(SDL_Renderer *renderer,
+-                                    const void *vertexData, size_t dataSizeInBytes, VULKAN_DrawStateCache *stateCache)
++                                    const void *vertexData, size_t dataSizeInBytes, size_t indexBytes, VULKAN_DrawStateCache *stateCache)
+ {
+     VULKAN_RenderData *rendererData = (VULKAN_RenderData *)renderer->internal;
+     const int vbidx = rendererData->currentVertexBuffer;
++    size_t bufferBytes;
++    if (!SDL_size_add_check_overflow(dataSizeInBytes, indexBytes, &bufferBytes)) {
++        return SDL_SetError("Vulkan geometry buffer is too large");
++    }
+     VULKAN_Buffer *vertexBuffer;
+ 
+     if (dataSizeInBytes == 0) {
+@@ -3304,16 +3372,21 @@
+         }
+     }
+     // If the existing vertex buffer isn't big enough, we need to recreate a big enough one
+-    if (dataSizeInBytes > rendererData->vertexBuffers[vbidx].size) {
++    if (bufferBytes > rendererData->vertexBuffers[vbidx].size) {
+         VULKAN_IssueBatch(rendererData);
+         VULKAN_WaitForGPU(rendererData);
+-        VULKAN_CreateVertexBuffer(rendererData, vbidx, dataSizeInBytes);
++        if (VULKAN_CreateVertexBuffer(rendererData, vbidx, bufferBytes) != VK_SUCCESS) return false;
+     }
+ 
+     vertexBuffer = &rendererData->vertexBuffers[vbidx];
+     SDL_memcpy(vertexBuffer->mappedBufferPtr, vertexData, dataSizeInBytes);
+ 
++    if (indexBytes) {
++        SDL_memcpy((Uint8 *)vertexBuffer->mappedBufferPtr + dataSizeInBytes, rendererData->queuedIndices, indexBytes);
++    }
+     stateCache->vertexBuffer = vertexBuffer->buffer;
++    stateCache->indexOffset = dataSizeInBytes;
++    stateCache->indexed = indexBytes != 0;
+ 
+     rendererData->currentVertexBuffer = vbidx + 1;
+     if (rendererData->currentVertexBuffer >= SDL_VULKAN_NUM_VERTEX_BUFFERS) {
+@@ -3819,7 +3892,7 @@
+ 
+     constantBuffer = rendererData->constantBuffers[rendererData->currentCommandBufferIndex][rendererData->currentConstantBufferIndex].buffer;
+     constantBufferOffset = (rendererData->currentConstantBufferOffset < 0) ? 0 : rendererData->currentConstantBufferOffset;
+-    if (updateConstants ||
++    if (rendererData->currentPipelineState->constantGeneration != rendererData->bindingGeneration ||
+         SDL_memcmp(shader_constants, &rendererData->currentPipelineState->shader_constants, sizeof(*shader_constants)) != 0) {
+ 
+         if (rendererData->currentConstantBufferOffset == -1) {
+@@ -3870,12 +3943,44 @@
+         uint8_t *dst = (uint8_t *)rendererData->constantBuffers[rendererData->currentCommandBufferIndex][rendererData->currentConstantBufferIndex].mappedBufferPtr;
+         dst += constantBufferOffset;
+         SDL_memcpy(dst, &rendererData->currentPipelineState->shader_constants, sizeof(VULKAN_PixelShaderConstants));
+-    }
+-
+-    // Allocate/update descriptor set with the bindings
+-    descriptorSet = VULKAN_AllocateDescriptorSet(renderer, shader, descriptorSetLayout, constantBuffer, constantBufferOffset, numImages, imageViews, numSamplers, samplers);
+-    if (descriptorSet == VK_NULL_HANDLE) {
+-        return false;
++        rendererData->currentPipelineState->constantGeneration = rendererData->bindingGeneration;
++        rendererData->currentPipelineState->constantBuffer = constantBuffer;
++        rendererData->currentPipelineState->constantOffset = constantBufferOffset;
++    } else {
++        constantBuffer = rendererData->currentPipelineState->constantBuffer;
++        constantBufferOffset = rendererData->currentPipelineState->constantOffset;
++    }
++
++    SDL_assert(numImages == numSamplers && numImages <= 2);
++    // Collisions replace the CPU lookup entry, never an in-flight descriptor set.
++    uintptr_t hash = (uintptr_t)descriptorSetLayout ^ ((uintptr_t)constantBuffer >> 4) ^ constantBufferOffset;
++    for (int image = 0; image < numImages; ++image) {
++        hash = (hash * 33) ^ ((uintptr_t)imageViews[image] >> 4) ^ (uintptr_t)samplers[image];
++    }
++    VULKAN_DescriptorBinding *binding = &rendererData->bindings[hash % SDL_arraysize(rendererData->bindings)];
++    bool found = binding->generation == rendererData->bindingGeneration &&
++        binding->layout == descriptorSetLayout && binding->buffer == constantBuffer &&
++        binding->offset == constantBufferOffset && binding->imageCount == numImages;
++    for (int image = 0; found && image < numImages; ++image) {
++        found = binding->images[image] == imageViews[image] && binding->samplers[image] == samplers[image];
++    }
++    if (found) {
++        descriptorSet = binding->set;
++    } else {
++        descriptorSet = VULKAN_AllocateDescriptorSet(renderer, shader, descriptorSetLayout, constantBuffer, constantBufferOffset, numImages, imageViews, numSamplers, samplers);
++        if (descriptorSet == VK_NULL_HANDLE) {
++            return false;
++        }
++        binding->generation = rendererData->bindingGeneration;
++        binding->layout = descriptorSetLayout;
++        binding->buffer = constantBuffer;
++        binding->offset = constantBufferOffset;
++        binding->imageCount = numImages;
++        for (int image = 0; image < numImages; ++image) {
++            binding->images[image] = imageViews[image];
++            binding->samplers[image] = samplers[image];
++        }
++        binding->set = descriptorSet;
+     }
+ 
+     // Bind the descriptor set with the sampler/UBO/image views
+@@ -4055,6 +4160,9 @@
+     VkSurfaceTransformFlagBitsKHR currentRotation = VULKAN_GetRotationForCurrentRenderTarget(rendererData);
+     VULKAN_DrawStateCache stateCache;
+     SDL_zero(stateCache);
++    // SDL consumes the queue even when device or swapchain recovery fails.
++    const size_t indexBytes = rendererData->queuedIndexCount * sizeof(Uint32);
++    rendererData->queuedIndexCount = 0;
+ 
+     if (!rendererData->device) {
+         return SDL_SetError("Device lost and couldn't be recovered");
+@@ -4073,7 +4181,7 @@
+         rendererData->recreateSwapchain = false;
+     }
+ 
+-    if (!VULKAN_UpdateVertexBuffer(renderer, vertices, vertsize, &stateCache)) {
++    if (!VULKAN_UpdateVertexBuffer(renderer, vertices, vertsize, indexBytes, &stateCache)) {
+         return false;
+     }
+ 
+@@ -4220,7 +4328,7 @@
+             SDL_RenderCommand *nextcmd;
+             size_t count = cmd->data.draw.count;
+             const size_t first = cmd->data.draw.first;
+-            const size_t start = first / sizeof(VULKAN_VertexPositionColor);
++            const size_t start = first / (thiscmdtype == SDL_RENDERCMD_GEOMETRY ? sizeof(Uint32) : sizeof(VULKAN_VertexPositionColor));
+             for (nextcmd = cmd->next; nextcmd; nextcmd = nextcmd->next) {
+                 const SDL_RenderCommandType nextcmdtype = nextcmd->command;
+                 if (nextcmdtype != thiscmdtype) {
+@@ -4249,7 +4357,7 @@
+                     VULKAN_SetDrawState(renderer, cmd, rendererData->pipelineLayout, rendererData->descriptorSetLayout, NULL, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, 0, NULL, 0, NULL, NULL, &stateCache, false);
+                 }
+ 
+-                VULKAN_DrawPrimitives(renderer, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, start, count);
++                vkCmdDrawIndexed(rendererData->currentCommandBuffer, (uint32_t)count, 1, (uint32_t)start, 0, 0);
+             } else {
+                 VULKAN_SetDrawState(renderer, cmd, rendererData->pipelineLayout, rendererData->descriptorSetLayout, NULL, VK_PRIMITIVE_TOPOLOGY_POINT_LIST, 0, NULL, 0, NULL, NULL, &stateCache, false);
+                 VULKAN_DrawPrimitives(renderer, VK_PRIMITIVE_TOPOLOGY_POINT_LIST, start, count);

@@ -19,7 +19,14 @@ so package recipes must select release explicitly in their `zig build` commands.
 It includes `zimbr`, `zimbr-provision`, the desktop
 launcher, the scalable SVG, PNG icons from 16 to 512 px, setup documentation,
 and license notices. Its dependencies include OpenSSH, Python cryptography, and
-OpenSSL. The Mac cask includes `zimbr-relay-setup`, `zimbr-relay-admin`, the service
+OpenSSL. SDL is fetched as a pinned Zig dependency, compiled directly by Zig, and
+linked statically. GNU `patch` applies the checked-in Vulkan changes to a generated
+renderer in the build cache. Its build also uses `pkg-config`, `wayland-scanner`, and the native
+development headers, including D-Bus and libdecor. The package uses `libibus` as a
+build dependency and sets `-Dibus=true` to include SDL's direct IBus integration.
+At runtime, `ibus` is optional; install `ibus-hangul` for Korean input through IBus.
+The package includes SDL's license and uses the system graphics loader and drivers.
+The Mac cask includes `zimbr-relay-setup`, `zimbr-relay-admin`, the service
 helper, and all their Python modules as signed app resources. Homebrew installs
 mkcert, Python, and cryptography for them. Neither installed package needs a
 source checkout or pip environment. See [two-step setup](setup.md).

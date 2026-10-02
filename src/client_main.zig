@@ -4768,6 +4768,107 @@ fn lineEnd(text: []const u8, at: usize) usize {
     return p;
 }
 
+/// Synthetic chat used only by the rendering benchmark; owns no database or worker thread.
+pub const RenderFixture = struct {
+    worker: Worker,
+    app: App,
+
+    pub const InitError = std.mem.Allocator.Error;
+    pub const Workload = enum { cached, scroll, cold_text, image_upload };
+    pub const Avatars = enum { shared, distinct };
+
+    /// Initialize in final storage because App borrows the embedded worker.
+    pub fn init(s: *RenderFixture, io: std.Io, avatars: Avatars) InitError!void {
+        s.worker = .{ .io = io, .config = .{ .data = "" } };
+        s.app = .{ .worker = &s.worker, .focus = .none };
+        errdefer s.deinit();
+        const view = try a.create(Worker.View);
+        view.* = .{
+            .arena = .init(a),
+            .snapshot = .{
+                .chats = &.{},
+                .messages = &.{},
+                .pending = &.{},
+                .selected = "render-bench",
+                .draft = "",
+                .epoch = "fixture",
+                .more = false,
+            },
+            .status = "Offline",
+            .online = false,
+            .send_direct = false,
+            .reply_existing = false,
+            .generation = 1,
+            .ack = 0,
+        };
+        s.app.view = view;
+        const ar = view.arena.allocator();
+        const chats = try ar.alloc(Store.Chat, 32);
+        for (chats, 0..) |*chat, i| chat.* = .{
+            .value = .{
+                .id = if (i == 0) "render-bench" else try std.fmt.allocPrint(ar, "chat-{d}", .{i}),
+                .service = "imessage",
+                .title = switch (avatars) {
+                    .shared => try std.fmt.allocPrint(ar, "Conversation {d}", .{i}),
+                    .distinct => try std.fmt.allocPrint(ar, "{c} Conversation {d}", .{
+                        @as(u8, @intCast('A' + i % 26)), i,
+                    }),
+                },
+                .last_activity = "2026-01-01T00:00:00Z",
+                .sendable = true,
+            },
+            .preview = "Synthetic rendering benchmark 👋",
+            .unread = 1,
+        };
+        const messages = try ar.alloc(t.Message, 1000);
+        for (messages, 0..) |*message, i| message.* = .{
+            .id = try std.fmt.allocPrint(ar, "message-{d}", .{i}),
+            .conversation_id = "render-bench",
+            .sender = "fixture@example.invalid",
+            .direction = if (i % 3 == 0) .outgoing else .incoming,
+            .service = "imessage",
+            .timestamp = "2026-01-01T00:00:00Z",
+            .kind = .text,
+            .text = try std.fmt.allocPrint(ar, "Message {d}: cached text, emoji 👩‍💻 and é.\nA second line exercises wrapping and clipping.", .{i}),
+            .decoding = .plain,
+            .observed_status = .received,
+        };
+        view.snapshot.chats = chats;
+        view.snapshot.messages = messages;
+        s.app.key = try a.dupe(u8, "render-bench");
+        s.app.loaded_key = try a.dupe(u8, "render-bench");
+    }
+
+    pub fn deinit(s: *RenderFixture) void {
+        s.app.deinit();
+        s.worker.shutdown();
+        s.* = undefined;
+    }
+
+    /// Workload preparation is included in each measured draw interval.
+    pub fn draw(s: *RenderFixture, workload: Workload, frame: usize) void {
+        switch (workload) {
+            .cached, .image_upload => {},
+            .scroll => {
+                s.app.following = false;
+                // Sweep the same 3000 logical pixels in both directions, independent of FPS.
+                const step = frame % 200;
+                const offset: f64 = @floatFromInt(@min(step, 200 - step) * 30);
+                s.app.scroll = @max(0, s.app.content_height - 800 - offset);
+            },
+            .cold_text => {
+                s.app.text.deinit();
+                s.app.text = .{};
+            },
+        }
+        s.app.draw(WindowMetrics.current().scale);
+    }
+
+    pub fn settled(s: *const RenderFixture) bool {
+        return !s.app.layout_pending and s.app.history_rows.len == 1000;
+    }
+};
+
 test "pending conversation selections accept redirects and surface cache failure" {
     const fixture = struct {
         fn publish(app: *App, snapshot: Store.Snapshot, redirect: []const u8, unavailable: bool) !void {
@@ -6465,6 +6566,136 @@ test "text and attachment messages retain identical sender and date alignment" {
     }
 }
 
+test "retired texture storage is reused without changing queued draws" {
+    try openWindow(320, 160, "Texture reuse ordering");
+    defer closeWindow();
+    desktop.poll();
+    const target = try graphics.createTarget(64, 32);
+    defer graphics.destroyTarget(target);
+    graphics.beginTarget(target);
+    graphics.clear(.black);
+    const red = try graphics.upload(&.{
+        255,
+        0,
+        0,
+        255,
+    }, 1, 1, .nearest);
+    const properties = desktop.c.SDL_GetTextureProperties(red);
+    graphics.drawTexture(red, .{
+        .x = 0,
+        .y = 0,
+        .width = 32,
+        .height = 32,
+    });
+    graphics.destroyTexture(red);
+    const green = try graphics.upload(&.{
+        0,
+        255,
+        0,
+        255,
+    }, 1, 1, .nearest);
+    defer graphics.destroyTexture(green);
+    try std.testing.expectEqual(properties, desktop.c.SDL_GetTextureProperties(green));
+    graphics.drawTexture(green, .{
+        .x = 32,
+        .y = 0,
+        .width = 32,
+        .height = 32,
+    });
+    graphics.endTarget();
+    const shot = try graphics.readTexture(target);
+    defer graphics.destroyImage(shot);
+    try std.testing.expectEqual(graphics.Color{
+        .r = 255,
+        .g = 0,
+        .b = 0,
+        .a = 255,
+    }, graphics.imageColor(shot, 16, 16));
+    try std.testing.expectEqual(graphics.Color{
+        .r = 0,
+        .g = 255,
+        .b = 0,
+        .a = 255,
+    }, graphics.imageColor(shot, 48, 16));
+}
+
+test "shared avatar initials retain colored rasters across redraws" {
+    try openWindow(320, 160, "Shared avatar raster cache");
+    defer closeWindow();
+    desktop.poll();
+    var text = Text{};
+    defer text.deinit();
+    const target = try graphics.createTarget(160, 48);
+    defer graphics.destroyTarget(target);
+    const colors = [_]graphics.Color{
+        .red,
+        .sky_blue,
+        .white,
+        .{
+            .r = 0,
+            .g = 255,
+            .b = 0,
+            .a = 255,
+        },
+    };
+    var first_bytes: usize = 0;
+    for (0..3) |_| {
+        text.nextFrame(1);
+        graphics.beginTarget(target);
+        graphics.clear(.black);
+        for (colors, 0..) |color, i| {
+            text.drawLine("C", @floatFromInt(i * 40 + 4), 4, 24, 32, color, null);
+            if (first_bytes == 0) first_bytes = text.texture_bytes;
+        }
+        graphics.endTarget();
+        try std.testing.expect(first_bytes > 0);
+        // Four appearances share one shaped layout and retain all four GPU rasters.
+        try std.testing.expectEqual(@as(usize, 1), text.entries.items.len);
+        try std.testing.expectEqual(first_bytes * colors.len, text.texture_bytes);
+        const shot = try graphics.readTexture(target);
+        defer graphics.destroyImage(shot);
+        for (colors, 0..) |color, i| {
+            var ink: usize = 0;
+            for (0..48) |y| for (0..40) |x| {
+                const pixel = graphics.imageColor(shot, @intCast(i * 40 + x), @intCast(y));
+                if (std.meta.eql(pixel, color)) ink += 1;
+            };
+            try std.testing.expect(ink > 10);
+        }
+    }
+}
+
+test "text raster variants evict old appearances without unbounded texture growth" {
+    try openWindow(320, 160, "Text raster limits");
+    defer closeWindow();
+    desktop.poll();
+    var text = Text{};
+    defer text.deinit();
+    const target = try graphics.createTarget(80, 48);
+    defer graphics.destroyTarget(target);
+    var single_bytes: usize = 0;
+    for (0..64) |i| {
+        text.nextFrame(1);
+        graphics.beginTarget(target);
+        graphics.clear(.black);
+        text.drawLine("C", 4, 4, 24, 32, .{
+            .r = @intCast(i),
+            .g = 127,
+            .b = 255,
+            .a = 255,
+        }, null);
+        graphics.endTarget();
+        if (single_bytes == 0) single_bytes = text.texture_bytes;
+        try std.testing.expect(text.texture_bytes <= 16 * single_bytes);
+    }
+    try std.testing.expect(single_bytes > 0);
+    try std.testing.expectEqual(16 * single_bytes, text.texture_bytes);
+    try std.testing.expectEqual(@as(usize, 1), text.entries.items.len);
+    for (text.entries.items[0].rasters.items) |raster| {
+        try std.testing.expect(raster.key.color.r >= 48);
+    }
+}
+
 test "text remains intact when layouts evict textures queued in the same frame" {
     try openWindow(640, 360, "Zimbr text cache checks");
     defer closeWindow();
@@ -6491,7 +6722,7 @@ test "text remains intact when layouts evict textures queued in the same frame" 
             graphics.Color.black,
             graphics.Color.white,
         );
-        // Recoloring and selection share metrics but replace the texture.
+        // Recoloring and selection share metrics but use distinct raster variants.
         text.drawSelection(
             "Message text must retain its glyphs and proportions",
             20,

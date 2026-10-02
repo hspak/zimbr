@@ -1,0 +1,52 @@
+SDL 3.4.16, pinned for Zimbr
+
+Upstream: https://github.com/libsdl-org/SDL/tree/release-3.4.16
+Archive: https://github.com/libsdl-org/SDL/archive/refs/tags/release-3.4.16.tar.gz
+Archive SHA-256: c2ee715e42ec520c4d11fd8d249ef1d2b2baf4ad31148b72b3b000276c0b3633
+Zig package hash: N-V-__8AABHq9wIiTHGY4qR6mw45F_TX8FSvqsQQ-Wtq1tzY
+
+This directory retains provenance and SDL's license. build.zig.zon pins the
+upstream archive; Zig downloads and verifies it as a lazy dependency. The full
+upstream archive lives in the dependency cache, outside the tracked source tree.
+Zimbr builds the library directly through build/sdl.zig with Zig 0.16.0.
+
+Local C changes are recorded in build/sdl/vulkan.patch and confined to
+src/render/vulkan/SDL_render_vulkan.c:
+- Reuse completed staging allocations with a bounded upload-buffer pool.
+- Preserve shared vertices and submit indexed geometry.
+- Reuse constant-buffer contents and matching descriptor sets within a command list.
+
+The build invokes GNU patch with --batch, --forward, and --fuzz=0. Both the
+original renderer and patch are tracked build inputs. The patched renderer is a
+declared output in the build cache; the upstream dependency is never modified.
+An unsuccessful patch application stops the build before compiling SDL.
+The source list excludes the original renderer so only the generated copy is
+compiled. Includes resolve against the pinned upstream tree.
+
+These are Zimbr modifications, not an unmodified upstream SDL release. The
+benchmark's SDL revision includes a SHA-256 prefix covering the upstream package
+hash followed by the patch bytes. Cached builds skip unchanged patch preparation.
+
+The Linux configuration and explicit source/protocol lists are in build/sdl/.
+They enable Wayland, offscreen/dummy video, Vulkan, OpenGL, GLES2, SDL GPU,
+software rendering, Fcitx through D-Bus, compositor text input, and libdecor.
+The direct IBus backend is enabled when pkg-config finds ibus-1.0. Use -Dibus=false
+to disable it or -Dibus=true to require its development files. Optional audio and
+device integrations use development headers discovered by pkg-config; their
+runtime libraries are loaded by SDL. The application requires no installed SDL.
+Wayland bindings are generated from the pinned XML by wayland-scanner as Zig
+build steps. Graphics loaders, drivers, and other OS services remain external.
+
+To update SDL, update the URL and content hash in build.zig.zon, rebase the
+renderer patch against that release, and reconcile build/sdl/sources.zig and
+build/sdl/SDL_build_config.h with that release's CMake source lists/configuration.
+Update this provenance, the version macros in build/sdl.zig, and the revision
+prefix. Generate the unified diff from pristine and edited copies of the renderer,
+using a/src/render/vulkan/SDL_render_vulkan.c and
+b/src/render/vulkan/SDL_render_vulkan.c as its labels. Verify that applying it
+reproduces the edited file exactly and that the pristine copy stays unchanged.
+Run both renderer test suites, real IME scenarios, and rendering benchmarks.
+
+The upstream SDL license and embedded third-party notices are preserved. Binary
+packages include SDL's license, HIDAPI's original permissive license, and the
+BSD license for yuv2rgb alongside Zimbr's notices.

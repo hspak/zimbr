@@ -5,6 +5,9 @@ The build selects Zrct's native SDL3 backend and supplies its SDL window and ren
 hooks. Mouse, key, wheel, and text playback use SDL events; reviewed attachment
 playback calls the application's ordinary native drop-delivery handler. Separate
 compositor scenarios cover actual Wayland file-drop negotiation.
+Explicit scenario boundaries are retained across application launches and restarts.
+`SDL_RENDER_DRIVER` selects the suite's renderer; reports record that selection and
+instrumented applications report the actual backend in their handshake.
 
 All 13 scenarios pass with SDL 3.4.16 and Zrct's Weston surface-scale extension,
 including the unchanged live output-scale scenario. The extension reports the
@@ -19,7 +22,7 @@ stalled-drop timeouts, and shutdown during a transfer. See
 limitation and fractional/multi-output coverage limits.
 
 `ime.py` is an optional real Korean input-method suite, run with
-`zig build test-ime -Dautomation=true -Dopenssl-prefix=/path/to/openssl-3.5`.
+`zig build test-ime -Dautomation=true -Dibus=true -Dopenssl-prefix=/path/to/openssl-3.5`.
 It requires IBus, ibus-hangul, their configuration helper/schemas, and a Hangul
 font. `ZIMBR_IBUS_PREFIX` can select an extracted installation. Each test owns a
 private IBus daemon and engine in addition to the isolated desktop and relay.
@@ -109,10 +112,8 @@ identity. Attachment mutations happen only after preparation enables Send.
 The declared local dependency includes SDL_Renderer capture through the supplied
 window, event-time modifier injection, bitmap-font scaling in the private font
 profile, configurable desktop dimensions, and a controllable partial-drop source.
-[`sdl-native.patch`](sdl-native.patch) preserves these companion changes against
-the dependency before this refactor. They are already applied in the local
-dependency; apply the patch with `patch -p1` in an equivalent older Zrct source
-checkout when reproducing the change elsewhere.
+These changes are already included in the declared dependency; no patch
+application is needed.
 
 The scale scenario uses a 2560×1600 test output so the application remains
 reachable by the compositor pointer at 2×. On a smaller output, Weston clamps

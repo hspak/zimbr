@@ -16,12 +16,24 @@ Run source-build and test commands below from the repository root.
 
 ## Build and install
 
-Use Zig **0.16.0**, `pkg-config`, and development headers/libraries for SQLite,
+Use Zig **0.16.0**, GNU `patch`, `pkg-config`, and development headers/libraries for SQLite,
 libcurl (8.10+ with HTTP/2 and the OpenSSL 3 backend), OpenSSL 3, Pango/Cairo (Pango 1.48+), Fontconfig, GLib/GIO,
-libpng, libjpeg, SDL3 (3.2+), Wayland, and xkbcommon, plus `wayland-scanner`.
+libpng, libjpeg, D-Bus, libdecor (0.2+), OpenGL/EGL, Wayland, and xkbcommon,
+plus `wayland-scanner`. Install the Vulkan loader and your GPU's Vulkan driver.
 Install a system sans-serif font and an emoji font for the scripts you use.
 
-The client uses system SDL3. With SDL 3.4.16, older compositors that expose only
+The client compiles pinned SDL 3.4.16 directly with Zig and links it statically,
+including bounded Vulkan upload-buffer reuse, indexed geometry, and descriptor reuse.
+Zig fetches SDL sources and Wayland protocol XML using the archive URL and content
+hash in `build.zig.zon`. GNU `patch` automatically generates the modified Vulkan
+renderer in the build cache, leaving downloaded sources unchanged. The first
+build needs network access to fetch dependencies; later builds reuse the cache.
+No system SDL, CMake, Ninja, or Python is required to build the client.
+IBus development files are optional and detected through `pkg-config`. Install
+them before building to include SDL's direct IBus backend. `-Dibus=false` disables
+it explicitly; `-Dibus=true` requires the development files. Fcitx and compositor
+Wayland text input remain available in builds without IBus.
+Older compositors that expose only
 output-scale events may require reopening the window after changing display
 scale. See [migration notes and remaining limitations](../FUTURE_MIGRATION.md).
 
@@ -187,7 +199,7 @@ Unsupported services remain readable with sending disabled.
 
 Enable a Korean input method in your desktop and install a font with Hangul
 coverage, such as Noto Sans CJK. Zimbr uses SDL's input-method connection; the
-two-set Korean workflow is tested with IBus and ibus-hangul.
+two-set Korean workflow is tested with IBus and ibus-hangul in an IBus-enabled build.
 
 The syllable being composed appears inline with an underline. Backspace edits
 the composing syllable through the input method. Enter used to confirm a
@@ -365,7 +377,14 @@ the client exits and continue to be written to the terminal.
 ## Rendering and performance
 
 Linux uses Wayland exclusively. The GUI supports fractional desktop scaling
-and uses `zimbr` as its application ID. Movement, scrolling, and navigation target
+and uses `zimbr` as its application ID. SDL3 prefers Vulkan, falling back to
+OpenGL when Vulkan cannot initialize. The startup log reports the selected
+renderer. Set `SDL_RENDER_DRIVER=opengl` or `SDL_RENDER_DRIVER=vulkan` to force
+a backend for diagnostics; an explicitly requested backend must initialize.
+The included SDL upload path reuses staging memory after GPU completion and batches
+up to 128 uploads before submitting. Retained staging storage is bounded to 8 MiB
+per command buffer, separately from the application's texture caches.
+Movement, scrolling, and navigation target
 120 FPS, returning to idle rendering after half a second without activity. The
 background worker continues to receive messages while rendering sleeps.
 Idle input and worker results wake rendering immediately. Settled histories reuse

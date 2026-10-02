@@ -3,6 +3,7 @@
 const std = @import("std");
 const desktop = @import("desktop.zig");
 const geometry = @import("geometry.zig");
+const TexturePool = @import("graphics/TexturePool.zig");
 pub const Point = geometry.Point;
 pub const Rect = geometry.Rect;
 pub const Color = geometry.Color;
@@ -28,20 +29,26 @@ pub const Pixels = struct {
 };
 
 var renderer: ?*c.SDL_Renderer = null;
+var retired: TexturePool = .empty;
 var transform: Point = .{ .x = 1, .y = 1 };
 
 /// Owns the window renderer until deinit. Destroy textures before deinit.
 pub fn init() ResourceError!void {
+    // Environment overrides remain available for diagnostics and driver comparisons.
+    _ = c.SDL_SetHintWithPriority(c.SDL_HINT_RENDER_DRIVER, "vulkan,opengl", c.SDL_HINT_DEFAULT);
     renderer = c.SDL_CreateRenderer(desktop.window(), null) orelse {
         log.err("SDL renderer: {s}", .{c.SDL_GetError()});
         return error.GraphicsUnavailable;
     };
     errdefer deinit();
+    log.info("SDL renderer: {s}", .{c.SDL_GetRendererName(renderer)});
     if (!c.SDL_SetRenderDrawBlendMode(renderer, c.SDL_BLENDMODE_BLEND))
         return error.GraphicsUnavailable;
     beginFrame();
 }
 pub fn deinit() void {
+    retired.deinit();
+    retired = .empty;
     c.SDL_DestroyRenderer(renderer);
     renderer = null;
 }
@@ -174,7 +181,9 @@ pub fn uploadPixels(pixels: Pixels, filter: Filter) ResourceError!Texture {
         .rgba => c.SDL_PIXELFORMAT_RGBA32,
         .cairo_argb => c.SDL_PIXELFORMAT_ARGB8888,
     };
-    const texture = c.SDL_CreateTexture(renderer, format, c.SDL_TEXTUREACCESS_STATIC, pixels.width, pixels.height) orelse return error.GraphicsUnavailable;
+    const texture = retired.take(format, pixels.width, pixels.height) orelse
+        c.SDL_CreateTexture(renderer, format, c.SDL_TEXTUREACCESS_STATIC, pixels.width, pixels.height) orelse
+        return error.GraphicsUnavailable;
     errdefer c.SDL_DestroyTexture(texture);
     const blend: c.SDL_BlendMode = switch (pixels.format) {
         .rgba => c.SDL_BLENDMODE_BLEND,
@@ -191,8 +200,9 @@ pub fn uploadPixels(pixels: Pixels, filter: Filter) ResourceError!Texture {
 pub fn textureBytes(texture: Texture) usize {
     return @as(usize, @intCast(texture.w)) * @as(usize, @intCast(texture.h)) * 4;
 }
+/// Releases ownership; bounded static texture storage may be retained until reuse or deinit.
 pub fn destroyTexture(texture: Texture) void {
-    c.SDL_DestroyTexture(texture);
+    retired.retire(texture);
 }
 pub fn drawTexture(texture: Texture, bounds: Rect) void {
     const rect = physical(bounds);
@@ -405,4 +415,195 @@ test "native Cairo uploads respect row pitch and premultiplied alpha" {
     try std.testing.expect(mixed.b >= 126 and mixed.b <= 128);
     try std.testing.expectEqual(@as(u8, 255), mixed.a);
     try std.testing.expectEqual(Color{ .r = 0, .g = 255, .b = 0, .a = 255 }, imageColor(shot, 0, 1));
+}
+
+test "retired textures respect count and byte limits and exclude render targets" {
+    try desktop.open(320, 240, "Texture retention limits");
+    defer desktop.close();
+    try init();
+    defer deinit();
+    const pixels = [_]u8{255} ** (132 * 4);
+    for (1..133) |width| {
+        destroyTexture(try upload(&pixels, @intCast(width), 1, .nearest));
+    }
+    try std.testing.expectEqual(@as(usize, 128), retired.len);
+    // FIFO eviction removes the oldest sizes, which otherwise accumulate after window resizes.
+    for (retired.textures[0..retired.len]) |texture| try std.testing.expect(texture.w >= 5);
+
+    const large = c.SDL_CreateTexture(renderer, c.SDL_PIXELFORMAT_RGBA32, c.SDL_TEXTUREACCESS_STATIC, 2048, 1024) orelse return error.GraphicsUnavailable;
+    destroyTexture(large);
+    try std.testing.expectEqual(@as(usize, 1), retired.len);
+    try std.testing.expectEqual(@as(usize, 8 * 1024 * 1024), retired.bytes);
+    const oversized = c.SDL_CreateTexture(renderer, c.SDL_PIXELFORMAT_RGBA32, c.SDL_TEXTUREACCESS_STATIC, 2048, 1025) orelse return error.GraphicsUnavailable;
+    destroyTexture(oversized);
+    destroyTarget(try createTarget(16, 16));
+    try std.testing.expectEqual(@as(usize, 1), retired.len);
+    try std.testing.expectEqual(@as(usize, 8 * 1024 * 1024), retired.bytes);
+}
+
+test "texture uploads preserve distinct pixels across batch rollover and buffer growth" {
+    try desktop.open(320, 240, "Upload batch ordering");
+    defer desktop.close();
+    try init();
+    defer deinit();
+    desktop.poll();
+
+    // Exceed the Vulkan upload batch, then cycle command buffers with growing and shrinking data.
+    for (0..9) |frame| {
+        beginFrame();
+        setScale(1);
+        clear(.black);
+        var textures: std.ArrayList(Texture) = .empty;
+        defer {
+            for (textures.items) |texture| destroyTexture(texture);
+            textures.deinit(std.testing.allocator);
+        }
+        try textures.ensureTotalCapacity(std.testing.allocator, 160);
+        const width = 1 + frame % 3;
+        for (0..160) |i| {
+            const pixel = [_]u8{
+                @intCast(i),
+                @intCast(255 - i),
+                @intCast(frame * 20),
+                255,
+            };
+            const pixels = pixel ** 3;
+            textures.appendAssumeCapacity(try upload(&pixels, @intCast(width), 1, .nearest));
+        }
+        for (textures.items, 0..) |texture, i| drawTexture(texture, .{
+            .x = @floatFromInt((i % 16) * 8),
+            .y = @floatFromInt((i / 16) * 8),
+            .width = 8,
+            .height = 8,
+        });
+        const shot = try capture();
+        defer destroyImage(shot);
+        endFrame();
+        for (0..160) |i| try std.testing.expectEqual(Color{
+            .r = @intCast(i),
+            .g = @intCast(255 - i),
+            .b = @intCast(frame * 20),
+            .a = 255,
+        }, imageColor(shot, @intCast((i % 16) * 8 + 4), @intCast((i / 16) * 8 + 4)));
+    }
+}
+
+test "mixed geometry index widths preserve pixels across primitives and flushes" {
+    try desktop.open(320, 240, "Indexed geometry ordering");
+    defer desktop.close();
+    try init();
+    defer deinit();
+    const target = try createTarget(180, 64);
+    defer destroyTarget(target);
+    const texture = try upload(&.{
+        255,
+        255,
+        255,
+        255,
+    }, 1, 1, .nearest);
+    defer destroyTexture(texture);
+    beginTarget(target);
+    clear(.black);
+    const colors = [_]Color{
+        .{
+            .r = 255,
+            .g = 0,
+            .b = 0,
+            .a = 255,
+        },
+        .{
+            .r = 0,
+            .g = 255,
+            .b = 0,
+            .a = 255,
+        },
+        .{
+            .r = 0,
+            .g = 0,
+            .b = 255,
+            .a = 255,
+        },
+        .{
+            .r = 255,
+            .g = 255,
+            .b = 0,
+            .a = 255,
+        },
+    };
+    const indices8 = [_]u8{
+        2,
+        1,
+        0,
+        3,
+        2,
+        0,
+    };
+    const indices16 = [_]u16{
+        2,
+        1,
+        0,
+        3,
+        2,
+        0,
+    };
+    const indices32 = [_]u32{
+        2,
+        1,
+        0,
+        3,
+        2,
+        0,
+    };
+    for ([_]c_int{
+        0,
+        1,
+        2,
+        4,
+    }, colors, 0..) |size, color, i| {
+        const x: f32 = @floatFromInt(i * 40 + 5);
+        const quad = [_]Vertex{
+            vertex(.{ .x = x, .y = 5 }, .{ .x = 0, .y = 0 }, color),
+            vertex(.{ .x = x + 30, .y = 5 }, .{ .x = 1, .y = 0 }, color),
+            vertex(.{ .x = x + 30, .y = 35 }, .{ .x = 1, .y = 1 }, color),
+            vertex(.{ .x = x, .y = 35 }, .{ .x = 0, .y = 1 }, color),
+        };
+        var expanded_vertices: [6]Vertex = undefined;
+        for (&expanded_vertices, indices8) |*v, index| v.* = quad[index];
+        const vertices: []const Vertex = if (size == 0) &expanded_vertices else &quad;
+        const indices: ?*const anyopaque = switch (size) {
+            0 => null,
+            1 => &indices8,
+            2 => &indices16,
+            4 => &indices32,
+            else => unreachable,
+        };
+        try std.testing.expect(c.SDL_RenderGeometryRaw(
+            renderer,
+            if (i % 2 == 0) texture else null,
+            &vertices[0].position.x,
+            @sizeOf(Vertex),
+            &vertices[0].color,
+            @sizeOf(Vertex),
+            &vertices[0].tex_coord.x,
+            @sizeOf(Vertex),
+            @intCast(vertices.len),
+            indices,
+            if (indices != null) 6 else 0,
+            size,
+        ));
+        // A flush consumes the CPU streams but leaves prior GPU draws pending.
+        if (i == 1) flush();
+        setColor(.white);
+        try std.testing.expect(c.SDL_RenderPoint(renderer, x + 15, 45));
+        try std.testing.expect(c.SDL_RenderLine(renderer, x, 55, x + 30, 55));
+    }
+    const shot = try readTexture(target);
+    defer destroyImage(shot);
+    for (colors, 0..) |color, i| {
+        const x: i32 = @intCast(i * 40 + 20);
+        try std.testing.expectEqual(color, imageColor(shot, x, 20));
+        try std.testing.expectEqual(Color.white, imageColor(shot, x, 45));
+        try std.testing.expectEqual(Color.white, imageColor(shot, x, 55));
+        try std.testing.expectEqual(Color.black, imageColor(shot, x, 40));
+    }
 }

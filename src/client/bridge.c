@@ -517,16 +517,6 @@ static void text_font_substitute(FcPattern *pattern, gpointer data) {
     FcPatternDel(pattern, FC_LCD_FILTER);
     FcPatternAddInteger(pattern, FC_LCD_FILTER, FC_LCD_LIGHT);
 }
-static PangoLayout *text_layout(cairo_t *cr) {
-    // Pango owns a default font map per thread. Configure it once so cached
-    // glyphs survive subsequent layouts, without changing system font settings.
-    PangoFontMap *map = pango_cairo_font_map_get_default();
-    if (PANGO_IS_FC_FONT_MAP(map) && !g_object_get_data(G_OBJECT(map), "zimbr-lcd-filter")) {
-        pango_fc_font_map_set_default_substitute(PANGO_FC_FONT_MAP(map), text_font_substitute, NULL, NULL);
-        g_object_set_data(G_OBJECT(map), "zimbr-lcd-filter", GINT_TO_POINTER(1));
-    }
-    return pango_cairo_create_layout(cr);
-}
 static cairo_t *text_context(cairo_surface_t *surface, double scale, int top, int subpixel) {
     cairo_t *cr = cairo_create(surface);
     // Keep glyph coordinates unchanged across tiles, including color emoji.
@@ -542,6 +532,49 @@ static cairo_t *text_context(cairo_surface_t *surface, double scale, int top, in
     cairo_set_font_options(cr, options);
     cairo_font_options_destroy(options);
     return cr;
+}
+struct TextSetup {
+    PangoContext *context[2];
+    double scale[2];
+    guint serial[2];
+};
+static void text_setup_free(gpointer value) {
+    struct TextSetup *cache = value;
+    for (int i = 0; i < 2; ++i) if (cache->context[i]) g_object_unref(cache->context[i]);
+    free(cache);
+}
+// The font map is per thread. Bound setup to two immutable contexts and release
+// the cache at thread exit; layouts own their context references independently.
+static GPrivate text_setup_key = G_PRIVATE_INIT(text_setup_free);
+static PangoLayout *text_layout(double scale, int subpixel) {
+    PangoFontMap *map = pango_cairo_font_map_get_default();
+    if (PANGO_IS_FC_FONT_MAP(map) && !g_object_get_data(G_OBJECT(map), "zimbr-lcd-filter")) {
+        pango_fc_font_map_set_default_substitute(PANGO_FC_FONT_MAP(map), text_font_substitute, NULL, NULL);
+        g_object_set_data(G_OBJECT(map), "zimbr-lcd-filter", GINT_TO_POINTER(1));
+    }
+    struct TextSetup *cache = g_private_get(&text_setup_key);
+    if (!cache) {
+        cache = calloc(1, sizeof(*cache));
+        if (!cache) return NULL;
+        g_private_set(&text_setup_key, cache);
+    }
+    const int slot = !!subpixel;
+    const guint serial = pango_font_map_get_serial(map);
+    if (!cache->context[slot] || cache->scale[slot] != scale || cache->serial[slot] != serial ||
+        pango_context_get_font_map(cache->context[slot]) != map) {
+        // Keep contexts immutable: older layouts may still use a different scale.
+        cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
+        cairo_t *cr = text_context(surface, scale, 0, subpixel);
+        PangoContext *context = pango_cairo_create_context(cr);
+        cairo_destroy(cr);
+        cairo_surface_destroy(surface);
+        if (!context) return NULL;
+        if (cache->context[slot]) g_object_unref(cache->context[slot]);
+        cache->context[slot] = context;
+        cache->scale[slot] = scale;
+        cache->serial[slot] = serial;
+    }
+    return pango_layout_new(cache->context[slot]);
 }
 static int text_measure_lines(ZcText *t, const PangoFontDescription *description) {
     PangoContext *context = pango_layout_get_context(t->layout);
@@ -616,11 +649,8 @@ ZcText *zc_text_new_weighted(const char *text, int length, double size, int widt
         if (p - word > 512) char_wrap = 1;
     }
     ZcText *t = calloc(1, sizeof(*t)); if (!t) return NULL; t->scale = scale; t->subpixel = subpixel;
-    // Layout needs a Cairo context but no rendered pixels yet; a 1x1 surface is sufficient.
-    cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
-    // Shape and hint at the same device scale used for rasterization. Creating
-    // the layout at 1x then drawing it at fractional scale softens small text.
-    cairo_t *cr = text_context(surface, scale, 0, subpixel); t->layout = text_layout(cr);
+    t->layout = text_layout(scale, subpixel);
+    if (!t->layout) { free(t); return NULL; }
     PangoFontDescription *font = pango_font_description_new();
     pango_font_description_set_family(font, "sans-serif");
     pango_font_description_set_absolute_size(font, size * PANGO_SCALE);
@@ -647,7 +677,6 @@ ZcText *zc_text_new_weighted(const char *text, int length, double size, int widt
     // never make an enormous texture or stretch it to fit the message bubble.
     t->width = (int)((MIN(t->width, width) + 2.0) * scale + .5);
     double height = (ceil(logical_height / (double)PANGO_SCALE) + 2.0) * scale + .5;
-    cairo_destroy(cr); cairo_surface_destroy(surface);
     if (!logical_height || height < 1 || height > INT_MAX || t->width < 1) { zc_text_free(t); return NULL; }
     t->height = (int)height;
     return t;

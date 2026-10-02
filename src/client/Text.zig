@@ -32,36 +32,49 @@ const Entry = struct {
     hash: u64,
     text: []const u8,
     layout: *c.ZcText,
-    texture: ?graphics.Texture = null,
-    tile_top: i32 = -1,
+    rasters: std.ArrayList(Raster) = .empty,
     used: u64 = 0,
     width: f32,
     height: f32,
     ink_center_y: ?f32 = null,
     fallback: bool = false,
     raster_failed: bool = false,
-    color: graphics.Color = graphics.Color.white,
-    background: ?graphics.Color = null,
-    start: usize = 0,
-    end: usize = 0,
+};
+const Raster = struct {
+    texture: graphics.Texture,
+    key: Key,
+    used: u64,
+
+    const Key = struct {
+        top: i32,
+        height: i32,
+        color: graphics.Color,
+        background: ?graphics.Color,
+        start: usize,
+        end: usize,
+    };
 };
 // 32 MiB bounds cached glyph textures while retaining several visible screens of text.
 const max_texture_bytes = 32 * 1024 * 1024;
+// Keep all eight avatar colors plus selection/tile variants without unbounded tiny textures.
+const max_rasters_per_layout = 16;
 pub fn deinit(s: *Text) void {
     for (s.entries.items) |*e| {
         c.zc_text_free(e.layout);
-        s.dropTexture(e);
+        s.dropRasters(e);
+        e.rasters.deinit(a);
         a.free(e.text);
     }
     s.entries.deinit(a);
     s.* = undefined;
 }
-fn dropTexture(s: *Text, e: *Entry) void {
-    if (e.texture) |tx| {
-        s.texture_bytes -= graphics.textureBytes(tx);
-        graphics.destroyTexture(tx);
-        e.texture = null;
-    }
+fn dropRaster(s: *Text, e: *Entry, index: usize) void {
+    const raster = e.rasters.swapRemove(index);
+    s.texture_bytes -= graphics.textureBytes(raster.texture);
+    graphics.destroyTexture(raster.texture);
+}
+fn dropRasters(s: *Text, e: *Entry) void {
+    while (e.rasters.items.len > 0) s.dropRaster(e, e.rasters.items.len - 1);
 }
 pub fn nextFrame(s: *Text, scale: f32) void {
     if (s.scale != scale) {
@@ -133,7 +146,8 @@ fn getStyled(s: *Text, text: []const u8, style: Style, width: f32, single_line: 
         };
         const old = &s.entries.items[oldest];
         c.zc_text_free(old.layout);
-        s.dropTexture(old);
+        s.dropRasters(old);
+        old.rasters.deinit(a);
         a.free(old.text);
         s.entries.items[oldest] = e;
         return &s.entries.items[oldest];
@@ -338,6 +352,63 @@ pub fn underline(s: *Text, text: []const u8, origin: graphics.Point, width: f32,
 fn rgba(color: graphics.Color) u32 {
     return (@as(u32, color.r) << 24) | (@as(u32, color.g) << 16) | (@as(u32, color.b) << 8) | color.a;
 }
+
+fn getRaster(s: *Text, e: *Entry, key: Raster.Key) !graphics.Texture {
+    for (e.rasters.items) |*raster| if (std.meta.eql(raster.key, key)) {
+        raster.used = s.frame;
+        return raster.texture;
+    };
+    if (e.rasters.items.len < max_rasters_per_layout) try e.rasters.ensureUnusedCapacity(a, 1);
+    const bytes = @as(usize, @intCast(c.zc_text_width(e.layout))) * @as(usize, @intCast(key.height)) * 4;
+    if (bytes > max_texture_bytes) return error.InvalidDimensions;
+    const pixels = c.zc_text_pixels_with_selection(
+        e.layout,
+        rgba(key.color),
+        if (e.fallback) 0 else @intCast(key.start),
+        if (e.fallback) 0 else @intCast(key.end),
+        key.top,
+        key.height,
+        if (key.background) |bg| rgba(bg) else 0,
+        rgba(theme.colors.selection),
+    ) orelse return error.TextRasterUnavailable;
+    defer c.zc_text_clear_pixels(e.layout);
+
+    if (e.rasters.items.len == max_rasters_per_layout) {
+        var oldest: usize = 0;
+        for (e.rasters.items, 0..) |raster, i| {
+            if (raster.used < e.rasters.items[oldest].used) oldest = i;
+        }
+        s.dropRaster(e, oldest);
+    }
+    while (s.texture_bytes + bytes > max_texture_bytes) {
+        var oldest_entry: ?*Entry = null;
+        var oldest_index: usize = 0;
+        var oldest_frame: u64 = std.math.maxInt(u64);
+        for (s.entries.items) |*entry| for (entry.rasters.items, 0..) |raster, i| {
+            if (oldest_entry == null or raster.used < oldest_frame) {
+                oldest_entry = entry;
+                oldest_index = i;
+                oldest_frame = raster.used;
+            }
+        };
+        // texture_bytes counts only the live rasters owned by these entries.
+        s.dropRaster(oldest_entry.?, oldest_index);
+    }
+    const texture = try graphics.uploadPixels(.{
+        .bytes = pixels,
+        .width = c.zc_text_width(e.layout),
+        .height = key.height,
+        .pitch = c.zc_text_pitch(e.layout),
+        .format = .cairo_argb,
+    }, .nearest);
+    e.rasters.appendAssumeCapacity(.{
+        .texture = texture,
+        .key = key,
+        .used = s.frame,
+    });
+    s.texture_bytes += bytes;
+    return texture;
+}
 fn drawEntry(
     s: *Text,
     e: *Entry,
@@ -364,57 +435,18 @@ fn drawEntry(
         // Match the native raster cap while allowing tall windows to draw several bounded tiles.
         const tile_height = @min(visible_end - top, 2048);
         if (tile_height <= 0) return;
-        if (e.texture != null and (e.tile_top != top or e.texture.?.h != tile_height or !std.meta.eql(
-            e.color,
-            color,
-        ) or !std.meta.eql(
-            e.background,
-            background,
-        ) or e.start != start or e.end != end)) s.dropTexture(e);
-        if (e.texture == null) {
-            const bytes = @as(usize, @intCast(c.zc_text_width(e.layout))) * @as(
-                usize,
-                @intCast(tile_height),
-            ) * 4;
-            for (s.entries.items) |*other| {
-                if (s.texture_bytes + bytes <= max_texture_bytes) break;
-                s.dropTexture(other);
-            }
-            e.tile_top = top;
-            e.color = color;
-            e.background = background;
-            e.start = start;
-            e.end = end;
-            const pixels = c.zc_text_pixels_with_selection(
-                e.layout,
-                rgba(color),
-                if (e.fallback) 0 else @intCast(start),
-                if (e.fallback) 0 else @intCast(end),
-                top,
-                tile_height,
-                if (background) |bg| rgba(bg) else 0,
-                rgba(theme.colors.selection),
-            );
-            if (pixels == null) {
-                e.raster_failed = true;
-                return;
-            }
-            defer c.zc_text_clear_pixels(e.layout);
-            e.texture = graphics.uploadPixels(.{
-                .bytes = pixels,
-                .width = c.zc_text_width(e.layout),
-                .height = tile_height,
-                .pitch = c.zc_text_pitch(e.layout),
-                .format = .cairo_argb,
-            }, .nearest) catch {
-                e.raster_failed = true;
-                return;
-            };
-            s.texture_bytes += bytes;
-            // Pango already antialiases at framebuffer resolution. Copy its pixels
-            // 1:1 so texture filtering does not add another blur pass.
-        }
-        const tx = e.texture.?;
+        const tx = s.getRaster(e, .{
+            .top = top,
+            .height = tile_height,
+            .color = color,
+            .background = background,
+            .start = start,
+            .end = end,
+        }) catch {
+            e.raster_failed = true;
+            return;
+        };
+        // Pango already antialiases at framebuffer resolution; copy pixels 1:1.
         graphics.drawRaster(tx, .{
             .x = x,
             .y = y + @as(f32, @floatFromInt(top)) / s.scale,

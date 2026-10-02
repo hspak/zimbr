@@ -5,7 +5,8 @@ from pathlib import Path
 
 from zrct import Suite, TestCase
 
-SUITE = Suite("zimbr-native", timeout=240)
+SUITE = Suite("zimbr-native", timeout=240, display=os.environ.get("ZRCT_DISPLAY_SMOKE") == "1",
+              sdl_renderer=os.environ.get("SDL_RENDER_DRIVER"))
 
 
 class Native(TestCase):

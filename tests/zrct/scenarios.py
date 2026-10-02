@@ -7,14 +7,15 @@ import re
 from zrct import Suite, TestCase
 from zrct.desktop import DesktopInput
 
-from support import relay, reading_anchor
+from support import relay, reading_anchor, set_boundary
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 PREFIX = os.environ.get("ZRCT_OPENSSL_PREFIX", str(REPOSITORY / ".tools/openssl-3.5"))
 SUITE = Suite("zimbr", REPOSITORY,
               ("zig", "build", "client", "fake-relay", "-Dautomation=true", f"-Dopenssl-prefix={PREFIX}"),
               "zig-out/bin/zimbr", setup=relay, timeout=90, desktop_input=True,
-              width=2560, height=1600)
+              width=2560, height=1600, display=os.environ.get("ZRCT_DISPLAY_SMOKE") == "1",
+              sdl_renderer=os.environ.get("SDL_RENDER_DRIVER"))
 
 
 class Messages(TestCase):
@@ -40,7 +41,7 @@ class Messages(TestCase):
         self.relay.expect_sent_once(text)
 
     def test_reviewed_attachments(self):
-        self.context.bundle.manifest["boundary"] = "application_input+native_drop_handler"
+        set_boundary(self.context, "application_input+native_drop_handler")
         self.app.press("left_control+n")
         self.app.type_text("peer@example.invalid")
         self.app.press("enter")
@@ -116,7 +117,8 @@ class Messages(TestCase):
         self.relay.expect_no_sends()
 
     def test_review_remove_attachment_and_restart_before_sending(self):
-        self.context.bundle.manifest["boundary"] = "application_input+native_drop_handler"
+        set_boundary(self.context, "application_input+native_drop_handler")
+        boundary = self.context.bundle.manifest["boundary"]
         self.app.target("composer").drop(self.relay.paths)
         self.app.target("draft-attachments").expect(value="3", label="photo 👋.png")
         self.app.target("send-button").expect(enabled=True)
@@ -130,6 +132,7 @@ class Messages(TestCase):
         self.relay.expect_draft(self.app, text)
         self.relay.expect_no_sends()
         self.app.restart()
+        self.assertEqual(boundary, self.context.bundle.manifest["boundary"])
         self.app.target(role="row", text="alice").expect_visible()
         self.app.target(role="row", text="alice").click()
         self.app.target("composer").expect(value=text)
@@ -247,9 +250,10 @@ class Settings(TestCase):
 
 class Desktop(TestCase):
     def setUp(self):
-        self.context.bundle.manifest["boundary"] = "compositor_input"
+        set_boundary(self.context, "compositor_input")
         self.relay = self.context.fixture
         self.app = self.relay.launch()
+        self.assertEqual("compositor_input", self.context.bundle.manifest["boundary"])
         self.desktop = DesktopInput(self.context)
         self.app.target(role="row", text="alice").expect_visible(timeout=15)
         self.desktop.activate()
@@ -323,6 +327,8 @@ class Application(TestCase):
         self.assertTrue((path.parent / (icon + ".svg")).is_file())
         app = self.context.launch("--data-dir", self.context.fixture.data,
                                   env={"WAYLAND_DEBUG": "client"})
+        if requested := os.environ.get("SDL_RENDER_DRIVER"):
+            self.assertIn(app.handshake["rendering"]["backend"], requested.lower().split(","))
         app.target("settings_relay").expect_visible()
         def reported_ids():
             return re.findall(r'xdg_toplevel[^\n]*\.set_app_id\("([^"\n]*)"\)',

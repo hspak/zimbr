@@ -1524,6 +1524,51 @@ test "long Unicode text measures, wraps, and renders a bounded tile" {
     try std.testing.expect(hit >= 99 and hit <= 101);
 }
 
+test "live text layouts retain pixels when other layouts change scale and font style" {
+    const c = @import("client.zig").c.api;
+    const text = "Keep é 한글 👩‍💻 שלום\nwrapped glyphs and selection";
+    const layout = c.zc_text_new_with_options(text.ptr, text.len, 16, 170, 1.25, 0, 1) orelse
+        return error.NoLayout;
+    defer c.zc_text_free(layout);
+    const width = c.zc_text_width(layout);
+    const height = c.zc_text_height(layout);
+    const pixels = c.zc_text_pixels_on(layout, 0x112233ff, 0, 12, 0, height, 0xf0e8d8ff);
+    try std.testing.expect(pixels != null);
+    const length = @as(usize, @intCast(c.zc_text_pitch(layout))) * @as(usize, @intCast(height));
+    const before = try std.testing.allocator.dupe(u8, pixels[0..length]);
+    defer std.testing.allocator.free(before);
+    var caret_before: [3]c_int = undefined;
+    c.zc_text_caret(layout, 12, &caret_before[0], &caret_before[1], &caret_before[2]);
+    for ([_]f64{
+        1.25,
+        2,
+        1,
+        1.25,
+    }) |scale| for ([_]c_int{ 0, 1 }) |subpixel| {
+        const other_text = "Other 한글";
+        const other = c.zc_text_new_weighted(other_text, other_text.len, 24, 90, scale, 0, subpixel, 600) orelse
+            return error.NoLayout;
+        defer c.zc_text_free(other);
+        try std.testing.expect(c.zc_text_pixels_on(
+            other,
+            0xff0000ff,
+            0,
+            0,
+            0,
+            c.zc_text_height(other),
+            if (subpixel == 1) 0xffffffff else 0,
+        ) != null);
+        try std.testing.expectEqual(width, c.zc_text_width(layout));
+        try std.testing.expectEqual(height, c.zc_text_height(layout));
+        var caret_after: [3]c_int = undefined;
+        c.zc_text_caret(layout, 12, &caret_after[0], &caret_after[1], &caret_after[2]);
+        try std.testing.expectEqualSlices(c_int, &caret_before, &caret_after);
+        const after = c.zc_text_pixels_on(layout, 0x112233ff, 0, 12, 0, height, 0xf0e8d8ff);
+        try std.testing.expect(after != null);
+        try std.testing.expectEqualSlices(u8, before, after[0..length]);
+    };
+}
+
 test "unbroken messages and URLs have bounded raster dimensions" {
     const c = @import("client.zig").c.api;
     const text = try std.testing.allocator.alloc(u8, 65536);

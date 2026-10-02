@@ -1,5 +1,6 @@
 """Owned relay fixture, durable-effect assertions, and reading-anchor selection."""
 from contextlib import closing, contextmanager
+from dataclasses import replace
 import json
 from pathlib import Path
 import subprocess
@@ -122,6 +123,12 @@ def relay(context):
         yield fixture
     finally:
         fixture.close()
+
+
+def set_boundary(context, boundary):
+    """Preserve this scenario's explicit input boundary through launches and restarts."""
+    context.suite = replace(context.suite, boundary=boundary)
+    context.bundle.manifest["boundary"] = boundary
 
 
 def reading_anchor(app):

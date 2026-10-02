@@ -14,6 +14,109 @@ Dev.app**, and separate `zimbr-dev` client state. For packaged releases, use
 `release` consistently in build and administration commands, port **8731**, and
 the paths in [profiles](macos-profiles.md). Optimization does not select a profile.
 
+## Rendering benchmarks
+
+Linux GUI builds fetch [pinned SDL 3.4.16 sources](../vendor/sdl/README.zimbr),
+compile them directly with [Zig](../build/sdl.zig), and link them statically.
+The client, rendering benchmark, native tests, and Zrct hooks all use that library.
+GNU `patch` applies the checked-in [Vulkan changes](../build/sdl/vulkan.patch)
+to a generated renderer file in the build cache. The downloaded sources remain
+unchanged; Zig reruns patch preparation when either input changes. No manual patch
+command, Python, CMake, Ninja, or host SDL installation is required. Zig owns
+compilation, configuration headers, caching, and linking, using the selected
+optimization mode and CPU target. The first build needs network access to fetch
+dependencies; subsequent builds can reuse the cached packages.
+`pkg-config` locates native development headers, and `wayland-scanner` generates
+bindings from SDL's pinned protocol XML as Zig build steps. D-Bus and libdecor
+development files are required. IBus support is enabled when `pkg-config` finds
+`ibus-1.0`; missing development files omit SDL's direct IBus backend. Fcitx and
+compositor-provided Wayland text input remain available. Use `-Dibus=false` to
+disable IBus explicitly or `-Dibus=true` to require it and fail if it is unavailable.
+Use `PKG_CONFIG_PATH` for development libraries outside the system prefix.
+Optional audio/device drivers are enabled when their development files are present.
+The patched library reuses completed upload buffers, retaining at most 8 MiB of
+buffer capacity per command buffer, and raises the upload batch limit from 32 to
+128. Driver allocation alignment and metadata are additional. Recycling waits
+for the associated completion fence or queue idle. Both swapchain recreation and
+renderer shutdown release every retained buffer.
+Geometry preserves shared vertices and normalizes indices to 32 bits, retaining
+SDL's draw batching. Vertex and index bytes share the existing GPU buffer lifetime.
+Shader constants and matching descriptor bindings are reused only within the
+current command list; an entry never mutates a descriptor used by pending draws.
+The SDL revision reported by the benchmark includes a digest of the upstream
+package hash and Vulkan patch, identifying both the release contents and local changes.
+
+Text shaping shares two immutable Pango contexts per thread, one for each
+antialiasing mode. Scale or font-map changes replace the cached context while
+existing layouts retain their original context. Cold-text benchmarks still
+rebuild every application layout and raster.
+
+Build the synthetic benchmark with the pinned toolchain, then run it on the
+Wayland desktop whose GPU and compositor you want to measure:
+
+```sh
+zig build render-bench -Doptimize=ReleaseFast
+python3 tests/rendering.py --output artifacts/rendering-before \
+  --drivers opengl --runs 5 --frames 1200
+# After a renderer change, repeat backends with alternating run order.
+python3 tests/rendering.py --output artifacts/rendering-after \
+  --drivers opengl vulkan gpu --runs 5 --frames 1200
+# Isolate the cost of avatars sharing a letter in different participant colors.
+python3 tests/rendering.py --output artifacts/rendering-distinct \
+  --drivers opengl vulkan --avatars distinct --runs 5 --frames 1200
+# Isolate cache rebuilding or image uploads for profiling.
+python3 tests/rendering.py --output artifacts/rendering-cold-text \
+  --drivers opengl vulkan --workload cold_text --runs 5 --frames 1200
+SDL_RENDER_DRIVER=vulkan perf record -g --call-graph dwarf \
+  -o artifacts/rendering-image-upload.perf \
+  -- zig-out/bin/render-bench 3000 shared image_upload
+```
+
+Each output directory must be new. It retains per-frame JSONL samples, summaries,
+stderr logs, the executable hash, source revision, SDL build revision, and system/driver information.
+`--workload` selects `cached`, `scroll`, `cold_text`, or `image_upload`; the default
+is `all`. The executable accepts the same selection as its optional third argument,
+after frame count and avatar mode. Keep profiling runs separate from timing runs.
+Use `--drivers default` to inspect and measure the application's default choice.
+The `vulkan` backend is SDL's direct Vulkan renderer; `gpu` selects SDL's GPU
+renderer with `SDL_GPU_DRIVER=vulkan` and verifies the underlying GPU driver.
+No relay, credentials, database, or real messages are used. A temporary benchmark
+window draws 32 conversations and 1,000 synthetic messages through the production
+chat renderer. Keep the window on the same display at the same scale, with other
+GPU workloads quiet. Compare matching window dimensions and optimization modes.
+The default `--avatars shared` gives conversations the same initial in different
+participant colors, exposing raster-cache contention. `--avatars distinct` gives
+visible conversations different initials. Compare backends within each fixture;
+the shared-initial case is a stress case, not an estimate of every user's chat list.
+The `cached` workload means a settled scene after warm-up; it does not guarantee
+zero texture uploads if cached raster variants replace one another.
+
+The four workloads are settled redraws, a deterministic scrolling sweep, clearing
+the text cache each frame, and uploading/drawing/destroying a 512×512 RGBA image
+over the cached chat. Layout settles before measurement; each workload gets 120
+warm-up frames. The benchmark disables VSync and bypasses the production frame
+timer. It records draw and presentation wall time plus process CPU time, reporting
+p50/p95/p99 and the fraction of work intervals exceeding the 8.33 ms budget for
+120 Hz. These are CPU-side throughput measurements through `SDL_RenderPresent`,
+not GPU timestamps, displayed FPS, input latency, or proof of missed display
+deadlines. Event polling is outside the measured interval. Texture retirement is
+included in the upload workload. The cold-text workload measures cache rebuilding,
+not whole-application startup. No screenshot capture runs during measurement.
+
+Preserve the baseline binary before rebuilding if a later direct comparison is
+needed. CPU sampling with `perf record` should use a separate run so profiling
+overhead does not contaminate the timing samples. The isolated zrct headless
+profile uses software OpenGL, so use a GPU-backed desktop for hardware comparisons.
+
+Shared shaped text retains up to 16 raster appearances per layout, within the
+32 MiB live text-texture limit. This avoids replacing a glyph texture whenever
+the same avatar initial appears in a different participant color. Retired static
+textures reuse matching size/format allocations in a FIFO bounded by 128 textures
+and 8 MiB of pixel storage, additional to the live caches. SDL/driver allocation
+overhead is outside those byte counts. Render targets and oversized textures are
+released immediately. Reusing storage avoids repeated creation and synchronous
+destruction in SDL's direct Vulkan renderer; uploads still use SDL's transfer path.
+
 ## 1. Build on the Mac
 
 Install Apple's Command Line Tools (`xcode-select --install` if absent), then:
@@ -153,7 +256,24 @@ zig build test-gui-isolated -Dopenssl-prefix=.tools/openssl-3.5
 zig build test-zrct -Dautomation=true -Dopenssl-prefix=.tools/openssl-3.5
 # Select a scenario and retain a recording:
 zig build test-zrct -Dautomation=true -Dopenssl-prefix=.tools/openssl-3.5 -- --filter send_unicode --record
+# On a GPU Wayland desktop, run the isolated suite in a nested GPU compositor:
+ZRCT_DISPLAY_SMOKE=1 SDL_RENDER_DRIVER=vulkan zig build test-gui-isolated \
+  -Doptimize=ReleaseSafe -Dopenssl-prefix=.tools/openssl-3.5
+ZRCT_DISPLAY_SMOKE=1 SDL_RENDER_DRIVER=vulkan zig build test-zrct \
+  -Dautomation=true -Doptimize=ReleaseSafe -Dopenssl-prefix=.tools/openssl-3.5 \
+  -- --filter Messages
 ```
+
+The default headless suites select software OpenGL unless `SDL_RENDER_DRIVER`
+is explicitly set. The suites pass this selection through Zrct's renderer option,
+which records the requested renderer in each report's rendering profile.
+`ZRCT_DISPLAY_SMOKE=1` uses the existing GPU Wayland session
+for a visible nested compositor while keeping client data and fixtures isolated;
+it tests the application's normal renderer preference unless overridden. Hardware
+and software rendering profiles have different visual baselines. The nested profile
+does not support all compositor-control fixtures: run the `Desktop` scale, clipboard,
+and drag-and-drop scenarios in their default headless profile. Use the separate
+benchmark above for timings; scenario capture and instrumentation add overhead.
 
 `-Dopenssl-prefix` selects the OpenSSL 3.5 LTS static libraries for the synthetic
 relay; replace the example prefix with your installation. Zrct's Zig build
@@ -195,8 +315,8 @@ desktop, and synthetic relay. It does not use the desktop's running input method
 or change the user's input-method settings.
 
 ```sh
-zig build test-ime -Dautomation=true -Dopenssl-prefix=/path/to/openssl-3.5
-zig build test-ime -Dautomation=true -Dopenssl-prefix=/path/to/openssl-3.5 -- --repeat 3
+zig build test-ime -Dautomation=true -Dibus=true -Dopenssl-prefix=/path/to/openssl-3.5
+zig build test-ime -Dautomation=true -Dibus=true -Dopenssl-prefix=/path/to/openssl-3.5 -- --repeat 3
 ```
 
 For an extracted IBus installation, `ZIMBR_IBUS_PREFIX` selects its prefix

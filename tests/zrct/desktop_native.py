@@ -1,5 +1,6 @@
 """SDL/Wayland contracts using Zrct's compositor, without application instrumentation."""
 import json
+import os
 import socket
 import subprocess
 
@@ -7,7 +8,8 @@ from zrct import Suite, TestCase
 from zrct.environment import executable, platform_directory
 from zrct.process import until
 
-SUITE = Suite("zimbr-sdl-desktop", timeout=90, desktop_input=True, boundary="compositor_input")
+SUITE = Suite("zimbr-sdl-desktop", timeout=90, desktop_input=True, boundary="compositor_input",
+              sdl_renderer=os.environ.get("SDL_RENDER_DRIVER"))
 
 
 class NativeDesktop(TestCase):
