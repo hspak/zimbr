@@ -6,6 +6,9 @@ import shutil
 import signal
 import sqlite3
 import sys
+import time
+import threading
+import uuid
 from contextlib import closing
 
 
@@ -16,25 +19,72 @@ def main():
     from attachment_sends import AttachmentSends
     from client_media_transport import png
     from fixture import add_message
+    from relay_faults import Faults
     fixture = AttachmentSends()
     fixture.setUp()
     paths = [fixture.root / name for name in ("photo 👋.png", "empty.txt", "original.bin")]
     originals = [png(), b"", bytes(range(256)) * 1024]
     for path, content in zip(paths, originals):
         path.write_bytes(content)
+    output_lock = threading.Lock()
+    faults = None
+    def write(value):
+        with output_lock:
+            print(json.dumps(value, ensure_ascii=False), flush=True)
+    def publish(event, data):
+        write(dict(event=event, data=data))
     def reply(value):
-        print(json.dumps(value, ensure_ascii=False), flush=True)
+        write(dict(id=command["id"], result=value))
     try:
         # Stable old content for visual baselines; certificate validity remains real time.
         with closing(sqlite3.connect(fixture.source)) as db:
             db.execute("UPDATE message SET date=?+ROWID", (790000000000000000,))
             db.commit()
-        reply(dict(ready=True, args=fixture.tls.client_args(), paths=list(map(str, paths))))
+        publish("ready", dict(args=fixture.tls.client_args(), paths=list(map(str, paths))))
         for line in sys.stdin:
             command = json.loads(line)
             op = command["op"]
             try:
-                if op == "sends":
+                if op == "fault":
+                    if faults is None:
+                        faults = Faults(fixture, publish)
+                    faults.set(command["mode"])
+                    reply(dict(ok=True, args=fixture.tls.client_args(port=faults.server.server_port)))
+                elif op == "faults":
+                    reply(faults.snapshot())
+                elif op == "status":
+                    reply(dict(ok=True, **fixture.get("/v1/status")))
+                elif op == "rich_content":
+                    fixture.stop()
+                    attachments = fixture.source.with_suffix(".db.attachments")
+                    attachments.mkdir(mode=0o700, exist_ok=True)
+                    guid = str(uuid.UUID(int=2000000))
+                    with closing(sqlite3.connect(fixture.source)) as db:
+                        db.executescript("ALTER TABLE message ADD COLUMN associated_message_guid TEXT; "
+                                         "ALTER TABLE message ADD COLUMN associated_message_emoji TEXT;")
+                        row = add_message(db, "Photos and reactions 👋", guid=guid)
+                        for index in range(2):
+                            path = attachments / f"photo-{index}"
+                            path.write_bytes(b"ZIMBR-IMAGE fixture")
+                            db.execute("INSERT INTO attachment VALUES(?,?,?,?,?,?)",
+                                       (100 + index, str(uuid.UUID(int=2000001 + index)),
+                                        f"photo-{index}.heic", "image/heic", 19, str(path)))
+                            db.execute("INSERT INTO message_attachment_join VALUES(?,?)", (row, 100 + index))
+                        add_message(db, "Reaction fixture", associated_message_type=2001,
+                                    associated_message_guid="p:0/" + guid, handle_id=1)
+                        add_message(db, "Reaction fixture", associated_message_type=2001,
+                                    associated_message_guid="p:0/" + guid, handle_id=2, is_from_me=1)
+                        fixture.before = db.execute("SELECT max(ROWID) FROM message").fetchone()[0]
+                        db.commit()
+                    fixture.start()
+                    reply(dict(ok=True, text="Photos and reactions 👋"))
+                elif op == "remove_self_reaction":
+                    with closing(sqlite3.connect(fixture.source)) as db:
+                        removed = db.execute("DELETE FROM message WHERE is_from_me=1 AND associated_message_type=2001").rowcount
+                        db.commit()
+                    fixture.assertEqual(removed, 1)
+                    reply(dict(ok=True, removed=removed))
+                elif op == "sends":
                     with closing(sqlite3.connect(fixture.source)) as db:
                         rows = [dict(text=text, chat=chat) for text, chat in db.execute(
                             "SELECT m.text,j.chat_id FROM message m "
@@ -59,13 +109,35 @@ def main():
                         fixture.assertEqual(row[1], path.name)
                         fixture.assertEqual(Path(row[2]).read_bytes(), content)
                     reply(dict(ok=True, original_bytes=True, attachments=len(indices)))
-                elif op == "history":
+                elif op in ("history", "benchmark_history"):
+                    benchmark = op == "benchmark_history"
+                    count = command.get("count", 200)
+                    if not 1 <= count <= 20000:
+                        raise ValueError("history count must be between 1 and 20000")
+                    if benchmark:
+                        fixture.stop()
                     with closing(sqlite3.connect(fixture.source)) as db:
-                        for index in range(command.get("count", 200)):
+                        for index in range(count):
                             add_message(db, f"Reading anchor {index:03d}", chat=1,
-                                        date=790000000000000000 - 1000000 + index)
+                                        date=790000000000000000 - 1000000 + index,
+                                        **({"guid": str(uuid.UUID(int=index + 1))} if benchmark else {}))
+                        if benchmark:
+                            add_message(db, "Benchmark initial conversation", chat=2,
+                                        date=790000001000000000, guid=str(uuid.UUID(int=1000000)))
+                        expected = db.execute("SELECT count(*) FROM message").fetchone()[0]
                         db.commit()
-                    reply(dict(ok=True))
+                    if benchmark:
+                        fixture.start()
+                        deadline = time.monotonic() + 45
+                        while True:
+                            with closing(sqlite3.connect(f"file:{fixture.root / 'data/relay.db'}?mode=ro", uri=True)) as db:
+                                indexed = db.execute("SELECT count(*) FROM messages").fetchone()[0]
+                            if indexed == expected:
+                                break
+                            if fixture.proc.poll() is not None or time.monotonic() >= deadline:
+                                raise RuntimeError(f"Relay indexed {indexed}/{expected} fixture messages")
+                            time.sleep(.05)
+                    reply(dict(ok=True, source_messages=expected, indexed_messages=indexed if benchmark else None))
                 elif op == "receive":
                     with closing(sqlite3.connect(fixture.source)) as db:
                         row = add_message(db, command["text"], chat=command.get("chat", 1))
@@ -82,9 +154,13 @@ def main():
                     break
                 else:
                     raise ValueError(f"Unknown fixture operation {op}")
-            except Exception as error:
+            except AssertionError as error:
                 reply(dict(ok=False, assertion=str(error)))
+            except Exception as error:
+                write(dict(id=command["id"], error=str(error)))
     finally:
+        if faults:
+            faults.close()
         if fixture.proc:
             try:
                 os.kill(fixture.proc.pid, signal.SIGCONT)

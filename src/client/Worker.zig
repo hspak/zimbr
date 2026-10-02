@@ -965,7 +965,8 @@ fn complete(s: *Worker) !void {
             s.dirty = true;
             return;
         }
-        if (status == 409 or status == 410) {
+        if (try requiresSync(ar, status, raw)) {
+            log.info("Relay requested sync: job={s}, HTTP {d}", .{ @tagName(job), status });
             s.need_sync = true;
             s.disconnected(status);
             s.retry_at = 0;
@@ -1077,6 +1078,11 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
             // previously cached presentation, marked stale in Details.
             const gate = blocked or (old_blocked and !contacts.ready);
             try s.store.set("contacts_blocked", if (gate) "1" else "0");
+            if (gate != old_blocked) log.info("Contact presentation changed: blocked={}, permission={s}, reason={s}", .{
+                gate,
+                contacts.permission orelse "unspecified",
+                contacts.reason,
+            });
             s.content_dirty = s.content_dirty or gate != old_blocked;
             if (changed_extension and s.stream_active) {
                 c.zc_net_cancel_stream(s.net.?);
@@ -1089,20 +1095,31 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
             s.send_attachments = v.capabilities.send_attachments_v1 and v.capabilities.attachment_uploads_v1;
             // Poll status each second during sync and every five seconds while idle.
             s.status_at = u.now() + @as(i64, if (v.sync_activity.active()) 1000 else 5000);
-            if (!u.eq(v.server_epoch, try s.store.get(ar, "epoch")) or !u.eq(
+            const epoch_changed = !u.eq(v.server_epoch, try s.store.get(ar, "epoch"));
+            if (epoch_changed or !u.eq(
                 try s.store.get(ar, "bootstrapped"),
                 "1",
-            ) or (identities and !u.eq(
-                try s.store.get(ar, "identity_bootstrapped"),
-                "1",
-            ))) {
+            )) {
                 if (s.stream_active) {
                     c.zc_net_cancel_stream(s.net.?);
                     s.stream_active = false;
                     s.sse.reset();
                 }
                 s.online = false;
+                log.info("Status requested bootstrap: epoch_changed={}", .{epoch_changed});
                 try s.request(.sync, "/v1/sync", .{}, null);
+            } else if (identities and !u.eq(try s.store.get(ar, "identity_bootstrapped"), "1")) {
+                // Enabling Contacts does not invalidate message history or its cursor.
+                // Snapshot the directory, then replay from the saved cursor to cover overlap.
+                if (s.stream_active) {
+                    c.zc_net_cancel_stream(s.net.?);
+                    s.stream_active = false;
+                    s.sse.reset();
+                }
+                s.online = false;
+                s.identities_before = try a.dupe(u8, "");
+                s.status = "Downloading contact names…";
+                log.info("Contact bootstrap started; retaining message cache and cursor", .{});
             } else {
                 try s.attach(ar);
                 if (s.online) s.status = if (!v.adapter_ready) "Relay reachable · Messages unavailable; run relay doctor on the Mac" else if (!s.send_direct and !s.reply_existing) "Connected · sending unavailable; check Messages Automation permission" else "Connected";
@@ -1250,6 +1267,19 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
         },
         .idle => {},
     }
+}
+fn requiresSync(ar: u.Allocator, status: c_long, raw: []const u8) !bool {
+    if (status != 409 and status != 410) return false;
+    const response = std.json.parseFromSliceLeaky(
+        struct { error_info: struct { code: []const u8 } },
+        ar,
+        raw,
+        .{ .ignore_unknown_fields = true },
+    ) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        return false;
+    };
+    return u.eq(response.error_info.code, "resync_required");
 }
 fn finishBootstrap(s: *Worker, ar: u.Allocator) !void {
     try s.store.set("bootstrapped", "1");

@@ -13,6 +13,7 @@ const display = @import("display.zig");
 const bridge = @import("c.zig").api;
 const outgoing = @import("outgoing.zig");
 const attachments = @import("../protocol.zig").attachments;
+const log = std.log.scoped(.client_store);
 const Store = @This();
 // Keep 100 recent messages ready for display; older history is loaded on demand.
 pub const recent_history_limit = 100;
@@ -295,9 +296,17 @@ pub fn beginSync(s: Store, epoch: []const u8, cursor: []const u8) BeginSyncError
     _ = try t.parseCursor(cursor, epoch);
     try s.db.exec("BEGIN IMMEDIATE");
     errdefer s.db.exec("ROLLBACK") catch {};
-    // Drafts and original outbox identities survive reset. Old messages are kept
-    // visible while offline; once a fresh sync begins only reconciled records show.
-    try s.db.exec("DELETE FROM enrichment_pages; DELETE FROM enrichment_cache; DELETE FROM identities; DELETE FROM records; DELETE FROM unread; DELETE FROM live_seen; DELETE FROM pages; DELETE FROM previews;");
+    const same_epoch = same_epoch: {
+        const q = try s.db.prepare("SELECT 1 FROM meta WHERE key='epoch' AND value=?");
+        defer q.close();
+        try q.bind(&.{.{ .text = epoch }});
+        break :same_epoch try q.step();
+    };
+    // Replay expiry changes coverage, not record identity. Keep offline history,
+    // names, avatar references and unread deduplication until fresher revisions arrive.
+    // A new epoch has unrelated IDs/revisions; only drafts and outbox identities survive.
+    if (!same_epoch) try s.db.exec("DELETE FROM enrichment_pages; DELETE FROM enrichment_cache; DELETE FROM identities; DELETE FROM records; DELETE FROM unread; DELETE FROM live_seen;");
+    try s.db.exec("DELETE FROM pages; DELETE FROM previews;");
     try s.exec(
         "UPDATE outbox SET state='unknown',detail='Relay changed. This request will not be sent again automatically.' WHERE epoch!=? AND state NOT IN ('delivered','failed')",
         &.{.{ .text = epoch }},
@@ -308,6 +317,7 @@ pub fn beginSync(s: Store, epoch: []const u8, cursor: []const u8) BeginSyncError
     try s.set("identity_bootstrapped", "0");
     try s.set("accepted_extensions", "");
     try s.db.exec("COMMIT");
+    log.info("Cache sync started: epoch_changed={}, cached_records_retained={}", .{ !same_epoch, same_epoch });
 }
 pub const Incoming = union(enum) {
     conversation: json_bounds.Decoded(t.Conversation),

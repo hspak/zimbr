@@ -1,14 +1,12 @@
 """Owned relay fixture, durable-effect assertions, and reading-anchor selection."""
 from contextlib import closing, contextmanager
 from dataclasses import replace
-import json
 from pathlib import Path
-import subprocess
 import sys
 import sqlite3
-import time
 
-from zrct.errors import ExpectationFailed, ZrctError
+from zrct.errors import ExpectationFailed
+from zrct.fixture import FixtureProcess
 from zrct.process import until
 
 
@@ -16,40 +14,27 @@ class Relay:
     def __init__(self, context):
         self.context = context
         repo = context.suite.repository
-        self.process = context.desktop.launch("fixture", [sys.executable, Path(__file__).with_name("relay_worker.py"),
-                                                          repo, context.bundle.root], cwd=repo, stdin=subprocess.PIPE)
-        self.reader = self.process.stdout_path.open()
-        self.buffer = ""
-        self.ready = self._read(timeout=15)
-        if not self.ready.get("ready"):
-            raise ZrctError("Fixture did not publish readiness", observed=self.ready)
+        self.channel = FixtureProcess(context, "fixture",
+                                      [sys.executable, Path(__file__).with_name("relay_worker.py"),
+                                       repo, context.bundle.root], cwd=repo)
+        self.process = self.channel.process
+        try:
+            self.ready = self.channel.wait_event("ready", timeout=15)
+        except BaseException:
+            self.channel.close()
+            raise
         context.bundle.manifest["metadata"]["fixture"] = {"kind": "zimbr synthetic TLS relay"}
         self.paths = self.ready["paths"]
 
-    def _read(self, timeout=5):
-        def line():
-            if self.process.child.poll() is not None:
-                self.process.drain()
-            raw = self.reader.readline(65537)
-            self.buffer += raw
-            if len(self.buffer) > 65536:
-                raise ZrctError("Fixture response exceeds 64 KiB")
-            if self.buffer.endswith("\n"):
-                response, self.buffer = self.buffer, ""
-                return json.loads(response)
-            self.process.check()
-            return None
-        return until(line, timeout=timeout, condition="fixture response")
-
-    def command(self, op, **fields):
-        self.process.check()
-        self.process.child.stdin.write((json.dumps(dict(op=op, **fields)) + "\n").encode())
-        self.process.child.stdin.flush()
-        result = self._read()
-        self.context.bundle.event("fixture_command", operation=op, fields=fields, result=result)
+    def command(self, op, *, timeout=None, **fields):
+        result = self.channel.request(op, timeout=timeout, **fields)
         if not result.get("ok"):
             raise ExpectationFailed("Fixture command failed", operation=op, observed=result)
         return result
+
+    def fault(self, mode):
+        result = self.command("fault", mode=mode)
+        self.ready["args"] = result["args"]
 
     @property
     def data(self):
@@ -77,31 +62,23 @@ class Relay:
                               and result["requests"][0]["state"] == "delivered") else None
         with self.context.bundle.step("relay confirms exact send, route, and original bytes", expected=text):
             result = until(delivered, timeout=25, condition="delivered send", health=self.process.check)
-            # Continue observing after delivery: an eventual count of one cannot catch late replay.
-            deadline = time.monotonic() + .75
-            while True:
-                rows = result["rows"]
-                if [r["text"] for r in rows] != expected or len(result["requests"]) != 1:
+            def exact():
+                result = self.command("sends")
+                if [r["text"] for r in result["rows"]] != expected or len(result["requests"]) != 1:
                     raise ExpectationFailed("Unexpected or duplicate relay sends", expected=expected, observed=result)
-                if chat is not None and any(r["chat"] != chat for r in rows):
-                    raise ExpectationFailed("Send reached the wrong conversation", expected=chat, observed=rows)
+                if chat is not None and any(r["chat"] != chat for r in result["rows"]):
+                    raise ExpectationFailed("Send reached the wrong conversation", expected=chat, observed=result)
                 if files:
                     self.command("verify_files", text=text, indices=list(files))
-                if time.monotonic() >= deadline:
-                    return result
-                time.sleep(.05)
-                result = self.command("sends")
+                return True
+            self.context.app.expect_always("exact send remains stable after delivery", exact,
+                                           duration=.75, interval=.05)
+            return result
 
     def expect_no_sends(self, *, duration=.5):
-        with self.context.bundle.step("relay receives no sends", duration=duration):
-            deadline = time.monotonic() + duration
-            while True:
-                result = self.command("sends")
-                if result["requests"] or result["rows"]:
-                    raise ExpectationFailed("Unexpected send", observed=result)
-                if time.monotonic() >= deadline:
-                    return
-                time.sleep(.05)
+        self.context.app.expect_unchanged("relay receives no sends", lambda: self.command("sends"),
+                                         expected=dict(ok=True, requests=[], rows=[]),
+                                         duration=duration, interval=.05)
 
     def close(self):
         try:
@@ -109,8 +86,7 @@ class Relay:
                 self.command("close")
                 self.process.wait(5)
         finally:
-            self.reader.close()
-            self.process.stop()
+            self.channel.close()
             log = self.context.bundle.root / "relay.log"
             if log.exists():
                 self.context.bundle.artifact(log, "log")
@@ -122,7 +98,13 @@ def relay(context):
     try:
         yield fixture
     finally:
-        fixture.close()
+        failing = sys.exc_info()[0] is not None
+        try:
+            fixture.close()
+        except Exception as cleanup:
+            if not failing:
+                raise
+            context.bundle.manifest["collection_errors"].append(f"relay cleanup: {cleanup}")
 
 
 def set_boundary(context, boundary):

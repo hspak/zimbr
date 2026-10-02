@@ -181,6 +181,9 @@ Opening a conversation loads its latest 100 messages. Older history loads when
 you scroll back and remains available offline. Background relay imports and
 reconciliation update sidebar previews and cached messages without copying the
 full archive into the local cache. Live messages continue to arrive normally.
+Reconnects and snapshot refreshes within the same relay epoch preserve cached
+history and contact names/photos. See [cache continuity](cache-continuity.md)
+for reset triggers and diagnostic logs.
 
 ## Keyboard and text input
 
@@ -431,6 +434,7 @@ python3 tests/client_settings.py
 python3 tests/client_reset.py
 python3 tests/client_relay_reset.py
 python3 tests/client_integration.py
+python3 tests/client_cache.py
 python3 tests/conversations.py
 python3 tests/client_transport.py
 python3 tests/client_lazy_history.py

@@ -114,9 +114,10 @@ fn control(init: std.process.Init, worker: *Worker) !void {
         }
         if (media.take()) |result| {
             defer media.release(result);
+            const key = result.key.hex();
             const raw = try u.json(a, .{ .media = .{
                 .state = result.state,
-                .key = result.key,
+                .key = key[0..64],
                 .generation = result.generation,
                 .width = result.pixels.width,
                 .height = result.pixels.height,

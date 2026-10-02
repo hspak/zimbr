@@ -9,8 +9,8 @@ Explicit scenario boundaries are retained across application launches and restar
 `SDL_RENDER_DRIVER` selects the suite's renderer; reports record that selection and
 instrumented applications report the actual backend in their handshake.
 
-All 13 scenarios pass with SDL 3.4.16 and Zrct's Weston surface-scale extension,
-including the unchanged live output-scale scenario. The extension reports the
+The desktop scenarios use SDL 3.4.16 and Zrct's Weston surface-scale extension,
+including the live output-scale scenario. The extension reports the
 headless output's actual integer scale through `wp_fractional_scale_v1`.
 Optional diagnostics in `desktop_native.py` run with
 `zig build test-sdl-desktop -Ddesktop-tests=true` without application
@@ -36,7 +36,10 @@ SDL text events. The suite adds the selected Korean font to its recorded profile
 Run from the repository root with the pinned Zig toolchain:
 
 ```sh
+zig build test-zrct-all -Dautomation=true -Dopenssl-prefix=/path/to/openssl-3.5
 zig build test-zrct -Dautomation=true -Dopenssl-prefix=/path/to/openssl-3.5
+zig build test-zrct-recovery -Dautomation=true -Dopenssl-prefix=/path/to/openssl-3.5
+zig build test-zrct-content -Dautomation=true -Dopenssl-prefix=/path/to/openssl-3.5
 zig build test-zrct -Dautomation=true -Dopenssl-prefix=/path/to/openssl-3.5 -- --filter Desktop
 zig build test-zrct -Dautomation=true -Dopenssl-prefix=/path/to/openssl-3.5 -- --repeat 3
 zig build test-zrct -Dautomation=true -Dopenssl-prefix=/path/to/openssl-3.5 -- --filter History --record
@@ -46,9 +49,15 @@ See [development setup](../../docs/development.md#gui-scenarios-with-zrct) for h
 prerequisites and artifact locations. Resolve and read Zrct's `SKILL.md` using the
 dependency in `build.zig.zon` before authoring or investigating a scenario.
 
-`scenarios.py` owns the suite. `support.py` launches `relay_worker.py` as a
-supervised fixture process; the worker reuses Zimbr's synthetic TLS/attachment
-fixtures. Its child relay belongs to the same process group, so Zrct can reclaim
+`scenarios.py` owns the general application/desktop suite. `recovery.py` and
+`content_scenarios.py` are independent suites for transport recovery and rich
+content. `all_scenarios.py` combines them under one worker limit and report.
+`benchmarks.py` owns serial ReleaseSafe GUI latency measurements; see
+[benchmark commands and timing boundaries](../../docs/development.md#gui-workflow-benchmarks).
+`support.py` launches `relay_worker.py` through Zrct's `FixtureProcess`, which
+correlates replies, retains events and transcripts, and reports fixture failures.
+The worker reuses Zimbr's synthetic TLS/attachment fixtures. Its child relay
+belongs to the same process group, so Zrct can reclaim
 it even if a scenario times out. The worker never opens a real Messages database.
 All clients run the production application loop with opt-in instrumentation.
 
@@ -72,6 +81,11 @@ These are useful implementation checks but cannot prove a whole user workflow.
 | Settings methods and coordinate-driven pane tests | First-launch navigation gate, invalid URL and credentials, clipped form scrolling, save, restart, Enter preference, cancellation of settings/reset | Failed database commits, reset acknowledgment ordering, credential file policy |
 | Native drop-delivery and attachment pipeline tests | Reviewed bytes retained after source removal/replacement, removal of the middle file, restart, actual Wayland attachment-only drop | Upload interruption, quotas, partial dispatch, uncertain outcomes and retry idempotency |
 | Worker offline persistence and reconnect tests | Cached conversation and editable draft after offline restart; no send until explicit action after reconnect | Transport fault matrix and cursor rollback |
+| `client_relay_reset.py` and reset methods | GUI-confirmed reset failure, lost response, retry with the original epoch, and local draft/media removal only after success | Authentication, transaction rollback, old-ID conversion, and Contacts freshness |
+| `client_attachments.py` and send recovery | Held upload with concurrent draft/incoming message, GUI cancellation and restart, accepted/unaccepted lost responses without duplicate submission | Byte corruption, storage permissions, quotas, partial dispatch, and protocol fault combinations |
+| Superseded worker-view regression in `client_main.zig` | Hold the selected conversation's real history response, switch back, preserve the draft, and verify the final send's route | Exact publication ordering and allocation failures |
+| Native rich-content controls | Viewer navigation, failed viewer request and Retry, live reaction-detail updates, hidden composer unchanged | Exact image pixels, decode limits, texture allocation failure, and malformed metadata |
+| Native long-editor workspace tests | Large multiline Unicode Wayland clipboard round trip, full-content digest/readback, resize, and restart | Grapheme boundary matrix, shaping/raster details, and editor allocation failures |
 | Native Details clipboard and hidden-editor checks | External Wayland clipboard reader, log copy/clear, hidden composer remains unchanged | Log ring capacity, scrollback anchoring and concurrent writers |
 | Native layout and text scale checks | Clipboard draft survives resize and live scale changes, then sends to the correct chat | Fractional pixel alignment, texture eviction and exact raster checks |
 | `tests/client_desktop.py` | Same application-ID and installed-icon assertions inside an isolated desktop | Standalone script remains usable against a packaged, uninstrumented client |
@@ -91,6 +105,10 @@ delivery through Apple's service.
   events, and Wayland drag-and-drop negotiation. Clicks synchronize application
   activation first, including after clipboard helper or drag-source focus. Window resize still uses the
   driver's application resize operation; output scale changes use Weston.
+- `Recovery` and `Content` use application input with operation-specific relay
+  faults. Fixture events establish when a request is held, and cumulative counters
+  detect submissions even if replies are lost. Rich controls use message/attachment
+  identity; viewer readiness observes an uploaded texture in the completed frame.
 - Draft/settings persistence checks read the committed client database without
   modifying it. Sends are checked against both the relay journal and synthetic
   Messages rows, including destination, count, ordered attachment names and bytes.
@@ -114,6 +132,12 @@ window, event-time modifier injection, bitmap-font scaling in the private font
 profile, configurable desktop dimensions, and a controllable partial-drop source.
 These changes are already included in the declared dependency; no patch
 application is needed.
+
+The dependency also preserves failed subtests, records window geometry per captured
+frame, reclaims descendants after a group leader exits, and publishes cached desktop
+helpers atomically. Runs support listing, exact selection, failed-case reruns, and
+JUnit reports. Benchmark compatibility identifies tool content independently of
+cache paths. Neither correctness scenarios nor benchmarks silently retry failures.
 
 The scale scenario uses a 2560×1600 test output so the application remains
 reachable by the compositor pointer at 2×. On a smaller output, Weston clamps

@@ -2029,6 +2029,9 @@ test "identity events are negotiated, revision merged, atomic and cleared on res
     );
     try s.saveDraft("c1", "Keep draft");
     try s.beginSync(epoch, epoch ++ ":8");
+    try std.testing.expectEqual(@as(i64, 1), try s.db.scalar("SELECT count(*) FROM identities"));
+    const replacement_epoch = "EREREREREREREREREREREQ";
+    try s.beginSync(replacement_epoch, replacement_epoch ++ ":0");
     try std.testing.expectEqual(@as(i64, 0), try s.db.scalar("SELECT count(*) FROM identities"));
     try std.testing.expectEqualStrings("Keep draft", try s.draft(ar, "c1"));
     try std.testing.expectEqualStrings("0", try s.get(ar, "identity_bootstrapped"));

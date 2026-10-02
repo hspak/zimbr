@@ -11,6 +11,15 @@ pub const wake = c.zc_desktop_wake;
 pub fn wait(timeout_ms: c_int) bool {
     return c.zc_desktop_wait(timeout_ms) != 0;
 }
+/// Wait for events for at most 25 ms, or finish the sub-millisecond frame remainder.
+/// Returns whether a worker signaled readiness, just like wait.
+pub fn waitNs(timeout_ns: u64) bool {
+    if (timeout_ns >= std.time.ns_per_ms)
+        return wait(@intCast(@min(25, timeout_ns / std.time.ns_per_ms)));
+    // Rounding up SDL's millisecond timeout loses nearly a millisecond per frame.
+    if (timeout_ns > 0) c.SDL_DelayNS(timeout_ns);
+    return false;
+}
 pub fn activate(token: [*:0]const u8) bool {
     return c.zc_desktop_activate(token) != 0;
 }
@@ -45,6 +54,7 @@ pub fn open(w: i32, h: i32, title: [:0]const u8) OpenError!void {
     closing = false;
     pointer = .{ .x = 0, .y = 0 };
     buttons = 0;
+    keys = .initEmpty();
     key_modifiers = 0;
     refreshMetrics();
 }
@@ -70,6 +80,7 @@ pub const Metrics = struct {
     render_width: i32 = 0,
     render_height: i32 = 0,
     scale: f32 = 1,
+    refresh_interval_ns: u64 = std.time.ns_per_s / 120,
 
     pub fn current() Metrics {
         return metrics;
@@ -81,7 +92,15 @@ pub fn refreshMetrics() void {
     if (window() == null) return;
     _ = c.SDL_GetWindowSize(window(), &metrics.width, &metrics.height);
     _ = c.SDL_GetWindowSizeInPixels(window(), &metrics.render_width, &metrics.render_height);
-    metrics.scale = @as(f32, @floatFromInt(metrics.render_width)) / @as(f32, @floatFromInt(@max(1, metrics.width)));
+    // Fractional framebuffer dimensions are rounded independently. Their ratios
+    // vary during resize even on one display, moving geometry and invalidating text.
+    metrics.scale = c.SDL_GetWindowDisplayScale(window());
+    metrics.refresh_interval_ns = std.time.ns_per_s / 120;
+    if (c.SDL_GetCurrentDisplayMode(c.SDL_GetDisplayForWindow(window()))) |mode| {
+        const hz = mode.*.refresh_rate;
+        if (std.math.isFinite(hz) and hz >= 1 and hz <= 1000)
+            metrics.refresh_interval_ns = @intFromFloat(std.time.ns_per_s / @as(f64, hz));
+    }
 }
 pub fn shouldClose() bool {
     return closing;
@@ -101,7 +120,7 @@ pub fn pixelHeight() i32 {
 pub fn scale() geometry.Point {
     return .{
         .x = metrics.scale,
-        .y = @as(f32, @floatFromInt(metrics.render_height)) / @as(f32, @floatFromInt(@max(1, metrics.height))),
+        .y = metrics.scale,
     };
 }
 pub fn setSize(w: i32, h: i32) void {
@@ -201,6 +220,7 @@ pub const KeyPress = struct {
 pub const Button = enum(u8) { left = c.SDL_BUTTON_LEFT, middle = c.SDL_BUTTON_MIDDLE, right = c.SDL_BUTTON_RIGHT };
 var pointer: geometry.Point = .{ .x = 0, .y = 0 };
 var buttons: c.SDL_MouseButtonFlags = 0;
+var keys: std.StaticBitSet(c.SDL_SCANCODE_COUNT) = .initEmpty();
 var key_modifiers: c.SDL_Keymod = 0;
 var closing = false;
 
@@ -213,6 +233,10 @@ pub fn modifiers() c.SDL_Keymod {
 pub fn leftDown() bool {
     return buttons & c.SDL_BUTTON_LMASK != 0;
 }
+/// Held input stays active between motion or key-repeat events, including injected events.
+pub fn inputHeld() bool {
+    return buttons != 0 or keys.count() > 0;
+}
 /// Borrow event strings until the next pump. Drain with PeepEvents so an SDL
 /// poll sentinel left by WaitEventTimeout cannot hide later injected events.
 pub fn nextEvent() ?c.SDL_Event {
@@ -221,7 +245,12 @@ pub fn nextEvent() ?c.SDL_Event {
     while (c.SDL_PeepEvents(&event, 1, c.SDL_GETEVENT, c.SDL_EVENT_FIRST, c.SDL_EVENT_LAST) > 0) {
         switch (event.type) {
             c.SDL_EVENT_QUIT, c.SDL_EVENT_WINDOW_CLOSE_REQUESTED => closing = true,
-            c.SDL_EVENT_KEY_DOWN, c.SDL_EVENT_KEY_UP => key_modifiers = event.key.mod,
+            c.SDL_EVENT_KEY_DOWN, c.SDL_EVENT_KEY_UP => {
+                key_modifiers = event.key.mod;
+                const code = event.key.scancode;
+                if (code > c.SDL_SCANCODE_UNKNOWN and code < c.SDL_SCANCODE_COUNT)
+                    keys.setValue(@intCast(code), event.type == c.SDL_EVENT_KEY_DOWN);
+            },
             c.SDL_EVENT_MOUSE_MOTION => pointer = .{ .x = event.motion.x, .y = event.motion.y },
             c.SDL_EVENT_MOUSE_BUTTON_DOWN, c.SDL_EVENT_MOUSE_BUTTON_UP => {
                 pointer = .{ .x = event.button.x, .y = event.button.y };
@@ -233,6 +262,7 @@ pub fn nextEvent() ?c.SDL_Event {
             c.SDL_EVENT_MOUSE_WHEEL => pointer = .{ .x = event.wheel.mouse_x, .y = event.wheel.mouse_y },
             c.SDL_EVENT_WINDOW_FOCUS_LOST => {
                 buttons = 0;
+                keys = .initEmpty();
                 key_modifiers = 0;
             },
             else => {},

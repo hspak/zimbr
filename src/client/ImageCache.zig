@@ -22,7 +22,7 @@ pub const Entry = struct {
         requested,
         ready: graphics.Texture,
         unavailable: struct {
-            kind: enum { offline, failed, denied },
+            kind: enum { offline, preparing, failed, denied },
             retry_at: i64,
             reason: [128:0]u8,
         },
@@ -44,7 +44,7 @@ pub const Entry = struct {
     }
     pub fn canRetry(entry: *const Entry) bool {
         return switch (entry.content) {
-            .unavailable => |failure| failure.kind != .denied,
+            .unavailable => |failure| failure.kind != .denied and failure.kind != .preparing,
             .pending, .requested, .ready, .retired => false,
         };
     }
@@ -108,11 +108,11 @@ pub fn accept(s: *ImageCache, result: *const Media.Result) void {
             entry.attempts = 0;
             s.bytes += graphics.textureBytes(texture);
         },
-        .pending => entry.content = .pending,
         .retired => entry.content = .{ .retired = true },
-        .offline, .failed, .denied => entry.content = .{ .unavailable = .{
+        .offline, .pending, .failed, .denied => entry.content = .{ .unavailable = .{
             .kind = switch (result.state) {
                 .offline => .offline,
+                .pending => .preparing,
                 .failed => .failed,
                 .denied => .denied,
                 else => unreachable,
@@ -311,6 +311,26 @@ fn openWindow(width: i32, height: i32, title: [:0]const u8) !void {
     try desktop.open(width, height, title);
     errdefer desktop.close();
     try graphics.init();
+}
+
+test "pending image retries honor the relay deadline" {
+    var images = ImageCache{};
+    defer images.deinit();
+    const key: Media.Key = .init(@splat(0), .inline_image);
+    const entry = images.touch(key) orelse return error.OutOfMemory;
+    const now = u.now();
+    const result: Media.Result = .{
+        .key = key,
+        .generation = 0,
+        .state = .pending,
+        .retry_at = now + 10000,
+    };
+    images.accept(&result);
+    try std.testing.expect(!entry.wantsRequest(now));
+    try std.testing.expect(!entry.wantsRequest(now + 9999));
+    try std.testing.expect(entry.wantsRequest(now + 10000));
+    try std.testing.expect(!entry.canRetry());
+    try std.testing.expect(entry.availableTexture() == null);
 }
 
 test "failed SDL uploads remain retryable and account only for resident textures" {

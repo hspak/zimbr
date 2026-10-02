@@ -282,6 +282,46 @@ fn client(
         });
         gui.step.dependOn(&b.top_level_steps.get("fake-relay").?.step);
         b.step("test-zrct", "Run isolated GUI scenarios with Zrct").dependOn(&gui.step);
+        const all_gui = @import("zrct").addRun(b, zrct_dep, .{
+            .suite = b.path("tests/zrct/all_scenarios.py"),
+            .executable = exe,
+            .desktop = true,
+            .python_extras = &.{"zimbr"},
+            .args = b.args orelse &.{},
+        });
+        all_gui.step.dependOn(&b.top_level_steps.get("fake-relay").?.step);
+        b.step("test-zrct-all", "Run all GUI workflow scenarios in one report").dependOn(&all_gui.step);
+        inline for (.{
+            .{
+                .name = "test-zrct-recovery",
+                .path = "tests/zrct/recovery.py",
+                .benchmark = false,
+            },
+            .{
+                .name = "test-zrct-content",
+                .path = "tests/zrct/content_scenarios.py",
+                .benchmark = false,
+            },
+            .{
+                .name = "bench-zrct",
+                .path = "tests/zrct/benchmarks.py",
+                .benchmark = true,
+            },
+        }) |suite| {
+            const run_suite = @import("zrct").addRun(b, zrct_dep, .{
+                .suite = b.path(suite.path),
+                .executable = exe,
+                .benchmark = suite.benchmark,
+                .python_extras = &.{"zimbr"},
+                .args = b.args orelse &.{},
+            });
+            run_suite.step.dependOn(&b.top_level_steps.get("fake-relay").?.step);
+            const description = if (suite.benchmark)
+                "Measure serial GUI workflow latency"
+            else
+                "Run isolated GUI workflow scenarios";
+            b.step(suite.name, description).dependOn(&run_suite.step);
+        }
         const ime = @import("zrct").addRun(b, zrct_dep, .{
             .suite = b.path("tests/zrct/ime.py"),
             .executable = exe,

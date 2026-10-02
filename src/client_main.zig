@@ -131,6 +131,11 @@ fn runSession(init: std.process.Init, config: Config) !?Config {
     app.syncTextInput();
     if (media_ready) app.media = &media;
     app.notifications.backend = bridge.zc_notifications_new(App.notificationAction, &app);
+    const vsync = config.frames == 0 and desktop.c.SDL_SetRenderVSync(
+        desktop.c.SDL_GetRenderer(desktop.window()),
+        1,
+    );
+    if (config.frames == 0 and !vsync) log.warn("VSync unavailable; using the display frame timer", .{});
     var frames: usize = 0;
     var last_draw: u64 = 0;
     var next_draw: u64 = 0;
@@ -141,6 +146,7 @@ fn runSession(init: std.process.Init, config: Config) !?Config {
     var last_drop_hovered = drop.hovered();
     var last_window = WindowMetrics{};
     var background_ready = false;
+    var was_idle = true;
     while (!desktop.shouldClose()) {
         const automation_input = if (comptime client_options.automation) zrct.poll() else false;
         if (comptime client_options.automation) if (zrct.shouldClose()) break;
@@ -158,21 +164,27 @@ fn runSession(init: std.process.Init, config: Config) !?Config {
         // Keep rendering between input events so scrolling and key repeat do
         // not fall back to the idle polling cadence during an interaction.
         if (input or window_changed or revision != last_revision or drop_hovered != last_drop_hovered)
-            // Hold the fast redraw cadence for half a second to bridge gaps between input events.
-            active_until = now + 500 * std.time.ns_per_ms;
-        const syncing = !app.settings.visible and app.syncActivity().active();
-        // Animate sync at about 30 fps; redraw idle status twice per second.
-        const frame_delay: u64 = (if (syncing) @as(u64, 33) else 500) * std.time.ns_per_ms;
-        // Render four startup frames to settle initial window/layout events before idle throttling.
-        const needs_draw = automation_input or frames < 4 or config.frames > 0 or background_ready or app.layout_pending or now < active_until or generation != last_generation or now - last_draw >= frame_delay;
+            // Match Flamez's short burst to bridge gaps in a gesture or key repeat.
+            active_until = now + 120 * std.time.ns_per_ms;
+        const syncing = !app.settings.visible and !app.show_details and app.syncActivity().active();
+        const active = frames < 4 or config.frames > 0 or app.layout_pending or
+            now < active_until or desktop.inputHeld() or syncing;
+        const now_ms = u.now();
+        const needs_draw = automation_input or active or background_ready or
+            generation != last_generation or now_ms >= app.redraw_at;
         if (needs_draw and now >= next_draw) {
-            app.frame_seconds = @as(f64, @floatFromInt(now - last_draw)) / std.time.ns_per_s;
+            // Sleeping between changes is not rendering time. Discard that first sample.
+            if (!was_idle) app.frame_seconds = @as(f64, @floatFromInt(now - last_draw)) / std.time.ns_per_s;
+            app.frame_idle = !active;
             app.capture_frame = config.screenshot != null and config.frames > 0 and frames + 1 >= config.frames;
             app.draw(window.scale);
             graphics.endFrame();
             background_ready = false;
             last_draw = now;
-            next_draw = now + std.time.ns_per_s / 120;
+            // Swapchain recreation can make VSync return early during resize. Keep the
+            // display deadline; time already spent drawing/presenting counts toward it.
+            next_draw = now + if (config.frames > 0) std.time.ns_per_s / 120 else window.refresh_interval_ns;
+            was_idle = false;
             last_generation = generation;
             last_revision = revision;
             last_mouse = mouse;
@@ -182,9 +194,12 @@ fn runSession(init: std.process.Init, config: Config) !?Config {
         } else {
             // Service GLib notifications, draft persistence, and transfers at least every
             // 25 ms, even when no SDL or worker event requests a frame.
-            const deadline = if (needs_draw) next_draw else last_draw + frame_delay;
-            const remaining = deadline -| now;
-            background_ready = desktop.wait(@intCast(@min(25, (remaining + std.time.ns_per_ms - 1) / std.time.ns_per_ms))) or background_ready;
+            if (!needs_draw) was_idle = true;
+            const ready = if (needs_draw)
+                desktop.waitNs(next_draw -| now)
+            else
+                desktop.wait(@intCast(@min(25, @max(0, app.redraw_at - now_ms))));
+            background_ready = ready or background_ready;
         }
         if (app.next_config != null) break;
         if (config.frames > 0 and frames >= config.frames) {
@@ -206,6 +221,8 @@ fn runSession(init: std.process.Init, config: Config) !?Config {
 }
 const App = struct {
     frame_seconds: f64 = 0,
+    frame_idle: bool = false,
+    redraw_at: i64 = std.math.maxInt(i64),
     controls: std.ArrayList(Control) = .empty,
     control_arena: std.heap.ArenaAllocator = .init(a),
     worker: *Worker,
@@ -229,6 +246,7 @@ const App = struct {
     view: ?*Worker.View = null,
     text: Text = .{},
     heights: std.AutoHashMapUnmanaged(u64, f32) = .empty,
+    block_heights: std.AutoHashMapUnmanaged(u64, f32) = .empty,
     height_context: u64 = 0,
     height_cursor: usize = 0,
     history_arena: std.heap.ArenaAllocator = .init(a),
@@ -240,7 +258,7 @@ const App = struct {
     hydration_at: i64 = 0,
     layout_pending: bool = false,
     height_budget: usize = 0,
-    height_deadline: i64 = 0,
+    height_deadline: u64 = 0,
     composer: Editor = .{},
     recipient: Editor = .{},
     search: Editor = .{},
@@ -833,6 +851,7 @@ const App = struct {
         if (s.view) |v| v.destroy();
         s.text.deinit();
         s.heights.deinit(a);
+        s.block_heights.deinit(a);
         s.history_arena.deinit();
         s.frame_arena.deinit();
         s.composer.deinit();
@@ -848,6 +867,7 @@ const App = struct {
     }
     fn info(s: *App, msg: []const u8) void {
         s.notice = msg;
+        s.layout_pending = true;
         // Keep notices visible for seven seconds so longer errors can be read.
         s.notice_until = u.now() + 7000;
     }
@@ -1539,7 +1559,17 @@ const App = struct {
         s.send_ack = s.view.?.ack;
         s.following = true;
     }
+    fn redrawAt(s: *App, when: i64) void {
+        s.redraw_at = @min(s.redraw_at, when);
+    }
+    fn redrawAfterGrace(s: *App, timestamp: []const u8, now: i64) void {
+        var sent_ms: i64 = undefined;
+        if (bridge.zc_timestamp_ms(timestamp.ptr, timestamp.len, &sent_ms) == 0) return;
+        const deadline = sent_ms + display.unknown_grace_ms;
+        if (deadline > now) s.redrawAt(deadline);
+    }
     fn draw(s: *App, scale: f32) void {
+        s.redraw_at = std.math.maxInt(i64);
         s.controls.clearRetainingCapacity();
         _ = s.control_arena.reset(.{ .retain_with_limit = 256 * 1024 });
         if (comptime client_options.automation) zrct.beginFrame();
@@ -1560,6 +1590,19 @@ const App = struct {
         std.debug.assert(clip_depth == 0);
         graphics.beginFrame();
         defer if (comptime client_options.automation) zrct.endFrame();
+        if (comptime client_options.automation) zrct.add(.{
+            .id = "window",
+            .role = "window",
+            .value = std.fmt.allocPrint(ar, "{d}x{d}", .{ desktop.width(), desktop.height() }) catch "",
+            .status = if (s.frame_idle) "idle" else "active",
+            .bounds = .{
+                .x = 0,
+                .y = 0,
+                .width = @floatFromInt(desktop.width()),
+                .height = @floatFromInt(desktop.height()),
+            },
+            .interactive = false,
+        });
         graphics.clear(theme.colors.paper);
         desktop.setCursor(.default);
         s.drawRail(areas.rail);
@@ -1692,11 +1735,12 @@ const App = struct {
         }
         if (comptime client_options.fps_counter) {
             if (!s.settings.visible) {
+                s.redrawAt(u.now() + 1000);
                 // Reserve 72 pixels so FPS updates do not shift the connection status.
                 const fps_width: f32 = 72;
                 // Fit the numeric FPS diagnostic and suffix without per-frame allocation.
                 var buffer: [32]u8 = undefined;
-                const fps = std.fmt.bufPrint(&buffer, "{d} FPS", .{if (s.frame_seconds > 0) @as(u32, @intFromFloat(@round(1 / s.frame_seconds))) else 0}) catch unreachable;
+                const fps = if (s.frame_idle) "Idle" else std.fmt.bufPrint(&buffer, "{d} FPS", .{if (s.frame_seconds > 0) @as(u32, @intFromFloat(@round(1 / s.frame_seconds))) else 0}) catch unreachable;
                 const band = layout.footer(areas.composer);
                 s.drawFooterLabel(fps, .{
                     .x = band.x + band.width - fps_width,
@@ -1709,6 +1753,13 @@ const App = struct {
         input_obscured = false;
         s.drawContentDetail();
         s.drawViewer(ar);
+        // Only images used in this frame can require a visible retry.
+        var images = s.images.entries.valueIterator();
+        while (images.next()) |entry| {
+            if (entry.used != s.images.frame) continue;
+            if (entry.content == .unavailable and entry.content.unavailable.retry_at > 0)
+                s.redrawAt(entry.content.unavailable.retry_at);
+        }
         if (s.capture_frame) {
             // Read the completed frame before swapping; Wayland may discard the
             // back buffer afterwards, making post-swap screenshots unreliable.
@@ -2371,6 +2422,8 @@ const App = struct {
         y.* += @max(24, s.text.height(status, 14, value_width) + 4) + 10;
     }
     fn drawDetails(s: *App, r: graphics.Rect, ar: u.Allocator) void {
+        // Relative ages and reconnect countdowns have one-second precision.
+        s.redrawAt(u.now() + 1000);
         s.drawPaneHeader("Details", "Connection, synchronization and this client", r);
         const viewport = graphics.Rect{
             .x = r.x + 32,
@@ -2816,6 +2869,7 @@ const App = struct {
             // Retain every height in the active conversation. Clearing a full
             // cache mid-layout makes histories larger than the cap start over.
             s.heights.clearRetainingCapacity();
+            s.block_heights.clearRetainingCapacity();
             s.height_context = context;
             s.height_cursor = 0;
             s.history_generation = null;
@@ -2985,7 +3039,7 @@ const App = struct {
     const max_height_work = 256;
     fn hasHeightBudget(s: *App) bool {
         // Guarantee progress even when preparing a large snapshot took time.
-        return s.height_budget > 0 and (s.height_budget == max_height_work or u.c.zr_monotonic_ms() < s.height_deadline);
+        return s.height_budget > 0 and (s.height_budget == max_height_work or desktop.ticks() < s.height_deadline);
     }
     fn measureRow(s: *App, row: *HistoryRow, width: f32, visible: bool) f32 {
         if (row.measured != null) return 0;
@@ -3010,15 +3064,16 @@ const App = struct {
     }
     fn measureHistory(s: *App, rows: []HistoryRow, inner: f32, viewport: f32) void {
         s.height_budget = max_height_work;
-        // An eight-millisecond layout budget leaves part of the frame for drawing and input.
-        s.height_deadline = u.c.zr_monotonic_ms() + 8;
-        var anchor: usize = 0;
-        // Match the 54-pixel older-messages strip used when positioning history rows.
-        var top: f64 = 54;
-        while (anchor < rows.len and top + rows[anchor].height() <= s.scroll) : (anchor += 1) top += rows[anchor].height();
+        // Reserve most of a 120 Hz frame for drawing and input. A single synchronous row
+        // can overrun the deadline; visible rows still take priority and always make progress.
+        s.height_deadline = desktop.ticks() + 2 * std.time.ns_per_ms;
+        var anchor = s.historyStart(rows);
+        var top = if (anchor < rows.len) rows[anchor].top else s.content_height;
         // The visible block may be deeper than its row's temporary estimate.
         // Resolve the saved row first so it cannot be skipped by the frame budget.
-        if (!s.following and s.history_anchor.len > 0) {
+        const at_anchor = anchor < rows.len and rows[anchor].pending == s.anchor_pending and
+            u.eq(rows[anchor].id, s.history_anchor);
+        if (!s.following and s.history_anchor.len > 0 and !at_anchor) {
             for (rows, 0..) |row, i| {
                 if (row.pending != s.anchor_pending or !u.eq(row.id, s.history_anchor)) continue;
                 anchor = i;
@@ -3167,6 +3222,17 @@ const App = struct {
         s.rememberHistoryAnchor(rows);
         return rows;
     }
+    fn historyRowY(s: *const App, viewport: graphics.Rect, top: f64) f32 {
+        const scale: f64 = s.text.scale;
+        // Following history moves with the bottom edge. Round that edge and the
+        // distance from it separately, so resizing translates every row equally.
+        const pixels = if (s.following)
+            @round(@as(f64, viewport.y + viewport.height) * scale) -
+                @round((s.content_height - top) * scale)
+        else
+            @round((@as(f64, viewport.y) + top - s.scroll) * scale);
+        return @floatCast(pixels / scale);
+    }
     fn drawHistory(s: *App, r: graphics.Rect, ar: u.Allocator) void {
         if (comptime client_options.automation) zrct.add(.{
             .id = "history",
@@ -3197,7 +3263,7 @@ const App = struct {
         if (!(empty_history and v.loading_history) and s.scroll < 54 and
             v.snapshot.more and !std.mem.startsWith(u8, s.key, "new:"))
         {
-            const y = r.y + 16 - @as(f32, @floatCast(s.scroll));
+            const y = s.historyRowY(r, 16);
             s.button("load-older", .{
                 .x = r.x + r.width / 2 - 86,
                 .y = y,
@@ -3243,18 +3309,20 @@ const App = struct {
             } else |_| {}
             // Coalesce visible metadata requests for a quarter second while scrolling.
             s.hydration_at = u.now() + 250;
-        }
-        // Reevaluate on idle redraws too, even when the snapshot is unchanged.
+            if (ids.items.len > 0) s.redrawAt(s.hydration_at);
+        } else if (v.online) s.redrawAt(s.hydration_at);
         const status_now = u.now();
         var message_hint: ?MessageHint = null;
         for (rows[visible.start..visible.end]) |row| {
             if (row.pending) continue;
             const m = v.snapshot.messages[row.source_index];
+            if (m.direction == .outgoing and m.observed_status == .unknown)
+                s.redrawAfterGrace(m.timestamp, status_now);
             const text = row.text;
             const h = row.measured.?;
             // Subtract in double precision before drawing. Accumulating tens
             // of thousands of f32 heights caused visible fractional-DPI drift.
-            const y = r.y + @as(f32, @floatCast(row.top - s.scroll));
+            const y = s.historyRowY(r, row.top);
             if (comptime client_options.automation) {
                 const status = display.messageStatus(m, is_group, status_now);
                 zrct.add(.{
@@ -3328,8 +3396,11 @@ const App = struct {
         for (rows[visible.start..visible.end]) |row| {
             if (!row.pending) continue;
             const p = v.snapshot.pending[row.source_index];
+            if (!u.eq(p.state, "uploading") and !u.eq(p.state, "delivered") and
+                !display.canCopyPending(p.state, p.sent_at, status_now))
+                s.redrawAfterGrace(p.sent_at, status_now);
             const h = row.measured.?;
-            const y = r.y + @as(f32, @floatCast(row.top - s.scroll));
+            const y = s.historyRowY(r, row.top);
             const x = r.x + 66;
             if (comptime client_options.automation) zrct.add(.{
                 .id = std.fmt.allocPrint(ar, "message/{s}", .{row.id}) catch "",
@@ -3565,6 +3636,18 @@ const App = struct {
             .height = h - 130,
         };
         s.drawAsset(asset, image_r, m.conversation_id);
+        if (comptime client_options.automation) zrct.add(.{
+            .id = "viewer-image",
+            .role = "image",
+            .label = item.name,
+            .value = item.id,
+            .bounds = .from(image_r),
+            .interactive = false,
+            .status = if (s.media) |media| if (s.images.entries.getPtr(media.key(asset))) |entry|
+                @tagName(entry.content)
+            else
+                "pending" else "unavailable",
+        });
         s.button("viewer-previous", .{
             .x = 24,
             .y = h - 52,
@@ -3616,25 +3699,42 @@ const App = struct {
     // Keep these heights aligned with drawBlocks: 28-pixel link rows, 32-pixel chip rows,
     // 48-pixel file cards, and a three-line (54-pixel) optional preview summary.
     fn blockHeight(s: *App, block: message_content.Block, width: f32, visible: bool) f32 {
-        return switch (block.value) {
-            .text => |value| height: {
-                var arena = std.heap.ArenaAllocator.init(a);
-                defer arena.deinit();
-                const links = link_targets.inText(arena.allocator(), block.source_text orelse value) catch &.{};
-                break :height (if (visible) s.text.height(value, 16, width) else s.text.measure(
-                    value,
-                    16,
-                    width,
-                )) + @as(
-                    f32,
-                    @floatFromInt(links.len),
-                ) * 28;
-            },
-            .attachment => |item| if (item.image != null) imageSize(item.image, width).y + 28 else 48,
-            .card => |card| 76 + (if (card.summary != null) @as(f32, 54) else 0) + (if (card.image) |asset| imageSize(
+        switch (block.value) {
+            .attachment => |item| return if (item.image != null) imageSize(item.image, width).y + 28 else 48,
+            .card => |card| return 76 + (if (card.summary != null) @as(f32, 54) else 0) + (if (card.image) |asset| imageSize(
                 asset,
                 width - 24,
             ).y + 8 else 0),
+            .more => return 30,
+            .text, .reactions => {},
+        }
+        var hash = std.hash.Wyhash.init(@intFromEnum(std.meta.activeTag(block.value)));
+        hash.update(std.mem.asBytes(&width));
+        hash.update(std.mem.asBytes(&s.text.scale));
+        switch (block.value) {
+            .text => |value| {
+                hash.update(value);
+                hash.update(std.mem.asBytes(&block.links.len));
+            },
+            .reactions => |chips| for (chips) |chip| {
+                hash.update(std.mem.asBytes(&chip.label.len));
+                hash.update(chip.label);
+                hash.update(std.mem.asBytes(&chip.actors.len));
+            },
+            // Fixed-size blocks returned above; only text-dependent heights need caching.
+            .attachment, .card, .more => unreachable,
+        }
+        const key = hash.final();
+        if (s.block_heights.get(key)) |height| return height;
+        const height = switch (block.value) {
+            .text => |value| (if (visible) s.text.height(value, 16, width) else s.text.measure(
+                value,
+                16,
+                width,
+            )) + @as(
+                f32,
+                @floatFromInt(block.links.len),
+            ) * 28,
             .reactions => |chips| height: {
                 var arena = std.heap.ArenaAllocator.init(a);
                 defer arena.deinit();
@@ -3655,8 +3755,10 @@ const App = struct {
                 }
                 break :height rows * 32;
             },
-            .more => 30,
+            .attachment, .card, .more => unreachable,
         };
+        s.block_heights.put(a, key, height) catch {};
+        return height;
     }
     fn chipWidth(s: *App, label: []const u8, width: f32) f32 {
         return @min(width, s.text.lineSize(label, 15, @max(1, width - 16)).x + 16);
@@ -3667,6 +3769,47 @@ const App = struct {
         const focused = s.focus == .none and s.rich_focus == index;
         if (focused) graphics.outline(r, 1, theme.colors.focus);
         if (input_obscured or s.detail_body != null or s.viewer_message.len > 0) return;
+        if (comptime client_options.automation) {
+            const ar = s.frame_arena.allocator();
+            const target: ?zrct.Target = switch (action) {
+                .viewer => |item| .{
+                    .id = std.fmt.allocPrint(ar, "message/{s}/attachment/{s}", .{ item.message, item.attachment }) catch "",
+                    .role = "button",
+                    .label = "Open image",
+                    .parent = std.fmt.allocPrint(ar, "message/{s}", .{item.message}) catch "",
+                    .bounds = .from(r),
+                },
+                .reaction => |item| .{
+                    .id = std.fmt.allocPrint(ar, "message/{s}/reaction/{s}/{s}", .{
+                        item.message,
+                        item.part,
+                        item.label,
+                    }) catch "",
+                    .role = "button",
+                    .label = item.label,
+                    .parent = std.fmt.allocPrint(ar, "message/{s}", .{item.message}) catch "",
+                    .bounds = .from(r),
+                },
+                .button,
+                .recover,
+                .rail,
+                .select,
+                .retry,
+                .link,
+                .detail,
+                .enrichment,
+                .editor,
+                .message,
+                .scroll,
+                .history_background,
+                => null,
+            };
+            if (target) |value| {
+                var clipped = value;
+                clipped.clip = if (clip_depth > 0) .from(clip_stack[clip_depth - 1]) else null;
+                zrct.add(clipped);
+            }
+        }
         if (hover(r)) desktop.setCursor(.pointing_hand);
         const before = s.controls.items.len;
         s.addControl(r, action);
@@ -3718,15 +3861,14 @@ const App = struct {
                 .text => |value| {
                     var part_row = row;
                     part_row.text = value;
-                    const text_h = s.text.height(value, 16, r.width);
+                    const text_h = h - @as(f32, @floatFromInt(block.links.len)) * 28;
                     s.drawMessageText(part_row, m.text orelse block.source_text orelse value, .{
                         .x = r.x,
                         .y = r.y,
                         .width = r.width,
                         .height = text_h,
                     }, foreground, bg);
-                    const links = link_targets.inText(ar, block.source_text orelse value) catch &.{};
-                    for (links, 0..) |link, i| {
+                    for (block.links, 0..) |link, i| {
                         const link_r = graphics.Rect{
                             .x = r.x,
                             .y = r.y + text_h + @as(f32, @floatFromInt(i)) * 28,
@@ -4005,6 +4147,13 @@ const App = struct {
             .height = r.height - 72,
         };
         const content_height = s.text.height(body, 16, viewport.width);
+        if (comptime client_options.automation) zrct.add(.{
+            .id = "content-detail",
+            .role = "text",
+            .value = body,
+            .bounds = .from(viewport),
+            .interactive = false,
+        });
         s.addControl(viewport, .{ .scroll = .{ .pane = .content, .viewport = viewport, .content = content_height } });
         s.content_detail_scroll = std.math.clamp(
             s.content_detail_scroll,
@@ -4388,6 +4537,7 @@ const App = struct {
     }
     fn drawNotice(s: *App, r: graphics.Rect, ar: u.Allocator) void {
         if (u.now() >= s.notice_until) return;
+        s.redrawAt(s.notice_until);
         const warning_visible = s.duplicate_risk and s.key.len > 0 and !s.new_mode and !s.show_details;
         var notice = composerFooter(r);
         if (warning_visible) notice.height /= 2;
@@ -4638,8 +4788,17 @@ const App = struct {
             desktop.textInputArea(area);
         }
         // Blink once per second with 600 ms visible so the insertion point is easy to locate.
-        if (s.focus == focus and (visible.composition != null or @mod(u.now(), 1000) < 600))
-            graphics.rectangle(caret_box, theme.colors.accent);
+        if (s.focus == focus) {
+            const now = u.now();
+            const phase = @mod(now, 1000);
+            const clip = clip_stack[clip_depth - 1];
+            if (visible.composition == null and !input_obscured and
+                caret_box.x < clip.x + clip.width and caret_box.x + caret_box.width > clip.x and
+                caret_box.y < clip.y + clip.height and caret_box.y + caret_box.height > clip.y)
+                s.redrawAt(now + (if (phase < 600) @as(i64, 600) else 1000) - phase);
+            if (visible.composition != null or phase < 600)
+                graphics.rectangle(caret_box, theme.colors.accent);
+        }
         endClip();
         if (multiline) s.composer_bar.draw(viewport, content_height, s.composer_scroll);
     }
@@ -4774,11 +4933,21 @@ pub const RenderFixture = struct {
     app: App,
 
     pub const InitError = std.mem.Allocator.Error;
-    pub const Workload = enum { cached, scroll, cold_text, image_upload };
+    pub const Workload = enum {
+        cached,
+        scroll,
+        cold_text,
+        image_upload,
+        rich_anchor,
+        caret,
+        reflow,
+        resize_width,
+        resize_height,
+    };
     pub const Avatars = enum { shared, distinct };
 
     /// Initialize in final storage because App borrows the embedded worker.
-    pub fn init(s: *RenderFixture, io: std.Io, avatars: Avatars) InitError!void {
+    pub fn init(s: *RenderFixture, io: std.Io, avatars: Avatars, workload: Workload) InitError!void {
         s.worker = .{ .io = io, .config = .{ .data = "" } };
         s.app = .{ .worker = &s.worker, .focus = .none };
         errdefer s.deinit();
@@ -4833,6 +5002,24 @@ pub const RenderFixture = struct {
             .decoding = .plain,
             .observed_status = .received,
         };
+        switch (workload) {
+            .cached, .scroll, .cold_text, .image_upload, .resize_width, .resize_height => {},
+            .rich_anchor => {
+                messages[messages.len - 1].text = "A long message with a link https://example.invalid/ and mixed text café 世界. " ** 48;
+                s.app.following = false;
+            },
+            .caret => {
+                s.app.composer.set("A long draft with several words and punctuation. " ** 80) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    // The synthetic draft is bounded, valid UTF-8.
+                    error.InvalidText => unreachable,
+                };
+                s.app.focus = .composer;
+            },
+            .reflow => for (messages, 0..) |*message, i| {
+                message.text = try std.fmt.allocPrint(ar, "Message {d}: " ++ "History text with wrapping and mixed scripts café 世界. " ** 16, .{i});
+            },
+        }
         view.snapshot.chats = chats;
         view.snapshot.messages = messages;
         s.app.key = try a.dupe(u8, "render-bench");
@@ -4860,14 +5047,92 @@ pub const RenderFixture = struct {
                 s.app.text.deinit();
                 s.app.text = .{};
             },
+            .rich_anchor => {
+                // Keep the first visible row's reading anchor inside its long text block.
+                s.app.scroll = s.app.history_rows[s.app.history_rows.len - 1].top + 120;
+            },
+            .caret => {
+                // Cycle more positions than the raster cache can retain, without selecting text.
+                s.app.composer.caret = frame % 64;
+                s.app.composer.anchor = s.app.composer.caret;
+            },
+            .reflow => if (!s.app.layout_pending) {
+                // Rebuild heights at a fixed width; repeat only after the last pass settles.
+                s.app.height_context = 0;
+            },
+            .resize_width, .resize_height => {
+                const step = frame % 200;
+                const offset: i32 = @intCast(@min(step, 200 - step) * 2);
+                desktop.setSize(
+                    if (workload == .resize_width) 1120 + offset else 1120,
+                    if (workload == .resize_height) 780 + offset else 780,
+                );
+                desktop.poll();
+            },
         }
         s.app.draw(WindowMetrics.current().scale);
+    }
+
+    pub fn measuredRows(s: *const RenderFixture) usize {
+        var count: usize = 0;
+        for (s.app.history_rows) |row| if (row.measured != null) {
+            count += 1;
+        };
+        return count;
     }
 
     pub fn settled(s: *const RenderFixture) bool {
         return !s.app.layout_pending and s.app.history_rows.len == 1000;
     }
 };
+
+test "rich reading anchors reuse text measurements between unchanged frames" {
+    try openWindow(1120, 780, "Rich history measurement reuse");
+    defer closeWindow();
+    desktop.poll();
+    var fixture: RenderFixture = undefined;
+    try fixture.init(std.testing.io, .shared, .rich_anchor);
+    defer fixture.deinit();
+    for (0..2000) |_| {
+        fixture.draw(.cached, 0);
+        graphics.endFrame();
+        if (fixture.settled()) break;
+    } else return error.LayoutDidNotSettle;
+    fixture.draw(.rich_anchor, 0);
+    graphics.endFrame();
+    const calls = fixture.app.text.measure_calls;
+    const offset = fixture.app.anchor_block_offset;
+    const height = fixture.app.content_height;
+    try std.testing.expectEqualStrings("fallback-text", fixture.app.anchor_block);
+    for (0..3) |frame| {
+        fixture.draw(.rich_anchor, frame);
+        graphics.endFrame();
+        try std.testing.expectEqual(calls, fixture.app.text.measure_calls);
+        try std.testing.expectEqual(height, fixture.app.content_height);
+        try std.testing.expectEqual(offset, fixture.app.anchor_block_offset);
+    }
+}
+
+test "rich block measurements follow text width scale and link count" {
+    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "" } };
+    defer worker.shutdown();
+    var app = App{ .worker = &worker };
+    defer app.deinit();
+    var block = message_content.Block{ .value = .{ .text = "Wrapped message words with café and 世界. " ** 8 } };
+    const wide = app.blockHeight(block, 500, false);
+    try std.testing.expect(app.blockHeight(block, 160, false) > wide);
+    const calls = app.text.measure_calls;
+    try std.testing.expectEqual(wide, app.blockHeight(block, 500, true));
+    try std.testing.expectEqual(calls, app.text.measure_calls);
+    block.links = &.{.{ .url = "https://example.invalid/", .hostname = "example.invalid" }};
+    try std.testing.expectEqual(wide + 28, app.blockHeight(block, 500, false));
+    block.value.text = "Short text";
+    try std.testing.expect(app.blockHeight(block, 500, false) < wide);
+    app.text.nextFrame(1.25);
+    const scaled = app.blockHeight(block, 500, false);
+    try std.testing.expectEqual(@as(usize, 1), app.text.measure_calls);
+    try std.testing.expectEqual(app.text.measure(block.value.text, 16, 500) + 28, scaled);
+}
 
 test "pending conversation selections accept redirects and surface cache failure" {
     const fixture = struct {
@@ -5067,6 +5332,81 @@ test "double text clicks require a nearby matching target within the time limit"
     second.target.field.focus = .composer;
     second.target.field.revision = 2;
     try std.testing.expect(!second.follows(first));
+}
+
+test "idle redraw deadlines follow visible caret and notice changes" {
+    // No relay or elapsed-time sleeps: inspect deadlines produced by the real draw path.
+    if (comptime client_options.fps_counter) return error.SkipZigTest;
+    try openWindow(1120, 780, "Idle redraw checks");
+    defer closeWindow();
+    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
+    defer worker.shutdown();
+    var app = App{ .worker = &worker, .focus = .none };
+    defer app.deinit();
+    testDraw(&app, WindowMetrics.current().scale);
+    try std.testing.expectEqual(std.math.maxInt(i64), app.redraw_at);
+
+    app.info("Notice after idle");
+    try std.testing.expect(app.layout_pending);
+    testDraw(&app, WindowMetrics.current().scale);
+    try std.testing.expectEqual(app.notice_until, app.redraw_at);
+
+    app.focus = .search;
+    const before_blink = u.now();
+    testDraw(&app, WindowMetrics.current().scale);
+    try std.testing.expect(app.redraw_at > before_blink);
+    try std.testing.expect(app.redraw_at <= u.now() + 600);
+
+    try app.search.setPreedit("한", 0, 1);
+    testDraw(&app, WindowMetrics.current().scale);
+    try std.testing.expectEqual(app.notice_until, app.redraw_at);
+
+    app.search.cancelPreedit();
+    app.focus = .none;
+    app.notice_until = u.now() - 1;
+    testDraw(&app, WindowMetrics.current().scale);
+    try std.testing.expectEqual(std.math.maxInt(i64), app.redraw_at);
+
+    const view = try a.create(Worker.View);
+    view.* = .{
+        .arena = .init(std.testing.allocator),
+        .snapshot = .{
+            .chats = &.{},
+            .messages = &.{},
+            .pending = &.{},
+            .selected = "chat",
+            .draft = "",
+            .epoch = "fixture",
+            .more = false,
+        },
+        .status = "Offline",
+        .online = false,
+        .send_direct = false,
+        .reply_existing = false,
+        .generation = 1,
+        .ack = 0,
+    };
+    app.view = view;
+    app.key = try a.dupe(u8, "chat");
+    const sent_ms = u.now() - 10000;
+    var messages = [_]t.Message{.{
+        .id = "uncertain",
+        .conversation_id = "chat",
+        .sender = "You",
+        .direction = .outgoing,
+        .service = "imessage",
+        .timestamp = try u.timestamp(view.arena.allocator(), (sent_ms - 978307200000) * 1000000),
+        .kind = .text,
+        .text = "Waiting for confirmation",
+        .decoding = .plain,
+        .observed_status = .unknown,
+    }};
+    view.snapshot.messages = &messages;
+    testDraw(&app, WindowMetrics.current().scale);
+    try std.testing.expectEqual(sent_ms + 30000, app.redraw_at);
+    messages[0].observed_status = .delivered;
+    testDraw(&app, WindowMetrics.current().scale);
+    try std.testing.expectEqual(std.math.maxInt(i64), app.redraw_at);
 }
 
 test "workspace navigation, compact lists, message selection, and scrollbars render correctly" {
@@ -6123,6 +6463,36 @@ test "history larger than the old cache limit renders newest first and settles" 
     try std.testing.expectEqual(@as(u32, 1), app.heights.count());
 }
 
+test "deferred heights make progress then yield without blocking cached measurements" {
+    var worker = Worker{ .io = std.testing.io, .config = .{ .data = "" } };
+    defer worker.shutdown();
+    var app = App{ .worker = &worker, .height_budget = App.max_height_work };
+    defer app.deinit();
+    var first = App.HistoryRow{
+        .id = "first",
+        .text = "A measured message",
+        .key = 1,
+        .measured = null,
+        .padding = 54,
+    };
+    _ = app.measureRow(&first, 320, false);
+    try std.testing.expect(first.measured != null);
+    var deferred = App.HistoryRow{
+        .id = "deferred",
+        .text = "A different message",
+        .key = 2,
+        .measured = null,
+        .padding = 54,
+    };
+    _ = app.measureRow(&deferred, 320, false);
+    try std.testing.expectEqual(null, deferred.measured);
+    var cached = first;
+    cached.measured = null;
+    _ = app.measureRow(&cached, 320, false);
+    try std.testing.expectEqual(first.measured, cached.measured);
+    try std.testing.expectEqual(@as(usize, 1), app.text.measure_calls);
+}
+
 test "reading position survives deferred heights and prepended history" {
     var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/zimbr-history-test" } };
     defer worker.shutdown();
@@ -6234,6 +6604,143 @@ test "loading reveals final rows without moving the newest message or snapping s
     const loading = app.visibleHistory(&rows, 500);
     try std.testing.expect(loading.loading);
     try std.testing.expectEqual(loading.start, loading.end);
+}
+
+test "horizontal resizing preserves fixed text and geometry pixels" {
+    try expectResizePixels(true);
+}
+
+test "vertical resizing preserves fixed text and geometry pixels" {
+    try expectResizePixels(false);
+}
+
+test "vertical resizing translates message history without changing its pixels" {
+    try expectHistoryResizePixels(true);
+}
+
+test "vertical resizing preserves pixels at the history reading position" {
+    try expectHistoryResizePixels(false);
+}
+
+fn expectHistoryResizePixels(following: bool) !void {
+    try openWindow(1120, 780, "History resize pixel stability");
+    defer closeWindow();
+    desktop.poll();
+    var fixture: RenderFixture = undefined;
+    try fixture.init(std.testing.io, .shared, .cached);
+    defer fixture.deinit();
+    for (0..2000) |_| {
+        fixture.draw(.cached, 0);
+        graphics.endFrame();
+        if (fixture.settled()) break;
+    } else return error.LayoutDidNotSettle;
+    if (!following) fixture.app.scrollHistory(4, 600);
+    const scale = WindowMetrics.current().scale;
+    var baseline: ?graphics.Image = null;
+    defer if (baseline) |shot| graphics.destroyImage(shot);
+    var baseline_bottom: i32 = 0;
+    for ([_]i32{
+        0,
+        1,
+        2,
+        3,
+        4,
+        3,
+        2,
+        1,
+        0,
+    }) |delta| {
+        desktop.setSize(1120, 780 + delta);
+        try std.testing.expect(desktop.c.SDL_SyncWindow(desktop.window()));
+        desktop.poll();
+        try std.testing.expectEqual(@as(i32, 780) + delta, desktop.height());
+        try std.testing.expectEqual(scale, WindowMetrics.current().scale);
+        fixture.draw(.cached, 0);
+        const shot = try graphics.capture();
+        graphics.endFrame();
+        const history = layout.frame(1120, @floatFromInt(desktop.height()), fixture.app.composerHeight()).history;
+        try std.testing.expectEqual(following, fixture.app.following);
+        const anchor_y = if (following) history.y + history.height else 600;
+        const bottom: i32 = @intFromFloat(@round(anchor_y * scale));
+        if (baseline) |before| {
+            defer graphics.destroyImage(shot);
+            var changed: usize = 0;
+            // Compare the message text after accounting for bottom anchoring.
+            for (40..400) |distance| {
+                const before_y = baseline_bottom - @as(i32, @intCast(distance));
+                const after_y = bottom - @as(i32, @intCast(distance));
+                for (470..900) |x| {
+                    if (!std.meta.eql(
+                        graphics.imageColor(before, @intCast(x), before_y),
+                        graphics.imageColor(shot, @intCast(x), after_y),
+                    )) changed += 1;
+                }
+            }
+            try std.testing.expectEqual(@as(usize, 0), changed);
+        } else {
+            baseline = shot;
+            baseline_bottom = bottom;
+        }
+    }
+}
+
+fn expectResizePixels(horizontal: bool) !void {
+    try openWindow(780, 560, "Resize pixel stability");
+    defer closeWindow();
+    desktop.poll();
+    const c = desktop.c;
+    const display_scale = c.SDL_GetWindowDisplayScale(desktop.window());
+    var text = Text{};
+    defer text.deinit();
+    var baseline: ?graphics.Image = null;
+    defer if (baseline) |shot| graphics.destroyImage(shot);
+    // Cross the 125% rounding phases in both resize directions.
+    for ([_]i32{
+        0,
+        1,
+        2,
+        3,
+        4,
+        3,
+        2,
+        1,
+        0,
+    }, 0..) |delta, frame| {
+        const width = 780 + if (horizontal) delta else @as(i32, 0);
+        const height = 560 + if (horizontal) @as(i32, 0) else delta;
+        desktop.setSize(width, height);
+        try std.testing.expect(c.SDL_SyncWindow(desktop.window()));
+        desktop.poll();
+        try std.testing.expectEqual(width, desktop.width());
+        try std.testing.expectEqual(height, desktop.height());
+        try std.testing.expectEqual(display_scale, c.SDL_GetWindowDisplayScale(desktop.window()));
+        text.nextFrame(WindowMetrics.current().scale);
+        graphics.beginFrame();
+        graphics.clear(.white);
+        text.drawLine("Conversation preview", 66, 254, 16, 244, .black, .white);
+        graphics.rectangle(.{
+            .x = 66,
+            .y = 294,
+            .width = 120,
+            .height = 2,
+        }, .black);
+        const shot = try graphics.capture();
+        graphics.endFrame();
+        if (baseline) |before| {
+            defer graphics.destroyImage(shot);
+            var changed: usize = 0;
+            for (0..@intFromFloat(320 * display_scale)) |y| {
+                for (0..@intFromFloat(320 * display_scale)) |x| {
+                    if (!std.meta.eql(
+                        graphics.imageColor(before, @intCast(x), @intCast(y)),
+                        graphics.imageColor(shot, @intCast(x), @intCast(y)),
+                    )) changed += 1;
+                }
+            }
+            try std.testing.expectEqual(@as(usize, 0), changed);
+        } else baseline = shot;
+        try std.testing.expectEqual(frame + 1, text.frame);
+    }
 }
 
 test "offscreen measurements match drawing metrics without evicting layouts" {
@@ -6694,6 +7201,42 @@ test "text raster variants evict old appearances without unbounded texture growt
     for (text.entries.items[0].rasters.items) |raster| {
         try std.testing.expect(raster.key.color.r >= 48);
     }
+}
+
+test "collapsed selections reuse rasters while real selections change pixels" {
+    try openWindow(640, 360, "Collapsed selection raster reuse");
+    defer closeWindow();
+    desktop.poll();
+    var text = Text{};
+    defer text.deinit();
+    const body = "Unchanged text while the caret moves across the message.";
+    for (0..32) |position| {
+        text.nextFrame(desktop.scale().x);
+        graphics.beginFrame();
+        graphics.clear(.white);
+        text.drawSelection(body, 20, 20, 16, 500, .black, position, position, .white);
+        graphics.endFrame();
+        try std.testing.expectEqual(@as(usize, 1), text.entries.items.len);
+        try std.testing.expectEqual(@as(usize, 1), text.entries.items[0].rasters.items.len);
+    }
+    const plain = text.entries.items[0].rasters.items[0].texture;
+    const before = try graphics.readTexture(plain);
+    defer graphics.destroyImage(before);
+    text.drawSelection(body, 20, 20, 16, 500, .black, 2, 8, .white);
+    try std.testing.expectEqual(@as(usize, 2), text.entries.items[0].rasters.items.len);
+    const selected = text.entries.items[0].rasters.items[1].texture;
+    const after = try graphics.readTexture(selected);
+    defer graphics.destroyImage(after);
+    try std.testing.expectEqual(before.w, after.w);
+    try std.testing.expectEqual(before.h, after.h);
+    var changed: usize = 0;
+    for (0..@intCast(before.h)) |y| for (0..@intCast(before.w)) |x| {
+        if (!std.meta.eql(
+            graphics.imageColor(before, @intCast(x), @intCast(y)),
+            graphics.imageColor(after, @intCast(x), @intCast(y)),
+        )) changed += 1;
+    };
+    try std.testing.expect(changed > 100);
 }
 
 test "text remains intact when layouts evict textures queued in the same frame" {
@@ -8341,10 +8884,12 @@ test "SDL event queue retains short clicks repeat wheel precision and focus rele
     const down = desktop.nextEvent().?;
     try std.testing.expectEqual(@as(u32, c.SDL_EVENT_MOUSE_BUTTON_DOWN), down.type);
     try std.testing.expect(desktop.leftDown());
+    try std.testing.expect(desktop.inputHeld());
     try std.testing.expectEqual(graphics.Point{ .x = 31.5, .y = 40.25 }, desktop.mouse());
     const up = desktop.nextEvent().?;
     try std.testing.expectEqual(@as(u32, c.SDL_EVENT_MOUSE_BUTTON_UP), up.type);
     try std.testing.expect(!desktop.leftDown());
+    try std.testing.expect(!desktop.inputHeld());
     try std.testing.expectEqual(@as(f32, 90), desktop.mouse().x);
 
     event = std.mem.zeroes(c.SDL_Event);
@@ -8359,7 +8904,19 @@ test "SDL event queue retains short clicks repeat wheel precision and focus rele
     try std.testing.expect(c.SDL_PushEvent(&event));
     try std.testing.expect(!desktop.nextEvent().?.key.repeat);
     try std.testing.expect(desktop.nextEvent().?.key.repeat);
+    try std.testing.expect(desktop.inputHeld());
     try std.testing.expectEqual(@as(c.SDL_Keymod, c.SDL_KMOD_SHIFT), desktop.modifiers());
+    event.key.type = c.SDL_EVENT_KEY_UP;
+    event.key.down = false;
+    event.key.repeat = false;
+    try std.testing.expect(c.SDL_PushEvent(&event));
+    _ = desktop.nextEvent();
+    try std.testing.expect(!desktop.inputHeld());
+    event.key.type = c.SDL_EVENT_KEY_DOWN;
+    event.key.down = true;
+    try std.testing.expect(c.SDL_PushEvent(&event));
+    _ = desktop.nextEvent();
+    try std.testing.expect(desktop.inputHeld());
     event = std.mem.zeroes(c.SDL_Event);
     event.wheel.type = c.SDL_EVENT_MOUSE_WHEEL;
     event.wheel.windowID = id;
@@ -8373,6 +8930,7 @@ test "SDL event queue retains short clicks repeat wheel precision and focus rele
     _ = desktop.nextEvent();
     try std.testing.expectEqual(@as(c.SDL_Keymod, 0), desktop.modifiers());
     try std.testing.expect(!desktop.leftDown());
+    try std.testing.expect(!desktop.inputHeld());
 }
 
 test "text shortcuts and repeated keys preserve SDL event order and modifiers" {

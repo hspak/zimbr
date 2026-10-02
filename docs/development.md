@@ -14,6 +14,22 @@ Dev.app**, and separate `zimbr-dev` client state. For packaged releases, use
 `release` consistently in build and administration commands, port **8731**, and
 the paths in [profiles](macos-profiles.md). Optimization does not select a profile.
 
+## Frame scheduling
+
+Interactive rendering uses VSync plus a deadline at the current display's refresh
+rate (120 Hz when unavailable). The deadline also applies during resize, when
+recreating Vulkan swapchains can let VSync return before a refresh. Drawing and
+presentation count toward that deadline, so an already blocked frame adds no
+extra wait. The final fraction of a millisecond uses a precise wait instead of
+rounding every frame up to the next millisecond. Held keys and mouse buttons keep
+rendering active; other input extends a 120 ms burst, and visible sync animation
+runs at the same cadence. Idle screens skip drawing and
+presentation until input, a worker update, or a visible timer needs a frame.
+Caret blinking, notice expiry, send recovery, and image retries retain their
+own deadlines; background services are still polled at least every 25 ms while
+idle. With `-Dfps-counter=true`, the counter shows `Idle` for idle refreshes and
+excludes idle waiting from the next active FPS sample.
+
 ## Rendering benchmarks
 
 Linux GUI builds fetch [pinned SDL 3.4.16 sources](../vendor/sdl/README.zimbr),
@@ -74,9 +90,12 @@ SDL_RENDER_DRIVER=vulkan perf record -g --call-graph dwarf \
 
 Each output directory must be new. It retains per-frame JSONL samples, summaries,
 stderr logs, the executable hash, source revision, SDL build revision, and system/driver information.
-`--workload` selects `cached`, `scroll`, `cold_text`, or `image_upload`; the default
-is `all`. The executable accepts the same selection as its optional third argument,
-after frame count and avatar mode. Keep profiling runs separate from timing runs.
+`--workload` selects `cached`, `scroll`, `cold_text`, `image_upload`, `rich_anchor`,
+`caret`, `reflow`, `resize_width`, or `resize_height`; the default is `all`.
+`--pacing` selects `unpaced` (default), `vsync`, `timer`, or `capped_vsync`.
+The executable accepts the workload and pacing as its optional third and fourth
+arguments, after frame count and avatar mode. Keep profiling
+runs separate from timing runs.
 Use `--drivers default` to inspect and measure the application's default choice.
 The `vulkan` backend is SDL's direct Vulkan renderer; `gpu` selects SDL's GPU
 renderer with `SDL_GPU_DRIVER=vulkan` and verifies the underlying GPU driver.
@@ -91,10 +110,10 @@ the shared-initial case is a stress case, not an estimate of every user's chat l
 The `cached` workload means a settled scene after warm-up; it does not guarantee
 zero texture uploads if cached raster variants replace one another.
 
-The four workloads are settled redraws, a deterministic scrolling sweep, clearing
+The original four workloads are settled redraws, a deterministic scrolling sweep, clearing
 the text cache each frame, and uploading/drawing/destroying a 512×512 RGBA image
 over the cached chat. Layout settles before measurement; each workload gets 120
-warm-up frames. The benchmark disables VSync and bypasses the production frame
+warm-up frames. The default `unpaced` mode disables VSync and bypasses the frame
 timer. It records draw and presentation wall time plus process CPU time, reporting
 p50/p95/p99 and the fraction of work intervals exceeding the 8.33 ms budget for
 120 Hz. These are CPU-side throughput measurements through `SDL_RenderPresent`,
@@ -102,6 +121,36 @@ not GPU timestamps, displayed FPS, input latency, or proof of missed display
 deadlines. Event polling is outside the measured interval. Texture retirement is
 included in the upload workload. The cold-text workload measures cache rebuilding,
 not whole-application startup. No screenshot capture runs during measurement.
+
+`rich_anchor` keeps a long message containing links partly above the viewport,
+exercising block measurements and reading-anchor maintenance on every frame.
+`caret` moves a collapsed selection through 64 positions in an unchanged long
+draft. `reflow` invalidates all 1,000 history heights at a fixed width, then lets
+the production layout finish before invalidating again. This isolates deferred
+height measurement from compositor resize timing and cold visible-text caches.
+Its summaries include completed cycles, frames to settle, and total CPU-side
+wall work per cycle; partial cycles at sample boundaries are excluded. Frame
+counts describe unpaced work, not elapsed convergence under the application's
+frame timer. Compare these alongside per-frame latency when changing the layout
+budget, since smaller batches may take more frames to finish.
+
+The resize workloads grow and shrink one window dimension by two logical pixels
+per frame over a 200-pixel range. They exercise real SDL window and swapchain
+resizing; width changes also reflow history. They do not simulate a compositor's
+interactive border drag. Frame-start intervals include pacing and event handling,
+while `draw_ms` and `present_ms` separate application work from presentation waits.
+`timer` and `capped_vsync` share the application's display interval and wait helper;
+the latter keeps VSync enabled. Use these modes to check regularity separately
+from unpaced rendering capacity, retaining each run's raw samples:
+
+```sh
+zig build render-bench -Doptimize=ReleaseSafe
+python3 tests/rendering.py --output artifacts/resize-vsync --drivers vulkan \
+  --workload resize_height --pacing vsync --runs 3 --frames 360
+python3 tests/rendering.py --output artifacts/resize-paced --drivers vulkan \
+  --workload resize_height --pacing capped_vsync --runs 3 --frames 360
+# Repeat with resize_width, scroll, and caret to check the other active paths.
+```
 
 Preserve the baseline binary before rebuilding if a later direct comparison is
 needed. CPU sampling with `perf record` should use a separate run so profiling
@@ -243,6 +292,32 @@ probe also checks logical and framebuffer dimensions independently of Zrct
 instrumentation. See [the migration notes](../FUTURE_MIGRATION.md) for the remaining
 limitation on compositors that only send legacy output-scale notifications.
 
+Text and geometry use SDL's reported display scale on both axes. Rounded
+framebuffer-to-window size ratios are not font scales: at 125%, those ratios
+change as either window dimension crosses a pixel boundary. The native resize
+regressions compare fixed text and geometry pixel-for-pixel while growing and
+shrinking each axis, and check that text caches survive. Run them on a Wayland
+display configured to 125% to exercise fractional rounding; the default isolated
+desktop exercises integer scaling:
+
+```sh
+zig build test-gui -Dgui-test-filter='resizing preserves fixed' \
+  -Dopenssl-prefix=.tools/openssl-3.5
+```
+
+History has an additional fractional-pixel boundary: following messages are
+anchored to the viewport's bottom edge. Round that edge and each row's distance
+from it separately, then use the resulting pixel-aligned row origin for its
+header and body. Rounding their absolute positions independently changes their
+relative spacing as the window height changes. The history resize regressions
+compare text pixels after accounting for the expected bottom-edge translation,
+and verify that a scrolled reading position stays fixed:
+
+```sh
+zig build test-gui -Dgui-test-filter='vertical resizing' \
+  -Dopenssl-prefix=.tools/openssl-3.5
+```
+
 Optional SDL compositor diagnostics run without application instrumentation:
 `zig build test-sdl-desktop -Ddesktop-tests=true`. These are independent of the
 normal client build and native test steps.
@@ -253,7 +328,10 @@ From the Zimbr checkout, run:
 
 ```sh
 zig build test-gui-isolated -Dopenssl-prefix=.tools/openssl-3.5
+zig build test-zrct-all -Dautomation=true -Dopenssl-prefix=.tools/openssl-3.5
 zig build test-zrct -Dautomation=true -Dopenssl-prefix=.tools/openssl-3.5
+zig build test-zrct-recovery -Dautomation=true -Dopenssl-prefix=.tools/openssl-3.5
+zig build test-zrct-content -Dautomation=true -Dopenssl-prefix=.tools/openssl-3.5
 # Select a scenario and retain a recording:
 zig build test-zrct -Dautomation=true -Dopenssl-prefix=.tools/openssl-3.5 -- --filter send_unicode --record
 # On a GPU Wayland desktop, run the isolated suite in a nested GPU compositor:
@@ -291,6 +369,17 @@ position while history and incoming messages load. Desktop scenarios also exerci
 real Wayland clipboard exchange, file-drop negotiation, window resizing and output
 scale changes. The application-ID check verifies the installed desktop identity.
 
+`test-zrct-recovery` covers confirmed reset, lost reset replies and retry, held-upload
+cancellation, uncertain send responses across restart, and superseded history
+responses. `test-zrct-content` covers image viewer navigation, failed-image retry,
+live reaction details, and preservation of the composer draft while overlays own
+keyboard input. These suites use application input and need no Weston input helpers.
+The relay owns operation-specific faults and records cumulative request counts;
+the tests independently inspect committed client state and relay effects.
+`test-zrct-all` combines the application, recovery, and content cases in one run,
+with one worker limit and one JUnit report. Keep the individual steps for focused
+work; the optional IME suite remains separate.
+
 Each scenario uses a private headless Wayland desktop and synthetic TLS relay; it
 does not need a Mac or account credentials. Desktop input additionally requires
 `wl-clipboard`, a C compiler, pkg-config, and Wayland development files/protocols,
@@ -298,14 +387,48 @@ xkbcommon, libdrm, and Pixman; the build provisions Zrct's Weston helpers.
 The build supplies the repository and executable paths. Up to four scenarios run
 concurrently in separate desktops; `--jobs 1` runs serially. Arguments after `--`
 go to the runner, including
-`--filter`, `--repeat`, `--record`, `--json`, and `--output`. Repetitions complete
-one batch before starting the next.
+`--filter`, `--case Class.test_name`, `--list`, `--rerun-failed artifacts/RUN`,
+`--repeat`, `--record`, `--json`, and `--output`. Selection applies to the chosen
+suite's build step. Repetitions complete one batch before starting the next.
 
 Reports, logs, screenshots, and requested recordings appear under `artifacts/`.
+Each run also writes `junit.xml` for CI and `result.json` with evidence links.
 The Python environment and managed tools use build caches. Automation remains
 opt-in through `-Dautomation=true`; normal client builds omit the Zrct driver.
 Existing native and protocol suites remain useful for fault injection, allocation
 failures, and precise rendering checks; GUI scenarios supplement those contracts.
+
+### GUI workflow benchmarks
+
+`bench-zrct` measures startup, first opening of a 10,000-message conversation,
+switching back to a cached conversation, search results, and send-to-delivered
+latency. It uses ReleaseSafe, matching the packaged Linux client. The fixture is
+fully indexed before measurement. Each scenario owns fresh application storage;
+the cached-switch case explicitly visits both conversations before timing the
+return. The OS page cache is uncontrolled and recorded as such.
+
+```sh
+zig build bench-zrct -Dautomation=true -Doptimize=ReleaseSafe \
+  -Dopenssl-prefix=.tools/openssl-3.5 -- --warmup 3 --repeat 20 --json
+# A short check that all measurements and effect assertions work:
+zig build bench-zrct -Dautomation=true -Doptimize=ReleaseSafe \
+  -Dopenssl-prefix=.tools/openssl-3.5 -- --warmup 1 --repeat 3
+```
+
+Measurements run serially without video capture. Native timestamps end at the
+first completed application frame containing the specified semantic result,
+before presentation; they do not measure physical display latency. Relay delivery,
+routing, draft persistence, and duplicate-send assertions run outside timed
+intervals. Avoid other builds or test runs while collecting samples.
+
+Each run writes `benchmark.json`, `benchmark.html`, and `benchmark.trace.json`
+alongside its correctness reports. Use the declared Zrct dependency's CLI:
+`zig build zrct -- compare /path/to/baseline /path/to/candidate` from that package's
+root. The comparator checks workload, fixture, tool content, renderer, optimization,
+and machine compatibility. Tool cache relocation alone does not invalidate a run.
+Comparisons are diagnostic: no timing threshold fails CI until repeatability and
+budgets have been established. The existing renderer and worker benchmarks retain
+their more specific performance coverage.
 
 ### Korean input-method scenarios
 

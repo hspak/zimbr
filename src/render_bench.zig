@@ -1,4 +1,4 @@
-//! Unpaced production chat rendering with synthetic data and per-frame wall/CPU timings.
+//! Production chat rendering with synthetic data and per-frame wall/CPU timings.
 const std = @import("std");
 const builtin = @import("builtin");
 const u = @import("common.zig");
@@ -6,11 +6,18 @@ const graphics = @import("client/graphics.zig");
 const desktop = @import("client/desktop.zig");
 const RenderFixture = @import("client_main.zig").RenderFixture;
 const c = desktop.c;
+const Pacing = enum { unpaced, vsync, timer, capped_vsync };
 
 const Sample = struct {
+    interval_ns: u64,
     draw_ns: u64,
     present_ns: u64,
     cpu_ns: u64,
+    measured_rows: usize,
+    layout_pending: bool,
+    reflow_started: bool,
+    width: i32,
+    height: i32,
 };
 
 fn cpuTime() !u64 {
@@ -39,18 +46,22 @@ pub fn main(init: std.process.Init) !void {
         std.meta.stringToEnum(RenderFixture.Avatars, args[2]) orelse return error.InvalidArguments
     else
         .shared;
-    const workload_filter: ?RenderFixture.Workload = if (args.len > 3)
+    const workload_filter: ?RenderFixture.Workload = if (args.len > 3 and !std.mem.eql(u8, args[3], "all"))
         std.meta.stringToEnum(RenderFixture.Workload, args[3]) orelse return error.InvalidArguments
     else
         null;
-    if (args.len > 4 or count < 100 or count > 100000) return error.InvalidArguments;
+    const pacing = if (args.len > 4)
+        std.meta.stringToEnum(Pacing, args[4]) orelse return error.InvalidArguments
+    else
+        .unpaced;
+    if (args.len > 5 or count < 100 or count > 100000) return error.InvalidArguments;
     try desktop.open(1120, 780, "Zimbr rendering benchmark");
     defer desktop.close();
     try graphics.init();
     defer graphics.deinit();
     const renderer = c.SDL_GetRenderer(desktop.window());
-    // Compare throughput without the production loop's 120 Hz timer or VSync sleep.
-    if (!c.SDL_SetRenderVSync(renderer, 0)) return error.VsyncUnavailable;
+    if (!c.SDL_SetRenderVSync(renderer, if (pacing == .vsync or pacing == .capped_vsync) 1 else 0))
+        return error.VsyncUnavailable;
     desktop.poll();
     const name = c.SDL_GetRendererName(renderer) orelse return error.RendererUnavailable;
     const gpu_device = c.SDL_GetPointerProperty(c.SDL_GetRendererProperties(renderer), "SDL.renderer.gpu.device", null);
@@ -66,6 +77,7 @@ pub fn main(init: std.process.Init) !void {
         .zig_version = builtin.zig_version_string,
         .optimize = @tagName(builtin.mode),
         .vsync = vsync,
+        .pacing = @tagName(pacing),
         .window = desktop.Metrics.current(),
         .samples = count,
         .warmup_frames = 120,
@@ -79,8 +91,9 @@ pub fn main(init: std.process.Init) !void {
     const samples = try gpa.alloc(Sample, count);
     inline for (std.meta.tags(RenderFixture.Workload)) |workload| {
         if (workload_filter == null or workload_filter.? == workload) {
+            desktop.setSize(1120, 780);
             var fixture: RenderFixture = undefined;
-            try fixture.init(init.io, avatars);
+            try fixture.init(init.io, avatars, workload);
             defer fixture.deinit();
             for (0..2000) |_| {
                 desktop.poll();
@@ -88,11 +101,22 @@ pub fn main(init: std.process.Init) !void {
                 graphics.endFrame();
                 if (fixture.settled()) break;
             } else return error.LayoutDidNotSettle;
+            var last_start = desktop.ticks();
             for (0..120 + count) |frame| {
+                if (pacing == .timer or pacing == .capped_vsync) {
+                    const deadline = last_start + desktop.Metrics.current().refresh_interval_ns;
+                    while (desktop.ticks() < deadline) {
+                        _ = desktop.waitNs(deadline -| desktop.ticks());
+                        desktop.poll();
+                        while (desktop.nextEvent() != null) {}
+                    }
+                }
                 desktop.poll();
+                while (desktop.nextEvent() != null) {}
                 if (desktop.shouldClose()) return error.BenchmarkInterrupted;
                 const cpu_start = try cpuTime();
                 const start = desktop.ticks();
+                const reflow_started = workload == .reflow and fixture.settled();
                 fixture.draw(workload, frame);
                 const texture = if (workload == .image_upload) try graphics.upload(pixels.ptr, 512, 512, .linear) else null;
                 if (texture) |photo| {
@@ -110,10 +134,17 @@ pub fn main(init: std.process.Init) !void {
                 const presented = desktop.ticks();
                 const cpu_end = try cpuTime();
                 if (frame >= 120) samples[frame - 120] = .{
+                    .interval_ns = start - last_start,
                     .draw_ns = drawn - start,
                     .present_ns = presented - drawn,
                     .cpu_ns = cpu_end - cpu_start,
+                    .measured_rows = fixture.measuredRows(),
+                    .layout_pending = !fixture.settled(),
+                    .reflow_started = reflow_started,
+                    .width = desktop.width(),
+                    .height = desktop.height(),
                 };
+                last_start = start;
             }
             try output(gpa, .{ .kind = "workload", .name = @tagName(workload), .frames = samples });
         }

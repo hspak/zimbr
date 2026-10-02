@@ -16,7 +16,7 @@ const Stored = struct {
 
 pub const ObserveError = Journal.QueryError || std.json.ParseError(std.json.Scanner);
 pub const NoLongerReactionError = Journal.QueryError || std.json.ParseError(std.json.Scanner);
-pub const AnchorsMatchError = Journal.QueryError || u.Allocator.Error;
+pub const ReconcileAnchorsError = Journal.QueryError || u.Allocator.Error;
 pub const DeletedAnchorError = Journal.QueryError || error{AmbiguousSourceIdentity};
 pub const FindGuidError = Journal.QueryError || error{AmbiguousSourceIdentity};
 pub const MissingTargetsError = Journal.QueryError || u.Allocator.Error || error{AmbiguousSourceIdentity};
@@ -234,21 +234,41 @@ test "batched anchors match per-row retention with duplicate GUIDs and rollback"
         );
     }
 }
-pub fn anchorsMatch(a: u.Allocator, j: Journal, source: Source) AnchorsMatchError!usize {
+/// Caller owns source and journal transactions. Retire missing anchors only
+/// when two independent surviving rows still prove continuity. Changed GUIDs
+/// return zero and leave anchors intact so the caller can reset the journal.
+pub fn reconcileAnchors(a: u.Allocator, j: Journal, source: Source) ReconcileAnchorsError!usize {
     const q = try j.db.prepare("SELECT source_row,source FROM ordinary_anchors");
     defer q.close();
     var count: usize = 0;
+    var missing: std.ArrayList(i64) = .empty;
+    defer missing.deinit(a);
     while (try q.step()) {
-        const current = try source.guid(a, q.int(0)) orelse return 0;
+        const current = try source.guid(a, q.int(0)) orelse {
+            try missing.append(a, q.int(0));
+            continue;
+        };
         if (!u.eq(current, q.bytes(1))) return 0;
         count += 1;
     }
+    if (missing.items.len > 0 and count < 2) return 0;
+    for (missing.items) |row| try j.execute(
+        "DELETE FROM ordinary_anchors WHERE source_row=?",
+        &.{.{ .int = row }},
+    );
     return count;
 }
-// A replaced/changed ordinary anchor never qualifies. Row reuse is allowed
-// only when this tracked reaction GUID is absent everywhere in the same file.
+// Ordinary deletion qualifies only when the row is absent. Row reuse remains
+// limited to tracked reactions whose old GUID is absent throughout the source.
 pub fn deletedAnchor(j: Journal, source: Source, row: i64, saved: []const u8) DeletedAnchorError!bool {
-    const q = try j.db.prepare("SELECT 1 FROM reaction_sources r JOIN messages m ON m.source=r.source WHERE r.source=? AND m.source_row=?");
+    const present = try source.db.prepare("SELECT 1 FROM message WHERE ROWID=?");
+    defer present.close();
+    try present.bind(&.{.{ .int = row }});
+    const reused = try present.step();
+    const q = try j.db.prepare(if (reused)
+        "SELECT 1 FROM reaction_sources r JOIN messages m ON m.source=r.source WHERE r.source=? AND m.source_row=?"
+    else
+        "SELECT 1 FROM messages WHERE source=? AND source_row=?");
     defer q.close();
     try q.bind(&.{ .{ .text = saved }, .{ .int = row } });
     if (!try q.step()) return false;

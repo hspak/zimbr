@@ -226,13 +226,17 @@ pub fn ingest(self: *Core, a: u.Allocator) IngestError!void {
     errdefer j.rollback();
     const stored_identity = try j.progress(a, "identity");
     var live = try j.position("live");
-    var reset = false;
+    var reset_reason: ?enum { file_identity, ordinary_anchor, live_anchor } = null;
     if (stored_identity) |identity| {
         const legacy_candidate = !u.eq(identity, source.identity) and live > 0 and source.legacyIdentityCandidate(identity);
-        reset = !u.eq(identity, source.identity) and !legacy_candidate;
-        const anchors = if (!reset) try reactions.anchorsMatch(a, j, source) else 0;
-        if (!reset and anchors == 0 and try j.db.scalar("SELECT count(*) FROM ordinary_anchors") > 0) reset = true;
-        if (!reset and live > 0) {
+        if (!u.eq(identity, source.identity) and !legacy_candidate) reset_reason = .file_identity;
+        const anchors = if (reset_reason == null) try reactions.reconcileAnchors(a, j, source) else 0;
+        if (reset_reason == null and anchors == 0 and
+            try j.db.scalar("SELECT count(*) FROM ordinary_anchors") > 0)
+        {
+            reset_reason = .ordinary_anchor;
+        }
+        if (reset_reason == null and live > 0) {
             const current = try source.guid(a, live);
             const saved = try j.progress(a, "anchor");
             const missing = high < live or current == null or saved == null or saved.?.len == 0 or !u.eq(
@@ -254,16 +258,17 @@ pub fn ingest(self: *Core, a: u.Allocator) IngestError!void {
                     batch.rebased = true;
                     try j.setPosition("live", live);
                     try j.setPosition("rolling", 0);
-                } else reset = true;
+                } else reset_reason = .live_anchor;
             }
         }
-        if (reset) {
+        if (reset_reason != null) {
             try j.reset(a);
             live = 0;
         } else if (legacy_candidate) {
             try j.setProgress("identity", source.identity);
         }
     }
+    const reset = reset_reason != null;
     if (stored_identity == null or reset) {
         live = high;
         try j.setProgress("identity", source.identity);
@@ -375,7 +380,11 @@ pub fn ingest(self: *Core, a: u.Allocator) IngestError!void {
     try reactions.trimAnchors(j);
     try j.backfillIdentities(a);
     try j.commit();
-    if (reset) log.warn("Messages source changed; relay journal reset and sync restarted", .{});
+    if (reset_reason) |reason| log.warn(
+        "Messages source changed; relay journal reset and sync restarted: {s}",
+        .{@tagName(reason)},
+    );
+    if (batch.rebased) log.info("Deleted source cursor rebased; relay epoch preserved", .{});
     if (stored_identity == null or reset) {
         log.info("Message backfill initialized: source_high={d}", .{high});
     }

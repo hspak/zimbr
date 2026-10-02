@@ -1,5 +1,6 @@
 """Production-loop workflows with independent synthetic-relay effect checks."""
 import configparser
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -25,6 +26,43 @@ class Messages(TestCase):
         self.app.target(role="row", text="alice").expect_visible(timeout=15)
         self.app.target(role="row", text="alice").click()
         self.app.target("composer").expect(visible=True, obscured=False)
+
+    def test_idle_skips_unchanged_frames_and_wakes_for_input_and_messages(self):
+        # Details has no blinking editor; its relative times change once a second.
+        self.app.press("left_control+d")
+        self.app.expect_idle(quiet=.75, timeout=15)
+        self.app.press("left_control+d")
+        text = "Input after the renderer was idle 👋"
+        self.app.target("composer").type_text(text)
+        self.app.target("composer").expect(value=text)
+        self.relay.expect_draft(self.app, text)
+        self.app.press("left_control+d")
+        self.app.expect_idle(quiet=.75, timeout=15)
+        incoming = "Worker update while the renderer was idle"
+        self.relay.command("receive", text=incoming)
+        self.app.press("left_control+d")
+        self.app.target(role="message", text=incoming).expect_visible(timeout=15)
+        self.app.target("composer").expect(value=text)
+        self.relay.expect_no_sends()
+
+    def test_held_input_and_resize_keep_rendering_active(self):
+        text = "Keep this draft through resize and held input 👋"
+        self.app.target("composer").type_text(text)
+        self.relay.expect_draft(self.app, text)
+        self.app.key_down("left_shift")
+        try:
+            self.app.expect_always("held key stays active between repeat events", lambda:
+                                  self.app.target("window").resolve()["status"] == "active",
+                                  duration=.8)
+        finally:
+            self.app.key_up("left_shift")
+        for width, height in ((1122, 780), (1122, 782), (1280, 900), (1000, 700), (1120, 780)):
+            self.app.resize(width, height)
+            self.app.target("window").expect(value=f"{width}x{height}", status="active")
+            self.app.target("composer").expect(value=text)
+        self.app.press("left_control+d")
+        self.app.expect_idle(quiet=.75, timeout=15)
+        self.relay.expect_no_sends()
 
     def test_send_unicode_and_persist(self):
         text = "Hello 👋 👩‍💻 é — a character queue longer than sixteen characters."
@@ -279,6 +317,29 @@ class Desktop(TestCase):
         self.desktop.click("send-button")
         self.app.target("composer").expect(value="")
         self.relay.expect_sent_once(text, chat=1)
+
+    def test_long_unicode_clipboard_uses_complete_content_through_resize_and_restart(self):
+        text = "\n".join(f"Line {index:03}: 👩‍💻 é 한글 — retained clipboard text" for index in range(160))
+        digest = hashlib.sha256(text.encode()).hexdigest()
+        self.desktop.set_clipboard(text)
+        self.desktop.click("composer")
+        self.desktop.press("left_control+v")
+        composer = self.app.target("composer")
+        composer.expect_digest(digest)
+        self.assertTrue(composer.resolve()["strings"]["value"]["truncated"])
+        self.assertEqual(composer.read_text(), text)
+        self.relay.expect_draft(self.app, text)
+        self.app.resize(780, 560)
+        self.desktop.click("composer")
+        self.desktop.press("left_control+a")
+        self.desktop.press("left_control+c")
+        self.app.expect("external clipboard contains the full selection", lambda: self.desktop.clipboard() == text)
+        self.app.restart()
+        self.app.target(role="row", text="alice").expect_visible()
+        self.app.target(role="row", text="alice").click()
+        composer.expect_digest(digest)
+        self.assertEqual(composer.read_text(), text)
+        self.relay.expect_no_sends()
 
     def test_wayland_attachment_only_drop_sends_original_bytes(self):
         self.desktop.drop_files("composer", self.relay.paths)

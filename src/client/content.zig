@@ -4,9 +4,12 @@ const std = @import("std");
 const t = @import("../protocol.zig").types;
 const u = @import("../common.zig");
 const display = @import("display.zig");
+const links = @import("links.zig");
 pub const Block = struct {
     part_id: ?[]const u8 = null,
     source_text: ?[]const u8 = null,
+    // Targets are owned by the immutable presentation's arena.
+    links: []const links.Target = &.{},
     value: union(enum) {
         text: []const u8,
         attachment: t.Attachment,
@@ -146,6 +149,9 @@ pub fn prepare(a: u.Allocator, m: t.Message) u.Allocator.Error![]const Block {
             .{ .value = .{ .more = section } },
         );
     };
+    for (result.items) |*block| if (block.value == .text) {
+        block.links = try links.inText(a, block.source_text orelse block.value.text);
+    };
     return result.items;
 }
 pub fn partText(m: t.Message, part: t.MessagePart) ?[]const u8 {
@@ -218,6 +224,27 @@ fn reactionLabel(key: []const u8) []const u8 {
     };
     for (keys, labels) |k, label| if (u.eq(key, k)) return label;
     return key;
+}
+
+test "prepared links retain destinations beyond the bounded text preview" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const body = "https://first.example/ " ++ "message words " ** 400 ++ "https://last.example/";
+    const blocks = try prepare(arena.allocator(), .{
+        .sender = "peer",
+        .service = "imessage",
+        .direction = .incoming,
+        .timestamp = "",
+        .kind = .text,
+        .decoding = .plain,
+        .observed_status = .received,
+        .text = body,
+    });
+    try std.testing.expectEqual(@as(usize, 1), blocks.len);
+    try std.testing.expect(std.mem.indexOf(u8, blocks[0].value.text, "last.example") == null);
+    try std.testing.expectEqual(@as(usize, 2), blocks[0].links.len);
+    try std.testing.expectEqualStrings("https://last.example/", blocks[0].links[1].url);
+    try std.testing.expectEqualStrings("last.example", blocks[0].links[1].hostname);
 }
 
 test "composite blocks keep captions, source order, part reactions and overflow" {

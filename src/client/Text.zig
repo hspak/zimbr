@@ -12,6 +12,8 @@ entries: std.ArrayList(Entry) = .empty,
 texture_bytes: usize = 0,
 frame: u64 = 0,
 scale: f32 = 1,
+// Native regression tests count uncached work without imposing timing thresholds.
+measure_calls: if (builtin.is_test) usize else void = if (builtin.is_test) 0 else {},
 
 // Keep logical font sizes unchanged; display scaling is applied separately.
 pub const font_scale = 1.0;
@@ -162,6 +164,7 @@ pub fn height(s: *Text, text: []const u8, size: i32, width: f32) f32 {
 // Offscreen history needs only metrics. Keeping these layouts in the drawing
 // cache evicts visible glyphs and textures during every background batch.
 pub fn measure(s: *Text, text: []const u8, size: i32, width: f32) f32 {
+    if (comptime builtin.is_test) s.measure_calls += 1;
     if (!std.math.isFinite(width) or !std.math.isFinite(s.scale) or s.scale < 0.5 or s.scale > 8) return 24;
     // Stay below the native 4096-pixel raster width after scale and two pixels of layout margin.
     const w: i32 = @intFromFloat(std.math.clamp(width, 1, 4096 / s.scale - 2));
@@ -440,8 +443,9 @@ fn drawEntry(
             .height = tile_height,
             .color = color,
             .background = background,
-            .start = start,
-            .end = end,
+            // A collapsed selection paints no highlight, regardless of the caret position.
+            .start = if (start < end) start else 0,
+            .end = if (start < end) end else 0,
         }) catch {
             e.raster_failed = true;
             return;
