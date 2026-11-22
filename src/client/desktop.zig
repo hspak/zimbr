@@ -2,10 +2,7 @@
 const std = @import("std");
 const log = std.log.scoped(.client_desktop);
 const geometry = @import("geometry.zig");
-pub const c = @cImport({
-    @cInclude("SDL3/SDL.h");
-    @cInclude("desktop.h");
-});
+pub const c = @import("desktop_c");
 
 pub const wake = c.zc_desktop_wake;
 pub fn wait(timeout_ms: c_int) bool {
@@ -54,7 +51,7 @@ pub fn open(w: i32, h: i32, title: [:0]const u8) OpenError!void {
     closing = false;
     pointer = .{ .x = 0, .y = 0 };
     buttons = 0;
-    keys = .initEmpty();
+    keys = .empty;
     key_modifiers = 0;
     refreshMetrics();
 }
@@ -214,13 +211,13 @@ pub const KeyPress = struct {
         return !key.repeat and key.matches(expected);
     }
     pub fn matches(key: KeyPress, expected: Key) bool {
-        return key.code == @intFromEnum(expected);
+        return key.code == @backingInt(expected);
     }
 };
 pub const Button = enum(u8) { left = c.SDL_BUTTON_LEFT, middle = c.SDL_BUTTON_MIDDLE, right = c.SDL_BUTTON_RIGHT };
 var pointer: geometry.Point = .{ .x = 0, .y = 0 };
 var buttons: c.SDL_MouseButtonFlags = 0;
-var keys: std.StaticBitSet(c.SDL_SCANCODE_COUNT) = .initEmpty();
+var keys: std.bit_set.Static(c.SDL_SCANCODE_COUNT) = .empty;
 var key_modifiers: c.SDL_Keymod = 0;
 var closing = false;
 
@@ -262,7 +259,7 @@ pub fn nextEvent() ?c.SDL_Event {
             c.SDL_EVENT_MOUSE_WHEEL => pointer = .{ .x = event.wheel.mouse_x, .y = event.wheel.mouse_y },
             c.SDL_EVENT_WINDOW_FOCUS_LOST => {
                 buttons = 0;
-                keys = .initEmpty();
+                keys = .empty;
                 key_modifiers = 0;
             },
             else => {},
@@ -274,7 +271,7 @@ pub fn nextEvent() ?c.SDL_Event {
 pub const Cursor = enum { default, pointing_hand, ibeam };
 var cursors: [3]?*c.SDL_Cursor = @splat(null);
 pub fn setCursor(cursor: Cursor) void {
-    const index = @intFromEnum(cursor);
+    const index = @backingInt(cursor);
     if (cursors[index] == null) cursors[index] = c.SDL_CreateSystemCursor(switch (cursor) {
         .default => c.SDL_SYSTEM_CURSOR_DEFAULT,
         .pointing_hand => c.SDL_SYSTEM_CURSOR_POINTER,

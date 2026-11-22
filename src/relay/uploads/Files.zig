@@ -1,15 +1,13 @@
 //! Private upload directories preserve original basenames and own immutable bytes.
 //! File writes and fsync run outside the journal mutex on the connection owner.
 const std = @import("std");
+const repeat = @import("../../fixtures.zig").repeat;
 const u = @import("../../common.zig");
 const attachments = @import("../../protocol.zig").attachments;
 const t = @import("../../protocol.zig").types;
 const uploads = @import("../uploads.zig");
 const Journal = @import("../Journal.zig");
-const c = @cImport({
-    @cInclude("relay/media.h");
-    @cInclude("relay/uploads.h");
-});
+const c = @import("relay_c");
 const Files = @This();
 
 root: []const u8,
@@ -30,9 +28,9 @@ pub fn init(a: u.Allocator, data: []const u8) InitError!Files {
         break :parent_path try std.fs.path.resolve(a, &.{ std.mem.span(current), data });
     };
     defer a.free(parent_path);
-    const parent_name = try a.dupeZ(u8, parent_path);
+    const parent_name = try a.dupeSentinel(u8, parent_path, 0);
     defer a.free(parent_name);
-    const root = try std.fmt.allocPrintSentinel(a, "{s}/uploads", .{parent_path}, 0);
+    const root = try a.printSentinel("{s}/uploads", .{parent_path}, 0);
     errdefer a.free(root);
     const directory = c.zr_media_directory(root, 1);
     if (directory < 0) return error.UploadStorageUnavailable;
@@ -90,11 +88,11 @@ pub fn beginNew(self: Files, a: u.Allocator, lease: uploads.Lease) BeginError!Tr
 fn beginTransfer(self: Files, a: u.Allocator, lease: uploads.Lease, replace: bool) BeginError!Transfer {
     const expected = try attachments.validate(lease.file);
     if (!t.validId(lease.token)) return error.InvalidRequest;
-    const id = try a.dupeZ(u8, lease.file.id);
-    const name = try a.dupeZ(u8, lease.file.name);
-    const temporary = try std.fmt.allocPrintSentinel(a, ".tmp-{s}{s}", .{
+    const id = try a.dupeSentinel(u8, lease.file.id, 0);
+    const name = try a.dupeSentinel(u8, lease.file.name, 0);
+    const temporary = try a.printSentinel(".tmp-{s}{s}", .{
         lease.token,
-        if (u.eq(lease.file.name, try std.fmt.allocPrint(a, ".tmp-{s}", .{lease.token}))) "-partial" else "",
+        if (u.eq(lease.file.name, try a.print(".tmp-{s}", .{lease.token}))) "-partial" else "",
     }, 0);
     // Upload verification retains all 32 bytes of SHA-256.
     var digest: [32]u8 = undefined;
@@ -118,7 +116,7 @@ fn beginTransfer(self: Files, a: u.Allocator, lease: uploads.Lease, replace: boo
 /// Open a private regular file with its exact declared length; caller closes it.
 pub fn open(self: Files, a: u.Allocator, file: attachments.Upload) OpenError!c_int {
     const size = try attachments.validate(file);
-    const fd = c.zr_upload_open(self.directory, try a.dupeZ(u8, file.id), try a.dupeZ(u8, file.name), size);
+    const fd = c.zr_upload_open(self.directory, try a.dupeSentinel(u8, file.id, 0), try a.dupeSentinel(u8, file.name, 0), size);
     if (fd < 0) return error.UploadFileUnavailable;
     return fd;
 }
@@ -126,7 +124,7 @@ pub fn open(self: Files, a: u.Allocator, file: attachments.Upload) OpenError!c_i
 /// Return an allocator-owned path for the local automation boundary only.
 pub fn path(self: Files, a: u.Allocator, file: attachments.Upload) (u.Allocator.Error || attachments.ValidateError)![]const u8 {
     _ = try attachments.validate(file);
-    return std.fmt.allocPrint(a, "{s}/{s}/{s}", .{
+    return a.print("{s}/{s}/{s}", .{
         self.root,
         file.id,
         file.name,
@@ -204,7 +202,7 @@ test "automation paths remain absolute when upload storage uses a relative path"
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const relative = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const relative = try a.print(".zig-cache/tmp/{s}", .{tmp.sub_path});
     var files = try Files.init(a, relative);
     defer files.deinit();
     const filename = try files.path(a, .{
@@ -212,7 +210,7 @@ test "automation paths remain absolute when upload storage uses a relative path"
         .name = "file.bin",
         .mime_type = "application/octet-stream",
         .bytes = "0",
-        .sha256 = "0" ** 64,
+        .sha256 = repeat("0", 64),
     });
     try std.testing.expect(std.fs.path.isAbsolute(filename));
 }
@@ -223,7 +221,7 @@ test "upload storage verifies chunked original bytes and retains only published 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const relative = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0);
+    const relative = try a.printSentinel(".zig-cache/tmp/{s}", .{tmp.sub_path}, 0);
     var absolute: [4096]u8 = undefined;
     const data = u.c.realpath(relative, &absolute) orelse return error.TestUnexpectedResult;
     var files = try Files.init(a, std.mem.span(data));
@@ -275,7 +273,7 @@ test "upload storage rejects wrong hashes and cleans sealed files without ledger
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const relative = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0);
+    const relative = try a.printSentinel(".zig-cache/tmp/{s}", .{tmp.sub_path}, 0);
     var absolute: [4096]u8 = undefined;
     const data = u.c.realpath(relative, &absolute) orelse return error.TestUnexpectedResult;
     var files = try Files.init(a, std.mem.span(data));
@@ -288,7 +286,7 @@ test "upload storage rejects wrong hashes and cleans sealed files without ledger
             .name = "empty.txt",
             .mime_type = "text/plain",
             .bytes = "0",
-            .sha256 = "0" ** 64,
+            .sha256 = repeat("0", 64),
         },
     };
     {
@@ -315,7 +313,7 @@ test "upload storage rejects wrong hashes and cleans sealed files without ledger
     const fd = try files.open(a, lease.file);
     defer _ = u.c.close(fd);
     try files.remove(lease.file.id);
-    lease.file.name = try std.fmt.allocPrint(a, ".tmp-{s}", .{lease.token});
+    lease.file.name = try a.print(".tmp-{s}", .{lease.token});
     {
         var transfer = try files.begin(a, lease);
         defer transfer.deinit();
@@ -325,7 +323,7 @@ test "upload storage rejects wrong hashes and cleans sealed files without ledger
     const collision = try files.open(a, lease.file);
     defer _ = u.c.close(collision);
     try files.remove(lease.file.id);
-    const id = try a.dupeZ(u8, lease.file.id);
+    const id = try a.dupeSentinel(u8, lease.file.id, 0);
     try std.testing.expectEqual(@as(c_int, 0), u.c.symlinkat(data, files.directory, id));
     try std.testing.expectError(error.UploadStorageUnavailable, files.begin(a, lease));
     try std.testing.expectError(error.UploadStorageUnavailable, files.remove(lease.file.id));

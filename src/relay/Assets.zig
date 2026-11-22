@@ -14,9 +14,7 @@ const Journal = @import("Journal.zig");
 const enrichment = @import("enrichment.zig");
 const Core = @import("Core.zig");
 const contacts = @import("adapter/contacts.zig");
-pub const c = @cImport({
-    @cInclude("relay/media.h");
-});
+pub const c = @import("relay_c");
 const Assets = @This();
 
 root_path: []const u8,
@@ -93,12 +91,11 @@ pub const ContactWorkError = contacts.ThumbnailError || Journal.MessageError || 
 /// Paths and allocated strings must live in the caller's arena until close.
 /// The returned service owns its cache descriptor.
 pub fn init(a: u.Allocator, io: std.Io, data: []const u8, root: []const u8) InitError!Assets {
-    const cache = try std.fmt.allocPrintSentinel(a, "{s}/assets", .{data}, 0);
+    const cache = try a.printSentinel("{s}/assets", .{data}, 0);
     const cache_fd = c.zr_media_directory(cache, 1);
     if (cache_fd < 0) return error.UnsafeAssetCache;
     errdefer _ = u.c.close(cache_fd);
-    const helper = try std.fmt.allocPrintSentinel(
-        a,
+    const helper = try a.printSentinel(
         "{s}/{s}",
         .{ try std.process.executableDirPathAlloc(io, a), if (comptime options.fake) "fake-image-helper" else "image-helper" },
         0,
@@ -115,7 +112,7 @@ pub fn close(self: Assets) void {
     _ = u.c.close(self.cache_fd);
 }
 fn relative(self: Assets, path: []const u8) ?[]const u8 {
-    if (std.mem.indexOfScalar(u8, path, 0) != null or path.len > 4096) return null;
+    if (std.mem.findScalar(u8, path, 0) != null or path.len > 4096) return null;
     const expected = "~/Library/Messages/Attachments/";
     if (comptime !options.fake) {
         if (std.mem.startsWith(u8, path, expected)) return path[expected.len..];
@@ -305,7 +302,7 @@ pub fn previews(
     for (artwork) |item| {
         var ref: ?t.AssetRef = null;
         if (item.data) |bytes| {
-            const key = try std.fmt.allocPrint(a, "{s}:{s}:{s}", .{
+            const key = try a.print("{s}:{s}:{s}", .{
                 message_source,
                 item.preview_id,
                 if (item.icon) "icon" else "image",
@@ -528,7 +525,7 @@ pub fn verifyBytes(a: u.Allocator, bytes: []const u8, etag: []const u8) u.Alloca
     return u.eq(try digest(a, bytes), etag);
 }
 fn fingerprint(a: u.Allocator, value: c.ZrMediaFingerprint) ![]const u8 {
-    return std.fmt.allocPrint(a, "{s}:{d}:{d}:{d}:{d}:{d}:{d}:{d}", .{
+    return a.print("{s}:{d}:{d}:{d}:{d}:{d}:{d}:{d}", .{
         transform_version,
         value.device,
         value.inode,
@@ -542,12 +539,12 @@ fn fingerprint(a: u.Allocator, value: c.ZrMediaFingerprint) ![]const u8 {
 fn openSource(self: *Assets, a: u.Allocator, source: Source, fp: *c.ZrMediaFingerprint) !c_int {
     // Reopen the approved namespace for every inspection, including the check
     // after conversion. A replaced root must not leave an old directory live.
-    const root_fd = c.zr_media_directory(try a.dupeZ(u8, self.root_path), 0);
+    const root_fd = c.zr_media_directory(try a.dupeSentinel(u8, self.root_path, 0), 0);
     if (root_fd < 0) return root_fd;
     defer _ = u.c.close(root_fd);
     if (source.path.len == 0) return -2;
     const relative_path = self.relative(source.path) orelse return -3;
-    return c.zr_media_source(root_fd, try a.dupeZ(u8, relative_path), fp);
+    return c.zr_media_source(root_fd, try a.dupeSentinel(u8, relative_path, 0), fp);
 }
 fn current(a: u.Allocator, j: Journal, epoch: []const u8, source: Source) !bool {
     if (!u.eq(epoch, try j.epoch(a))) return false;
@@ -574,8 +571,7 @@ fn checkSources(self: *Assets, core: *Core, a: u.Allocator) !void {
         var fp: c.ZrMediaFingerprint = undefined;
         const fd = try self.openSource(a, original, &fp);
         if (fd >= 0) _ = u.c.close(fd);
-        const signature = if (fd >= 0) try fingerprint(a, fp) else try std.fmt.allocPrint(
-            a,
+        const signature = if (fd >= 0) try fingerprint(a, fp) else try a.print(
             "error:{d}",
             .{fd},
         );
@@ -769,7 +765,7 @@ fn convert(self: *Assets, core: *Core, a: u.Allocator, job: Job) !void {
         job.source.path,
         .{},
     )).value else null;
-    const source_temp = try std.fmt.allocPrintSentinel(a, ".tmp-{s}", .{try u.id(a)}, 0);
+    const source_temp = try a.printSentinel(".tmp-{s}", .{try u.id(a)}, 0);
     const payload = u.eq(job.source.kind, "payload");
     const photo_fd = if (photo != null or payload) c.zr_media_temporary(self.cache_fd, source_temp) else -1;
     defer if (photo_fd >= 0) {
@@ -808,13 +804,13 @@ fn convert(self: *Assets, core: *Core, a: u.Allocator, job: Job) !void {
         if (input < 0) break :signature null;
         const length = u.c.lseek(input, 0, u.c.SEEK_END);
         if (length <= 0 or length > max_derivative) return error.InvalidImage;
-        const signature = try std.fmt.allocPrint(a, "{s}:{s}", .{
+        const signature = try a.print("{s}:{s}", .{
             transform_version, try digest(a, try readBytes(a, input, @intCast(length))),
         });
         if (!try contacts.photoCurrent(a, core, p) or !try checkPhoto(a, core, job, signature)) return;
         break :signature signature;
     } else null;
-    const temporary = try std.fmt.allocPrintSentinel(a, ".tmp-{s}", .{try u.id(a)}, 0);
+    const temporary = try a.printSentinel(".tmp-{s}", .{try u.id(a)}, 0);
     const output = c.zr_media_temporary(self.cache_fd, temporary);
     if (output < 0) return error.AssetCacheUnavailable;
     defer _ = u.c.close(output);
@@ -849,7 +845,7 @@ fn convert(self: *Assets, core: *Core, a: u.Allocator, job: Job) !void {
     if (code == 0 and (job.etag == null or u.eq(job.etag.?, hash.?))) {
         // fsync/rename is outside the writer lock. A stale/failed completion
         // removes its installed file; startup GC handles a crash in this gap.
-        const name = try std.fmt.allocPrintSentinel(a, "{s}-{s}-{s}", .{
+        const name = try a.printSentinel("{s}-{s}-{s}", .{
             job.source.id,
             job.source.version,
             @tagName(job.variant),
@@ -995,7 +991,7 @@ fn collect(self: *Assets, core: *Core, a: u.Allocator, reserve: usize) !void {
         try j.commit();
         break :removals names.items;
     };
-    for (removals) |name| _ = c.zr_media_remove(self.cache_fd, try a.dupeZ(u8, name));
+    for (removals) |name| _ = c.zr_media_remove(self.cache_fd, try a.dupeSentinel(u8, name, 0));
 }
 fn sweepOrphans(self: *Assets, core: *Core) !void {
     const scan = c.zr_media_scan(self.cache_fd) orelse return error.AssetCacheUnavailable;
@@ -1106,7 +1102,7 @@ test "asset requests deduplicate and enforce the shared durable queue bound" {
             a,
             j,
             "attachment",
-            try std.fmt.allocPrint(a, "fixture-{d}", .{i}),
+            try a.print("fixture-{d}", .{i}),
             "",
         );
         const ref = try reference(a, j, id, .inline_image);
@@ -1200,7 +1196,7 @@ test "contact validation resumes after queue pressure and leaves unrequested pho
         .source_path = "",
     };
     for (0..max_queue + 1) |i| {
-        const id = try std.fmt.allocPrint(a, "contact-{d}", .{i});
+        const id = try a.print("contact-{d}", .{i});
         _ = try avatar(a, j, id, .{
             .contact_id = id,
             .generation = 1,

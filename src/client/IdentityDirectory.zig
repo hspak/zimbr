@@ -66,7 +66,7 @@ pub fn conversation(s: IdentityDirectory, a: std.mem.Allocator, chat: t.Conversa
     const joined = try std.mem.join(a, ", ", names[0..count]);
     if (chat.participants.len <= names.len) return joined;
     defer a.free(joined);
-    return std.fmt.allocPrint(a, "{s} +{d}", .{ joined, chat.participants.len - names.len });
+    return a.print("{s} +{d}", .{ joined, chat.participants.len - names.len });
 }
 pub fn matches(s: IdentityDirectory, chat: t.Conversation, query: []const u8) bool {
     if (chat.is_self and contains("You", query)) return true;
@@ -77,7 +77,7 @@ pub fn matches(s: IdentityDirectory, chat: t.Conversation, query: []const u8) bo
     return false;
 }
 fn contains(value: []const u8, query: []const u8) bool {
-    return std.ascii.indexOfIgnoreCase(value, query) != null;
+    return std.ascii.findIgnoreCase(value, query) != null;
 }
 
 test "directory preserves routes, explicit titles, ambiguity and permission clearing" {

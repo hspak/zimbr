@@ -1,0 +1,28 @@
+.{
+    .name = .zrct,
+    .version = "0.1.0",
+    .fingerprint = 0x6b0bae9baecbc463,
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{
+        .uv_linux_x86_64 = .{
+            .url = "https://github.com/astral-sh/uv/releases/download/0.12.21/uv-x86_64-unknown-linux-musl.tar.gz",
+            .hash = "N-V-__8AACgZggMqWOZwyB1RUgQA2MhwvEJl-jXJUM8t14hp",
+            .lazy = true,
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        ".python-version",
+        "pyproject.toml",
+        "uv.lock",
+        "native-tools.json",
+        "tools",
+        "zrct",
+        "platform",
+        "README.md",
+        "SKILL.md",
+        "docs",
+    },
+}

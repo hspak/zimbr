@@ -1,4 +1,5 @@
 const std = @import("std");
+const repeat = @import("../fixtures.zig").repeat;
 const u = @import("../common.zig");
 const attachments = @import("attachments.zig");
 // 64 KiB bounds request parsing while leaving room for text and attachment metadata.
@@ -341,17 +342,17 @@ pub fn validAddress(s: []const u8) bool {
         for (s[1..]) |ch| if (!std.ascii.isDigit(ch)) return false;
         return true;
     }
-    const at = std.mem.indexOfScalar(u8, s, '@') orelse return false;
-    if (at == 0 or at == s.len - 1 or std.mem.indexOfScalar(u8, s[at + 1 ..], '@') != null) return false;
-    if (std.mem.indexOfScalar(u8, s[at + 1 ..], '.') == null) return false;
-    for (s) |ch| if (ch <= 32 or ch >= 127 or std.mem.indexOfScalar(u8, "<>\\\"(),;:", ch) != null) return false;
+    const at = std.mem.findScalar(u8, s, '@') orelse return false;
+    if (at == 0 or at == s.len - 1 or std.mem.findScalar(u8, s[at + 1 ..], '@') != null) return false;
+    if (std.mem.findScalar(u8, s[at + 1 ..], '.') == null) return false;
+    for (s) |ch| if (ch <= 32 or ch >= 127 or std.mem.findScalar(u8, "<>\\\"(),;:", ch) != null) return false;
     return true;
 }
 pub fn validate(v: SendInput) ValidateError!void {
     if (!validId(v.request_id) or !validId(v.server_epoch)) return error.InvalidRequest;
     if (v.text.len > max_text) return error.TextTooLarge;
     try attachments.validateSet(v.attachments);
-    if ((v.text.len == 0 and v.attachments.len == 0) or !std.unicode.utf8ValidateSlice(v.text) or std.mem.indexOfScalar(
+    if ((v.text.len == 0 and v.attachments.len == 0) or !std.unicode.utf8ValidateSlice(v.text) or std.mem.findScalar(
         u8,
         v.text,
         0,
@@ -366,7 +367,7 @@ pub fn validate(v: SendInput) ValidateError!void {
     }
 }
 pub fn cursor(a: u.Allocator, epoch: []const u8, seq: i64) u.Allocator.Error![]const u8 {
-    return std.fmt.allocPrint(a, "{s}:{d}", .{ epoch, seq });
+    return a.print("{s}:{d}", .{ epoch, seq });
 }
 pub fn parseCursor(s: []const u8, epoch: []const u8) ParseCursorError!i64 {
     if (s.len < id_length + 2 or s[id_length] != ':' or
@@ -389,7 +390,7 @@ test "attachment-only sends validate without weakening text or target validation
         .name = "photo.png",
         .mime_type = "image/png",
         .bytes = "4",
-        .sha256 = "0123456789abcdef" ** 4,
+        .sha256 = repeat("0123456789abcdef", 4),
     };
     var input: SendInput = .{
         .request_id = "aBEiM0RVZneImaq7zN3u_w",
@@ -404,7 +405,7 @@ test "attachment-only sends validate without weakening text or target validation
     try validate(input);
     input.text = "bad\x00caption";
     try std.testing.expectError(error.InvalidRequest, validate(input));
-    input.text = "x" ** (max_text + 1);
+    input.text = repeat("x", max_text + 1);
     try std.testing.expectError(error.TextTooLarge, validate(input));
     input.text = "";
     input.target.recipient.?.service = "sms";
@@ -428,7 +429,7 @@ test "text sends retain legacy serialization and attachments survive round trips
         .name = "photo.png",
         .mime_type = "image/png",
         .bytes = "4",
-        .sha256 = "0123456789abcdef" ** 4,
+        .sha256 = repeat("0123456789abcdef", 4),
     }};
     const with_file = try u.json(a, input);
     defer a.free(with_file);

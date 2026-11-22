@@ -1,4 +1,5 @@
 const std = @import("std");
+const repeat = @import("../fixtures.zig").repeat;
 const log = std.log.scoped(.client_worker);
 const a = std.heap.page_allocator;
 
@@ -338,7 +339,7 @@ fn run(s: *Worker) void {
     };
 }
 fn work(s: *Worker) !void {
-    const path = try std.fmt.allocPrintSentinel(a, "{s}/client.db", .{s.config.data}, 0);
+    const path = try a.printSentinel("{s}/client.db", .{s.config.data}, 0);
     defer a.free(path);
     s.store = try Store.open(path);
     defer s.store.close();
@@ -555,7 +556,7 @@ fn request(
     body: ?[]const u8,
 ) !void {
     std.debug.assert(s.job == .idle);
-    const url = std.fmt.bufPrintZ(&s.job_path, format, args) catch
+    const url = std.mem.printSentinel(&s.job_path, format, args, 0) catch
         return error.RequestPathTooLong;
     if (c.zc_net_start(s.net.?, 0, url, if (body) |b| b.ptr else null, if (body) |b| b.len else 0) == 0)
         return error.TransportFailure;
@@ -866,10 +867,11 @@ fn attach(s: *Worker, ar: u.Allocator) !void {
     if (s.stream_active) return;
     const cursor = try s.store.get(ar, "cursor");
     var buffer: [c.ZC_REQUEST_URL_CAPACITY]u8 = undefined;
-    const path = std.fmt.bufPrintZ(
+    const path = std.mem.printSentinel(
         &buffer,
         "/v1/events?after={f}{s}",
         .{ url_format.escaped(cursor), if (s.want_identities) "&extensions=identity-v1" else "" },
+        0,
     ) catch return error.RequestPathTooLong;
     if (c.zc_net_start(s.net.?, 1, path, null, 0) == 0) return error.TransportFailure;
     s.stream_verified = false;
@@ -1049,7 +1051,7 @@ fn handleResponse(s: *Worker, ar: u.Allocator, job: @FieldType(Worker, "job"), r
             s.last_status_ms = u.now();
             try s.store.set(
                 "server_checked_at",
-                try std.fmt.allocPrint(ar, "{d}", .{s.last_status_ms}),
+                try ar.print("{d}", .{s.last_status_ms}),
             );
             if (!u.eq(v.api_version, "1")) {
                 s.auth_blocked = true;
@@ -1658,8 +1660,7 @@ fn publish(s: *Worker) !void {
     const server = try s.store.get(ar, "relay_status");
     // Warn 30 days before expiry to leave time for certificate renewal.
     const expiring = s.identity.expires_at > 0 and s.identity.expires_at - @divTrunc(u.now(), 1000) <= 30 * 86400;
-    if (expiring and s.online) v.status = try std.fmt.allocPrint(
-        ar,
+    if (expiring and s.online) v.status = try ar.print(
         "{s} · client certificate expires {s}; renew and Reconnect",
         .{ s.status, std.mem.sliceTo(&s.identity.expires, 0) },
     );
@@ -1793,8 +1794,7 @@ test "lazy metadata upgrades a text snapshot without changing its revision or lo
 test "worker shuts down before making its first request" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const data = try std.fmt.allocPrintSentinel(
-        std.testing.allocator,
+    const data = try std.testing.allocator.printSentinel(
         ".zig-cache/tmp/{s}",
         .{tmp.sub_path},
         0,
@@ -1813,7 +1813,7 @@ test "worker shuts down before making its first request" {
 
 test "oversized request paths are rejected before starting transport" {
     var worker = Worker{ .io = std.testing.io, .config = .{ .data = "/tmp/unused" } };
-    const path = "/" ++ "x" ** (c.ZC_REQUEST_URL_CAPACITY - 1);
+    const path = "/" ++ repeat("x", c.ZC_REQUEST_URL_CAPACITY - 1);
     try std.testing.expectError(error.RequestPathTooLong, worker.request(.history, "{s}", .{path}, null));
     try std.testing.expectEqual(.idle, worker.job);
     try std.testing.expectEqual(@as(usize, 0), worker.job_path_len);
@@ -2070,13 +2070,12 @@ fn notificationFrame(
     const cursor = try t.cursor(ar, epoch, sequence);
     const payload = try u.json(ar, .{
         .cursor = cursor,
-        .sequence = try std.fmt.allocPrint(ar, "{d}", .{sequence}),
+        .sequence = try ar.print("{d}", .{sequence}),
         .type = "message.upsert",
         .origin = origin,
         .record = message,
     });
-    return std.fmt.allocPrint(
-        ar,
+    return ar.print(
         "id: {s}\nevent: message.upsert\ndata: {s}\n\n",
         .{ cursor, payload },
     );

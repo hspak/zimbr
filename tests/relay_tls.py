@@ -24,8 +24,9 @@ from h2.connection import H2Connection
 from h2.events import ResponseReceived
 
 ROOT = Path(__file__).resolve().parents[1]
-BIN = ROOT/'zig-out/bin/fake-relay'
-REAL = ROOT/'zig-out/bin/relay'
+BIN_DIR = Path(os.environ.get('ZIMBR_TEST_BIN', ROOT/'zig-out/bin'))
+BIN = BIN_DIR/'fake-relay'
+REAL = BIN_DIR/'relay'
 
 
 class RelayTls(unittest.TestCase):

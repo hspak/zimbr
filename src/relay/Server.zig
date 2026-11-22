@@ -126,7 +126,7 @@ pub fn handle(self: *Server, a: u.Allocator, req: *Request, peer: *Tls.c.ZrTls) 
     if ((req.head.content_length orelse 0) > t.max_body) return error.BodyTooLarge;
     if (req.head.method == .GET and ((req.head.content_length orelse 0) != 0 or req.body.items.len != 0)) return error.InvalidRequest;
     const target = try a.dupe(u8, req.head.target);
-    const split = std.mem.indexOfScalar(u8, target, '?') orelse target.len;
+    const split = std.mem.findScalar(u8, target, '?') orelse target.len;
     const path = target[0..split];
     const query = if (split < target.len) target[split + 1 ..] else "";
     const resetting = req.head.method == .POST and u.eq(path, "/v1/reset");
@@ -432,7 +432,7 @@ fn asset(
     );
     const size = std.fmt.parseInt(usize, value.ref.bytes orelse "", 10) catch return error.InvalidAsset;
     if (size > Assets.max_derivative) return error.InvalidAsset;
-    const fd = Assets.c.zr_media_cached(service.cache_fd, try a.dupeZ(u8, value.file_name.?), size);
+    const fd = Assets.c.zr_media_cached(service.cache_fd, try a.dupeSentinel(u8, value.file_name.?, 0), size);
     defer if (fd >= 0) {
         _ = u.c.close(fd);
     };
@@ -465,7 +465,7 @@ fn asset(
         _ = try Assets.lookup(a, self.core.journal, id, version, variant);
     }
     if (Tls.c.zr_tls_valid(peer) == 0) return error.CertificateExpired;
-    const etag = try std.fmt.allocPrint(a, "\"{s}\"", .{value.etag.?});
+    const etag = try a.print("\"{s}\"", .{value.etag.?});
     const extra = [_]std.http.Header{
         .{ .name = "content-type", .value = value.ref.mime_type orelse return error.InvalidAsset },
         .{ .name = "etag", .value = etag },
@@ -593,7 +593,7 @@ fn param(a: u.Allocator, query: []const u8, key: []const u8) !?[]const u8 {
     var it = std.mem.splitScalar(u8, query, '&');
     var found: ?[]const u8 = null;
     while (it.next()) |part| {
-        const split = std.mem.indexOfScalar(u8, part, '=') orelse continue;
+        const split = std.mem.findScalar(u8, part, '=') orelse continue;
         if (!u.eq(part[0..split], key)) continue;
         if (found != null) return error.InvalidRequest;
         const raw = part[split + 1 ..];

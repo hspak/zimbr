@@ -1,5 +1,6 @@
 //! GUI-thread textures; immutable bytes and decoding belong to Media's worker.
 const std = @import("std");
+const repeat = @import("../fixtures.zig").repeat;
 const a = std.heap.c_allocator;
 const desktop = @import("desktop.zig");
 const graphics = @import("graphics.zig");
@@ -282,7 +283,7 @@ test "local previews queue offline and transfer decoded pixels into bounded text
         .name = "photo.png",
         .mime_type = "image/png",
         .bytes = "71",
-        .sha256 = "0" ** 64,
+        .sha256 = repeat("0", 64),
     };
     const queued = images.getLocal(&media, file) orelse return error.TestUnexpectedResult;
     try std.testing.expect(queued.availableTexture() == null and queued.content == .requested);

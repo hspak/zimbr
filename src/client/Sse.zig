@@ -53,7 +53,7 @@ fn parse(comptime accept: anytype, context: anytype, frame: []const u8) !void {
     while (lines.next()) |raw| {
         const line = std.mem.trimEnd(u8, raw, "\r");
         if (line.len == 0 or line[0] == ':') continue;
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse line.len;
+        const colon = std.mem.findScalar(u8, line, ':') orelse line.len;
         const key = line[0..colon];
         var value = if (colon < line.len) line[colon + 1 ..] else "";
         if (std.mem.startsWith(u8, value, " ")) value = value[1..];

@@ -9,14 +9,14 @@ pub fn escaped(raw: []const u8) std.fmt.Alt(std.Uri.Component, std.Uri.Component
 
 test "escaped components cannot inject path or query delimiters" {
     var buffer: [128]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&buffer, "/messages/{f}?before={f}", .{
+    const path = try std.mem.printSentinel(&buffer, "/messages/{f}?before={f}", .{
         escaped("a/b?x=1&y=%"),
         escaped("é :+\x00"),
-    });
+    }, 0);
     try std.testing.expectEqualStrings("/messages/a%2Fb%3Fx%3D1%26y%3D%25?before=%C3%A9%20%3A%2B%00", path);
     try std.testing.expectEqual(@as(u8, 0), path[path.len]);
-    try std.testing.expectEqualStrings("AZaz09-_.~", try std.fmt.bufPrint(&buffer, "{f}", .{escaped("AZaz09-_.~")}));
-    try std.testing.expectError(error.NoSpaceLeft, std.fmt.bufPrintZ(buffer[0..3], "{f}", .{escaped("/ ")}));
+    try std.testing.expectEqualStrings("AZaz09-_.~", try std.mem.print(&buffer, "{f}", .{escaped("AZaz09-_.~")}));
+    try std.testing.expectError(error.NoSpaceLeft, std.mem.printSentinel(buffer[0..3], "{f}", .{escaped("/ ")}, 0));
 }
 
 pub fn safe(url: []const u8) bool {
@@ -36,13 +36,13 @@ pub fn safe(url: []const u8) bool {
     )) return false;
     if (parsed.user != null or parsed.password != null or parsed.host == null) return false;
     const host = parsed.host.?.percent_encoded;
-    if (host.len == 0 or std.mem.indexOfScalar(u8, host, '%') != null) return false;
+    if (host.len == 0 or std.mem.findScalar(u8, host, '%') != null) return false;
     if (host[0] == '[') {
         if (host.len < 3 or host[host.len - 1] != ']') return false;
         _ = std.Io.net.Ip6Address.parse(host[1 .. host.len - 1], 0) catch return false;
     } else {
         for (host) |byte| if (byte < 128 and !std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '.') return false;
-        if (host[0] == '.' or std.mem.indexOf(u8, host, "..") != null) return false;
+        if (host[0] == '.' or std.mem.find(u8, host, "..") != null) return false;
     }
     return true;
 }

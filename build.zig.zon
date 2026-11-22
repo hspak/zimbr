@@ -5,11 +5,11 @@
     // Shared release identity consumed by the binaries and packaging tools.
     .version = "0.4.1",
     // The build and std.Io APIs require the toolchain pinned in .zigversion.
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.1",
     // Pin exact source revisions and content hashes so builds and local dependency patches agree.
     // Lazy fetching avoids downloading platform-specific libraries for unrelated build steps.
     .dependencies = .{
-        .zrct = .{ .path = "../zrct", .lazy = true },
+        .zrct = .{ .path = "vendor/zrct", .lazy = true },
         .sdl = .{
             .url = "https://github.com/libsdl-org/SDL/archive/refs/tags/release-3.4.16.tar.gz",
             .hash = "N-V-__8AABHq9wIiTHGY4qR6mw45F_TX8FSvqsQQ-Wtq1tzY",
@@ -24,6 +24,10 @@
             .url = "https://github.com/iziz/libPhoneNumber-iOS/archive/refs/tags/1.7.8.tar.gz",
             .hash = "N-V-__8AADIM0gHF00afnMgkE2orN3Iz2IJyCn4e3Cjeh_I1",
             .lazy = true,
+        },
+        .translate_c = .{
+            .url = "git+https://codeberg.org/ziglang/translate-c?ref=zig-0.17.x#cfac21f3199b2b02ce3fd7db652aa456421fe4ab",
+            .hash = "translate_c-2.0.2-Q_BUWvBNBwDnyehSiuAJmdFcMYHYGA-Jc3KiYdrV2Dqx",
         },
     },
     .paths = .{

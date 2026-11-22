@@ -8,20 +8,10 @@ pub fn addRun(
     dependency: *std.Build.Dependency,
     options: Zrct.RunOptions,
 ) *std.Build.Step.Run {
-    const run = Zrct.addRun(b, dependency, options);
     // Zrct reports unsupported hosts before any native tooling is downloaded.
     if (b.graph.host.result.os.tag != .linux or b.graph.host.result.cpu.arch != .x86_64)
-        return run;
-    const uv = dependency.builder.lazyDependency("uv_linux_x86_64", .{}) orelse return run;
-    const python_version = std.Io.Dir.cwd().readFileAlloc(
-        b.graph.io,
-        dependency.path(".python-version").getPath(b),
-        b.allocator,
-        .limited(64),
-    ) catch |err| {
-        run.step.dependOn(&b.addFail(b.fmt("Cannot read Zrct's Python version: {t}", .{err})).step);
-        return run;
-    };
+        return Zrct.addRun(b, dependency, options);
+    const uv = dependency.builder.lazyDependency("uv_linux_x86_64", .{}) orelse return Zrct.addRun(b, dependency, options);
     const fetch = std.Build.Step.Run.create(b, "provision Lavapipe");
     fetch.addFileArg(uv.path("uv"));
     fetch.addArgs(&.{
@@ -30,7 +20,7 @@ pub fn addRun(
         "--managed-python",
         "--python",
     });
-    fetch.addArg(std.mem.trim(u8, python_version, " \r\n"));
+    fetch.addArg(Zrct.python_version);
     fetch.addArg("python");
     fetch.addFileArg(dependency.path("tools/provision.py"));
     fetch.addArg("--manifest");
@@ -47,7 +37,12 @@ pub fn addRun(
         .install_dir = .prefix,
         .install_subdir = "tools/lavapipe",
     });
+    var suite = options;
+    suite.environment = &.{
+        .{ .name = "ZIMBR_LAVAPIPE_ROOT", .path = b.graph.path(.install_prefix, "tools/lavapipe") },
+        .{ .name = "ZIMBR_TEST_BIN", .path = b.graph.path(.install_bin, "") },
+    };
+    const run = Zrct.addRun(b, dependency, suite);
     run.step.dependOn(&install.step);
-    run.setEnvironmentVariable("ZIMBR_LAVAPIPE_ROOT", b.getInstallPath(.prefix, "tools/lavapipe"));
     return run;
 }

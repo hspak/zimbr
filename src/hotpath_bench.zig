@@ -1,5 +1,6 @@
 //! Synthetic CPU and cache-maintenance hot paths, with no network or display.
 const std = @import("std");
+const repeat = @import("fixtures.zig").repeat;
 const u = @import("common.zig");
 const Db = @import("relay.zig").Sqlite;
 const Journal = @import("relay.zig").Journal;
@@ -48,7 +49,7 @@ fn diskMaintenance(initial_entries: usize) !struct {
     defer for (0..total_files) |i| {
         // Use production-shaped 64-character cache keys plus NUL.
         var key: [65]u8 = undefined;
-        const name = std.fmt.bufPrintZ(&key, "{x:0>64}", .{i}) catch unreachable;
+        const name = std.mem.printSentinel(&key, "{x:0>64}", .{i}, 0) catch unreachable;
         c.zc_cache_remove(dir, name);
     };
     for (0..initial_entries) |i| try cacheFile(dir, i, file_bytes);
@@ -102,7 +103,7 @@ fn diskMaintenance(initial_entries: usize) !struct {
 fn cacheFile(dir: c_int, index: usize, bytes: usize) !void {
     // Use production-shaped 64-character cache keys plus NUL.
     var key: [65]u8 = undefined;
-    const name = try std.fmt.bufPrintZ(&key, "{x:0>64}", .{index});
+    const name = try std.mem.printSentinel(&key, "{x:0>64}", .{index}, 0);
     const fd = u.c.openat(dir, name, @as(c_int, u.c.O_WRONLY | u.c.O_CREAT | u.c.O_EXCL | u.c.O_NOFOLLOW), @as(c_uint, 0o600));
     if (fd < 0) return error.CacheFileUnavailable;
     defer _ = u.c.close(fd);
@@ -121,7 +122,7 @@ pub fn main(init: std.process.Init) !void {
     bytes[0] = '"';
     bytes[bytes.len - 1] = '"';
     // Repeat mixed Unicode across six lines to exercise shaping, fallback, and rasterization.
-    const body = "Opaque text, é 👩‍💻 and Unicode fallback.\n" ** 6;
+    const body = repeat("Opaque text, é 👩‍💻 and Unicode fallback.\n", 6);
     const layout = c.zc_text_new_with_options(body.ptr, body.len, 16, 480, 1.25, 0, 1) orelse return error.TextLayoutUnavailable;
     defer c.zc_text_free(layout);
     const height = @min(2048, c.zc_text_height(layout));
@@ -154,7 +155,7 @@ pub fn main(init: std.process.Init) !void {
         .direction = .incoming,
         .timestamp = "2026-01-01T00:00:00Z",
         .kind = .text,
-        .text = "x" ** 1024,
+        .text = repeat("x", 1024),
         .decoding = .plain,
         .observed_status = .received,
     }, "historical_import");

@@ -2,6 +2,7 @@
 //! emoji/catalog.tsv and licenses/gemoji.txt; tools/generate_emoji.py regenerates it.
 
 const std = @import("std");
+const repeat = @import("../fixtures.zig").repeat;
 const Editor = @import("Editor.zig");
 const t = @import("../protocol.zig").types;
 pub const Completion = @import("emoji/Completion.zig");
@@ -26,7 +27,7 @@ fn parseCatalog() [catalogCount()]Entry {
     var lines = std.mem.tokenizeScalar(u8, catalog, '\n');
     var index: usize = 0;
     while (lines.next()) |line| : (index += 1) {
-        const tab = std.mem.indexOfScalar(u8, line, '\t').?;
+        const tab = std.mem.findScalar(u8, line, '\t').?;
         result[index] = .{ .name = line[0..tab], .text = line[tab + 1 ..] };
     }
     return result;
@@ -66,7 +67,7 @@ fn opening(text: []const u8, at: usize) bool {
     if (at == 0) return true;
     const previous = text[at - 1];
     return std.ascii.isWhitespace(previous) or previous >= 0x80 or
-        std.mem.indexOfScalar(u8, "([{'\"", previous) != null;
+        std.mem.findScalar(u8, "([{'\"", previous) != null;
 }
 
 /// Find an unfinished shortcode at a collapsed caret. The returned range also
@@ -97,7 +98,7 @@ fn append(buffer: []u8, used: *usize, text: []const u8) error{TextTooLarge}!void
 pub fn expand(editor: *Editor, inserted_start: usize) Editor.InsertError!void {
     const text = editor.text.items;
     const end = editor.caret;
-    if (std.mem.indexOfScalar(u8, text[inserted_start..end], ':') == null) return;
+    if (std.mem.findScalar(u8, text[inserted_start..end], ':') == null) return;
     var start = inserted_start;
     while (start > 0 and nameByte(text[start - 1])) : (start -= 1) {}
     if (start > 0 and text[start - 1] == ':') start -= 1;
@@ -193,10 +194,10 @@ test "emoji expansion failure preserves literal text and caret" {
 test "emoji expansion preserves a full draft when a sequence would exceed its byte budget" {
     var editor: Editor = .{};
     defer editor.deinit();
-    try editor.set("x" ** (t.max_text - 4) ++ " :v:");
+    try editor.set(repeat("x", t.max_text - 4) ++ " :v:");
     const revision = editor.revision;
     try std.testing.expectError(error.TextTooLarge, expand(&editor, t.max_text - 1));
-    try std.testing.expectEqualStrings("x" ** (t.max_text - 4) ++ " :v:", editor.text.items);
+    try std.testing.expectEqualStrings(repeat("x", t.max_text - 4) ++ " :v:", editor.text.items);
     try std.testing.expectEqual(revision, editor.revision);
     try std.testing.expectEqual(@as(usize, t.max_text), editor.caret);
 }

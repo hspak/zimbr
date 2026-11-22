@@ -1,6 +1,7 @@
 //! Allocation-free bounds before the JSON parser sees untrusted input. This
 //! checks structure, not the JSON grammar; the typed parser still validates it.
 const std = @import("std");
+const repeat = @import("../fixtures.zig").repeat;
 // 32 levels leaves room for nested metadata while bounding the parser's stack.
 pub const max_depth = 32;
 
@@ -136,10 +137,10 @@ fn checkImpl(comptime vectorize: bool, bytes: []const u8, max_bytes: usize, max_
 
 test "JSON bounds include unknown fields but ignore escaped delimiters" {
     try check("{\"text\":\"[\\\"}\\\\\",\"future\":[true,null,2]}", 1024, 32);
-    try check("[" ** max_depth ++ "0" ++ "]" ** max_depth, 1024, 64);
+    try check(repeat("[", max_depth) ++ "0" ++ repeat("]", max_depth), 1024, 64);
     try std.testing.expectError(
         error.JsonTooDeep,
-        check("[" ** (max_depth + 1) ++ "0" ++ "]" ** (max_depth + 1), 1024, 64),
+        check(repeat("[", max_depth + 1) ++ "0" ++ repeat("]", max_depth + 1), 1024, 64),
     );
     try std.testing.expectError(error.JsonTooComplex, check("[0,0,0,0]", 1024, 4));
     try std.testing.expectError(error.JsonTooLarge, check("[0]", 2, 10));
@@ -179,24 +180,23 @@ test "vector string scanning matches scalar bounds across escapes and tails" {
 test "long quoted prefixes cannot hide depth token or byte limits" {
     const a = std.testing.allocator;
     for (0..32) |padding| {
-        const prefix = try std.fmt.allocPrint(
-            a,
+        const prefix = try a.print(
             "{{\"padding\":\"{s}\\\"\\\\\",\"unknown\":",
-            .{("a" ** 96)[0 .. 64 + padding]},
+            .{(repeat("a", 96))[0 .. 64 + padding]},
         );
         defer a.free(prefix);
-        const deep = try std.mem.concat(a, u8, &.{ prefix, "[" ** 31 ++ "0" ++ "]" ** 31 ++ "}" });
+        const deep = try std.mem.concat(a, u8, &.{ prefix, repeat("[", 31) ++ "0" ++ repeat("]", 31) ++ "}" });
         defer a.free(deep);
         try check(deep, deep.len, 8192);
         const too_deep = try std.mem.concat(
             a,
             u8,
-            &.{ prefix, "[" ** 32 ++ "0" ++ "]" ** 32 ++ "}" },
+            &.{ prefix, repeat("[", 32) ++ "0" ++ repeat("]", 32) ++ "}" },
         );
         defer a.free(too_deep);
         try std.testing.expectError(error.JsonTooDeep, check(too_deep, too_deep.len, 8192));
         // Object, two keys, string value, array, and 8,187 number tokens.
-        const wide = try std.mem.concat(a, u8, &.{ prefix, "[" ++ "0," ** 8186 ++ "0]}" });
+        const wide = try std.mem.concat(a, u8, &.{ prefix, "[" ++ repeat("0,", 8186) ++ "0]}" });
         defer a.free(wide);
         try check(wide, wide.len, 8192);
         try std.testing.expectError(error.JsonTooComplex, check(wide, wide.len, 8191));

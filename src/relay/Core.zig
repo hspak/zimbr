@@ -457,7 +457,7 @@ fn importRow(
     const source = batch.source;
     const j = self.journal;
     if (try source.message(a, row)) |m| {
-        const origin_key = try std.fmt.allocPrint(a, "pending:{d}", .{row});
+        const origin_key = try a.print("pending:{d}", .{row});
         const remembered = try j.progress(a, origin_key);
         // A recent/rolling scan can discover a new row before the bounded live
         // scan reaches it, including rows inserted between queries. Preserve

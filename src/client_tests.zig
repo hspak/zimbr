@@ -1,4 +1,5 @@
 const std = @import("std");
+const repeat = @import("fixtures.zig").repeat;
 const Store = @import("client.zig").Store;
 const Editor = @import("client.zig").Editor;
 const Sse = @import("client.zig").Sse;
@@ -24,7 +25,7 @@ const message = "{\"id\":\"m1\",\"revision\":\"2\",\"conversation_id\":\"c1\",\"
 test "confined client connections preserve WAL readers while another thread writes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const path = try std.fmt.allocPrintSentinel(std.testing.allocator, ".zig-cache/tmp/{s}/client.db", .{tmp.sub_path}, 0);
+    const path = try std.testing.allocator.printSentinel(".zig-cache/tmp/{s}/client.db", .{tmp.sub_path}, 0);
     defer std.testing.allocator.free(path);
     const reader = try Store.open(path);
     defer reader.close();
@@ -61,10 +62,10 @@ test "hostile messages cannot change records or advance the event cursor" {
     defer arena.deinit();
     const a = arena.allocator();
     try s.beginSync(epoch, epoch ++ ":0");
-    const deep = "{\"unknown\":" ++ "[" ** 32 ++ "0" ++ "]" ** 32 ++ "}";
+    const deep = "{\"unknown\":" ++ repeat("[", 32) ++ "0" ++ repeat("]", 32) ++ "}";
     try std.testing.expectError(error.JsonTooDeep, s.upsert(a, "message", deep));
     var m = try std.json.parseFromSliceLeaky(t.Message, a, message, .{});
-    for ([_][]const u8{ "hidden\x00suffix", "x" ** (t.max_body + 1) }) |text| {
+    for ([_][]const u8{ "hidden\x00suffix", repeat("x", t.max_body + 1) }) |text| {
         m.text = text;
         const event = try u.json(a, .{
             .cursor = epoch ++ ":1",
@@ -336,8 +337,7 @@ test "hidden conversations survive restart and live updates without losing histo
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const ar = arena.allocator();
-    const path = try std.fmt.allocPrintSentinel(
-        ar,
+    const path = try ar.printSentinel(
         ".zig-cache/tmp/{s}/client.db",
         .{tmp.sub_path},
         0,
@@ -441,7 +441,7 @@ test "background history advances sync and previews without filling the message 
     _ = try s.upsert(ar, "conversation", "{\"id\":\"c1\",\"service\":\"imessage\"}");
     var m = try std.json.parseFromSliceLeaky(t.Message, ar, message, .{});
     for (0..200) |i| {
-        m.id = try std.fmt.allocPrint(ar, "archive-{d}", .{i});
+        m.id = try ar.print("archive-{d}", .{i});
         m.revision = try u.decimal(ar, @intCast(i + 1));
         m.timestamp = if (i == 0) "2020-01-01T00:00:00Z" else "2010-01-01T00:00:00Z";
         const cursor = try t.cursor(ar, epoch, @intCast(i + 1));
@@ -510,8 +510,7 @@ test "legacy history cache trims once per thread while preserving drafts sends a
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const ar = arena.allocator();
-    const path = try std.fmt.allocPrintSentinel(
-        ar,
+    const path = try ar.printSentinel(
         ".zig-cache/tmp/{s}/client.db",
         .{tmp.sub_path},
         0,
@@ -537,7 +536,7 @@ test "legacy history cache trims once per thread while preserving drafts sends a
         }));
         var m = try std.json.parseFromSliceLeaky(t.Message, ar, message, .{});
         for (0..150) |i| {
-            m.id = try std.fmt.allocPrint(ar, "m-{d:0>3}", .{i});
+            m.id = try ar.print("m-{d:0>3}", .{i});
             m.conversation_id = if (i % 2 == 0) root else alias;
             _ = try s.upsert(ar, "message", try u.json(ar, m));
         }
@@ -775,8 +774,7 @@ test "outbox send times survive status updates, restart, and epoch reset" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const ar = arena.allocator();
-    const path = try std.fmt.allocPrintSentinel(
-        ar,
+    const path = try ar.printSentinel(
         ".zig-cache/tmp/{s}/client.db",
         .{tmp.sub_path},
         0,
@@ -832,8 +830,7 @@ test "legacy outbox positions are estimated from nearby history only once" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const ar = arena.allocator();
-    const path = try std.fmt.allocPrintSentinel(
-        ar,
+    const path = try ar.printSentinel(
         ".zig-cache/tmp/{s}/client.db",
         .{tmp.sub_path},
         0,
@@ -1451,7 +1448,7 @@ test "word hits select chat words and delimiters without splitting Unicode graph
         const shaped = c.zc_text_new(case.text.ptr, @intCast(case.text.len), 16, 400, 1) orelse
             return error.NoLayout;
         defer c.zc_text_free(shaped);
-        const at = std.mem.indexOf(u8, case.text, case.hit).?;
+        const at = std.mem.find(u8, case.text, case.hit).?;
         var x: c_int = 0;
         var y: c_int = 0;
         var height: c_int = 0;
@@ -1586,9 +1583,9 @@ test "unsafe text and invalid geometry fail before shaping or allocation" {
     for ([_][]const u8{
         "bad\xff",
         "nul\x00text",
-        "a" ++ "́" ** 1000,
-        "\u{202e}" ** 1000,
-        "\n" ** 65536,
+        "a" ++ repeat("́", 1000),
+        repeat("\u{202e}", 1000),
+        repeat("\n", 65536),
     }) |text| {
         try std.testing.expect(c.zc_text_new(text.ptr, @intCast(text.len), 16, 300, 1) == null);
     }
@@ -1624,7 +1621,7 @@ test "RGB glyph edges use opaque backgrounds and transparent text stays grayscal
                 (pixels[i] != pixels[i + 1] or pixels[i + 1] != pixels[i + 2])) chromatic += 1;
         }
         // The raster API exposes Cairo's native ARGB32; inspect channels by integer bits.
-        const native = std.mem.readInt(u32, pixels[0..4], @import("builtin").cpu.arch.endian());
+        const native = std.mem.readInt(u32, pixels[0..4], @import("builtin").target.cpu.arch.endian());
         try std.testing.expectEqual(@as(u8, @intCast(background >> 24)), @as(u8, @truncate(native >> 16)));
         try std.testing.expectEqual(@as(u8, @truncate(background >> 16)), @as(u8, @truncate(native >> 8)));
         try std.testing.expectEqual(@as(u8, @truncate(background >> 8)), @as(u8, @truncate(native)));
@@ -1740,7 +1737,7 @@ test "selecting the second text row leaves other rows and their whitespace uncha
             @intFromBool(subpixel),
         ) orelse return error.NoLayout;
         defer c.zc_text_free(shaped);
-        const start = std.mem.indexOf(u8, case.text, case.selected).?;
+        const start = std.mem.find(u8, case.text, case.selected).?;
         const end = start + case.selected.len;
         var x: c_int = 0;
         var y: c_int = 0;
@@ -1789,8 +1786,8 @@ test "selecting the second text row leaves other rows and their whitespace uncha
 test "fractional scale tiles match full text rendering including selection and bidi" {
     const c = @import("client.zig").c.api;
     const texts = [_][]const u8{
-        "Café é 👩‍💻 שלום مرحبا\n" ** 12,
-        "English 한글 👩‍💻\n한국어 Test\n" ** 12,
+        repeat("Café é 👩‍💻 שלום مرحبا\n", 12),
+        repeat("English 한글 👩‍💻\n한국어 Test\n", 12),
     };
     for (texts) |text| for ([_]f64{
         1,
@@ -1959,7 +1956,7 @@ test "tall combining marks still expand the text line and caret" {
     const c = @import("client.zig").c.api;
     const plain = c.zc_text_new("A", 1, 16, 300, 1) orelse return error.NoLayout;
     defer c.zc_text_free(plain);
-    const accented = "A م" ++ "\u{0651}\u{064f}" ** 4;
+    const accented = "A م" ++ repeat("\u{0651}\u{064f}", 4);
     const tall = c.zc_text_new(accented.ptr, accented.len, 16, 300, 1) orelse return error.NoLayout;
     defer c.zc_text_free(tall);
     const height = c.zc_text_height(tall);
@@ -2048,8 +2045,7 @@ test "reaction rows and enrichment changes do not alert or create unread" {
         "\"kind\":\"text\"",
         "\"kind\":\"reaction\"",
     );
-    const ev = try std.fmt.allocPrint(
-        ar,
+    const ev = try ar.print(
         "{{\"cursor\":\"{s}:1\",\"sequence\":\"1\",\"type\":\"message.upsert\",\"origin\":\"live\",\"record\":{s}}}",
         .{ epoch, reaction },
     );
@@ -2140,12 +2136,12 @@ test "relay event bytes reach the client without numeric conversion or multiline
     defer store.close();
     const relay_epoch = try journal.epoch(a);
     try store.beginSync(relay_epoch, try t.cursor(a, relay_epoch, 0));
-    const raw = try std.fmt.allocPrint(a, "{s},\r\n\"future\":1.234567890123456789}}", .{message[0 .. message.len - 1]});
+    const raw = try a.print("{s},\r\n\"future\":1.234567890123456789}}", .{message[0 .. message.len - 1]});
     try journal.event(1, "message.upsert", raw, "live");
     const frames = try journal.events(a, 0);
     try std.testing.expectEqual(@as(usize, 1), frames.len);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, frames[0].frame, "\n\n"));
-    try std.testing.expect(std.mem.indexOf(u8, frames[0].frame, "1.234567890123456789") != null);
+    try std.testing.expect(std.mem.find(u8, frames[0].frame, "1.234567890123456789") != null);
     var stream: Sse = .{};
     defer stream.deinit();
     const Receive = struct {
@@ -2158,7 +2154,7 @@ test "relay event bytes reach the client without numeric conversion or multiline
     const q = try store.db.prepare("SELECT record FROM records WHERE id='m1'");
     defer q.close();
     try std.testing.expect(try q.step());
-    try std.testing.expect(std.mem.indexOf(u8, q.bytes(0), "1.234567890123456789") != null);
+    try std.testing.expect(std.mem.find(u8, q.bytes(0), "1.234567890123456789") != null);
     try std.testing.expectEqualStrings(try t.cursor(a, relay_epoch, 1), try store.get(a, "cursor"));
     try journal.event(2, "message.upsert", "{\"bad\":\"\\q\"}", "live");
     try std.testing.expectError(error.SyntaxError, journal.events(a, 1));

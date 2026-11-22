@@ -1,6 +1,7 @@
 //! Bounded session logs shared by background workers and the GUI. Snapshots own
 //! their copies so rendering and clipboard access never hold the writer lock.
 const std = @import("std");
+const repeat = @import("../fixtures.zig").repeat;
 const u = @import("../common.zig");
 const LogBuffer = @This();
 
@@ -135,13 +136,13 @@ test "session logs retain newest entries in order and snapshots survive clear" {
     const copied = try logs.copy(std.testing.allocator);
     defer std.testing.allocator.free(copied);
     try std.testing.expect(std.mem.endsWith(u8, copied, "warning(test_log): after clear\n"));
-    try std.testing.expect(std.mem.indexOf(u8, copied, "event") == null);
+    try std.testing.expect(std.mem.find(u8, copied, "event") == null);
     try std.testing.expect(std.mem.endsWith(u8, entries[0].text(), "event 7"));
 }
 
 test "session logs bound long Unicode entries and preserve multiline text" {
     var logs: LogBuffer = .{};
-    logs.append(.info, .test_log, "{s}", .{"👩‍💻" ** 1000});
+    logs.append(.info, .test_log, "{s}", .{repeat("👩‍💻", 1000)});
     logs.append(.info, .test_log, "first\nsecond\x00third", .{});
     const entries = try logs.snapshot(std.testing.allocator);
     defer std.testing.allocator.free(entries);

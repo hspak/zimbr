@@ -1,5 +1,6 @@
 //! Amortized disk maintenance for the media worker, the cache's sole writer.
 const std = @import("std");
+const repeat = @import("../../fixtures.zig").repeat;
 const u = @import("../../common.zig");
 const c = @import("../c.zig").api;
 const DiskCache = @This();
@@ -55,17 +56,17 @@ fn trim(cache: *DiskCache, startup: bool) void {
 test "disk maintenance batches eviction and distinguishes orphan and active downloads" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const path = try std.fmt.allocPrintSentinel(std.testing.allocator, ".zig-cache/tmp/{s}/media", .{tmp.sub_path}, 0);
+    const path = try std.testing.allocator.printSentinel(".zig-cache/tmp/{s}/media", .{tmp.sub_path}, 0);
     defer std.testing.allocator.free(path);
     const dir = c.zc_cache_open(path);
     try std.testing.expect(dir >= 0);
     defer _ = u.c.close(dir);
-    const first = "1" ** 64;
-    const second = "2" ** 64;
-    const third = "3" ** 64;
-    const fourth = "4" ** 64;
-    const fifth = "5" ** 64;
-    const temporary = "tmp-" ++ "a" ** 32;
+    const first = repeat("1", 64);
+    const second = repeat("2", 64);
+    const third = repeat("3", 64);
+    const fourth = repeat("4", 64);
+    const fifth = repeat("5", 64);
+    const temporary = "tmp-" ++ repeat("a", 32);
     try writeFixture(dir, first, 10, 1);
     try writeFixture(dir, second, 10, 2);
     try writeFixture(dir, third, 10, 3);
@@ -110,7 +111,7 @@ test "disk maintenance batches eviction and distinguishes orphan and active down
 test "disk maintenance caps small file counts and retries failed scans" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const path = try std.fmt.allocPrintSentinel(std.testing.allocator, ".zig-cache/tmp/{s}/media", .{tmp.sub_path}, 0);
+    const path = try std.testing.allocator.printSentinel(".zig-cache/tmp/{s}/media", .{tmp.sub_path}, 0);
     defer std.testing.allocator.free(path);
     const dir = c.zc_cache_open(path);
     try std.testing.expect(dir >= 0);
@@ -125,18 +126,18 @@ test "disk maintenance caps small file counts and retries failed scans" {
     cache.downloaded(1);
     try std.testing.expect(cache.usage == null);
     cache.dir = dir;
-    const first = "1" ** 64;
+    const first = repeat("1", 64);
     try writeFixture(dir, first, 1, 1);
     cache.downloaded(1);
     try std.testing.expectEqual(@as(usize, 1), cache.usage.?.entries);
     for (2..5) |i| {
         var key: [65]u8 = undefined;
-        try writeFixture(dir, try std.fmt.bufPrintZ(&key, "{d:0>64}", .{i}), 1, @intCast(i));
+        try writeFixture(dir, try std.mem.printSentinel(&key, "{d:0>64}", .{i}, 0), 1, @intCast(i));
         cache.downloaded(1);
     }
     try std.testing.expectEqual(@as(usize, 4), cache.usage.?.entries);
     try std.testing.expect(exists(dir, first));
-    const newest = "5" ** 64;
+    const newest = repeat("5", 64);
     try writeFixture(dir, newest, 1, 5);
     cache.downloaded(1);
     try std.testing.expect(!exists(dir, first) and exists(dir, newest));
@@ -147,14 +148,14 @@ test "disk maintenance caps small file counts and retries failed scans" {
 test "disk scan bounds its entry storage for an oversized directory" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const path = try std.fmt.allocPrintSentinel(std.testing.allocator, ".zig-cache/tmp/{s}/media", .{tmp.sub_path}, 0);
+    const path = try std.testing.allocator.printSentinel(".zig-cache/tmp/{s}/media", .{tmp.sub_path}, 0);
     defer std.testing.allocator.free(path);
     const dir = c.zc_cache_open(path);
     try std.testing.expect(dir >= 0);
     defer _ = u.c.close(dir);
     for (0..8200) |i| {
         var key: [65]u8 = undefined;
-        try writeFixture(dir, try std.fmt.bufPrintZ(&key, "{x:0>64}", .{i}), 1, @intCast(i));
+        try writeFixture(dir, try std.mem.printSentinel(&key, "{x:0>64}", .{i}, 0), 1, @intCast(i));
     }
     const cache = DiskCache.init(dir, .{
         .bytes = 10000,
@@ -167,7 +168,7 @@ test "disk scan bounds its entry storage for an oversized directory" {
     var remaining: usize = 0;
     for (0..8200) |i| {
         var key: [65]u8 = undefined;
-        if (exists(dir, try std.fmt.bufPrintZ(&key, "{x:0>64}", .{i}))) remaining += 1;
+        if (exists(dir, try std.mem.printSentinel(&key, "{x:0>64}", .{i}, 0))) remaining += 1;
     }
     try std.testing.expectEqual(@as(usize, 7680), remaining);
 }

@@ -2,6 +2,7 @@
 //! decoding; the GUI receives at most one bounded decoded image at a time.
 const std = @import("std");
 const builtin = @import("builtin");
+const repeat = @import("../fixtures.zig").repeat;
 const a = if (builtin.is_test) std.testing.allocator else std.heap.c_allocator;
 const u = @import("../common.zig");
 const t = @import("../protocol.zig").types;
@@ -14,7 +15,7 @@ const Media = @This();
 const log = std.log.scoped(.client_media);
 const asset_path_capacity = capacity: {
     var variant_length: usize = 0;
-    for (std.meta.fieldNames(@FieldType(t.AssetRef, "variant"))) |name|
+    for (@typeInfo(@FieldType(t.AssetRef, "variant")).@"enum".field_names) |name|
         variant_length = @max(variant_length, name.len);
     break :capacity "/v1/assets///".len + 2 * t.id_length + variant_length + 1;
 };
@@ -91,7 +92,7 @@ pub const StartError = std.Thread.SpawnError || error{
 };
 
 pub fn start(s: *Media) StartError!void {
-    const path = try std.fmt.allocPrintSentinel(a, "{s}/media", .{s.config.data}, 0);
+    const path = try a.printSentinel("{s}/media", .{s.config.data}, 0);
     defer a.free(path);
     s.dir = c.zc_cache_open(path);
     if (s.dir < 0) return error.PrivateMediaCacheUnavailable;
@@ -527,11 +528,11 @@ fn work(s: *Media) !void {
                 }
                 r.fd = c.zc_cache_temp(s.dir, &r.temporary, r.temporary.len);
                 var path_buffer: [asset_path_capacity]u8 = undefined;
-                const path = std.fmt.bufPrintZ(&path_buffer, "/v1/assets/{s}/{s}/{s}", .{
+                const path = std.mem.printSentinel(&path_buffer, "/v1/assets/{s}/{s}/{s}", .{
                     r.id,
                     r.version,
                     @tagName(r.variant),
-                }) catch unreachable; // UUIDs are validated before enqueueing.
+                }, 0) catch unreachable; // UUIDs are validated before enqueueing.
                 if (r.fd < 0 or c.zc_net_start_file(net.?, @intCast(lane), path, r.fd, r.expected_bytes) == 0) {
                     s.deliver(r, result, lane);
                     break;
@@ -552,7 +553,7 @@ fn work(s: *Media) !void {
 fn localPreview(s: *Media, request_value: *Request, result: *Result) void {
     setReason(result, "No local preview");
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buffer, "{s}/outgoing", .{s.config.data}) catch return;
+    const path = std.mem.printSentinel(&path_buffer, "{s}/outgoing", .{s.config.data}, 0) catch return;
     const directory = u.c.open(path, u.c.O_RDONLY | u.c.O_DIRECTORY | u.c.O_NOFOLLOW | u.c.O_CLOEXEC);
     if (directory < 0) return;
     defer _ = u.c.close(directory);
@@ -574,7 +575,7 @@ test "media cache validates files and pixels, installs atomically, and evicts pr
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const ar = std.testing.allocator;
-    const path = try std.fmt.allocPrintSentinel(ar, ".zig-cache/tmp/{s}/media", .{tmp.sub_path}, 0);
+    const path = try ar.printSentinel(".zig-cache/tmp/{s}/media", .{tmp.sub_path}, 0);
     defer ar.free(path);
     const dir = c.zc_cache_open(path);
     try std.testing.expect(dir >= 0);
@@ -670,7 +671,7 @@ test "media cache validates files and pixels, installs atomically, and evicts pr
     var after: c.ZcOutgoingFingerprint = undefined;
     try std.testing.expectEqual(@as(c_int, 1), c.zc_outgoing_fingerprint(fd, &after));
     try std.testing.expectEqualDeep(before, after);
-    const key_value = "b" ** 64;
+    const key_value = repeat("b", 64);
     try std.testing.expectEqual(@as(c_int, 1), c.zc_cache_install(dir, &temporary, key_value, fd));
     try std.testing.expectEqual(@as(c_int, 0), c.zc_image_read(dir, &temporary, &pixels));
     try std.testing.expectEqual(@as(c_int, 1), c.zc_image_read(dir, key_value, &pixels));

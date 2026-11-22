@@ -1,6 +1,7 @@
 //! Persistent client cache. Allocation-taking queries use a caller-owned arena;
 //! returned snapshots and any partial allocations share that arena's lifetime.
 const std = @import("std");
+const repeat = @import("../fixtures.zig").repeat;
 const json_bounds = @import("../protocol.zig").json;
 const Json = @import("../protocol.zig").Json;
 const validation = @import("validation.zig");
@@ -251,8 +252,7 @@ fn mergeThreadState(s: Store, a: u.Allocator, key: []const u8) !void {
     while (try q.step()) {
         try aliases.append(a, try q.text(a, 0));
         const other = try q.text(a, 1);
-        if (other.len > 0 and !u.eq(combined, other)) combined = if (combined.len == 0) other else try std.fmt.allocPrint(
-            a,
+        if (other.len > 0 and !u.eq(combined, other)) combined = if (combined.len == 0) other else try a.print(
             "{s}\n\n{s}",
             .{ combined, other },
         );
@@ -328,15 +328,16 @@ pub const Incoming = union(enum) {
 
 pub fn upsert(s: Store, a: u.Allocator, kind: []const u8, raw: []const u8) UpsertError!bool {
     try json_bounds.check(raw, validation.max_record_bytes, 32768);
-    inline for (std.meta.fields(Incoming)) |field| {
-        if (u.eq(kind, field.name)) {
+    const fields = @typeInfo(Incoming).@"union";
+    inline for (fields.field_names, fields.field_types) |name, T| {
+        if (u.eq(kind, name)) {
             const decoded = try std.json.parseFromSliceLeaky(
-                field.type,
+                T,
                 a,
                 raw,
                 .{ .ignore_unknown_fields = true },
             );
-            return s.writeRecord(a, @unionInit(Incoming, field.name, decoded));
+            return s.writeRecord(a, @unionInit(Incoming, name, decoded));
         }
     }
     return error.InvalidRecord;
@@ -957,7 +958,7 @@ test "multipart history preserves partial outcomes and follows every confirmed e
         .name = "photo.png",
         .mime_type = "image/png",
         .bytes = "17",
-        .sha256 = "0" ** 64,
+        .sha256 = repeat("0", 64),
     };
     const key = "new:peer@example.invalid";
     try outgoing.addDraft(s, a, key, file);

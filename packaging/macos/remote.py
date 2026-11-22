@@ -24,9 +24,6 @@ def build(repository, version, revision):
 
     # Borrow the installed toolchain and signing identity, not the working tree.
     env = dict(os.environ)
-    zig = repository / '.tools/zig-aarch64-macos-0.16.0/zig'
-    if zig.is_file():
-        env.setdefault('ZIMBR_ZIG', str(zig))
     env.setdefault('ZIMBR_OPENSSL_PREFIX', str(repository / '.tools/openssl-3.5'))
     env.setdefault('ZIMBR_OPENSSL_LICENSE',
                    str(repository / '.tools/openssl-build/openssl-3.5.8/LICENSE.txt'))
@@ -43,6 +40,10 @@ def build(repository, version, revision):
         run('git', 'clone', '--shared', '--no-checkout', '--', repository, source)
         run('git', '-C', source, 'fetch', '--no-tags', 'https://github.com/hspak/zimbr.git', revision)
         run('git', '-C', source, 'checkout', '--detach', revision)
+        zig_version = (source / '.zigversion').read_text().strip()
+        zig = repository / f'.tools/zig-aarch64-macos-{zig_version}/zig'
+        if zig.is_file():
+            env.setdefault('ZIMBR_ZIG', str(zig))
         output = work / 'output'
         run(python, source / 'packaging/macos/release.py', 'build', '--output', output)
         archive = output / f'zimbr-relay-{version}-aarch64-macos.zip'

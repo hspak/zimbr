@@ -9,9 +9,7 @@ pub const Point = geometry.Point;
 pub const Rect = geometry.Rect;
 pub const Color = geometry.Color;
 const c = desktop.c;
-const png = @cImport({
-    @cInclude("png.h");
-});
+const png = @import("png_c");
 const log = std.log.scoped(.client_graphics);
 
 pub const Texture = *c.SDL_Texture;
@@ -267,8 +265,8 @@ pub fn imageColor(image: Image, x: i32, y: i32) Color {
     return @as(*align(1) const Color, @ptrCast(bytes + @as(usize, @intCast(y * image.pitch + x * 4)))).*;
 }
 pub fn saveImage(image: Image, path: []const u8) SaveError!void {
-    if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidPath;
-    const name = try a.dupeZ(u8, path);
+    if (std.mem.findScalar(u8, path, 0) != null) return error.InvalidPath;
+    const name = try a.dupeSentinel(u8, path, 0);
     defer a.free(name);
     std.debug.assert(image.format == c.SDL_PIXELFORMAT_RGBA32);
     var output = std.mem.zeroes(png.png_image);
@@ -476,7 +474,7 @@ test "retired textures respect count and byte limits and exclude render targets"
     defer desktop.close();
     try init();
     defer deinit();
-    const pixels = [_]u8{255} ** (132 * 4);
+    const pixels: [132 * 4]u8 = @splat(255);
     for (1..133) |width| {
         destroyTexture(try upload(&pixels, @intCast(width), 1, .nearest));
     }
@@ -521,7 +519,7 @@ test "texture uploads preserve distinct pixels across batch rollover and buffer 
                 @intCast(frame * 20),
                 255,
             };
-            const pixels = pixel ** 3;
+            const pixels = pixel ++ pixel ++ pixel;
             textures.appendAssumeCapacity(try upload(&pixels, @intCast(width), 1, .nearest));
         }
         for (textures.items, 0..) |texture, i| drawTexture(texture, .{

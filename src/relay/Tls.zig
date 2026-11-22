@@ -2,9 +2,7 @@ const std = @import("std");
 const options = @import("options");
 const contacts = @import("adapter/contacts.zig");
 const u = @import("../common.zig");
-pub const c = @cImport({
-    @cInclude("relay/tls.h");
-});
+pub const c = @import("relay_c");
 const Tls = @This();
 
 config: Config,
@@ -42,7 +40,7 @@ pub fn readPrivate(a: u.Allocator, path: []const u8) ReadPrivateError![]const u8
     // 64 KiB covers PEM/config files while bounding private-file reads.
     const buffer = try a.alloc(u8, 65536);
     errdefer a.free(buffer);
-    const terminated_path = try a.dupeZ(u8, path);
+    const terminated_path = try a.dupeSentinel(u8, path, 0);
     defer a.free(terminated_path);
     const n = c.zr_tls_read_file(terminated_path, buffer.ptr, buffer.len);
     if (n < 0) {
@@ -75,7 +73,7 @@ pub fn loadBytes(a: u.Allocator, path: []const u8, bytes: []const u8) LoadError!
         config.listen_address,
         config.server_name,
     }) |value| {
-        if (std.mem.indexOfScalar(u8, value, 0) != null) return error.InvalidTlsConfiguration;
+        if (std.mem.findScalar(u8, value, 0) != null) return error.InvalidTlsConfiguration;
     }
     const directory = std.fs.path.dirname(path) orelse return error.InvalidTlsConfiguration;
     if (config.port == 0 or config.server_name.len == 0) return error.InvalidTlsConfiguration;
@@ -94,7 +92,7 @@ pub fn loadBytes(a: u.Allocator, path: []const u8, bytes: []const u8) LoadError!
     const devices = std.json.parseFromSliceLeaky(
         []const Device,
         a,
-        try readPrivate(a, try std.fmt.allocPrint(a, "{s}/devices.json", .{directory})),
+        try readPrivate(a, try a.print("{s}/devices.json", .{directory})),
         .{},
     ) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
@@ -119,10 +117,10 @@ pub fn loadBytes(a: u.Allocator, path: []const u8, bytes: []const u8) LoadError!
     // Keep native TLS diagnostics bounded; longer messages are truncated by the C helper.
     var diagnostic: [256]u8 = @splat(0);
     const ctx = c.zr_tls_context(
-        try std.fmt.allocPrintSentinel(a, "{s}/server.pem", .{directory}, 0),
-        try std.fmt.allocPrintSentinel(a, "{s}/server-key.pem", .{directory}, 0),
-        try std.fmt.allocPrintSentinel(a, "{s}/ca.pem", .{directory}, 0),
-        try a.dupeZ(u8, config.server_name),
+        try a.printSentinel("{s}/server.pem", .{directory}, 0),
+        try a.printSentinel("{s}/server-key.pem", .{directory}, 0),
+        try a.printSentinel("{s}/ca.pem", .{directory}, 0),
+        try a.dupeSentinel(u8, config.server_name, 0),
         @ptrCast(&fingerprints),
         count,
         &diagnostic,

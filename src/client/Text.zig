@@ -114,7 +114,7 @@ fn getStyled(s: *Text, text: []const u8, style: Style, width: f32, single_line: 
         s.scale,
         @intFromBool(single_line),
         @intFromBool(subpixel),
-        @intFromEnum(style.weight),
+        @backingInt(style.weight),
     ) else null;
     const layout = original orelse c.zc_text_new_weighted(
         display.unavailable.ptr,
@@ -124,7 +124,7 @@ fn getStyled(s: *Text, text: []const u8, style: Style, width: f32, single_line: 
         s.scale,
         @intFromBool(single_line),
         @intFromBool(subpixel),
-        @intFromEnum(style.weight),
+        @backingInt(style.weight),
     ) orelse return error.TextLayoutUnavailable;
     errdefer c.zc_text_free(layout);
     const copy = try a.dupe(u8, text);

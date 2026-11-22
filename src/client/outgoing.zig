@@ -1,6 +1,7 @@
 //! Durable ownership of local attachment originals. File preparation and cleanup
 //! belong to Files; these operations change only the client cache transaction.
 const std = @import("std");
+const repeat = @import("../fixtures.zig").repeat;
 const u = @import("../common.zig");
 const protocol = @import("../protocol.zig");
 const attachments = protocol.attachments;
@@ -92,8 +93,8 @@ pub fn transfer(s: Store, a: u.Allocator, key: []const u8, input: protocol.types
     const files = try draft(s, a, key);
     if (files.len != input.attachments.len) return error.AttachmentDraftChanged;
     for (files, input.attachments) |saved, requested| {
-        inline for (std.meta.fields(attachments.Upload)) |field| {
-            if (!u.eq(@field(saved, field.name), @field(requested, field.name))) return error.AttachmentDraftChanged;
+        inline for (@typeInfo(attachments.Upload).@"struct".field_names) |name| {
+            if (!u.eq(@field(saved, name), @field(requested, name))) return error.AttachmentDraftChanged;
         }
     }
     try s.exec("UPDATE outgoing_files SET draft_key=NULL,request_id=? WHERE draft_key=?", &.{
@@ -120,7 +121,7 @@ test "draft limits and global quotas include retired originals until physical cl
         .name = "same-name.bin",
         .mime_type = "application/octet-stream",
         .bytes = "0",
-        .sha256 = "0" ** 64,
+        .sha256 = repeat("0", 64),
     };
     for (0..attachments.max_files) |_| {
         file.id = try u.id(a);
@@ -142,7 +143,7 @@ test "draft limits and global quotas include retired originals until physical cl
     file.bytes = "104857600";
     for (0..20) |i| {
         file.id = try u.id(a);
-        try addDraft(s, a, try std.fmt.allocPrint(a, "chat-{d}", .{i}), file);
+        try addDraft(s, a, try a.print("chat-{d}", .{i}), file);
     }
     file.bytes = "50331648";
     file.id = try u.id(a);
@@ -155,7 +156,7 @@ test "draft limits and global quotas include retired originals until physical cl
     file.bytes = "0";
     for (0..max_stored_files) |i| {
         file.id = try u.id(a);
-        try addDraft(s, a, try std.fmt.allocPrint(a, "chat-{d}", .{i}), file);
+        try addDraft(s, a, try a.print("chat-{d}", .{i}), file);
     }
     try testing.expectError(error.AttachmentStorageFull, addDraft(s, a, "last", file));
 }
@@ -169,13 +170,13 @@ test "merged conversation drafts preserve attachment order and immutable outbox 
     defer s.close();
     const root = try u.id(a);
     const alias = try u.id(a);
-    try s.beginSync(root, try std.fmt.allocPrint(a, "{s}:0", .{root}));
+    try s.beginSync(root, try a.print("{s}:0", .{root}));
     const first: attachments.Upload = .{
         .id = try u.id(a),
         .name = "one.bin",
         .mime_type = "application/octet-stream",
         .bytes = "0",
-        .sha256 = "0" ** 64,
+        .sha256 = repeat("0", 64),
     };
     var second = first;
     second.id = try u.id(a);
@@ -201,7 +202,7 @@ test "merged conversation drafts preserve attachment order and immutable outbox 
         .attachments = combined,
     });
     try testing.expectEqual(@as(usize, 0), (try draft(s, a, root)).len);
-    try s.beginSync(alias, try std.fmt.allocPrint(a, "{s}:0", .{alias}));
+    try s.beginSync(alias, try a.print("{s}:0", .{alias}));
     try testing.expect(!try s.expireUnknown(u.now() + 3600000));
     try testing.expectEqual(@as(i64, 2), try s.db.scalar("SELECT count(*) FROM outgoing_files WHERE request_id IS NOT NULL"));
     const q = try s.db.prepare("SELECT payload,state FROM outbox WHERE id=?");

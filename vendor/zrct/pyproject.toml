@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zrct"
+version = "0.1.0"
+description = "Isolated GUI scenarios for Zig, SDL3 and ClayUI applications"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+zimbr = ["h2>=4.3,<5", "cryptography>=46,<49"]
+
+[project.scripts]
+zrct = "zrct.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["zrct*"]
+
+[tool.uv]
+required-version = ">=0.12.21"
+python-preference = "only-managed"
+
+[tool.setuptools.package-data]
+zrct = ["keys.tsv"]

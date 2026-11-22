@@ -1,6 +1,7 @@
 //! Durable reservations and ownership for outgoing files. The caller serializes
 //! access with the journal mutex; only immutable metadata is stored in SQLite.
 const std = @import("std");
+const repeat = @import("../fixtures.zig").repeat;
 const u = @import("../common.zig");
 const protocol = @import("../protocol.zig");
 const t = protocol.types;
@@ -272,7 +273,7 @@ test "upload reservations preserve ownership metadata and phase on exact retries
         .name = "photo.png",
         .mime_type = "image/png",
         .bytes = "4",
-        .sha256 = "0123456789abcdef" ** 4,
+        .sha256 = repeat("0123456789abcdef", 4),
     };
     try std.testing.expectEqual(Phase.reserved, (try reserve(j, a, "device-a", epoch, file, 100)).phase);
     const lease = (try claim(j, a, "device-a", epoch, file.id)).write;
@@ -302,7 +303,7 @@ test "stale upload leases cannot publish or abandon a replacement transfer" {
         .name = "empty.txt",
         .mime_type = "text/plain",
         .bytes = "0",
-        .sha256 = "0123456789abcdef" ** 4,
+        .sha256 = repeat("0123456789abcdef", 4),
     };
     _ = try reserve(j, a, "device", epoch, file, 0);
     const first = (try claim(j, a, "device", epoch, file.id)).write;
@@ -343,7 +344,7 @@ test "upload quotas account for declared bytes and empty-file reservations" {
         .name = "file.bin",
         .mime_type = "application/octet-stream",
         .bytes = "104857600",
-        .sha256 = "0123456789abcdef" ** 4,
+        .sha256 = repeat("0123456789abcdef", 4),
     };
     for (0..20) |_| {
         file.id = try u.id(a);
@@ -383,13 +384,13 @@ test "pinning validates the entire set and keeps uncertain files across resets" 
         .text = "caption",
     };
     _ = try j.accept(a, input, true);
-    var files = [_]attachments.Upload{.{
+    var files: [3]attachments.Upload = @splat(.{
         .id = try u.id(a),
         .name = "file.bin",
         .mime_type = "application/octet-stream",
         .bytes = "4",
-        .sha256 = "0123456789abcdef" ** 4,
-    }} ** 3;
+        .sha256 = repeat("0123456789abcdef", 4),
+    });
     files[1].id = try u.id(a);
     files[2].id = try u.id(a);
     for (files) |file| _ = try reserve(j, a, "device", epoch, file, 0);
@@ -437,7 +438,7 @@ test "upload leases and completed reservations survive closing and reopening the
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const path = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}/relay.db", .{tmp.sub_path}, 0);
+    const path = try a.printSentinel(".zig-cache/tmp/{s}/relay.db", .{tmp.sub_path}, 0);
     var interrupted: Lease = undefined;
     var ready_id: []const u8 = undefined;
     {
@@ -449,7 +450,7 @@ test "upload leases and completed reservations survive closing and reopening the
             .name = "file.bin",
             .mime_type = "application/octet-stream",
             .bytes = "4",
-            .sha256 = "0123456789abcdef" ** 4,
+            .sha256 = repeat("0123456789abcdef", 4),
         };
         _ = try reserve(j, a, "device", epoch, file, 0);
         interrupted = (try claim(j, a, "device", epoch, file.id)).write;

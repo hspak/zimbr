@@ -12,10 +12,7 @@ const Source = @import("../adapter/MessagesDb.zig");
 const sends = @import("../sends.zig");
 const uploads = @import("../uploads.zig");
 const options = @import("options");
-const c = @cImport({
-    @cInclude("errno.h");
-    @cInclude("relay/media.h");
-});
+const c = @import("relay_c");
 
 // Inspect 64 send candidates per pass to keep observation work bounded.
 const max_rows = 64;
@@ -211,7 +208,7 @@ fn snapshot(core: *Core, a: u.Allocator, work: Work) !?Snapshot {
 }
 
 fn relative(root: []const u8, path: []const u8) ?[]const u8 {
-    if (std.mem.indexOfScalar(u8, path, 0) != null or path.len > 4096) return null;
+    if (std.mem.findScalar(u8, path, 0) != null or path.len > 4096) return null;
     const home_root = "~/Library/Messages/Attachments/";
     if (comptime !options.fake) {
         if (std.mem.startsWith(u8, path, home_root)) return path[home_root.len..];
@@ -222,10 +219,10 @@ fn relative(root: []const u8, path: []const u8) ?[]const u8 {
 
 fn open(core: *Core, a: u.Allocator, filename: []const u8, fingerprint: *c.ZrMediaFingerprint) !?c_int {
     const path = relative(core.attachment_root, filename) orelse return null;
-    const root = c.zr_media_directory(try a.dupeZ(u8, core.attachment_root), 0);
+    const root = c.zr_media_directory(try a.dupeSentinel(u8, core.attachment_root, 0), 0);
     if (root < 0) return null;
     defer _ = u.c.close(root);
-    const fd = c.zr_media_source(root, try a.dupeZ(u8, path), fingerprint);
+    const fd = c.zr_media_source(root, try a.dupeSentinel(u8, path, 0), fingerprint);
     return if (fd < 0) null else fd;
 }
 

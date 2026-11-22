@@ -34,8 +34,10 @@ def configure_rendering(context):
     context.bundle.manifest["metadata"]["rendering_profile"]["vulkan_driver_package"] = package
     # Zrct records its own tool variables; retain this consumer-owned tool as well.
     reproduction = context.bundle.manifest["reproduction"]
-    context.bundle.manifest["reproduction"] = (
-        shlex.join(["env", f"ZIMBR_LAVAPIPE_ROOT={root}"]) + " " + reproduction)
+    environment = ["env", f"ZIMBR_LAVAPIPE_ROOT={root}"]
+    if directory := context.desktop.env.get("ZIMBR_TEST_BIN"):
+        environment.append(f"ZIMBR_TEST_BIN={directory}")
+    context.bundle.manifest["reproduction"] = shlex.join(environment) + " " + reproduction
 
 
 class Relay:

@@ -1,5 +1,6 @@
 //! Bound presentation work without modifying stored messages or copied text.
 const std = @import("std");
+const repeat = @import("../fixtures.zig").repeat;
 const t = @import("../protocol.zig").types;
 const bridge = @import("c.zig").api;
 // Limit preview shaping to 4 KiB; copying still exposes the complete message.
@@ -90,7 +91,7 @@ pub fn pendingStatus(
         state,
         "sending",
     )) "Saving / submitting…" else if (std.mem.eql(u8, state, "cancelled")) "Upload cancelled" else state;
-    return if (detail.len > 0) try std.fmt.allocPrint(a, "{s} · {s}", .{ status, try label(a, detail) }) else status;
+    return if (detail.len > 0) try a.print("{s} · {s}", .{ status, try label(a, detail) }) else status;
 }
 
 pub fn canCopyPending(state: []const u8, sent_at: []const u8, now_ms: i64) bool {
@@ -348,7 +349,7 @@ fn content(a: std.mem.Allocator, m: t.Message) std.mem.Allocator.Error![]const u
             .unsupported => "Unsupported reaction",
             .malformed => "Reaction target could not be decoded",
         };
-        return std.fmt.allocPrint(a, "Reaction {s} · {s}{s}{s}", .{
+        return a.print("Reaction {s} · {s}{s}{s}", .{
             event.emoji orelse event.key orelse "",
             state,
             if (text.len > 0) "\n" else "",
@@ -358,13 +359,12 @@ fn content(a: std.mem.Allocator, m: t.Message) std.mem.Allocator.Error![]const u
     if (text.len > 0) {
         if (m.kind == .text or m.kind == .attachment) return text;
         if (m.kind == .reaction or m.kind == .system or m.kind == .unsupported)
-            return std.fmt.allocPrint(
-                a,
+            return a.print(
                 "{s} · {s}",
                 .{ if (m.kind == .reaction) "Reaction" else if (m.kind == .system) "Conversation update" else "Unsupported content", text },
             );
     }
-    if (m.attachments.len > 0) return std.fmt.allocPrint(a, "Attachment · {s}\n{s} · {s} bytes\nDownloads are not available yet.", .{
+    if (m.attachments.len > 0) return a.print("Attachment · {s}\n{s} · {s} bytes\nDownloads are not available yet.", .{
         m.attachments[0].name,
         m.attachments[0].mime_type,
         m.attachments[0].bytes,
@@ -394,7 +394,7 @@ test "display limits preserve UTF8 and never change full message content" {
     try std.testing.expectEqualStrings(normal, try message(a, object_marker ++ normal ++ object_marker));
     try std.testing.expectEqualStrings("", try message(a, object_marker ++ "\n" ++ object_marker));
     const long = try std.mem.concat(a, u8, &.{
-        "x" ** (max_bytes - 1),
+        repeat("x", max_bytes - 1),
         "👩‍💻",
         "tail",
     });
@@ -402,19 +402,19 @@ test "display limits preserve UTF8 and never change full message content" {
     try std.testing.expect(std.unicode.utf8ValidateSlice(preview));
     try std.testing.expect(std.mem.endsWith(u8, preview, shortened));
     try std.testing.expect(std.mem.endsWith(u8, long, "👩‍💻tail"));
-    try std.testing.expect((try message(a, "\n" ** 1000)).len < 200);
+    try std.testing.expect((try message(a, repeat("\n", 1000))).len < 200);
     try std.testing.expect((try message(a, "before\x00after")).len < 100);
     try std.testing.expect(std.unicode.utf8ValidateSlice(try message(a, "bad\xff")));
-    try std.testing.expect((try label(a, "url" ** 1000)).len <= 259);
-    try std.testing.expectEqualStrings("a" ** 32, prefix("a" ** 32 ++ "\ntrailing", 64, 1));
-    try std.testing.expectEqualStrings("a" ** 32, prefix("a" ** 32 ++ "\u{2028}trailing", 64, 1));
-    try std.testing.expectEqualStrings("a" ** 32, prefix("a" ** 32 ++ "\x00trailing", 64, 2));
+    try std.testing.expect((try label(a, repeat("url", 1000))).len <= 259);
+    try std.testing.expectEqualStrings(repeat("a", 32), prefix(repeat("a", 32) ++ "\ntrailing", 64, 1));
+    try std.testing.expectEqualStrings(repeat("a", 32), prefix(repeat("a", 32) ++ "\u{2028}trailing", 64, 1));
+    try std.testing.expectEqualStrings(repeat("a", 32), prefix(repeat("a", 32) ++ "\x00trailing", 64, 2));
 }
 
 test "object marker removal preserves other Unicode and incomplete byte sequences" {
     const unchanged = [_][]const u8{
         "",
-        "Ordinary ASCII " ** 4096,
+        repeat("Ordinary ASCII ", 4096),
         "\u{feff}Café \u{fffd} 👩‍💻",
         "trailing\xef",
         "trailing\xef\xbf",
@@ -427,7 +427,7 @@ test "object marker removal preserves other Unicode and incomplete byte sequence
     }
     const cases = .{
         .{ "\u{fffd}" ++ object_marker ++ "\u{feff}", "\u{fffd}\u{feff}" },
-        .{ "x" ** 31 ++ object_marker ++ "tail", "x" ** 31 ++ "tail" },
+        .{ repeat("x", 31) ++ object_marker ++ "tail", repeat("x", 31) ++ "tail" },
         .{ object_marker ++ object_marker ++ "caption" ++ object_marker, "caption" },
         .{ "\xef" ++ object_marker ++ "\xef\xbf", "\xef\xef\xbf" },
         .{ " \t" ++ object_marker ++ "\r\n", "" },
@@ -454,7 +454,7 @@ pub fn summary(a: std.mem.Allocator, m: t.Message) std.mem.Allocator.Error![]con
         photos += 1;
     };
     if (photos == 1) return "Photo";
-    if (photos > 1) return std.fmt.allocPrint(a, "{d} photos", .{photos});
+    if (photos > 1) return a.print("{d} photos", .{photos});
     return switch (m.kind) {
         .attachment => "Attachment",
         .reaction => "Reaction",
@@ -474,9 +474,9 @@ test "presentation helpers propagate allocation failures" {
     const a = failing.allocator();
     const cleaned: std.mem.Allocator.Error![]const u8 = withoutObjectMarkers(a, "Caption" ++ object_marker);
     try std.testing.expectError(error.OutOfMemory, cleaned);
-    const preview: std.mem.Allocator.Error![]const u8 = message(a, "x" ** (max_bytes + 1));
+    const preview: std.mem.Allocator.Error![]const u8 = message(a, repeat("x", max_bytes + 1));
     try std.testing.expectError(error.OutOfMemory, preview);
-    const caption: std.mem.Allocator.Error![]const u8 = label(a, "x" ** 257);
+    const caption: std.mem.Allocator.Error![]const u8 = label(a, repeat("x", 257));
     try std.testing.expectError(error.OutOfMemory, caption);
     const status: std.mem.Allocator.Error![]const u8 = pendingStatus(a, "failed", "Rejected", "", 0);
     try std.testing.expectError(error.OutOfMemory, status);

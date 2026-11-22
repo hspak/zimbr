@@ -42,12 +42,11 @@ fn run(init: std.process.Init) !void {
         .default_port = options.relay_default_port,
     });
     const home = init.environ_map.get("HOME") orelse return error.HomeRequired;
-    var data: []const u8 = try std.fmt.allocPrint(
-        a,
+    var data: []const u8 = try a.print(
         "{s}/Library/Application Support/{s}",
         .{ home, options.relay_data_directory },
     );
-    var source: []const u8 = try std.fmt.allocPrint(a, "{s}/Library/Messages/chat.db", .{home});
+    var source: []const u8 = try a.print("{s}/Library/Messages/chat.db", .{home});
     var source_explicit = false;
     var config_path: ?[]const u8 = null;
     // Match Core's replay retention default while allowing the CLI to override it.
@@ -110,13 +109,13 @@ fn run(init: std.process.Init) !void {
     if (request_contacts and !u.eq(cmd, "doctor")) return error.InvalidArguments;
     if (enrichment_probe and !u.eq(cmd, "doctor") and !u.eq(cmd, "probe")) return error.InvalidArguments;
     if (fake and (!source_explicit or !std.fs.path.isAbsolute(source))) return error.ExplicitFixturePathRequired;
-    const source_path = try a.dupeZ(u8, source);
-    const tls_path = config_path orelse try std.fmt.allocPrint(a, "{s}/relay.json", .{data});
-    const db_path = try std.fmt.allocPrintSentinel(a, "{s}/relay.db", .{data}, 0);
+    const source_path = try a.dupeSentinel(u8, source, 0);
+    const tls_path = config_path orelse try a.print("{s}/relay.json", .{data});
+    const db_path = try a.printSentinel("{s}/relay.db", .{data}, 0);
     if (u.eq(cmd, "setup")) {
         _ = u.c.umask(0o077);
         try std.Io.Dir.cwd().createDirPath(init.io, data);
-        const dz = try a.dupeZ(u8, data);
+        const dz = try a.dupeSentinel(u8, data, 0);
         if (u.c.chmod(dz, 0o700) != 0) return error.PermissionRequired;
         const journal = try Journal.open(db_path);
         journal.close();
@@ -201,14 +200,14 @@ fn run(init: std.process.Init) !void {
     }
     _ = u.c.umask(0o077);
     if (menu_bar) try std.Io.Dir.cwd().createDirPath(init.io, data);
-    const lock_path = try std.fmt.allocPrintSentinel(a, "{s}/relay.lock", .{data}, 0);
+    const lock_path = try a.printSentinel("{s}/relay.lock", .{data}, 0);
     const lock_fd = u.c.zr_lock(lock_path);
     if (lock_fd < 0) {
-        if (menu_bar) Menu.reopen(try a.dupeZ(u8, tls_path));
+        if (menu_bar) Menu.reopen(try a.dupeSentinel(u8, tls_path, 0));
         return error.AlreadyRunning;
     }
     // Retain the lock for this process, including the UI when startup fails.
-    var menu: Menu = .{ .config_path = try a.dupeZ(u8, tls_path), .data_path = try a.dupeZ(u8, data) };
+    var menu: Menu = .{ .config_path = try a.dupeSentinel(u8, tls_path, 0), .data_path = try a.dupeSentinel(u8, data, 0) };
     var service: Service = .{
         .allocator = a,
         .io = init.io,
@@ -296,12 +295,10 @@ const Service = struct {
             };
             break :upload_files files;
         };
-        const attachment_root = if (comptime fake) try std.fmt.allocPrint(
-            a,
+        const attachment_root = if (comptime fake) try a.print(
             "{s}.attachments",
             .{source},
-        ) else try std.fmt.allocPrint(
-            a,
+        ) else try a.print(
             "{s}/Library/Messages/Attachments",
             .{home},
         );
@@ -313,7 +310,7 @@ const Service = struct {
         if (core.reset_required) {
             core.degraded = "relay_cache_reset_required";
         } else try core.journal.recover(a);
-        if (comptime !fake and builtin.os.tag == .macos) {
+        if (comptime !fake and builtin.target.os.tag == .macos) {
             contact_directory.startAuthorizationChecks();
             const authorization = try std.Thread.spawn(
                 .{},
@@ -346,7 +343,7 @@ const Service = struct {
             menu.expires_unix = @min(tls_info.server_expires_unix, tls_info.ca_expires_unix);
             menu.core.store(core, .release);
             try server.run();
-        } else if (comptime !fake and builtin.os.tag == .macos) {
+        } else if (comptime !fake and builtin.target.os.tag == .macos) {
             var state = NativeServer{ .server = server };
             const listener = try std.Thread.spawn(.{}, NativeServer.run, .{&state});
             while (!state.done.load(.acquire)) contact_directory.pumpMain();

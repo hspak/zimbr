@@ -1,6 +1,7 @@
 //! Ordered attachment-send operations. A successful automation return allows
 //! the next operation, but only observation can establish submission or delivery.
 const std = @import("std");
+const repeat = @import("../fixtures.zig").repeat;
 const u = @import("../common.zig");
 const t = @import("../protocol.zig").types;
 pub const observation = @import("sends/observation.zig");
@@ -207,14 +208,14 @@ test "attachment-only operations stop on failure and never confuse invocation wi
                 .name = "one",
                 .mime_type = "application/octet-stream",
                 .bytes = "0",
-                .sha256 = "0" ** 64,
+                .sha256 = repeat("0", 64),
             },
             .{
                 .id = "two",
                 .name = "two",
                 .mime_type = "application/octet-stream",
                 .bytes = "0",
-                .sha256 = "0" ** 64,
+                .sha256 = repeat("0", 64),
             },
         },
     };

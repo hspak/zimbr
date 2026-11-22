@@ -235,7 +235,7 @@ const Xml = struct {
                 continue;
             }
             if (self.consume("<!--")) {
-                const end = std.mem.indexOf(u8, self.bytes[self.pos..], "-->") orelse return error.Malformed;
+                const end = std.mem.find(u8, self.bytes[self.pos..], "-->") orelse return error.Malformed;
                 self.pos += end + 3;
                 continue;
             }
@@ -245,14 +245,14 @@ const Xml = struct {
     fn parse(self: *Xml) Failure!Node {
         try self.whitespace();
         if (self.consume("<?xml ")) {
-            const end = std.mem.indexOf(u8, self.bytes[self.pos..], "?>") orelse return error.Malformed;
+            const end = std.mem.find(u8, self.bytes[self.pos..], "?>") orelse return error.Malformed;
             self.pos += end + 2;
             try self.whitespace();
         }
         if (self.consume("<!DOCTYPE plist ")) {
-            const end = std.mem.indexOfScalar(u8, self.bytes[self.pos..], '>') orelse return error.Malformed;
+            const end = std.mem.findScalar(u8, self.bytes[self.pos..], '>') orelse return error.Malformed;
             // External DTD declarations are inert; internal subsets/entities are rejected.
-            if (std.mem.indexOfScalar(u8, self.bytes[self.pos..][0..end], '[') != null) return error.Unsupported;
+            if (std.mem.findScalar(u8, self.bytes[self.pos..][0..end], '[') != null) return error.Unsupported;
             self.pos += end + 1;
             try self.whitespace();
         }
@@ -265,9 +265,9 @@ const Xml = struct {
         return root;
     }
     fn content(self: *Xml, closing: []const u8) Failure![]const u8 {
-        const end = std.mem.indexOf(u8, self.bytes[self.pos..], closing) orelse return error.Malformed;
+        const end = std.mem.find(u8, self.bytes[self.pos..], closing) orelse return error.Malformed;
         const raw = self.bytes[self.pos..][0..end];
-        if (std.mem.indexOfScalar(u8, raw, '<') != null) return error.Malformed;
+        if (std.mem.findScalar(u8, raw, '<') != null) return error.Malformed;
         self.pos += end + closing.len;
         var result: std.ArrayList(u8) = .empty;
         var i: usize = 0;
@@ -277,7 +277,7 @@ const Xml = struct {
                 i += 1;
                 continue;
             }
-            const semi = std.mem.indexOfScalarPos(u8, raw, i, ';') orelse return error.Malformed;
+            const semi = std.mem.findScalarPos(u8, raw, i, ';') orelse return error.Malformed;
             const entity = raw[i + 1 .. semi];
             const character: u21 = if (u.eq(entity, "amp")) '&' else if (u.eq(entity, "lt")) '<' else if (u.eq(
                 entity,

@@ -1,6 +1,7 @@
 //! Private, immutable local attachment snapshots. One background owner performs
 //! file preparation and cleanup; metadata commits through its own Store connection.
 const std = @import("std");
+const repeat = @import("../../fixtures.zig").repeat;
 const u = @import("../../common.zig");
 const attachments = @import("../../protocol.zig").attachments;
 const t = @import("../../protocol.zig").types;
@@ -26,7 +27,7 @@ pub const StageOptions = struct {
 };
 
 pub fn init(a: u.Allocator, data: []const u8) InitError!Files {
-    const path = try a.dupeZ(u8, data);
+    const path = try a.dupeSentinel(u8, data, 0);
     defer a.free(path);
     const directory = c.zc_outgoing_directory(path);
     if (directory < 0) return error.AttachmentStorageUnavailable;
@@ -43,10 +44,10 @@ pub fn deinit(self: *Files) void {
 /// an interrupted process may leave an orphan for startup collection.
 pub fn stage(self: Files, a: u.Allocator, s: Store, key: []const u8, options: StageOptions) StageError!attachments.Upload {
     if (options.path.len == 0 or options.path.len > 4096 or
-        !std.fs.path.isAbsolute(options.path) or std.mem.indexOfScalar(u8, options.path, 0) != null)
+        !std.fs.path.isAbsolute(options.path) or std.mem.findScalar(u8, options.path, 0) != null)
         return error.AttachmentSourceUnavailable;
     var before: c.ZcOutgoingFingerprint = undefined;
-    const source = c.zc_outgoing_source(try a.dupeZ(u8, options.path), &before);
+    const source = c.zc_outgoing_source(try a.dupeSentinel(u8, options.path, 0), &before);
     if (source < 0) return error.AttachmentSourceUnavailable;
     defer _ = u.c.close(source);
     const name = std.fs.path.basename(options.path);
@@ -54,12 +55,12 @@ pub fn stage(self: Files, a: u.Allocator, s: Store, key: []const u8, options: St
         .id = try u.id(a),
         .name = try a.dupe(u8, name),
         .mime_type = mimeType(name),
-        .bytes = try std.fmt.allocPrint(a, "{d}", .{before.bytes}),
+        .bytes = try a.print("{d}", .{before.bytes}),
         // Use a correctly shaped placeholder while validating metadata before computing the digest.
-        .sha256 = "0" ** 64,
+        .sha256 = repeat("0", 64),
     };
     try outgoing.checkAdd(s, a, key, file);
-    const id = try a.dupeZ(u8, file.id);
+    const id = try a.dupeSentinel(u8, file.id, 0);
     const destination = c.zc_outgoing_create(self.directory, id);
     if (destination < 0) return error.AttachmentStorageUnavailable;
     defer _ = u.c.close(destination);
@@ -83,7 +84,7 @@ fn copy(source: c_int, destination: c_int, before: c.ZcOutgoingFingerprint, canc
         if (cancel) |stopped| if (stopped.load(.acquire)) return error.AttachmentCanceled;
         const n = u.c.read(source, &buffer, @min(remaining, buffer.len));
         if (n < 0) {
-            if (std.c._errno().* == @intFromEnum(std.posix.E.INTR)) continue;
+            if (std.c._errno().* == @backingInt(std.posix.E.INTR)) continue;
             return error.AttachmentSourceUnavailable;
         }
         if (n == 0) return error.AttachmentSourceChanged;
@@ -168,8 +169,8 @@ test "local attachment originals survive source changes restart and relay reset"
     defer arena.deinit();
     const a = arena.allocator();
     const root = try testRoot(a, tmp.sub_path);
-    const db = try std.fmt.allocPrintSentinel(a, "{s}/client.db", .{root}, 0);
-    const source = try std.fmt.allocPrintSentinel(a, "{s}/photo 👋.PNG", .{root}, 0);
+    const db = try a.printSentinel("{s}/client.db", .{root}, 0);
+    const source = try a.printSentinel("{s}/photo 👋.PNG", .{root}, 0);
     const bytes = "\x00\x01image original\xff";
     try testWrite(source, bytes);
     const epoch = try u.id(a);
@@ -177,7 +178,7 @@ test "local attachment originals survive source changes restart and relay reset"
     {
         const s = try Store.open(db);
         defer s.close();
-        try s.beginSync(epoch, try std.fmt.allocPrint(a, "{s}:0", .{epoch}));
+        try s.beginSync(epoch, try a.print("{s}:0", .{epoch}));
         var files = try Files.init(a, root);
         defer files.deinit();
         first = try files.stage(a, s, "new:alice@example.invalid", .{ .path = source });
@@ -209,7 +210,7 @@ test "local attachment originals survive source changes restart and relay reset"
         try files.collect(s, true);
         try testBytes(files, first, bytes);
         const next_epoch = try u.id(a);
-        try s.beginSync(next_epoch, try std.fmt.allocPrint(a, "{s}:0", .{next_epoch}));
+        try s.beginSync(next_epoch, try a.print("{s}:0", .{next_epoch}));
         const snapshot = try s.snapshot(a, "new:alice@example.invalid");
         try testing.expectEqual(@as(usize, 1), snapshot.chats.len);
         try testing.expectEqualStrings(first.id, snapshot.draft_attachments[0].id);
@@ -233,10 +234,10 @@ test "attachment outbox ownership commits atomically and rejects changed drafts 
     defer s.close();
     var files = try Files.init(a, root);
     defer files.deinit();
-    const source = try std.fmt.allocPrintSentinel(a, "{s}/empty.bin", .{root}, 0);
+    const source = try a.printSentinel("{s}/empty.bin", .{root}, 0);
     try testWrite(source, "");
     const epoch = try u.id(a);
-    try s.beginSync(epoch, try std.fmt.allocPrint(a, "{s}:0", .{epoch}));
+    try s.beginSync(epoch, try a.print("{s}:0", .{epoch}));
     try s.saveDraft("chat", "caption");
     const file = try files.stage(a, s, "chat", .{ .path = source });
     var input: t.SendInput = .{
@@ -317,7 +318,7 @@ test "snapshot failures leave no draft and collection distinguishes active files
     defer s.close();
     var files = try Files.init(a, root);
     defer files.deinit();
-    const source = try std.fmt.allocPrintSentinel(a, "{s}/file.bin", .{root}, 0);
+    const source = try a.printSentinel("{s}/file.bin", .{root}, 0);
     try testWrite(source, "contents");
     var cancel: std.atomic.Value(bool) = .init(true);
     try testing.expectError(error.AttachmentCanceled, files.stage(a, s, "chat", .{ .path = source, .cancel = &cancel }));
@@ -329,7 +330,7 @@ test "snapshot failures leave no draft and collection distinguishes active files
     defer c.zc_outgoing_scan_close(scan);
     var name: [23]u8 = undefined;
     try testing.expectEqual(@as(c_int, 0), c.zc_outgoing_next(scan, &name, name.len));
-    const id = try a.dupeZ(u8, try u.id(a));
+    const id = try a.dupeSentinel(u8, try u.id(a), 0);
     const orphan = c.zc_outgoing_create(files.directory, id);
     try testing.expect(orphan >= 0);
     _ = u.c.close(orphan);
@@ -339,11 +340,11 @@ test "snapshot failures leave no draft and collection distinguishes active files
     _ = u.c.close(active);
     try files.collect(s, true);
     try testing.expectEqual(@as(c_int, -1), c.zc_outgoing_open(files.directory, id, 0));
-    const link = try std.fmt.allocPrintSentinel(a, "{s}/link.bin", .{root}, 0);
+    const link = try a.printSentinel("{s}/link.bin", .{root}, 0);
     try testing.expectEqual(@as(c_int, 0), u.c.symlink(source, link));
     try testing.expectError(error.AttachmentSourceUnavailable, files.stage(a, s, "chat", .{ .path = link }));
     try testing.expectError(error.AttachmentSourceUnavailable, files.stage(a, s, "chat", .{ .path = root }));
-    const fifo = try std.fmt.allocPrintSentinel(a, "{s}/fifo", .{root}, 0);
+    const fifo = try a.printSentinel("{s}/fifo", .{root}, 0);
     try testing.expectEqual(@as(c_int, 0), u.c.mkfifo(fifo, 0o600));
     try testing.expectError(error.AttachmentSourceUnavailable, files.stage(a, s, "chat", .{ .path = fifo }));
     var before: c.ZcOutgoingFingerprint = undefined;
@@ -360,7 +361,7 @@ test "snapshot failures leave no draft and collection distinguishes active files
 fn testRoot(a: u.Allocator, sub_path: [std.fs.base64_encoder.calcSize(12)]u8) ![:0]const u8 {
     var cwd: [std.fs.max_path_bytes]u8 = undefined;
     const current = u.c.getcwd(&cwd, cwd.len) orelse return error.TestUnexpectedResult;
-    return std.fmt.allocPrintSentinel(a, "{s}/.zig-cache/tmp/{s}", .{ std.mem.span(current), sub_path }, 0);
+    return a.printSentinel("{s}/.zig-cache/tmp/{s}", .{ std.mem.span(current), sub_path }, 0);
 }
 
 fn testWrite(path: [:0]const u8, bytes: []const u8) !void {

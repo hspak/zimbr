@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Synthetic end-to-end latency benchmark; never opens an Apple account/cache.
 
-Build ReleaseFast client-probe and fake-relay first. Outputs aggregates only.
+Build fast client-probe and fake-relay first. Outputs aggregates only.
 View times include the probe's 20 ms sampling interval, but exclude GPU drawing.
 """
 import argparse

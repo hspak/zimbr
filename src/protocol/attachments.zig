@@ -1,5 +1,6 @@
 //! Outgoing file metadata shared by upload reservations, drafts, and sends.
 const std = @import("std");
+const repeat = @import("../fixtures.zig").repeat;
 const u = @import("../common.zig");
 
 // Sixteen files bounds one send's reservations and matches the native drop limit.
@@ -70,11 +71,11 @@ fn validMime(mime: []const u8) bool {
     // Require at least a/b and cap bare media types at 127 bytes to keep reservation headers
     // bounded.
     if (mime.len < 3 or mime.len > 127) return false;
-    const slash = std.mem.indexOfScalar(u8, mime, '/') orelse return false;
+    const slash = std.mem.findScalar(u8, mime, '/') orelse return false;
     if (slash == 0 or slash == mime.len - 1) return false;
     for (mime, 0..) |ch, i| {
         if (i == slash or std.ascii.isAlphanumeric(ch)) continue;
-        if (std.mem.indexOfScalar(u8, "!#$&^_.+-", ch) == null) return false;
+        if (std.mem.findScalar(u8, "!#$&^_.+-", ch) == null) return false;
     }
     return true;
 }
@@ -85,7 +86,7 @@ test "upload metadata accepts Unicode basenames and exact byte boundaries" {
         .name = "photo 👩‍💻.png",
         .mime_type = "image/png",
         .bytes = "0",
-        .sha256 = "0123456789abcdef" ** 4,
+        .sha256 = repeat("0123456789abcdef", 4),
     };
     try std.testing.expectEqual(@as(u64, 0), try validate(file));
     file.bytes = "104857600";
@@ -102,7 +103,7 @@ test "upload metadata rejects paths malformed identities hashes sizes and MIME h
         .name = "document.pdf",
         .mime_type = "application/pdf",
         .bytes = "17",
-        .sha256 = "0123456789abcdef" ** 4,
+        .sha256 = repeat("0123456789abcdef", 4),
     };
     for ([_][]const u8{
         "",
@@ -113,7 +114,7 @@ test "upload metadata rejects paths malformed identities hashes sizes and MIME h
         "photo\x00.png",
         "photo\r\n.png",
         "invalid\xff",
-        "x" ** 256,
+        repeat("x", 256),
     }) |name| {
         var bad = good;
         bad.name = name;
@@ -150,20 +151,20 @@ test "upload metadata rejects paths malformed identities hashes sizes and MIME h
     bad.id = "ABEiM0RVZneImaq7zN3u_x";
     try std.testing.expectError(error.InvalidRequest, validate(bad));
     bad = good;
-    bad.sha256 = "ABCDEF0123456789" ** 4;
+    bad.sha256 = repeat("ABCDEF0123456789", 4);
     try std.testing.expectError(error.InvalidRequest, validate(bad));
-    bad.sha256 = "0" ** 63;
+    bad.sha256 = repeat("0", 63);
     try std.testing.expectError(error.InvalidRequest, validate(bad));
 }
 
 test "attachment sets bound count and aggregate size and reject repeated upload IDs" {
-    var files = [_]Upload{.{
+    var files: [max_files + 1]Upload = @splat(.{
         .id = "ABEiM0RVZneImaq7zN3u_w",
         .name = "file.bin",
         .mime_type = "application/octet-stream",
         .bytes = "104857600",
-        .sha256 = "0123456789abcdef" ** 4,
-    }} ** (max_files + 1);
+        .sha256 = repeat("0123456789abcdef", 4),
+    });
     try std.testing.expectError(error.TooManyAttachments, validateSet(&files));
     try std.testing.expectError(error.InvalidRequest, validateSet(files[0..2]));
     files[1].id = "aBEiM0RVZneImaq7zN3u_w";
@@ -181,7 +182,7 @@ test "attachment names reject invisible controls but preserve ordinary Unicode" 
         .name = "",
         .mime_type = "application/octet-stream",
         .bytes = "0",
-        .sha256 = "0" ** 64,
+        .sha256 = repeat("0", 64),
     };
     for ([_][]const u8{
         "photo\u{85}.png",

@@ -7,7 +7,7 @@ pub const Target = struct { url: [:0]const u8, hostname: []const u8 };
 /// Return null for an unsafe or invalid URL. The caller owns both target strings.
 pub fn parse(a: std.mem.Allocator, value: []const u8) std.mem.Allocator.Error!?Target {
     if (!url_policy.safe(value)) return null;
-    const url = try a.dupeZ(u8, value);
+    const url = try a.dupeSentinel(u8, value, 0);
     errdefer a.free(url);
     // Room for a DNS/IP host and NUL, with margin beyond the DNS text-name limit.
     var host: [512]u8 = undefined;

@@ -1,6 +1,7 @@
 //! Immutable message blocks. Missing/unverified placement falls back to the
 //! original captions, then attachments and cards, without displaying anchors.
 const std = @import("std");
+const repeat = @import("../fixtures.zig").repeat;
 const t = @import("../protocol.zig").types;
 const u = @import("../common.zig");
 const display = @import("display.zig");
@@ -35,10 +36,10 @@ pub fn prepare(a: u.Allocator, m: t.Message) u.Allocator.Error![]const Block {
     if (m.reaction_event != null) return &.{};
     const text: []const u8 = m.text orelse "";
     const complete = if (m.enrichment) |e| e.attachments.complete and e.previews.complete and e.reactions.complete and e.parts.complete else true;
-    if (m.attachments.len == 0 and (if (m.link_previews) |items| items.len == 0 else true) and (if (m.reactions) |items| items.len == 0 else true) and complete and std.ascii.indexOfIgnoreCase(
+    if (m.attachments.len == 0 and (if (m.link_previews) |items| items.len == 0 else true) and (if (m.reactions) |items| items.len == 0 else true) and complete and std.ascii.findIgnoreCase(
         text,
         "http://",
-    ) == null and std.ascii.indexOfIgnoreCase(
+    ) == null and std.ascii.findIgnoreCase(
         text,
         "https://",
     ) == null) return &.{};
@@ -229,7 +230,7 @@ fn reactionLabel(key: []const u8) []const u8 {
 test "prepared links retain destinations beyond the bounded text preview" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const body = "https://first.example/ " ++ "message words " ** 400 ++ "https://last.example/";
+    const body = "https://first.example/ " ++ repeat("message words ", 400) ++ "https://last.example/";
     const blocks = try prepare(arena.allocator(), .{
         .sender = "peer",
         .service = "imessage",
@@ -241,7 +242,7 @@ test "prepared links retain destinations beyond the bounded text preview" {
         .text = body,
     });
     try std.testing.expectEqual(@as(usize, 1), blocks.len);
-    try std.testing.expect(std.mem.indexOf(u8, blocks[0].value.text, "last.example") == null);
+    try std.testing.expect(std.mem.find(u8, blocks[0].value.text, "last.example") == null);
     try std.testing.expectEqual(@as(usize, 2), blocks[0].links.len);
     try std.testing.expectEqualStrings("https://last.example/", blocks[0].links[1].url);
     try std.testing.expectEqualStrings("last.example", blocks[0].links[1].hostname);
@@ -399,7 +400,7 @@ test "many reactions group each actor once across many target parts" {
     const blocks = try a.alloc(Block, count);
     const reactions = try a.alloc(t.Reaction, count);
     for (blocks, reactions, 0..) |*block, *reaction, i| {
-        const id = try std.fmt.allocPrint(a, "part:{d}", .{i});
+        const id = try a.print("part:{d}", .{i});
         block.* = .{ .part_id = id, .value = .{ .text = "text" } };
         reaction.* = .{
             .id = id,

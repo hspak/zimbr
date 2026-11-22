@@ -30,7 +30,7 @@ REQUIRED = {
     f'{APP}/Resources/tls_support.py', f'{APP}/Resources/profiles.py',
     f'{APP}/Resources/profiles.json',
     f'{APP}/Resources/LICENSE', f'{APP}/Resources/OpenSSL-LICENSE.txt',
-    f'{APP}/Resources/nghttp2-LICENSE.txt',
+    f'{APP}/Resources/nghttp2-LICENSE.txt', f'{APP}/Resources/translate-c-LICENSE.txt',
     f'{APP}/Resources/libPhoneNumber-LICENSE.txt', f'{APP}/_CodeSignature/CodeResources',
 }
 
@@ -100,10 +100,11 @@ def build(args):
         raise ValueError('Commit the source checkout before building a release archive')
     revision = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
     version = source_version()
-    zig = os.environ.get('ZIMBR_ZIG', str(ROOT / '.tools/zig-aarch64-macos-0.16.0/zig'))
+    zig_version = (ROOT / '.zigversion').read_text().strip()
+    zig = os.environ.get('ZIMBR_ZIG', str(ROOT / f'.tools/zig-aarch64-macos-{zig_version}/zig'))
     if 'ZIMBR_ZIG' not in os.environ and not Path(zig).exists():
         zig = 'zig'
-    if subprocess.check_output([zig, 'version'], text=True).strip() != (ROOT / '.zigversion').read_text().strip():
+    if subprocess.check_output([zig, 'version'], text=True).strip() != zig_version:
         raise ValueError('Use the Zig version pinned in .zigversion')
     openssl = Path(os.environ.get('ZIMBR_OPENSSL_PREFIX', ROOT / '.tools/openssl-3.5')).resolve()
     license_path = Path(os.environ.get('ZIMBR_OPENSSL_LICENSE',
@@ -118,7 +119,7 @@ def build(args):
         prefix = work / 'build'
         subprocess.run([
             zig, 'build', 'relay', 'test', 'test-macos-enrichment',
-            '-Doptimize=ReleaseSafe', '-Dtarget=aarch64-macos.27.0', '-Dcpu=apple_m1',
+            '-Doptimize=safe', '-Dtarget=aarch64-macos.27.0', '-Dcpu=apple_m1',
             '-Dprofile=release',
             f'-Dopenssl-prefix={openssl}', '--prefix', str(prefix),
         ], cwd=ROOT, check=True)

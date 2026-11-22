@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const repeat = @import("fixtures.zig").repeat;
 const log = std.log.scoped(.client);
 const a = std.heap.page_allocator;
 
@@ -569,11 +570,13 @@ const App = struct {
     }
     fn copyControl(comptime T: type, allocator: std.mem.Allocator, item: T) std.mem.Allocator.Error!T {
         if (T == []const u8) return allocator.dupe(u8, item);
-        if (T == [:0]const u8) return allocator.dupeZ(u8, item);
+        if (T == [:0]const u8) return allocator.dupeSentinel(u8, item, 0);
         switch (@typeInfo(T)) {
             .@"struct" => |fields| {
                 var result: T = undefined;
-                inline for (fields.fields) |field| @field(result, field.name) = try copyControl(field.type, allocator, @field(item, field.name));
+                inline for (fields.field_names, fields.field_types) |name, Field| {
+                    @field(result, name) = try copyControl(Field, allocator, @field(item, name));
+                }
                 return result;
             },
             .@"union" => return switch (item) {
@@ -601,6 +604,7 @@ const App = struct {
             .@"anyframe",
             .vector,
             .enum_literal,
+            .spirv,
             => return item,
         }
     }
@@ -940,7 +944,7 @@ const App = struct {
             s.notifications.submit(n, s.media, u.now());
         }
         if (s.readingConversation()) {
-            const key = a.dupeZ(u8, s.key) catch return;
+            const key = a.dupeSentinel(u8, s.key, 0) catch return;
             defer a.free(key);
             s.notifications.dismiss(key);
         }
@@ -1312,7 +1316,7 @@ const App = struct {
             }
             if (ctrl and (key.pressed(.c) or key.pressed(.x))) {
                 if (e.selected().len > 0) {
-                    const clip = try a.dupeZ(u8, e.selected());
+                    const clip = try a.dupeSentinel(u8, e.selected(), 0);
                     defer a.free(clip);
                     desktop.setClipboardText(clip);
                     if (key.pressed(.x)) try e.insert("");
@@ -1362,7 +1366,7 @@ const App = struct {
             if (s.focus == .none and s.message_selection.id.len > 0) {
                 if (ctrl and key.pressed(.a)) s.message_selection.selectAll();
                 if (ctrl and key.pressed(.c) and s.message_selection.selected().len > 0) {
-                    const clip = try a.dupeZ(u8, s.message_selection.selected());
+                    const clip = try a.dupeSentinel(u8, s.message_selection.selected(), 0);
                     defer a.free(clip);
                     desktop.setClipboardText(clip);
                     s.info("Selected text copied");
@@ -1562,7 +1566,7 @@ const App = struct {
             s.info("Use an international number (+country code) or an email address.");
             return;
         }
-        const key = try std.fmt.allocPrint(a, "new:{s}", .{address});
+        const key = try a.print("new:{s}", .{address});
         defer a.free(key);
         s.show_hidden = false;
         try s.select(key);
@@ -1685,7 +1689,7 @@ const App = struct {
         if (comptime client_options.automation) zrct.add(.{
             .id = "window",
             .role = "window",
-            .value = std.fmt.allocPrint(ar, "{d}x{d}", .{ desktop.width(), desktop.height() }) catch "",
+            .value = ar.print("{d}x{d}", .{ desktop.width(), desktop.height() }) catch "",
             .status = if (s.frame_idle) "idle" else "active",
             .bounds = .{
                 .x = 0,
@@ -1805,7 +1809,7 @@ const App = struct {
             const status = if (activity.active()) display.syncLabel(activity, &sync_buffer) else if (online) status: {
                 const endpoint = std.Uri.parse(s.worker.config.relay_url) catch break :status "Connected";
                 const host = endpoint.host orelse break :status "Connected";
-                break :status std.fmt.allocPrint(ar, "Connected to {s}", .{host.percent_encoded}) catch
+                break :status ar.print("Connected to {s}", .{host.percent_encoded}) catch
                     "Connected";
             } else "Offline · drafts saved locally";
             const status_x = footer.x + sidebar_padding + sidebar_text_inset;
@@ -1838,7 +1842,7 @@ const App = struct {
                 const fps_width: f32 = 72;
                 // Fit the numeric FPS diagnostic and suffix without per-frame allocation.
                 var buffer: [32]u8 = undefined;
-                const fps = if (s.frame_idle) "Idle" else std.fmt.bufPrint(&buffer, "{d} FPS", .{if (s.frame_seconds > 0) @as(u32, @intFromFloat(@round(1 / s.frame_seconds))) else 0}) catch unreachable;
+                const fps = if (s.frame_idle) "Idle" else std.mem.print(&buffer, "{d} FPS", .{if (s.frame_seconds > 0) @as(u32, @intFromFloat(@round(1 / s.frame_seconds))) else 0}) catch unreachable;
                 const band = layout.footer(areas.composer);
                 s.drawFooterLabel(fps, .{
                     .x = band.x + band.width - fps_width,
@@ -1935,7 +1939,7 @@ const App = struct {
             s.settings_scroll = std.math.inf(f32);
             return;
         }
-        const path = try std.fmt.allocPrintSentinel(a, "{s}/client.db", .{candidate.data}, 0);
+        const path = try a.printSentinel("{s}/client.db", .{candidate.data}, 0);
         defer a.free(path);
         const store = try Store.open(path);
         defer store.close();
@@ -2350,7 +2354,7 @@ const App = struct {
                 if (selected or hot) shapes.drawRectangle(row, 4, bg);
                 const name = display.label(ar, v.snapshot.directory.conversation(ar, chat.value) catch "Group conversation") catch "…";
                 if (comptime client_options.automation) zrct.add(.{
-                    .id = std.fmt.allocPrint(ar, "conversation/{s}", .{chat.value.id}) catch "",
+                    .id = ar.print("conversation/{s}", .{chat.value.id}) catch "",
                     .role = "row",
                     .label = name,
                     .bounds = .from(row),
@@ -2411,8 +2415,7 @@ const App = struct {
                     const badge_color = if (read_only) theme.colors.muted else theme.colors.accent;
                     shapes.drawRectangle(badge, 5, badge_color);
                     // Cap the badge at 99+ so large unread counts fit its fixed width.
-                    const label = if (chat.unread > 99) "99+" else std.fmt.allocPrint(
-                        ar,
+                    const label = if (chat.unread > 99) "99+" else ar.print(
                         "{d}",
                         .{chat.unread},
                     ) catch "";
@@ -2578,11 +2581,11 @@ const App = struct {
             );
             s.detailRow(
                 "Certificate expiry",
-                if (d.transport.expiring) std.fmt.allocPrint(ar, "{s} · renew now, then Reconnect", .{d.transport.expires}) catch "" else d.transport.expires,
+                if (d.transport.expiring) ar.print("{s} · renew now, then Reconnect", .{d.transport.expires}) catch "" else d.transport.expires,
                 clip,
                 &y,
             );
-            s.detailRow("Failure", std.fmt.allocPrint(ar, "{s} · curl {d} · verification {d}\n{s}", .{
+            s.detailRow("Failure", ar.print("{s} · curl {d} · verification {d}\n{s}", .{
                 d.transport.failure,
                 d.transport.curl_code,
                 d.transport.verify_result,
@@ -2590,13 +2593,13 @@ const App = struct {
             }) catch "", clip, &y);
             s.detailRow(
                 "Last response",
-                if (d.last_response_ms == 0) "None this session" else if (d.last_http_status == 0) "Transport interrupted / no HTTP response" else std.fmt.allocPrint(ar, "HTTP {d} · {s}", .{ d.last_http_status, elapsed(ar, d.last_response_ms) }) catch "",
+                if (d.last_response_ms == 0) "None this session" else if (d.last_http_status == 0) "Transport interrupted / no HTTP response" else ar.print("HTTP {d} · {s}", .{ d.last_http_status, elapsed(ar, d.last_response_ms) }) catch "",
                 clip,
                 &y,
             );
             s.detailRow(
                 "Retry",
-                if (d.auth_blocked) "Waiting for Reconnect" else if (!v.online and d.retry_at > u.now()) std.fmt.allocPrint(ar, "In {d}s", .{@divTrunc(d.retry_at - u.now() + 999, 1000)}) catch "" else if (v.online) "Not needed" else "Connecting",
+                if (d.auth_blocked) "Waiting for Reconnect" else if (!v.online and d.retry_at > u.now()) ar.print("In {d}s", .{@divTrunc(d.retry_at - u.now() + 999, 1000)}) catch "" else if (v.online) "Not needed" else "Connecting",
                 clip,
                 &y,
             );
@@ -2612,7 +2615,7 @@ const App = struct {
                     &y,
                 );
                 const caps = server.capabilities;
-                s.detailRow("Capabilities", std.fmt.allocPrint(ar, "History: {s} · Live messages: {s}\nDirect sends: {s} · Replies: {s}\nAttachments: {s} · Create groups: {s}", .{
+                s.detailRow("Capabilities", ar.print("History: {s} · Live messages: {s}\nDirect sends: {s} · Replies: {s}\nAttachments: {s} · Create groups: {s}", .{
                     yesNo(caps.read_history),
                     yesNo(caps.live_messages),
                     yesNo(caps.send_direct),
@@ -2687,7 +2690,7 @@ const App = struct {
                 &y,
             );
             s.detailRow("Last event", elapsed(ar, d.last_event_ms), clip, &y);
-            s.detailRow("Local cache", std.fmt.allocPrint(ar, "{d} conversations · {d} messages\n{d} drafts · {d} unresolved sends", .{
+            s.detailRow("Local cache", ar.print("{d} conversations · {d} messages\n{d} drafts · {d} unresolved sends", .{
                 v.snapshot.chats.len,
                 d.cached_messages,
                 d.saved_drafts,
@@ -2695,7 +2698,7 @@ const App = struct {
             }) catch "", clip, &y);
             s.detailRow(
                 "Current history",
-                std.fmt.allocPrint(ar, "{d} cached messages · {s}", .{ v.snapshot.messages.len, if (v.loading_history) "Loading" else if (v.snapshot.more) "Older history available" else "No older page" }) catch "",
+                ar.print("{d} cached messages · {s}", .{ v.snapshot.messages.len, if (v.loading_history) "Loading" else if (v.snapshot.more) "Older history available" else "No older page" }) catch "",
                 clip,
                 &y,
             );
@@ -2704,7 +2707,7 @@ const App = struct {
         s.detailRow("Version", client_options.version, clip, &y);
         s.detailRow(
             "Platform",
-            @tagName(builtin.os.tag) ++ " / " ++ @tagName(builtin.cpu.arch) ++ " · Wayland",
+            @tagName(builtin.target.os.tag) ++ " / " ++ @tagName(builtin.target.cpu.arch) ++ " · Wayland",
             clip,
             &y,
         );
@@ -2714,7 +2717,7 @@ const App = struct {
             clip,
             &y,
         );
-        s.detailRow("Display", std.fmt.allocPrint(ar, "{d} × {d} logical · {d} × {d} pixels · {d:.0}% scale", .{
+        s.detailRow("Display", ar.print("{d} × {d} logical · {d} × {d} pixels · {d:.0}% scale", .{
             desktop.width(),
             desktop.height(),
             desktop.pixelWidth(),
@@ -2723,7 +2726,7 @@ const App = struct {
         }) catch "", clip, &y);
         s.detailRow(
             "Database",
-            std.fmt.allocPrint(ar, "{s}/client.db", .{s.worker.config.data}) catch "",
+            ar.print("{s}/client.db", .{s.worker.config.data}) catch "",
             clip,
             &y,
         );
@@ -2796,7 +2799,7 @@ const App = struct {
             .role = "scroll",
             .bounds = .from(box),
             .clip = .from(r),
-            .value = std.fmt.allocPrint(ar, "{d}", .{entries.len}) catch "",
+            .value = ar.print("{d}", .{entries.len}) catch "",
             .status = if (s.logs_follow) "live" else "scrolled_back",
             .interactive = false,
         });
@@ -2856,7 +2859,7 @@ const App = struct {
         // Fit a localized timezone name and offset in the log footer.
         var zone: [80]u8 = undefined;
         const latest_label = std.fmt.comptimePrint("latest {d} entries", .{LogBuffer.capacity});
-        const status = std.fmt.allocPrint(ar, "{s} · {s} · {s}", .{
+        const status = ar.print("{s} · {s} · {s}", .{
             if (s.logs_follow) "Live" else "Scrolled back",
             LogBuffer.timeZone(&zone),
             if (s.logs_follow) latest_label else "Latest resumes live updates",
@@ -2885,8 +2888,7 @@ const App = struct {
         } else if (s.view) |v| for (v.snapshot.chats) |chat| {
             if (u.eq(chat.value.id, s.key)) {
                 title = v.snapshot.directory.conversation(ar, chat.value) catch "Group conversation";
-                subtitle = if (!chat.value.is_self and chat.value.participants.len > 1) std.fmt.allocPrint(
-                    ar,
+                subtitle = if (!chat.value.is_self and chat.value.participants.len > 1) ar.print(
                     "{d} participants  ·  {s}",
                     .{ chat.value.participants.len, if (chat.value.sendable) "iMessage" else "Read only" },
                 ) catch "Group conversation" else if (chat.value.sendable) "iMessage" else "Read only · unsupported service";
@@ -3360,7 +3362,7 @@ const App = struct {
             .bounds = .from(r),
             .interactive = false,
             .obscured = input_obscured,
-            .value = std.fmt.allocPrint(ar, "{d}", .{if (s.view) |v| v.snapshot.messages.len else 0}) catch "",
+            .value = ar.print("{d}", .{if (s.view) |v| v.snapshot.messages.len else 0}) catch "",
             .status = if (s.view != null and s.view.?.loading_history) "loading" else "ready",
         });
         const v = s.view orelse return;
@@ -3450,7 +3452,7 @@ const App = struct {
             if (comptime client_options.automation) {
                 const status = display.messageStatus(m, is_group, status_now);
                 zrct.add(.{
-                    .id = std.fmt.allocPrint(ar, "message/{s}", .{row.id}) catch "",
+                    .id = ar.print("message/{s}", .{row.id}) catch "",
                     .role = "message",
                     .label = row.text,
                     .bounds = .{
@@ -3532,7 +3534,7 @@ const App = struct {
             const y = s.historyRowY(r, row.top);
             const x = r.x + 66;
             if (comptime client_options.automation) zrct.add(.{
-                .id = std.fmt.allocPrint(ar, "message/{s}", .{row.id}) catch "",
+                .id = ar.print("message/{s}", .{row.id}) catch "",
                 .role = "message",
                 .label = row.text,
                 .bounds = .{
@@ -3560,7 +3562,7 @@ const App = struct {
                     .height = 34,
                 }, "You", style, 17);
                 const status = if (u.eq(p.state, "uploading") and u.eq(v.upload.request_id, p.input.request_id))
-                    std.fmt.allocPrint(ar, "Uploading {d}% · {s}", .{
+                    ar.print("Uploading {d}% · {s}", .{
                         if (v.upload.total == 0) 0 else @min(100, v.upload.bytes * 100 / v.upload.total),
                         display.label(ar, v.upload.filename) catch "…",
                     }) catch "Uploading…"
@@ -3589,7 +3591,7 @@ const App = struct {
                 } else s.drawBlocks(row, pendingMessage(p), body, foreground, theme.colors.paper, ar);
                 const can_cancel = p.input.attachments.len > 0 and u.eq(p.state, "uploading");
                 const recovery_id = if (comptime client_options.automation)
-                    std.fmt.allocPrint(ar, "message/{s}/recover", .{row.id}) catch ""
+                    ar.print("message/{s}/recover", .{row.id}) catch ""
                 else
                     "";
                 if (can_cancel or (needs_recovery and p.input.text.len > 0)) s.actionButton(recovery_id, .{
@@ -3842,7 +3844,7 @@ const App = struct {
             .more => return 30,
             .text, .reactions => {},
         }
-        var hash = std.hash.Wyhash.init(@intFromEnum(std.meta.activeTag(block.value)));
+        var hash = std.hash.Wyhash.init(@backingInt(std.meta.activeTag(block.value)));
         hash.update(std.mem.asBytes(&width));
         hash.update(std.mem.asBytes(&s.text.scale));
         switch (block.value) {
@@ -3875,8 +3877,7 @@ const App = struct {
                 var x: f32 = 0;
                 var rows: f32 = 1;
                 for (chips) |chip| {
-                    const label = std.fmt.allocPrint(
-                        arena.allocator(),
+                    const label = arena.allocator().print(
                         "{s} {d}",
                         .{ chip.label, chip.actors.len },
                     ) catch chip.label;
@@ -3907,21 +3908,21 @@ const App = struct {
             const ar = s.frame_arena.allocator();
             const target: ?zrct.Target = switch (action) {
                 .viewer => |item| .{
-                    .id = std.fmt.allocPrint(ar, "message/{s}/attachment/{s}", .{ item.message, item.attachment }) catch "",
+                    .id = ar.print("message/{s}/attachment/{s}", .{ item.message, item.attachment }) catch "",
                     .role = "button",
                     .label = "Open image",
-                    .parent = std.fmt.allocPrint(ar, "message/{s}", .{item.message}) catch "",
+                    .parent = ar.print("message/{s}", .{item.message}) catch "",
                     .bounds = .from(r),
                 },
                 .reaction => |item| .{
-                    .id = std.fmt.allocPrint(ar, "message/{s}/reaction/{s}/{s}", .{
+                    .id = ar.print("message/{s}/reaction/{s}/{s}", .{
                         item.message,
                         item.part,
                         item.label,
                     }) catch "",
                     .role = "button",
                     .label = item.label,
-                    .parent = std.fmt.allocPrint(ar, "message/{s}", .{item.message}) catch "",
+                    .parent = ar.print("message/{s}", .{item.message}) catch "",
                     .bounds = .from(r),
                 },
                 .button,
@@ -3951,7 +3952,7 @@ const App = struct {
         if (s.controls.items.len > before) s.controls.items[before].rich_index = index;
     }
     fn showContentDetail(s: *App, body: []const u8) void {
-        const copy = a.dupeZ(u8, body) catch return;
+        const copy = a.dupeSentinel(u8, body, 0) catch return;
         s.closeContentDetail();
         s.detail_body = copy;
         s.focus = .none;
@@ -4066,7 +4067,7 @@ const App = struct {
                             bg,
                         );
                         s.text.drawLine(
-                            std.fmt.allocPrint(ar, "{s} · {s} bytes · preview unavailable", .{ item.mime_type, item.bytes }) catch "Attachment",
+                            ar.print("{s} · {s} bytes · preview unavailable", .{ item.mime_type, item.bytes }) catch "Attachment",
                             r.x,
                             r.y + 24,
                             12,
@@ -4150,8 +4151,7 @@ const App = struct {
                     var x = r.x;
                     var top = r.y;
                     for (chips) |chip| {
-                        const label = std.fmt.allocPrint(
-                            ar,
+                        const label = ar.print(
                             "{s} {d}",
                             .{ chip.label, chip.actors.len },
                         ) catch chip.label;
@@ -4182,7 +4182,7 @@ const App = struct {
                     }
                 },
                 .more => |section| {
-                    const label = std.fmt.allocPrint(ar, "Show more {s}", .{@tagName(section)}) catch "Show more";
+                    const label = ar.print("Show more {s}", .{@tagName(section)}) catch "Show more";
                     s.text.drawLine(
                         label,
                         r.x + 8,
@@ -4207,11 +4207,11 @@ const App = struct {
             const name = s.view.?.snapshot.directory.actor(actor);
             names.append(
                 ar,
-                if (actor.is_self) "You (your reaction)" else std.fmt.allocPrint(ar, "{s} · {s}", .{ name, actor.address orelse "Unknown address" }) catch name,
+                if (actor.is_self) "You (your reaction)" else ar.print("{s} · {s}", .{ name, actor.address orelse "Unknown address" }) catch name,
             ) catch {};
         }
         const people = std.mem.join(ar, "\n", names.items) catch "";
-        return std.fmt.allocPrint(ar, "{s}\n\n{s}{s}", .{
+        return ar.print("{s}\n\n{s}{s}", .{
             chip.label,
             people,
             if (chip.unresolved) "\n\nShown on the whole message: the original message part could not be resolved." else "",
@@ -4241,7 +4241,7 @@ const App = struct {
             break;
         };
         if (!u.eq(body, s.detail_body orelse "")) {
-            const owned = a.dupeZ(u8, body) catch return;
+            const owned = a.dupeSentinel(u8, body, 0) catch return;
             if (s.detail_body) |old| a.free(old);
             s.detail_body = owned;
         }
@@ -4509,7 +4509,7 @@ const App = struct {
         if (files.len == 0) return;
         s.attachment_index = @min(s.attachment_index, files.len - 1);
         s.text.drawLine(
-            std.fmt.allocPrint(ar, "Attachment {d} of {d}", .{ s.attachment_index + 1, files.len }) catch "Attachments",
+            ar.print("Attachment {d} of {d}", .{ s.attachment_index + 1, files.len }) catch "Attachments",
             bounds.x,
             top + 3,
             12,
@@ -4536,7 +4536,7 @@ const App = struct {
             .id = "draft-attachments",
             .role = "group",
             .label = file.name,
-            .value = std.fmt.allocPrint(ar, "{d}", .{files.len}) catch "",
+            .value = ar.print("{d}", .{files.len}) catch "",
             .bounds = .from(bounds),
             .interactive = false,
             .obscured = input_obscured,
@@ -4600,7 +4600,7 @@ const App = struct {
             background,
         );
         s.text.drawLine(
-            std.fmt.allocPrint(ar, "{s} bytes · {s}", .{ file.bytes, status }) catch status,
+            ar.print("{s} bytes · {s}", .{ file.bytes, status }) catch status,
             bounds.x + 58,
             bounds.y + 27,
             11,
@@ -4847,12 +4847,12 @@ const App = struct {
             if (selected or hot) shapes.drawRectangle(row, 4, background);
             if (selected) shapes.drawRectangleLines(row, 4, 1, theme.colors.focus);
             s.text.drawLine(entry.text, row.x + 8, row.y + 4, 20, 32, theme.colors.ink, background);
-            const label = std.fmt.allocPrint(ar, ":{s}:", .{entry.name}) catch entry.name;
+            const label = ar.print(":{s}:", .{entry.name}) catch entry.name;
             s.text.drawLine(label, row.x + 45, row.y + 7, 14, row.width - 53, theme.colors.ink, background);
             s.addControl(row, .{ .emoji = index });
             if (hot) desktop.setCursor(.pointing_hand);
             if (comptime client_options.automation) zrct.add(.{
-                .id = std.fmt.allocPrint(ar, "emoji/{s}", .{entry.name}) catch "",
+                .id = ar.print("emoji/{s}", .{entry.name}) catch "",
                 .role = "option",
                 .parent = "emoji-completion",
                 .label = label,
@@ -4861,7 +4861,7 @@ const App = struct {
                 .bounds = .from(row),
             });
         }
-        const hint = std.fmt.allocPrint(ar, "Tab ↹ · Enter to insert · Esc · {d}/{d}", .{
+        const hint = ar.print("Tab ↹ · Enter to insert · Esc · {d}/{d}", .{
             completion.selected + 1,
             completion.items.len,
         }) catch "Tab ↹ · Enter to insert · Esc";
@@ -5075,9 +5075,9 @@ fn yesNo(value: bool) []const u8 {
 fn elapsed(ar: u.Allocator, when: i64) []const u8 {
     if (when == 0) return "Not observed";
     const seconds = @max(0, @divTrunc(u.now() - when, 1000));
-    if (seconds < 60) return std.fmt.allocPrint(ar, "{d}s ago", .{seconds}) catch "";
-    if (seconds < 3600) return std.fmt.allocPrint(ar, "{d}m ago", .{@divTrunc(seconds, 60)}) catch "";
-    return std.fmt.allocPrint(ar, "{d}h ago", .{@divTrunc(seconds, 3600)}) catch "";
+    if (seconds < 60) return ar.print("{d}s ago", .{seconds}) catch "";
+    if (seconds < 3600) return ar.print("{d}m ago", .{@divTrunc(seconds, 60)}) catch "";
+    return ar.print("{d}h ago", .{@divTrunc(seconds, 3600)}) catch "";
 }
 var input_obscured = false;
 fn hover(r: graphics.Rect) bool {
@@ -5118,7 +5118,7 @@ fn chatName(v: t.Conversation) []const u8 {
     return "Conversation";
 }
 fn localTime(ar: u.Allocator, value: []const u8, compact: bool) []const u8 {
-    const stamp = ar.dupeZ(u8, value) catch return value;
+    const stamp = ar.dupeSentinel(u8, value, 0) catch return value;
     // 64 bytes covers localized display timestamps; fall back to source text if formatting fails.
     const buffer = ar.alloc(u8, 64) catch return value;
     const n = bridge.zc_local_time(stamp, buffer.ptr, buffer.len, @intFromBool(compact));
@@ -5186,11 +5186,11 @@ pub const RenderFixture = struct {
         const chats = try ar.alloc(Store.Chat, 32);
         for (chats, 0..) |*chat, i| chat.* = .{
             .value = .{
-                .id = if (i == 0) "render-bench" else try std.fmt.allocPrint(ar, "chat-{d}", .{i}),
+                .id = if (i == 0) "render-bench" else try ar.print("chat-{d}", .{i}),
                 .service = "imessage",
                 .title = switch (avatars) {
-                    .shared => try std.fmt.allocPrint(ar, "Conversation {d}", .{i}),
-                    .distinct => try std.fmt.allocPrint(ar, "{c} Conversation {d}", .{
+                    .shared => try ar.print("Conversation {d}", .{i}),
+                    .distinct => try ar.print("{c} Conversation {d}", .{
                         @as(u8, @intCast('A' + i % 26)), i,
                     }),
                 },
@@ -5202,25 +5202,25 @@ pub const RenderFixture = struct {
         };
         const messages = try ar.alloc(t.Message, 1000);
         for (messages, 0..) |*message, i| message.* = .{
-            .id = try std.fmt.allocPrint(ar, "message-{d}", .{i}),
+            .id = try ar.print("message-{d}", .{i}),
             .conversation_id = "render-bench",
             .sender = "fixture@example.invalid",
             .direction = if (i % 3 == 0) .outgoing else .incoming,
             .service = "imessage",
             .timestamp = "2026-01-01T00:00:00Z",
             .kind = .text,
-            .text = try std.fmt.allocPrint(ar, "Message {d}: cached text, emoji 👩‍💻 and é.\nA second line exercises wrapping and clipping.", .{i}),
+            .text = try ar.print("Message {d}: cached text, emoji 👩‍💻 and é.\nA second line exercises wrapping and clipping.", .{i}),
             .decoding = .plain,
             .observed_status = .received,
         };
         switch (workload) {
             .cached, .scroll, .cold_text, .image_upload, .resize_width, .resize_height => {},
             .rich_anchor => {
-                messages[messages.len - 1].text = "A long message with a link https://example.invalid/ and mixed text café 世界. " ** 48;
+                messages[messages.len - 1].text = repeat("A long message with a link https://example.invalid/ and mixed text café 世界. ", 48);
                 s.app.following = false;
             },
             .caret => {
-                s.app.composer.set("A long draft with several words and punctuation. " ** 80) catch |err| switch (err) {
+                s.app.composer.set(repeat("A long draft with several words and punctuation. ", 80)) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     // The synthetic draft is bounded, valid UTF-8.
                     error.InvalidText => unreachable,
@@ -5228,7 +5228,7 @@ pub const RenderFixture = struct {
                 s.app.focus = .composer;
             },
             .reflow => for (messages, 0..) |*message, i| {
-                message.text = try std.fmt.allocPrint(ar, "Message {d}: " ++ "History text with wrapping and mixed scripts café 世界. " ** 16, .{i});
+                message.text = try ar.print("Message {d}: " ++ repeat("History text with wrapping and mixed scripts café 世界. ", 16), .{i});
             },
         }
         view.snapshot.chats = chats;
@@ -5329,7 +5329,7 @@ test "rich block measurements follow text width scale and link count" {
     defer worker.shutdown();
     var app = App{ .worker = &worker };
     defer app.deinit();
-    var block = message_content.Block{ .value = .{ .text = "Wrapped message words with café and 世界. " ** 8 } };
+    var block = message_content.Block{ .value = .{ .text = repeat("Wrapped message words with café and 世界. ", 8) } };
     const wide = app.blockHeight(block, 500, false);
     try std.testing.expect(app.blockHeight(block, 160, false) > wide);
     const calls = app.text.measure_calls;
@@ -5638,10 +5638,9 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     var chats: [32]Store.Chat = undefined;
     for (&chats, 0..) |*chat, i| chat.* = .{
         .value = .{
-            .id = try std.fmt.allocPrint(arena.allocator(), "fixture-{d}", .{i}),
+            .id = try arena.allocator().print("fixture-{d}", .{i}),
             .service = "imessage",
-            .title = try std.fmt.allocPrint(
-                arena.allocator(),
+            .title = try arena.allocator().print(
                 "Conversation {d} long wrapped label",
                 .{i},
             ),
@@ -5745,7 +5744,7 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     };
     var group_messages: [12]t.Message = undefined;
     for (&group_messages, 0..) |*m, i| m.* = .{
-        .id = try std.fmt.allocPrint(arena.allocator(), "group-{d}", .{i}),
+        .id = try arena.allocator().print("group-{d}", .{i}),
         .sender = chats[0].value.participants[i % 3],
         .direction = .incoming,
         .service = "imessage",
@@ -5757,7 +5756,7 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     };
     view.snapshot.messages = &group_messages;
     view.generation += 1;
-    try app.composer.set("A longer draft line\n" ** 20);
+    try app.composer.set(repeat("A longer draft line\n", 20));
     testDraw(&app, WindowMetrics.current().scale);
     try std.testing.expect(app.composer_scroll > 0);
     app.composer_scroll = 0;
@@ -6104,22 +6103,21 @@ test "workspace navigation, compact lists, message selection, and scrollbars ren
     var messages: [420]t.Message = undefined;
     const bodies = [_][]const u8{
         "Normal é 👩‍💻 שלום مرحبا",
-        "https://example.invalid/" ++ "W" ** 65500,
-        "\n" ** 65536,
-        "a" ++ "́" ** 1000,
+        "https://example.invalid/" ++ repeat("W", 65500),
+        repeat("\n", 65536),
+        "a" ++ repeat("́", 1000),
         "nul\x00tail",
         "bad\xff",
     };
     for (&messages, 0..) |*m, i| m.* = .{
-        .id = try std.fmt.allocPrint(arena.allocator(), "message-{d}", .{i}),
+        .id = try arena.allocator().print("message-{d}", .{i}),
         .conversation_id = "fixture-0",
-        .sender = "long-sender-" ** 100,
+        .sender = repeat("long-sender-", 100),
         .direction = if (i % 2 == 0) .incoming else .outgoing,
         .service = "imessage",
         .timestamp = "2026-01-01T00:00:00Z",
         .kind = .text,
-        .text = try std.fmt.allocPrint(
-            arena.allocator(),
+        .text = try arena.allocator().print(
             "{d}: {s}",
             .{ i, bodies[i % bodies.len] },
         ),
@@ -6284,18 +6282,18 @@ test "conversation switches keep the previous frame until the latest selection i
             const ar = arena.allocator();
             const messages = try ar.alloc(t.Message, 30);
             for (messages, 0..) |*m, i| m.* = .{
-                .id = try std.fmt.allocPrint(ar, "{s}-{d}", .{ key, i }),
+                .id = try ar.print("{s}-{d}", .{ key, i }),
                 .conversation_id = key,
                 .sender = "friend",
                 .direction = .incoming,
                 .service = "imessage",
                 .timestamp = "2026-01-01T00:00:00Z",
                 .kind = .text,
-                .text = try std.fmt.allocPrint(ar, "{s} message {d}", .{ key, i }),
+                .text = try ar.print("{s} message {d}", .{ key, i }),
                 .decoding = .plain,
                 .observed_status = .received,
             };
-            const draft = try std.fmt.allocPrint(ar, "{s} draft", .{key});
+            const draft = try ar.print("{s} draft", .{key});
             v.* = .{
                 .arena = arena,
                 .snapshot = .{
@@ -6403,7 +6401,7 @@ test "shared message presentations survive replaced views and refresh edited tex
         .service = "imessage",
         .timestamp = "2026-01-01T00:00:00Z",
         .kind = .text,
-        .text = "Long " ++ "x" ** 6000,
+        .text = "Long " ++ repeat("x", 6000),
         .decoding = .plain,
         .observed_status = .received,
     };
@@ -6514,7 +6512,7 @@ test "send status and echo transitions preserve message positions and heights" {
         2,
     }) |scale| for ([_][]const u8{
         "A short reply",
-        "A wrapped reply 👋 " ** 12,
+        repeat("A wrapped reply 👋 ", 12),
         "A link: https://example.invalid/page\nAnd another line",
     }) |body| {
         const store = try Store.open(":memory:");
@@ -6560,7 +6558,7 @@ test "send status and echo transitions preserve message positions and heights" {
             "failed",
             "unconfirmed",
         }) |state| {
-            try store.outcome(epoch, state, "A long error explanation that must stay out of message layout. " ** 12);
+            try store.outcome(epoch, state, repeat("A long error explanation that must stay out of message layout. ", 12));
             generation += 1;
             try fixture.draw(&app, store, generation, scale);
             try fixture.expectPositions(&app, positions, height);
@@ -6576,7 +6574,7 @@ test "send status and echo transitions preserve message positions and heights" {
             .failed,
         }) |status| {
             generation += 1;
-            message.revision = try std.fmt.allocPrint(ar, "{d}", .{generation});
+            message.revision = try ar.print("{d}", .{generation});
             message.observed_status = status;
             _ = try store.upsert(ar, "message", try u.json(ar, message));
             try fixture.draw(&app, store, generation, scale);
@@ -6615,13 +6613,13 @@ test "history larger than the old cache limit renders newest first and settles" 
     const ar = view.arena.allocator();
     const messages = try ar.alloc(t.Message, 17000);
     for (messages, 0..) |*m, i| m.* = .{
-        .id = try std.fmt.allocPrint(ar, "message-{d}", .{i}),
+        .id = try ar.print("message-{d}", .{i}),
         .sender = "fixture",
         .direction = .incoming,
         .service = "imessage",
         .timestamp = "2026-01-01T00:00:00Z",
         .kind = .text,
-        .text = try std.fmt.allocPrint(ar, "Message {d}\nA second line", .{i}),
+        .text = try ar.print("Message {d}\nA second line", .{i}),
         .decoding = .plain,
         .observed_status = .received,
     };
@@ -6721,8 +6719,7 @@ test "reading position survives deferred heights and prepended history" {
     defer arena.deinit();
     var rows: [800]App.HistoryRow = undefined;
     for (&rows, 0..) |*row, i| {
-        const text = try std.fmt.allocPrint(
-            arena.allocator(),
+        const text = try arena.allocator().print(
             "Message {d}\nLine two\nLine three",
             .{i},
         );
@@ -6975,9 +6972,9 @@ test "offscreen measurements match drawing metrics without evicting layouts" {
         for ([_][]const u8{
             "Hello",
             "Café 👩‍💻 שלום مرحبا\nSecond line",
-            "wrapped " ** 150,
+            repeat("wrapped ", 150),
             "bad\xff",
-            "a" ++ "́" ** 1000,
+            "a" ++ repeat("́", 1000),
         }) |body| {
             const drawn_height = text.height(body, 16, 320);
             const count = text.entries.items.len;
@@ -7210,7 +7207,7 @@ test "text and attachment messages retain identical sender and date alignment" {
     }};
     var messages: [4]t.Message = undefined;
     for (&messages, 0..) |*message, i| message.* = .{
-        .id = try std.fmt.allocPrint(ar, "message-{d}", .{i}),
+        .id = try ar.print("message-{d}", .{i}),
         .conversation_id = "alignment",
         .sender = if (i < 2) "Alice" else "Gregory",
         .service = "imessage",
@@ -7553,7 +7550,7 @@ test "text remains intact when layouts evict textures queued in the same frame" 
         if (pass == 1) {
             var buf: [64]u8 = undefined;
             for (0..400) |i| {
-                const label = try std.fmt.bufPrint(&buf, "Offscreen message {d}", .{i});
+                const label = try std.mem.print(&buf, "Offscreen message {d}", .{i});
                 _ = text.height(label, 16, 320);
             }
         }
@@ -7585,7 +7582,7 @@ test "text remains intact when layouts evict textures queued in the same frame" 
     graphics.beginFrame();
     graphics.clear(graphics.Color.white);
     text.draw(
-        "Visible text at every height\n" ** 40,
+        repeat("Visible text at every height\n", 40),
         20,
         0,
         16,
@@ -7805,9 +7802,9 @@ test "enriched messages render captions, photos, cards and chips with keyboard v
         if (block.value == .reactions) {
             clickTestFrame(&app, r.x + 18, r.y + 14);
             try std.testing.expect(app.detail_body != null);
-            try std.testing.expect(std.mem.indexOf(u8, app.detail_body.?, "Renée 👋") != null);
-            try std.testing.expect(std.mem.indexOf(u8, app.detail_body.?, "You (your reaction)") != null);
-            try std.testing.expect(std.mem.indexOf(u8, app.detail_body.?, "whole message") != null);
+            try std.testing.expect(std.mem.find(u8, app.detail_body.?, "Renée 👋") != null);
+            try std.testing.expect(std.mem.find(u8, app.detail_body.?, "You (your reaction)") != null);
+            try std.testing.expect(std.mem.find(u8, app.detail_body.?, "whole message") != null);
             try view.snapshot.directory.put(ar, .{
                 .id = "person",
                 .revision = "2",
@@ -7818,10 +7815,10 @@ test "enriched messages render captions, photos, cards and chips with keyboard v
                 .avatar = avatar,
             });
             app.refreshReactionDetail();
-            try std.testing.expect(std.mem.indexOf(u8, app.detail_body.?, "Renamed peer") != null);
+            try std.testing.expect(std.mem.find(u8, app.detail_body.?, "Renamed peer") != null);
             view.snapshot.directory.available = false;
             app.refreshReactionDetail();
-            try std.testing.expect(std.mem.indexOf(u8, app.detail_body.?, "Renamed peer") == null);
+            try std.testing.expect(std.mem.find(u8, app.detail_body.?, "Renamed peer") == null);
             view.snapshot.directory.available = true;
             app.closeContentDetail();
         }
@@ -8082,8 +8079,8 @@ test "attachment updates preserve the visible part through history preparation a
     try std.testing.expectApproxEqAbs(after_wheel, app.scroll, 0.001);
     attachments[0].image.?.height = 100;
 
-    var surrounding = [_]t.Message{messages[0]} ** 3;
-    var photos = [_][2]t.Attachment{attachments} ** 3;
+    var surrounding: [3]t.Message = @splat(messages[0]);
+    var photos: [3][2]t.Attachment = @splat(attachments);
     for (&surrounding, &photos, [_][]const u8{
         "earlier",
         "reading",
@@ -8196,8 +8193,8 @@ test "settings reset waits for relay confirmation before stopping the session fo
     const ar = arena.allocator();
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const length = try tmp.dir.realPath(std.testing.io, &path_buffer);
-    const data = try ar.dupeZ(u8, path_buffer[0..length]);
-    const path = try std.fmt.allocPrintSentinel(ar, "{s}/client.db", .{data}, 0);
+    const data = try ar.dupeSentinel(u8, path_buffer[0..length], 0);
+    const path = try ar.printSentinel("{s}/client.db", .{data}, 0);
     const store = try Store.open(path);
     defer store.close();
     try store.saveDraft("chat", "Keep until confirmed and workers stop");
@@ -8336,7 +8333,7 @@ test "Details streams logs, preserves scrollback, and supports latest copy and c
     clickTestFrame(&app, width - 142, 128);
     const clipboard = (desktop.clipboardText() orelse "");
     try std.testing.expect(std.mem.endsWith(u8, clipboard, "Newest visible event\n"));
-    try std.testing.expect(std.mem.indexOf(u8, clipboard, "disk cache hit") != null);
+    try std.testing.expect(std.mem.find(u8, clipboard, "disk cache hit") != null);
     clickTestFrame(&app, width - 68, 128);
     const cleared = try logs.snapshot(std.testing.allocator);
     defer std.testing.allocator.free(cleared);
@@ -8357,9 +8354,9 @@ test "settings validate credentials and commit through the pane before unlocking
     const ar = arena.allocator();
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const length = try tmp.dir.realPath(std.testing.io, &path_buffer);
-    const data = try ar.dupeZ(u8, path_buffer[0..length]);
+    const data = try ar.dupeSentinel(u8, path_buffer[0..length], 0);
     try std.testing.expectEqual(@as(c_int, 0), u.c.chmod(data, 0o700));
-    const tls = try std.fmt.allocPrint(ar, "{s}/tls", .{data});
+    const tls = try ar.print("{s}/tls", .{data});
     // Reuse the integration suite's ephemeral certificates, valid at test time.
     const fixture = try std.process.run(ar, std.testing.io, .{ .argv = &.{
         "python3",
@@ -8368,7 +8365,7 @@ test "settings validate credentials and commit through the pane before unlocking
         tls,
     } });
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, fixture.term);
-    const path = try std.fmt.allocPrintSentinel(ar, "{s}/client.db", .{data}, 0);
+    const path = try ar.printSentinel("{s}/client.db", .{data}, 0);
     const store = try Store.open(path);
     defer store.close();
     try store.saveDraft("chat", "Keep this draft");
@@ -8396,14 +8393,14 @@ test "settings validate credentials and commit through the pane before unlocking
     try std.testing.expectEqual(.settings_ca, app.focus);
     testKey(.tab, false);
     try app.settings.fields[0].set("https://localhost:1");
-    try app.settings.fields[1].set(try std.fmt.allocPrint(ar, "{s}/ca.pem", .{tls}));
-    try app.settings.fields[2].set(try std.fmt.allocPrint(ar, "{s}/client.pem", .{tls}));
-    try app.settings.fields[3].set(try std.fmt.allocPrint(ar, "{s}/missing-key.pem", .{tls}));
+    try app.settings.fields[1].set(try ar.print("{s}/ca.pem", .{tls}));
+    try app.settings.fields[2].set(try ar.print("{s}/client.pem", .{tls}));
+    try app.settings.fields[3].set(try ar.print("{s}/missing-key.pem", .{tls}));
     try app.saveSettings();
     try std.testing.expect(app.next_config == null and app.settings.required);
     try std.testing.expectEqual(@as(c_int, bridge.ZC_CREDENTIALS), app.settings.failure.kind);
     try std.testing.expect(try Config.read(ar, store) == null);
-    try app.settings.fields[3].set(try std.fmt.allocPrint(ar, "{s}/client-key.pem", .{tls}));
+    try app.settings.fields[3].set(try ar.print("{s}/client-key.pem", .{tls}));
     app.settings.enter_to_send = false;
     try store.db.exec("CREATE TRIGGER reject_settings BEFORE INSERT ON settings BEGIN SELECT RAISE(ABORT,'failure'); END");
     try std.testing.expectError(error.DatabaseFailure, app.saveSettings());
@@ -8436,7 +8433,7 @@ test "Wayland drop backend preserves local filenames and never truncates rejecte
     bridge.zc_drop_offer(remote, remote.len);
     try std.testing.expect(drop.take() == null);
     try std.testing.expect(drop.rejected());
-    const too_long = "/" ++ "x" ** 4095;
+    const too_long = "/" ++ repeat("x", 4095);
     const invalid = [_][*c]const u8{too_long};
     bridge.zc_drop_paths(1, &invalid);
     try std.testing.expect(!(bridge.zc_drop_pending() != 0));
@@ -8579,7 +8576,7 @@ test "Korean preedit wraps scrolls and positions the native candidate area at th
     var event = std.mem.zeroes(sdl.SDL_Event);
     event.edit.type = sdl.SDL_EVENT_TEXT_EDITING;
     event.edit.windowID = sdl.SDL_GetWindowID(desktop.window());
-    event.edit.text = "한글 " ** 20;
+    event.edit.text = repeat("한글 ", 20);
     event.edit.start = 60;
     try std.testing.expect(sdl.SDL_PushEvent(&event));
     desktop.poll();
@@ -8671,9 +8668,7 @@ test "Korean reset echoes are discarded once and fresh identical input is preser
 }
 
 test "SDL commits complete Unicode strings and preserves long clipboard pastes" {
-    const sdl = @cImport({
-        @cInclude("SDL3/SDL.h");
-    });
+    const sdl = @import("desktop_c");
     try openWindow(780, 560, "SDL input checks");
     defer closeWindow();
     desktop.poll();
@@ -8682,7 +8677,7 @@ test "SDL commits complete Unicode strings and preserves long clipboard pastes" 
     var app = App{ .worker = &worker, .focus = .search };
     defer app.deinit();
     const window_id = sdl.SDL_GetWindowID(@ptrCast(desktop.window()));
-    const committed = "你好 👋 e\u{301} " ** 64;
+    const committed = repeat("你好 👋 e\u{301} ", 64);
     var event = std.mem.zeroes(sdl.SDL_Event);
     event.text.type = sdl.SDL_EVENT_TEXT_INPUT;
     event.text.windowID = window_id;
@@ -8695,7 +8690,7 @@ test "SDL commits complete Unicode strings and preserves long clipboard pastes" 
     try app.search.history(false);
     try std.testing.expectEqualStrings("", app.search.text.items);
 
-    const clip = "clipboard 👋\n" ** 300;
+    const clip = repeat("clipboard 👋\n", 300);
     desktop.setClipboardText(clip);
     testKey(.left_control, true);
     testKey(.v, true);
@@ -8755,14 +8750,14 @@ test "composer consumes file drops and waits for reviewed attachments before an 
             .name = "photo 👋.png",
             .mime_type = "image/png",
             .bytes = "71",
-            .sha256 = "0" ** 64,
+            .sha256 = repeat("0", 64),
         },
         .{
             .id = "BBEiM0RVZneImaq7zN3u_w",
             .name = "empty.txt",
             .mime_type = "text/plain",
             .bytes = "0",
-            .sha256 = "1" ** 64,
+            .sha256 = repeat("1", 64),
         },
     };
     var worker = Worker{ .io = std.testing.io, .config = .{ .data = "" } };
@@ -9104,7 +9099,7 @@ fn testInput(input: TestInput) void {
         .button_down, .button_up => |button| {
             event.button.type = if (input == .button_down) sdl.SDL_EVENT_MOUSE_BUTTON_DOWN else sdl.SDL_EVENT_MOUSE_BUTTON_UP;
             event.button.windowID = id;
-            event.button.button = @intCast(@intFromEnum(button));
+            event.button.button = @intCast(@backingInt(button));
             event.button.down = input == .button_down;
             event.button.x = test_pointer.x;
             event.button.y = test_pointer.y;
@@ -9167,8 +9162,8 @@ fn testInput(input: TestInput) void {
             };
             if (input == .key_down) test_modifiers |= bit else test_modifiers &= ~bit;
             event.key.mod = test_modifiers;
-            event.key.key = @intFromEnum(key);
-            event.key.scancode = sdl.SDL_GetScancodeFromKey(@intFromEnum(key), null);
+            event.key.key = @backingInt(key);
+            event.key.scancode = sdl.SDL_GetScancodeFromKey(@backingInt(key), null);
             event.key.down = input == .key_down;
         },
         .wheel => |delta| {

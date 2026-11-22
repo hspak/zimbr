@@ -310,7 +310,7 @@ If profiling shows expensive assertion-only setup survives optimization, gate
 both that setup and its assertion with the project's compile-time verification
 option. Keep required validation and state changes outside the gate.
 `std.debug.runtime_safety` describes the standard library's build mode and is
-deprecated as a query for the caller's settings. A module's `builtin.mode`
+deprecated as a query for the caller's settings. A module's `builtin.optimize`
 can define a default verification policy, but does not report local
 `@setRuntimeSafety` overrides. See the [standard-library definition][debug-safety].
 

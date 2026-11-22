@@ -4,10 +4,8 @@
 const std = @import("std");
 const u = @import("../common.zig");
 const builtin = @import("builtin");
-const macos = builtin.os.tag == .macos;
-const c = if (macos) @cImport({
-    @cInclude("os/lock.h");
-}) else void;
+const macos = builtin.target.os.tag == .macos;
+const c = if (macos) @import("relay_c") else void;
 const Mutex = @This();
 
 native: if (macos) c.os_unfair_lock else std.Io.Mutex,

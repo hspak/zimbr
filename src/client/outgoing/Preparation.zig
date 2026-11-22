@@ -149,7 +149,7 @@ fn run(self: *Preparation) void {
     };
 }
 fn work(self: *Preparation) !void {
-    const path = try std.fmt.allocPrintSentinel(a, "{s}/client.db", .{self.data}, 0);
+    const path = try a.printSentinel("{s}/client.db", .{self.data}, 0);
     defer a.free(path);
     const store = try Store.open(path);
     defer store.close();
@@ -187,9 +187,9 @@ fn work(self: *Preparation) !void {
 test "preparation startup failure completes queued files instead of blocking future sends" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const root = try a.print(".zig-cache/tmp/{s}", .{tmp.sub_path});
     defer a.free(root);
-    const database = try std.fmt.allocPrintSentinel(a, "{s}/client.db", .{root}, 0);
+    const database = try a.printSentinel("{s}/client.db", .{root}, 0);
     defer a.free(database);
     try std.testing.expectEqual(@as(c_int, 0), u.c.mkdir(database, 0o700));
     var preparation: Preparation = .{

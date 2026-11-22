@@ -9,7 +9,7 @@ identities and deployment details in private records.
 
 ## Native build and packaging gate
 
-Use an Apple Silicon Mac with the supported macOS release, Zig 0.16.0, Apple's
+Use an Apple Silicon Mac with the supported macOS release, Zig 0.17.1, Apple's
 Command Line Tools, target OpenSSL 3.5 static archives, and Python with TLS 1.3 and
 the repository's TLS dependencies. Use generic local paths appropriate to the
 machine; never commit deployed endpoints or credentials to this record.

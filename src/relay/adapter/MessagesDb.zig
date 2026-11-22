@@ -312,7 +312,7 @@ pub fn message(self: MessagesDb, a: u.Allocator, row: i64) MessageError!?SourceM
     var text: ?[]const u8 = null;
     var decoding: @FieldType(t.Message, "decoding") = .empty;
     if (plain.len > t.max_body or s.int(7) > t.max_decode) decoding = .oversized else if (plain.len > 0) {
-        if (std.unicode.utf8ValidateSlice(plain) and std.mem.indexOfScalar(u8, plain, 0) == null) {
+        if (std.unicode.utf8ValidateSlice(plain) and std.mem.findScalar(u8, plain, 0) == null) {
             text = try a.dupe(u8, plain);
             decoding = .plain;
         } else decoding = .malformed;
@@ -333,7 +333,7 @@ pub fn message(self: MessagesDb, a: u.Allocator, row: i64) MessageError!?SourceM
     var metadata_oversized = false;
     // Read one beyond the 1,024-attachment/GUID and 4,096-path caps to detect truncation;
     // 255-character names and 128-character MIME/UTI labels bound descriptive metadata.
-    const attachment_query = try std.fmt.allocPrintSentinel(a, "SELECT substr(CAST(a.guid AS BLOB),1,1025),substr(coalesce(a.transfer_name,'Attachment'),1,255),substr(coalesce(a.mime_type,''),1,128),a.total_bytes,{s},{s},{s} FROM attachment a JOIN message_attachment_join j ON j.attachment_id=a.ROWID WHERE j.message_id=? ORDER BY a.ROWID LIMIT 1025", .{
+    const attachment_query = try a.printSentinel("SELECT substr(CAST(a.guid AS BLOB),1,1025),substr(coalesce(a.transfer_name,'Attachment'),1,255),substr(coalesce(a.mime_type,''),1,128),a.total_bytes,{s},{s},{s} FROM attachment a JOIN message_attachment_join j ON j.attachment_id=a.ROWID WHERE j.message_id=? ORDER BY a.ROWID LIMIT 1025", .{
         if (self.features.attachment_filename) "substr(CAST(coalesce(a.filename,'') AS BLOB),1,4097)" else "''",
         if (self.features.attachment_uti) "substr(coalesce(a.uti,''),1,128)" else "''",
         if (self.features.attachment_transfer_state) "coalesce(a.transfer_state,0)" else "0",
@@ -369,7 +369,7 @@ pub fn message(self: MessagesDb, a: u.Allocator, row: i64) MessageError!?SourceM
     const outgoing = s.int(3) != 0;
     var reaction_result: ?reactions.Observation = null;
     if (reaction and self.features.reaction_target) {
-        const sql = try std.fmt.allocPrintSentinel(a, "SELECT substr(coalesce(associated_message_guid,''),1,1100),{s},{s},{s} FROM message WHERE ROWID=?", .{
+        const sql = try a.printSentinel("SELECT substr(coalesce(associated_message_guid,''),1,1100),{s},{s},{s} FROM message WHERE ROWID=?", .{
             if (self.features.reaction_emoji) "substr(coalesce(associated_message_emoji,''),1,257)" else "''",
             if (self.features.reaction_range) "associated_message_range_location" else "NULL",
             if (self.features.reaction_range) "associated_message_range_length" else "NULL",

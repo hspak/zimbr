@@ -79,7 +79,7 @@ failures. No test reads a real address book or Messages database.
 | Scroll anchoring and reuse across large histories | `test-gui`, immutable-history tests, `client-bench` |
 | Existing sending, drafts, TLS renewal/revocation, offline recovery | existing client integration, transport, TLS, native TLS, and Details suites |
 
-Commands (Zig 0.16.0):
+Commands (Zig 0.17.1):
 
 ```sh
 zig build test client client-probe client-bench

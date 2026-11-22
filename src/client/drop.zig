@@ -1,6 +1,7 @@
 //! Bounded local file-manager offers. Raw URI validation and delivery are
 //! independent of the renderer and preserve whole-drop rejection semantics.
 const std = @import("std");
+const repeat = @import("../fixtures.zig").repeat;
 const c = @import("c.zig").api;
 
 pub fn take() ?c.ZcDrop {
@@ -40,15 +41,15 @@ test "file drops decode local Unicode paths without accepting authorities or mal
         "file:///tmp/file?query",
         "file:///tmp/file#fragment",
         "file:///tmp/hidden\x00.txt",
-        "file:///" ++ "x" ** 4095,
-        "file:///tmp/one\n" ** 17,
+        "file:///" ++ repeat("x", 4095),
+        repeat("file:///tmp/one\n", 17),
     }) |invalid| {
         try std.testing.expectEqual(@as(c_int, 0), c.zc_drop_parse(invalid.ptr, invalid.len, &result));
         try std.testing.expectEqual(@as(c_int, 0), result.count);
         try std.testing.expect(rejected());
         try std.testing.expect(!rejected());
     }
-    const boundary = "file:///tmp/file\n" ** 16;
+    const boundary = repeat("file:///tmp/file\n", 16);
     try std.testing.expectEqual(@as(c_int, 1), c.zc_drop_parse(boundary, boundary.len, &result));
     try std.testing.expectEqual(@as(c_int, 16), result.count);
 }

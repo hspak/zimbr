@@ -1,8 +1,8 @@
 # macOS development and release profiles
 
 Local builds and source-install tools default to `dev`. The Homebrew archive
-builder explicitly selects `release`. This choice is independent of Debug,
-ReleaseSafe, or ReleaseFast optimization.
+builder explicitly selects `release`. This choice is independent of debug,
+safe, or fast optimization.
 
 | Setting | Development | Homebrew / release |
 | --- | --- | --- |
@@ -29,7 +29,7 @@ The Homebrew cask installs and removes only the release app and LaunchAgent.
 Use [development setup](development.md) for source builds and local signing.
 
 ```sh
-zig build relay -Dprofile=dev -Doptimize=ReleaseSafe \
+zig build relay -Dprofile=dev -Doptimize=safe \
   -Dopenssl-prefix=/absolute/openssl-3.5
 zig-out/bin/relay profile
 python3 packaging/macos/install.py --profile dev --install --start \

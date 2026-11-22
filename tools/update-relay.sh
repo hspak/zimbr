@@ -6,7 +6,7 @@ usage() {
   cat <<'EOF'
 Usage: tools/update-relay.sh [--profile dev|release] [--release=safe] [--reset-cache]
 
-Build the relay and run its tests in ReleaseSafe, install the signed app using
+Build the relay and run its tests in safe, install the signed app using
 the existing credentials/signing identity, restart it, and verify the running
 executable. The default profile is dev; release must be selected explicitly.
 Run as the Mac login user, without sudo.
@@ -46,14 +46,15 @@ fi
 
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 cd "$repo"
-zig=${ZIMBR_ZIG:-"$repo/.tools/zig-aarch64-macos-0.16.0/zig"}
+zig_version=$(cat "$repo/.zigversion")
+zig=${ZIMBR_ZIG:-"$repo/.tools/zig-aarch64-macos-$zig_version/zig"}
 python=${ZIMBR_PYTHON:-"$repo/.tools/python/bin/python3"}
 if [ -z "${ZIMBR_ZIG:-}" ] && [ ! -x "$zig" ]; then zig=zig; fi
 if [ -z "${ZIMBR_PYTHON:-}" ] && [ ! -x "$python" ]; then python=python3; fi
 openssl_prefix=${ZIMBR_OPENSSL_PREFIX:-"$repo/.tools/openssl-3.5"}
 openssl_license=${ZIMBR_OPENSSL_LICENSE:-"$repo/.tools/openssl-build/openssl-3.5.8/LICENSE.txt"}
-if [ "$("$zig" version)" != "$(cat .zigversion)" ]; then
-  echo "Expected Zig $(cat .zigversion); set ZIMBR_ZIG to that compiler." >&2
+if [ "$("$zig" version)" != "$zig_version" ]; then
+  echo "Expected Zig $zig_version; set ZIMBR_ZIG to that compiler." >&2
   exit 1
 fi
 command -v "$python" >/dev/null
@@ -68,9 +69,9 @@ build_dir=$(mktemp -d "$repo/zig-out/relay-release-safe.XXXXXX")
 trap 'rm -rf -- "$build_dir"' EXIT
 revision=$(git describe --always --dirty)
 printf 'Building relay %s with --release=safe\n' "$revision"
-"$zig" build relay test test-macos-enrichment --release=safe \
+ZIG_GLOBAL_CACHE_DIR="$repo/.tools/cache" "$zig" build relay test test-macos-enrichment --release=safe \
   "-Dprofile=$profile" "-Dopenssl-prefix=$openssl_prefix" --prefix "$build_dir" \
-  --cache-dir "$repo/.tools/zig-cache" --global-cache-dir "$repo/.tools/cache" \
+  --cache-dir "$repo/.tools/zig-cache" \
   --summary all
 
 # install.py signs/validates before stopping the old process, backs up the
@@ -142,7 +143,7 @@ if not any(f.get('n') == str(binary) and f.get('i') == str(binary.stat().st_ino)
 if service_pid(service) != pid:
     fail('LaunchAgent restarted during verification; inspect the relay log')
 
-print(f'Verified ReleaseSafe relay {sys.argv[3]}: PID {pid}')
+print(f'Verified safe relay {sys.argv[3]}: PID {pid}')
 print(f'Executable: {binary}')
 print(f'Signed SHA-256: {digest(binary)}')
 PY

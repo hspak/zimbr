@@ -1,0 +1,23 @@
+{
+  "platform": "linux-x86_64",
+  "tools": {
+    "weston": {
+      "version": "15.0.1-3",
+      "url": "https://archive.archlinux.org/packages/w/weston/weston-15.0.1-3-x86_64.pkg.tar.zst",
+      "sha256": "92fe0bfe2cf1ae02105b0e6573f6695c6bbd4637c9a6b20299a6fea8c3d23b4d",
+      "size": 1524891
+    },
+    "ffmpeg": {
+      "version": "2:9.0.2-1",
+      "url": "https://archive.archlinux.org/packages/f/ffmpeg/ffmpeg-2%3A9.0.2-1-x86_64.pkg.tar.zst",
+      "sha256": "e100076027211c1c8abace2d9fce62d0f46c9b078ae18321a634826491241735",
+      "size": 15891603
+    },
+    "imagemagick": {
+      "version": "7.1.2.32-1",
+      "url": "https://archive.archlinux.org/packages/i/imagemagick/imagemagick-7.1.2.32-1-x86_64.pkg.tar.zst",
+      "sha256": "8eb08d75d74071afee8b70161bbed4e06a8a041281a1f0cb43aefa78061ec4e5",
+      "size": 9218740
+    }
+  }
+}

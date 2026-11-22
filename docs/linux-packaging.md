@@ -12,7 +12,7 @@ export ZIMBR_AUR_DIR=/path/to/aur/zimbr
 export ZIMBR_TAP_DIR=/path/to/homebrew-tap
 ```
 
-The package builds the native Wayland client with Zig 0.16, `ReleaseSafe`,
+The package builds the native Wayland client with Zig 0.17.1, `safe`,
 `-Dprofile=release`, and baseline CPU features. Source builds default to dev,
 so package recipes must select release explicitly in their `zig build` commands.
 `release.sh` adds this selection to the staged recipe before building or publishing it.

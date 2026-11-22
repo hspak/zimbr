@@ -15,12 +15,12 @@ pub const AutomationError = u.Allocator.Error || error{
 };
 
 pub fn automation(a: u.Allocator, mode: []const u8, route: []const u8, text: []const u8) AutomationError!void {
-    if (comptime builtin.os.tag != .macos) return error.UnsupportedPlatform;
+    if (comptime builtin.target.os.tag != .macos) return error.UnsupportedPlatform;
     const rc = u.c.zr_spawn(
         @embedFile("send.applescript"),
-        try a.dupeZ(u8, mode),
-        try a.dupeZ(u8, route),
-        try a.dupeZ(u8, text),
+        try a.dupeSentinel(u8, mode, 0),
+        try a.dupeSentinel(u8, route, 0),
+        try a.dupeSentinel(u8, text, 0),
         // Allow 15 seconds for Messages automation before treating the result as uncertain.
         15000,
     );

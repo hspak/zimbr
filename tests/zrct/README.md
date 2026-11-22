@@ -66,7 +66,7 @@ dependency in `build.zig.zon` before authoring or investigating a scenario.
 `scenarios.py` owns the general application/desktop suite. `recovery.py` and
 `content_scenarios.py` are independent suites for transport recovery and rich
 content. `all_scenarios.py` combines them under one worker limit and report.
-`benchmarks.py` owns serial ReleaseSafe GUI latency measurements; see
+`benchmarks.py` owns serial safe GUI latency measurements; see
 [benchmark commands and timing boundaries](../../docs/development.md#gui-workflow-benchmarks).
 `support.py` launches `relay_worker.py` through Zrct's `FixtureProcess`, which
 correlates replies, retains events and transcripts, and reports fixture failures.

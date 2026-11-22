@@ -197,7 +197,7 @@ pkgrel=3
 _ref=old
 sha256sums=("old")
 prepare() { zig build client --fetch=all; }
-build() { zig build client -Dprofile=dev -Doptimize=ReleaseSafe; }
+build() { zig build client -Dprofile=dev -Doptimize=safe; }
 check() { zig build test-client -Dprofile=release; }
 '''
         (self.aur / 'PKGBUILD').write_text(self.initial_recipe)

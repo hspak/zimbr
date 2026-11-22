@@ -75,7 +75,7 @@ pub fn main(init: std.process.Init) !void {
         .sdl_version = c.SDL_GetVersion(),
         .sdl_revision = std.mem.span(c.SDL_GetRevision()),
         .zig_version = builtin.zig_version_string,
-        .optimize = @tagName(builtin.mode),
+        .optimize = @tagName(builtin.optimize),
         .vsync = vsync,
         .pacing = @tagName(pacing),
         .window = desktop.Metrics.current(),

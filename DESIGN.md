@@ -464,7 +464,7 @@ Only the client build imports SDL3. Only the real relay adapter imports
 macOS integration code. Shared protocol, journal, send-state behavior, and fake
 adapters should build and test on Linux.
 
-Use Zig 0.16's APIs as pinned by the actual toolchain; do not mix examples from
+Use Zig 0.17.1's APIs as pinned by the actual toolchain; do not mix examples from
 other Zig versions. Establish small transport and SQLite integration spikes before
 committing to a networking dependency. Prefer existing HTTP parsing over a custom
 HTTP implementation, while keeping its types out of the public protocol model.

@@ -50,7 +50,7 @@ pub fn init(gpa: u.Allocator, net: *c.ZcNet, payload: []const u8, may_submit: bo
     if (input.attachments.len == 0) return error.InvalidUploadResponse;
     var total: u64 = 0;
     for (input.attachments) |file| total += try attachments.validate(file);
-    const path = try std.fmt.allocPrintSentinel(a, "/v1/send-requests/{s}", .{input.request_id}, 0);
+    const path = try a.printSentinel("/v1/send-requests/{s}", .{input.request_id}, 0);
     if (c.zc_net_start(net, 4, path, null, 0) == 0) return error.TransportFailure;
     return .{
         .arena = arena,
@@ -152,8 +152,8 @@ pub fn poll(self: *Upload, net: *c.ZcNet, store: Store, files: Files) Error!bool
                 .reserved => {
                     if (self.phase != .reserve) return error.InvalidUploadResponse;
                     self.fd = try files.open(record.file);
-                    const path = try std.fmt.allocPrintSentinel(a, "/v1/uploads/{s}", .{record.file.id}, 0);
-                    const epoch = try a.dupeZ(u8, self.input.server_epoch);
+                    const path = try a.printSentinel("/v1/uploads/{s}", .{record.file.id}, 0);
+                    const epoch = try a.dupeSentinel(u8, self.input.server_epoch, 0);
                     self.phase = .transfer;
                     if (c.zc_net_upload(net, path, epoch, self.fd, try attachments.validate(record.file)) == 0)
                         return error.TransportFailure;

@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const repeat = @import("../fixtures.zig").repeat;
 const u = @import("../common.zig");
 const c = @import("c.zig").api;
 const t = @import("../protocol.zig").types;
@@ -67,7 +68,7 @@ pub fn selected(s: Editor) []const u8 {
 /// Replace temporary IME text without changing the document, selection, or undo stack.
 /// SDL cursor and selection lengths count Unicode codepoints. Unknown offsets use the end.
 pub fn setPreedit(s: *Editor, text: []const u8, start: i32, length: i32) InsertError!void {
-    if (!std.unicode.utf8ValidateSlice(text) or std.mem.indexOfScalar(u8, text, 0) != null)
+    if (!std.unicode.utf8ValidateSlice(text) or std.mem.findScalar(u8, text, 0) != null)
         return error.InvalidText;
     if (text.len > t.max_text - (s.text.items.len - s.selected().len)) return error.TextTooLarge;
     try s.preedit.ensureTotalCapacity(s.allocator, text.len);
@@ -142,7 +143,7 @@ pub fn replace(s: *Editor, range: Range, value: []const u8) InsertError!void {
     const start = range.start;
     const end = range.end;
     std.debug.assert(start <= end and end <= s.text.items.len);
-    if (!std.unicode.utf8ValidateSlice(value) or std.mem.indexOfScalar(u8, value, 0) != null) return error.InvalidText;
+    if (!std.unicode.utf8ValidateSlice(value) or std.mem.findScalar(u8, value, 0) != null) return error.InvalidText;
     if (s.text.items.len - (end - start) + value.len > t.max_text) return error.TextTooLarge;
     try s.text.ensureTotalCapacity(a, s.text.items.len - (end - start) + value.len);
     try s.checkpoint();
@@ -201,10 +202,10 @@ test "failed replacement preserves text selection and undo history" {
     editor.caret = editor.text.items.len;
     editor.anchor = 2;
     const revision = editor.revision;
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
     editor.allocator = failing.allocator();
     defer editor.allocator = std.testing.allocator;
-    try std.testing.expectError(error.OutOfMemory, editor.set("replacement" ** 100));
+    try std.testing.expectError(error.OutOfMemory, editor.set(repeat("replacement", 100)));
     try std.testing.expectEqualStrings("original", editor.text.items);
     try std.testing.expectEqual(@as(usize, 8), editor.caret);
     try std.testing.expectEqual(@as(usize, 2), editor.anchor);
@@ -254,7 +255,7 @@ test "preedit validates encoding and replacement budget before changing the disp
     const testing = std.testing;
     var editor: Editor = .{};
     defer editor.deinit();
-    try editor.set("x" ** (t.max_text - 3));
+    try editor.set(repeat("x", t.max_text - 3));
     try editor.setPreedit("한", -1, -1);
     try testing.expectEqual(@as(usize, "한".len), editor.preedit_start);
     try testing.expectError(error.TextTooLarge, editor.setPreedit("한글", 2, 0));
@@ -275,10 +276,10 @@ test "failed preedit update and commit preserve the composition and selected tex
     try editor.set("original");
     editor.anchor = 0;
     try editor.setPreedit("한", 1, 0);
-    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
     editor.allocator = failing.allocator();
     defer editor.allocator = testing.allocator;
-    try testing.expectError(error.OutOfMemory, editor.setPreedit("한" ** 100, 1, 0));
+    try testing.expectError(error.OutOfMemory, editor.setPreedit(repeat("한", 100), 1, 0));
     try testing.expectError(error.OutOfMemory, editor.commitPreedit());
     try testing.expectEqualStrings("original", editor.selected());
     try testing.expectEqualStrings("한", editor.preedit.items);

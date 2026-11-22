@@ -44,7 +44,7 @@ pub fn deinit(s: *Settings) void {
 pub fn toConfig(s: *const Settings, a: std.mem.Allocator, base: Config) std.mem.Allocator.Error!Config {
     var candidate = base;
     inline for (field_names, 0..) |field, index| {
-        @field(candidate, field) = try a.dupeZ(u8, std.mem.trim(u8, s.fields[index].text.items, " \t"));
+        @field(candidate, field) = try a.dupeSentinel(u8, std.mem.trim(u8, s.fields[index].text.items, " \t"), 0);
     }
     candidate.enter_to_send = s.enter_to_send;
     candidate.overrides = .{};
@@ -73,7 +73,7 @@ test "missing and invalid settings cannot dismiss the first-launch pane" {
     try std.testing.expect(!candidate.check(&settings.failure));
     settings.close();
     try std.testing.expect(settings.visible);
-    try std.testing.expect(std.mem.indexOf(u8, std.mem.sliceTo(&settings.failure.message, 0), "HTTPS") != null);
+    try std.testing.expect(std.mem.find(u8, std.mem.sliceTo(&settings.failure.message, 0), "HTTPS") != null);
 }
 
 test "settings edits own their text and do not change the active configuration" {

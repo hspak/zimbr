@@ -81,13 +81,13 @@ pub fn close(self: Sqlite) void {
 }
 /// Execute trusted application SQL. Bind all external values through Statement.
 pub fn exec(self: Sqlite, sql: [:0]const u8) ExecError!void {
-    if (sql.len > max_sql_bytes or std.mem.indexOfScalar(u8, sql, 0) != null)
+    if (sql.len > max_sql_bytes or std.mem.findScalar(u8, sql, 0) != null)
         return error.DatabaseFailure;
     if (c.sqlite3_exec(self.handle, sql, null, null, null) != c.SQLITE_OK) return error.DatabaseFailure;
 }
 /// Prepare exactly one trusted statement. User input belongs in bind parameters.
 pub fn prepare(self: Sqlite, sql: [:0]const u8) PrepareError!Statement {
-    if (sql.len > max_sql_bytes or std.mem.indexOfScalar(u8, sql, 0) != null)
+    if (sql.len > max_sql_bytes or std.mem.findScalar(u8, sql, 0) != null)
         return error.SchemaUnsupported;
     // Schema/PRAGMA preparation can itself have side effects. Cache only DML.
     // Only cache short recurring queries so large SQL cannot occupy every retained slot.
@@ -277,7 +277,7 @@ test "cache survives schema changes and failed writes and stays bounded" {
     try std.testing.expectEqual(@as(i64, 2), try db.scalar("SELECT count(*) FROM example"));
     var buf: [64]u8 = undefined;
     for (0..1024) |i| {
-        const sql = try std.fmt.bufPrintZ(&buf, "SELECT {d}", .{i});
+        const sql = try std.mem.printSentinel(&buf, "SELECT {d}", .{i}, 0);
         try std.testing.expectEqual(@as(i64, @intCast(i)), try db.scalar(sql));
     }
     var count: usize = 0;

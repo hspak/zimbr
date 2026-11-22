@@ -1,6 +1,7 @@
 //! Durable message and send journal. Allocation-taking queries use a caller-owned
 //! arena; returned records and any partial allocations share that arena's lifetime.
 const std = @import("std");
+const repeat = @import("../fixtures.zig").repeat;
 const Signal = @import("../Signal.zig");
 const u = @import("../common.zig");
 const t = @import("../protocol.zig").types;
@@ -145,7 +146,7 @@ pub fn setProgress(self: Journal, key: []const u8, value: []const u8) Db.QueryEr
 pub fn setPosition(self: Journal, key: []const u8, n: i64) QueryError!void {
     // A signed 64-bit decimal, including its sign, fits in 20 bytes.
     var buffer: [20]u8 = undefined;
-    const value = std.fmt.bufPrint(&buffer, "{d}", .{n}) catch unreachable;
+    const value = std.mem.print(&buffer, "{d}", .{n}) catch unreachable;
     try self.setProgress(key, value);
 }
 
@@ -564,7 +565,7 @@ pub fn pageContent(
         var date: i64 = std.math.maxInt(i64);
         var key: []const u8 = "~";
         if (before) |b| {
-            const split = std.mem.indexOfScalar(u8, b, ':') orelse return error.InvalidRequest;
+            const split = std.mem.findScalar(u8, b, ':') orelse return error.InvalidRequest;
             date = std.fmt.parseInt(i64, b[0..split], 10) catch return error.InvalidRequest;
             key = b[split + 1 ..];
             if (!t.validId(key)) return error.InvalidRequest;
@@ -593,11 +594,11 @@ pub fn pageContent(
         items[count] = try Json.init(a, try s.text(a, 0));
         count += 1;
         byte_count += s.bytes(0).len + 1;
-        last = if (conversation_id != null) std.fmt.bufPrint(
+        last = if (conversation_id != null) std.mem.print(
             &cursor_buffer,
             "{d}:{s}",
             .{ s.int(1), s.bytes(2) },
-        ) catch return error.DatabaseFailure else std.fmt.bufPrint(
+        ) catch return error.DatabaseFailure else std.mem.print(
             &cursor_buffer,
             "{s}",
             .{s.bytes(2)},
@@ -621,8 +622,7 @@ pub fn previews(self: Journal, a: u.Allocator, before: ?[]const u8, limit: usize
             defer images.close();
             try images.bind(&.{.{ .text = q.bytes(1) }});
             _ = try images.step();
-            if (images.int(0) > 0) text = if (images.int(0) == 1) "Photo" else try std.fmt.allocPrint(
-                a,
+            if (images.int(0) > 0) text = if (images.int(0) == 1) "Photo" else try a.print(
                 "{d} photos",
                 .{images.int(0)},
             );
@@ -669,7 +669,7 @@ pub fn eventsWithIdentities(self: Journal, a: u.Allocator, after: i64, identitie
             .record = record_value,
             .origin = s.bytes(3),
         });
-        try items.append(a, .{ .sequence = seq, .frame = try std.fmt.allocPrint(a, "id: {s}\nevent: {s}\ndata: {s}\n\n", .{
+        try items.append(a, .{ .sequence = seq, .frame = try a.print("id: {s}\nevent: {s}\ndata: {s}\n\n", .{
             cur,
             s.bytes(1),
             data,
@@ -753,7 +753,7 @@ pub fn identityPage(self: Journal, a: u.Allocator, before: ?[]const u8, limit: u
         bytes += s.bytes(1).len + 1;
         records[count] = try Json.init(a, try s.text(a, 1));
         count += 1;
-        last = std.fmt.bufPrint(&cursor_buffer, "{s}", .{s.bytes(0)}) catch return error.DatabaseFailure;
+        last = std.mem.print(&cursor_buffer, "{s}", .{s.bytes(0)}) catch return error.DatabaseFailure;
     }
     return .{ .records = try a.dupe(Json, records[0..count]), .next = next_key };
 }
@@ -767,7 +767,7 @@ test "bounded pages own records and cursors across subsequent queries and reject
     const chat = try j.conversation(a, "chat", 1, "route", .{ .service = "imessage" }, "historical_import");
     for (0..t.max_page + 1) |i| {
         var source_buffer: [20]u8 = undefined;
-        const source = try std.fmt.bufPrint(&source_buffer, "{d}", .{i});
+        const source = try std.mem.print(&source_buffer, "{d}", .{i});
         try j.message(a, source, @intCast(i + 1), std.math.minInt(i64), .{
             .conversation_id = chat,
             .sender = "fixture@example.invalid",
@@ -1174,14 +1174,14 @@ test "attachment acceptance pins every file and records every part atomically" {
             .name = "one.png",
             .mime_type = "image/png",
             .bytes = "4",
-            .sha256 = "0123456789abcdef" ** 4,
+            .sha256 = repeat("0123456789abcdef", 4),
         },
         .{
             .id = try u.id(a),
             .name = "two.pdf",
             .mime_type = "application/pdf",
             .bytes = "4",
-            .sha256 = "0123456789abcdef" ** 4,
+            .sha256 = repeat("0123456789abcdef", 4),
         },
     };
     var input: t.SendInput = .{
@@ -1248,21 +1248,21 @@ test "restart preserves completed parts and holds interrupted and unstarted part
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const path = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}/relay.db", .{tmp.sub_path}, 0);
+    const path = try a.printSentinel(".zig-cache/tmp/{s}/relay.db", .{tmp.sub_path}, 0);
     const files = [_]@import("../protocol.zig").attachments.Upload{
         .{
             .id = try u.id(a),
             .name = "one.png",
             .mime_type = "image/png",
             .bytes = "4",
-            .sha256 = "0123456789abcdef" ** 4,
+            .sha256 = repeat("0123456789abcdef", 4),
         },
         .{
             .id = try u.id(a),
             .name = "two.pdf",
             .mime_type = "application/pdf",
             .bytes = "4",
-            .sha256 = "0123456789abcdef" ** 4,
+            .sha256 = repeat("0123456789abcdef", 4),
         },
     };
     var input: t.SendInput = .{
@@ -1373,7 +1373,7 @@ test "directory tombstones preserve identity and legacy streams skip extension e
     for (legacy, rich) |old, new| {
         try std.testing.expectEqual(old.sequence, new.sequence);
         try std.testing.expectEqualStrings("", old.frame);
-        try std.testing.expect(std.mem.indexOf(u8, new.frame, "identity.upsert") != null);
+        try std.testing.expect(std.mem.find(u8, new.frame, "identity.upsert") != null);
     }
     // Rollback covers the directory, its jobs, and all associated revisions.
     j.rollback();

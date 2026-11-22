@@ -6,7 +6,7 @@ This guide is for working on Zimbr itself.
 Run commands from a checkout of the same revision on both computers. The Mac
 must be signed into Messages in its graphical login session; Linux needs a
 Wayland desktop. Install the Zig version in [`.zigversion`](../.zigversion)
-(currently **0.16.0**) from [Zig's downloads](https://ziglang.org/download/).
+(currently **0.17.1**) from [Zig's downloads](https://ziglang.org/download/).
 Run setup as your ordinary user.
 
 These steps use the source build's **dev** profile: port **8732**, **Zimbr Relay
@@ -106,7 +106,7 @@ Build the synthetic benchmark with the pinned toolchain, then run it on the
 Wayland desktop whose GPU and compositor you want to measure:
 
 ```sh
-zig build render-bench -Doptimize=ReleaseFast
+zig build render-bench -Doptimize=fast
 python3 tests/rendering.py --output artifacts/rendering-before \
   --drivers opengl --runs 5 --frames 1200
 # After a renderer change, repeat backends with alternating run order.
@@ -179,7 +179,7 @@ the latter keeps VSync enabled. Use these modes to check regularity separately
 from unpaced rendering capacity, retaining each run's raw samples:
 
 ```sh
-zig build render-bench -Doptimize=ReleaseSafe
+zig build render-bench -Doptimize=safe
 python3 tests/rendering.py --output artifacts/resize-vsync --drivers vulkan \
   --workload resize_height --pacing vsync --runs 3 --frames 360
 python3 tests/rendering.py --output artifacts/resize-paced --drivers vulkan \
@@ -220,7 +220,7 @@ test "$(zig version)" = "$(cat .zigversion)"
 test -f "$ZIMBR_OPENSSL_PREFIX/lib/libssl.a"
 test -f "$ZIMBR_OPENSSL_PREFIX/lib/libcrypto.a"
 test -f "$ZIMBR_OPENSSL_LICENSE"
-zig build relay test test-macos-enrichment -Dprofile=dev -Doptimize=ReleaseSafe \
+zig build relay test test-macos-enrichment -Dprofile=dev -Doptimize=safe \
   -Dopenssl-prefix="$ZIMBR_OPENSSL_PREFIX"
 ```
 
@@ -288,11 +288,11 @@ does not log the user out. Permission grants cannot be automated by the installe
 
 ## 3. Build and connect on Linux
 
-Install Zig 0.16.0 and the [Linux build dependencies](linux-client.md#build-and-install),
+Install Zig 0.17.1 and the [Linux build dependencies](linux-client.md#build-and-install),
 including OpenSSH, Python cryptography, and OpenSSL. Then:
 
 ```sh
-zig build client -Dprofile=dev -Doptimize=ReleaseSafe
+zig build client -Dprofile=dev -Doptimize=safe
 packaging/linux/install.sh
 zimbr-provision setup user@mac.example --profile dev --launch "$HOME/.local/bin/zimbr"
 ```
@@ -362,8 +362,7 @@ Zrct is a lazy test dependency. Normal client, relay, and headless test builds
 do not load it or provision its tools. Use `-Ddesktop-tests=true` for isolated
 native tests, or `-Dautomation=true` for instrumented scenarios.
 
-Resolve Zrct from the dependency declared in `build.zig.zon`. For a local
-checkout, set that dependency's `.path` to its location relative to the manifest.
+The manifest selects the bundled Zig 0.17 port under `vendor/zrct`.
 From the Zimbr checkout, run:
 
 ```sh
@@ -376,9 +375,9 @@ zig build test-zrct-content -Dautomation=true -Dopenssl-prefix=.tools/openssl-3.
 zig build test-zrct -Dautomation=true -Dopenssl-prefix=.tools/openssl-3.5 -- --filter send_unicode --record
 # On a GPU Wayland desktop, run the isolated suite in a nested GPU compositor:
 ZRCT_DISPLAY_SMOKE=1 SDL_RENDER_DRIVER=vulkan zig build test-gui-isolated -Ddesktop-tests=true \
-  -Doptimize=ReleaseSafe -Dopenssl-prefix=.tools/openssl-3.5
+  -Doptimize=safe -Dopenssl-prefix=.tools/openssl-3.5
 ZRCT_DISPLAY_SMOKE=1 SDL_RENDER_DRIVER=vulkan zig build test-zrct \
-  -Dautomation=true -Doptimize=ReleaseSafe -Dopenssl-prefix=.tools/openssl-3.5 \
+  -Dautomation=true -Doptimize=safe -Dopenssl-prefix=.tools/openssl-3.5 \
   -- --filter Messages
 ```
 
@@ -465,16 +464,16 @@ failures, and precise rendering checks; GUI scenarios supplement those contracts
 
 `bench-zrct` measures startup, first opening of a 10,000-message conversation,
 switching back to a cached conversation, search results, and send-to-delivered
-latency. It uses ReleaseSafe, matching the packaged Linux client. The fixture is
+latency. It uses safe, matching the packaged Linux client. The fixture is
 fully indexed before measurement. Each scenario owns fresh application storage;
 the cached-switch case explicitly visits both conversations before timing the
 return. The OS page cache is uncontrolled and recorded as such.
 
 ```sh
-zig build bench-zrct -Dautomation=true -Doptimize=ReleaseSafe \
+zig build bench-zrct -Dautomation=true -Doptimize=safe \
   -Dopenssl-prefix=.tools/openssl-3.5 -- --warmup 3 --repeat 20 --json
 # A short check that all measurements and effect assertions work:
-zig build bench-zrct -Dautomation=true -Doptimize=ReleaseSafe \
+zig build bench-zrct -Dautomation=true -Doptimize=safe \
   -Dopenssl-prefix=.tools/openssl-3.5 -- --warmup 1 --repeat 3
 ```
 

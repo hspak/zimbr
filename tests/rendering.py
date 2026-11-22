@@ -123,7 +123,7 @@ def main():
             assert driver == "default" or header["renderer"] == driver, header
             if driver == "gpu":
                 assert header["gpu_driver"] == "vulkan", header
-            assert header["vsync"] == int(args.pacing in ("vsync", "capped_vsync")) and header["optimize"] != "Debug", header
+            assert header["vsync"] == int(args.pacing in ("vsync", "capped_vsync")) and header["optimize"] in ("safe", "fast", "small"), header
             assert header["pacing"] == args.pacing, header
             assert header["avatars"] == args.avatars, header
             if summaries:

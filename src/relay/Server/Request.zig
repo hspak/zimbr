@@ -73,7 +73,7 @@ pub fn iterateHeaders(self: *const Request) HeaderIterator {
 pub fn respond(self: *Request, body: []const u8, options: RespondOptions) protocol.Error!void {
     // An unsigned 64-bit content length needs at most 20 decimal digits.
     var length: [20]u8 = undefined;
-    const count = std.fmt.bufPrint(&length, "{d}", .{body.len}) catch unreachable;
+    const count = std.mem.print(&length, "{d}", .{body.len}) catch unreachable;
     // Room for standard response headers plus bounded endpoint-specific extras.
     var headers: [16]std.http.Header = undefined;
     if (options.extra_headers.len >= headers.len) return error.HeaderListTooLarge;
@@ -83,7 +83,7 @@ pub fn respond(self: *Request, body: []const u8, options: RespondOptions) protoc
         headers[len] = .{ .name = "content-length", .value = count };
         len += 1;
     }
-    try self.connection.engine.respond(self.id, @intFromEnum(options.status), headers[0..len], self.events != null or body.len != 0);
+    try self.connection.engine.respond(self.id, @backingInt(options.status), headers[0..len], self.events != null or body.len != 0);
     self.responded = true;
     self.response = body;
     self.offset = 0;

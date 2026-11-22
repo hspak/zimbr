@@ -16,7 +16,7 @@ Run source-build and test commands below from the repository root.
 
 ## Build and install
 
-Use Zig **0.16.0**, GNU `patch`, `pkg-config`, and development headers/libraries for SQLite,
+Use Zig **0.17.1**, GNU `patch`, `pkg-config`, and development headers/libraries for SQLite,
 libcurl (8.10+ with HTTP/2 and the OpenSSL 3 backend), OpenSSL 3, Pango/Cairo (Pango 1.48+), Fontconfig, GLib/GIO,
 libpng, libjpeg, D-Bus, libdecor (0.2+), OpenGL/EGL, Wayland, and xkbcommon,
 plus `wayland-scanner`. Install the Vulkan loader and your GPU's Vulkan driver.
@@ -35,9 +35,9 @@ it explicitly; `-Dibus=true` requires the development files. Fcitx and composito
 Wayland text input remain available in builds without IBus.
 
 ```sh
-zig build client -Doptimize=ReleaseSafe
+zig build client -Doptimize=safe
 # After provisioning and configuration below:
-zig build run -Doptimize=ReleaseSafe
+zig build run -Doptimize=safe
 # Optional user-local executable, icon, and application launcher:
 packaging/linux/install.sh
 ```

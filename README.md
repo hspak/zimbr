@@ -1,7 +1,7 @@
 # Zimbr
 
 **iMessage on Linux, through your Mac.** A native Wayland desktop client and a
-self-hosted macOS relay, written in Zig 0.16.0. The Mac stays signed into Messages;
+self-hosted macOS relay, written in Zig 0.17.1. The Mac stays signed into Messages;
 Linux never receives your Apple account credentials.
 
 [AUR setup](docs/linux-setup.md) · [Linux client](docs/linux-client.md) · [Mac setup](docs/macos-relay.md) ·
@@ -46,7 +46,7 @@ Later, open **Zimbr** or run `zimbr`. Enter sends; Shift+Enter adds a line.
 Ctrl+N starts a conversation, Ctrl+F searches, and Ctrl+D opens connection details.
 
 Building from source? Use [development setup](docs/development.md) with Zig
-**0.16.0**. [Dev and release profiles](docs/macos-profiles.md) keep local builds
+**0.17.1**. [Dev and release profiles](docs/macos-profiles.md) keep local builds
 separate from packaged installations.
 
 ## Limits to know

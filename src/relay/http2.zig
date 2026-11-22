@@ -4,9 +4,7 @@
 // Adapted from hspak/zhtps src/http2.zig at 621bb2e70a4810a8ac0ed46f203ec8013559d3a5.
 const std = @import("std");
 const http = std.http;
-const c = @cImport({
-    @cInclude("nghttp2/nghttp2.h");
-});
+const c = @import("nghttp2_c");
 
 pub const Error = std.mem.Allocator.Error || error{
     Protocol,
@@ -165,7 +163,7 @@ pub fn Session(comptime Handler: type) type {
             if (headers.len > 63) return error.HeaderListTooLarge;
             // HTTP status codes serialize as exactly three decimal digits.
             var code: [3]u8 = undefined;
-            _ = std.fmt.bufPrint(&code, "{d}", .{status}) catch unreachable;
+            _ = std.mem.print(&code, "{d}", .{status}) catch unreachable;
             // Bound response header staging on the stack; includes the :status pseudo-header.
             var fields: [64]c.nghttp2_nv = undefined;
             fields[0] = field(":status", &code);

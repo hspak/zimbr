@@ -21,6 +21,8 @@ assert (source / 'source.txt').read_text() == 'committed source'
 for name in ('ZIMBR_ZIG', 'ZIMBR_OPENSSL_LICENSE'):
     assert Path(os.environ[name]).read_bytes() == b'toolchain fixture'
 assert Path(os.environ['ZIMBR_OPENSSL_PREFIX']).is_dir()
+if 'EXPECT_ZIG' in os.environ:
+    assert os.environ['ZIMBR_ZIG'] == os.environ['EXPECT_ZIG']
 print('Build diagnostics belong on stderr of the SSH stream')
 if os.environ.get('FAIL_REMOTE_BUILD'):
     sys.exit(1)
@@ -61,17 +63,20 @@ class RemoteBuild(unittest.TestCase):
         builder = self.repository / 'packaging/macos/release.py'
         builder.parent.mkdir(parents=True)
         builder.write_text(BUILDER)
+        pin = (ROOT / '.zigversion').read_text()
+        (self.repository / '.zigversion').write_text(pin)
         (self.repository / 'source.txt').write_text('committed source')
         self.git('-C', self.repository, 'add', '.')
         self.git('-C', self.repository, 'commit', '-m', 'fixture: Mac builder')
         self.revision = self.git('-C', self.repository, 'rev-parse', 'HEAD').strip()
         self.git('clone', '--bare', str(self.repository), str(self.root / 'upstream.git'))
+        (self.repository / '.zigversion').write_text('9.9.9\n')
         # Local edits and a different HEAD must not leak into the release build.
         (self.repository / 'source.txt').write_text('newer source')
         self.git('-C', self.repository, 'commit', '-am', 'fixture: newer checkout')
         (self.repository / 'source.txt').write_text('uncommitted source')
         self.original_head = self.git('-C', self.repository, 'rev-parse', 'HEAD')
-        for name in ('.tools/zig-aarch64-macos-0.16.0/zig',
+        for name in (f'.tools/zig-aarch64-macos-{pin.strip()}/zig',
                      '.tools/openssl-build/openssl-3.5.8/LICENSE.txt'):
             tool = self.repository / name
             tool.parent.mkdir(parents=True, exist_ok=True)
@@ -110,6 +115,12 @@ os.execv({real_git!r}, ['git', *args])
         self.assertEqual((self.repository / 'source.txt').read_text(), 'uncommitted source')
         self.assertEqual(self.git('-C', self.repository, 'rev-parse', 'HEAD'), self.original_head)
         self.assertEqual(list(self.work.iterdir()), [])
+
+    def test_explicit_compiler_overrides_the_checkout_toolchain(self):
+        override = self.root / 'custom-zig'
+        override.write_bytes(b'toolchain fixture')
+        result = self.build(ZIMBR_ZIG=str(override), EXPECT_ZIG=str(override))
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
 
     def test_build_failure_emits_no_archive_and_cleans_temporary_checkout(self):
         result = self.build(FAIL_REMOTE_BUILD='1')

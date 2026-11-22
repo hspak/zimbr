@@ -10,7 +10,7 @@ const u = @import("../../common.zig");
 const t = @import("../../protocol.zig").types;
 const Journal = @import("../Journal.zig");
 const Assets = @import("../Assets.zig");
-const native = !options.fake and builtin.os.tag == .macos;
+const native = !options.fake and builtin.target.os.tag == .macos;
 // Version persisted address keys so normalization changes can trigger a rebuild.
 pub const normalization_version = 1;
 extern fn zr_contacts_status() c_int;
@@ -137,12 +137,12 @@ pub const CompleteError = Journal.QueryError || std.json.ParseError(std.json.Sca
 };
 
 fn emailKey(a: u.Allocator, address: []const u8, fold_local: bool) !?[]const u8 {
-    if (address.len > 254 or std.mem.indexOfScalar(u8, address, 0) != null) return null;
+    if (address.len > 254 or std.mem.findScalar(u8, address, 0) != null) return null;
     if (comptime native) {
         // Leave room for Unicode normalization/case folding of the 254-byte email input.
         var out: [1024]u8 = undefined;
         const n = zr_contacts_email_key(
-            try a.dupeZ(u8, address),
+            try a.dupeSentinel(u8, address, 0),
             @intFromBool(fold_local),
             &out,
             out.len,
@@ -150,8 +150,8 @@ fn emailKey(a: u.Allocator, address: []const u8, fold_local: bool) !?[]const u8 
         return if (n < 0) null else try a.dupe(u8, out[0..@intCast(n)]);
     }
     const trimmed = std.mem.trim(u8, address, " \t\r\n");
-    const at = std.mem.indexOfScalar(u8, trimmed, '@') orelse return null;
-    if (trimmed.len > 254 or at == 0 or at + 1 == trimmed.len or std.mem.indexOfScalar(
+    const at = std.mem.findScalar(u8, trimmed, '@') orelse return null;
+    if (trimmed.len > 254 or at == 0 or at + 1 == trimmed.len or std.mem.findScalar(
         u8,
         trimmed[at + 1 ..],
         '@',
@@ -165,12 +165,12 @@ fn emailKey(a: u.Allocator, address: []const u8, fold_local: bool) !?[]const u8 
 }
 pub fn phoneKey(a: u.Allocator, address: []const u8, region: []const u8) PhoneKeyError![]const u8 {
     if (comptime native) {
-        if (std.mem.indexOfScalar(u8, address, 0) != null) return error.InvalidContacts;
+        if (std.mem.findScalar(u8, address, 0) != null) return error.InvalidContacts;
         // Fit a normalized phone key or bounded exact-match fallback, including its prefix.
         var out: [512]u8 = undefined;
         const n = zr_contacts_phone_key(
-            try a.dupeZ(u8, address),
-            try a.dupeZ(u8, region),
+            try a.dupeSentinel(u8, address, 0),
+            try a.dupeSentinel(u8, region, 0),
             &out,
             out.len,
         );
@@ -178,8 +178,7 @@ pub fn phoneKey(a: u.Allocator, address: []const u8, region: []const u8) PhoneKe
         return a.dupe(u8, out[0..@intCast(n)]);
     }
     const trimmed = std.mem.trim(u8, address, " \t\r\n");
-    return std.fmt.allocPrint(
-        a,
+    return a.print(
         "{s}:{s}",
         .{ if (std.mem.startsWith(u8, trimmed, "+") and t.validAddress(trimmed)) "phone" else "exact", trimmed },
     );
@@ -187,7 +186,7 @@ pub fn phoneKey(a: u.Allocator, address: []const u8, region: []const u8) PhoneKe
 pub fn validateRegion(a: u.Allocator, region: []const u8) ValidateRegionError!void {
     if (region.len == 0) return;
     if (region.len != 2 or !std.ascii.isUpper(region[0]) or !std.ascii.isUpper(region[1])) return error.InvalidContactsPhoneRegion;
-    if (comptime native) if (zr_contacts_region_valid(try a.dupeZ(u8, region)) == 0) return error.InvalidContactsPhoneRegion;
+    if (comptime native) if (zr_contacts_region_valid(try a.dupeSentinel(u8, region, 0)) == 0) return error.InvalidContactsPhoneRegion;
 }
 pub fn suggestedRegion(a: u.Allocator) u.Allocator.Error!?[]const u8 {
     if (comptime !native) return null;
@@ -274,7 +273,7 @@ pub fn photoCurrent(a: u.Allocator, core: *Core, photo: PhotoSource) u.Allocator
 }
 pub fn thumbnail(a: u.Allocator, core: *Core, photo: PhotoSource, output: c_int) ThumbnailError!c_int {
     if (comptime native) return zr_contacts_thumbnail(
-        try a.dupeZ(u8, photo.contact_id),
+        try a.dupeSentinel(u8, photo.contact_id, 0),
         photo.generation,
         output,
     );
@@ -307,7 +306,7 @@ fn snapshot(
         // Permission changes need a fresh index even without a store-change
         // notification; a grant must not publish an empty cached snapshot.
         if (p != .authorized or (!refresh and previous == generation and previous_permission == p)) return .{ .permission = p, .generation = generation };
-        const raw = zr_contacts_snapshot(try a.dupeZ(u8, core.contacts_phone_region)) orelse return .{
+        const raw = zr_contacts_snapshot(try a.dupeSentinel(u8, core.contacts_phone_region, 0)) orelse return .{
             .permission = permission(),
             .generation = generation,
             .failed = true,
@@ -331,7 +330,7 @@ fn snapshot(
         };
     }
     // Fake relay only: explicit synthetic fixture adjacent to its required DB.
-    const path = try std.fmt.allocPrint(a, "{s}.contacts.json", .{core.source_path});
+    const path = try a.print("{s}.contacts.json", .{core.source_path});
     // Cap the complete contact snapshot at 32 MiB before JSON decoding.
     const bytes = std.Io.Dir.cwd().readFileAlloc(core.io, path, a, .limited(32 * 1024 * 1024)) catch |err| {
         if (err == error.FileNotFound) return .{ .permission = .unavailable, .generation = 0 };
@@ -732,7 +731,7 @@ test "stale contact completions cannot publish across work generations or epoch 
         @as(i64, 1),
         try j.db.scalar("SELECT count(*) FROM contact_mappings"),
     );
-    for (try j.eventsWithIdentities(a, 0, true)) |frame| try std.testing.expect(std.mem.indexOf(
+    for (try j.eventsWithIdentities(a, 0, true)) |frame| try std.testing.expect(std.mem.find(
         u8,
         frame.frame,
         "private-contact-id",

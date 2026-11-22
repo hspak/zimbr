@@ -5,7 +5,7 @@ const std = @import("std");
 
 pub const Options = struct {
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     sdk: ?[]const u8,
 };
 

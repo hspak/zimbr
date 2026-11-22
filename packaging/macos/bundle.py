@@ -44,6 +44,7 @@ def stage(bundle, binary, image_helper, openssl_license, phone_license, *,
                          (ROOT / 'LICENSE', 'LICENSE'),
                          (openssl_license, 'OpenSSL-LICENSE.txt'),
                          (ROOT / 'licenses/nghttp2.txt', 'nghttp2-LICENSE.txt'),
+                         (ROOT / 'licenses/translate-c.txt', 'translate-c-LICENSE.txt'),
                          (phone_license, 'libPhoneNumber-LICENSE.txt')):
         shutil.copy2(source, resources / name)
     # Shell scripts are sealed resources; signing them as nested Mach-O code

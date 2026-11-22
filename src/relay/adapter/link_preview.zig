@@ -64,7 +64,7 @@ fn parse(a: u.Allocator, bytes: []const u8) Failure!Result {
             "mapMetadata",
             "specialization",
         }) |key| if (metadata.get(key) != null) return error.Unsupported;
-        const id = try std.fmt.allocPrint(a, "link:{d}", .{i});
+        const id = try a.print("link:{d}", .{i});
         const original = try urlField(metadata, "originalURL");
         const final = try urlField(metadata, "URL");
         if (original == null and final == null) return error.Malformed;
@@ -129,7 +129,7 @@ fn field(value: V, key: []const u8, maximum: usize) Failure!?[]const u8 {
     if (item == .none) return null;
     const bytes = item.text() orelse return error.Malformed;
     if (bytes.len > maximum) return error.Oversized;
-    if (!std.unicode.utf8ValidateSlice(bytes) or std.mem.indexOfScalar(u8, bytes, 0) != null) return error.Malformed;
+    if (!std.unicode.utf8ValidateSlice(bytes) or std.mem.findScalar(u8, bytes, 0) != null) return error.Malformed;
     return if (bytes.len == 0) null else bytes;
 }
 fn urlField(value: V, key: []const u8) Failure!?[]const u8 {
@@ -282,7 +282,7 @@ pub fn bindLocalArtwork(
         // Observed RichLink substitutes use at_<index>_<message GUID>. Require
         // that exact attachment to be joined to this message. Never interpret
         // the index as SQL row order or as an attributed-body part index.
-        const guid = try std.fmt.allocPrint(a, "at_{d}_{s}", .{ index, source_guid });
+        const guid = try a.print("at_{d}_{s}", .{ index, source_guid });
         const id = u.hashId(guid);
         for (attachments) |attachment| if (u.eq(attachment.id, &id)) {
             item.attachment_guid = guid;

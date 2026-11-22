@@ -1,6 +1,7 @@
 //! Shared ceiling for request and SSE arenas, including responses held by slow
 //! readers. The backing allocator must support concurrent allocation and free.
 const std = @import("std");
+const repeat = @import("../../fixtures.zig").repeat;
 const Allocator = std.mem.Allocator;
 const Alignment = std.mem.Alignment;
 const Memory = @This();
@@ -46,10 +47,10 @@ test "failed backing allocations return quota and realloc charges peak storage" 
     try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 64));
     try std.testing.expectEqual(@as(usize, 0), budget.used.load(.monotonic));
     failing.fail_index = std.math.maxInt(usize);
-    const bytes = try a.dupe(u8, "x" ** 32);
+    const bytes = try a.dupe(u8, repeat("x", 32));
     defer a.free(bytes);
     try std.testing.expectError(error.OutOfMemory, a.realloc(bytes, 33));
-    try std.testing.expectEqualStrings("x" ** 32, bytes);
+    try std.testing.expectEqualStrings(repeat("x", 32), bytes);
     try std.testing.expectEqual(@as(usize, 32), budget.used.load(.monotonic));
     const remaining = try a.alloc(u8, 32);
     a.free(remaining);

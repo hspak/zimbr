@@ -1,11 +1,6 @@
 const std = @import("std");
 pub const Allocator = std.mem.Allocator;
-pub const c = @cImport({
-    // Zig 0.16 cannot translate glibc's fortified open/openat wrappers.
-    // This only affects bindings; compiled C sources retain fortification.
-    @cUndef("_FORTIFY_SOURCE");
-    @cInclude("platform.h");
-});
+pub const c = @import("platform_c");
 
 pub const IdError = Allocator.Error || error{RandomUnavailable};
 pub const TimestampError = Allocator.Error || error{InvalidTimestamp};
@@ -42,7 +37,7 @@ pub fn hashId(bytes: []const u8) [hash_id_length]u8 {
     return result;
 }
 pub fn decimal(a: Allocator, n: i64) Allocator.Error![]const u8 {
-    return std.fmt.allocPrint(a, "{d}", .{n});
+    return a.print("{d}", .{n});
 }
 pub fn timestamp(a: Allocator, n: i64) TimestampError![]const u8 {
     // Leave room for the native UTC timestamp, fractional seconds, and terminating NUL.

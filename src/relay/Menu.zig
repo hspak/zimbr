@@ -7,9 +7,7 @@ const Tls = @import("Tls.zig");
 const settings = @import("settings.zig");
 const contacts = @import("adapter/contacts.zig");
 const u = @import("../common.zig");
-const c = @cImport({
-    @cInclude("relay/menu.h");
-});
+const c = @import("relay_c");
 const Menu = @This();
 
 config_path: [:0]const u8,
@@ -20,7 +18,7 @@ listening: std.atomic.Value(bool) = .init(false),
 // Written before publishing core; immutable for the lifetime of that service.
 expires_unix: i64 = 0,
 
-pub const available = builtin.os.tag == .macos and !options.fake;
+pub const available = builtin.target.os.tag == .macos and !options.fake;
 
 /// Runs on the main thread. The receiver and its paths must outlive the event loop.
 pub fn run(self: *Menu, show_settings: bool) void {
@@ -182,7 +180,7 @@ test "menu reports startup failures through its native callback without a runnin
     var buffer: [8192]u8 = undefined;
     const starting_length = bridge.status.?(bridge.relay, &buffer, buffer.len);
     try std.testing.expect(starting_length > 0);
-    try std.testing.expect(std.mem.indexOf(u8, buffer[0..@intCast(starting_length)], "Starting relay") != null);
+    try std.testing.expect(std.mem.find(u8, buffer[0..@intCast(starting_length)], "Starting relay") != null);
     menu.failure.store(@errorName(error.InvalidTlsConfiguration), .release);
     const length = bridge.status.?(bridge.relay, &buffer, buffer.len);
     try std.testing.expect(length > 0);

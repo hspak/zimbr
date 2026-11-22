@@ -34,7 +34,7 @@ pub fn request(value: t.SendRequest) MessageError!void {
 
 pub fn message(value: t.Message) MessageError!void {
     if (value.text) |text| {
-        if (text.len > t.max_body or !std.unicode.utf8ValidateSlice(text) or std.mem.indexOfScalar(
+        if (text.len > t.max_body or !std.unicode.utf8ValidateSlice(text) or std.mem.findScalar(
             u8,
             text,
             0,

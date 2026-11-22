@@ -18,8 +18,9 @@ pub const Library = struct {
 pub fn addLibrary(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) ?Library {
+    const ibus = b.option(bool, "ibus", "Enable SDL IBus support (default: detect development files)");
     const source = b.lazyDependency("sdl", .{}) orelse return null;
     const module = b.createModule(.{
         .target = target,
@@ -45,7 +46,7 @@ pub fn addLibrary(
     module.addCMacro("EGL_NO_X11", "1");
     module.addCMacro("MESA_EGL_NO_X11_HEADERS", "1");
     module.addCMacro("_REENTRANT", "1");
-    if (optimize != .Debug) module.addCMacro("NDEBUG", "1");
+    if (optimize != .debug) module.addCMacro("NDEBUG", "1");
     for ([_][]const u8{
         "m",
         "dl",
@@ -74,7 +75,6 @@ pub fn addLibrary(
     check_headers.addArgs(required_packages);
     check_headers.has_side_effects = true;
     for (required_packages) |package| _ = addHeaderFlags(b, &flags, package);
-    const ibus = b.option(bool, "ibus", "Enable SDL IBus support (default: detect development files)");
     if (ibus orelse true) {
         if (addHeaderFlags(b, &flags, "ibus-1.0")) module.addCMacro("HAVE_IBUS_IBUS_H", "1");
         if (ibus == true) check_headers.addArg("ibus-1.0");
@@ -182,6 +182,8 @@ fn pkgConfig(b: *std.Build) []const u8 {
 }
 
 fn queryPackage(b: *std.Build, option: []const u8, package: []const u8) ?[]const u8 {
+    // pkg-config searches host-controlled directories and package metadata.
+    b.graph.poisonCache();
     var exit_code: u8 = undefined;
     return b.runAllowFail(&.{
         pkgConfig(b),

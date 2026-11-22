@@ -252,7 +252,7 @@ Browser image offers and clipboard image bytes require additional input support;
 the first input path handles local file-manager drops. Upload and dispatch are
 generic across regular files and do not depend on preview support.
 
-The final `zig build test-gui-attachments -Doptimize=ReleaseSafe` check drives a
+The `zig build test-gui-attachments -Doptimize=safe` check drives a
 real App, Worker, and Media instance through the native file-drop callback on
 Wayland. It stages a Unicode-named PNG, an empty file, and a 256 KiB binary file,
 checks the decoded thumbnail, and verifies that no send occurs before review.

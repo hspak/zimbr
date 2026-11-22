@@ -173,7 +173,7 @@ const Reader = struct {
             if (u.eq(name, "NSNumber")) {
                 try self.expectType("*");
                 const encoding = try self.cstring();
-                if (encoding.len != 1 or std.mem.indexOfScalar(u8, "iIsScCqQ", encoding[0]) == null) return error.Unsupported;
+                if (encoding.len != 1 or std.mem.findScalar(u8, "iIsScCqQ", encoding[0]) == null) return error.Unsupported;
                 try self.expectType(encoding);
                 break :result .{ .number = try self.integer(std.ascii.isLower(encoding[0])) };
             }
@@ -279,7 +279,7 @@ pub fn decode(
             }
         }
         if ((try seen.getOrPut(a, part_index)).found_existing) return error.Unsupported;
-        const id = try std.fmt.allocPrint(a, "source:{d}", .{part_index});
+        const id = try a.print("source:{d}", .{part_index});
         if (transfer) |guid| {
             if (!u.eq(text[start..end], "\xef\xbf\xbc")) return error.Unsupported;
             const attachment_id = u.hashId(guid);
@@ -297,7 +297,7 @@ pub fn decode(
                 .attachment_id = match,
             });
         } else {
-            if (std.mem.indexOf(u8, text[start..end], "\xef\xbf\xbc") != null) return error.Unsupported;
+            if (std.mem.find(u8, text[start..end], "\xef\xbf\xbc") != null) return error.Unsupported;
             try parts.append(a, .{
                 .id = id,
                 .source_index = part_index,

@@ -66,7 +66,7 @@ pub const ParseError = std.Io.Dir.CreateDirPathError || u.Allocator.Error || err
 /// Hold the returned descriptor until the client and its workers have shut down.
 pub fn lockCache(s: Config) LockCacheError!c_int {
     const a = std.heap.page_allocator;
-    const path = try std.fmt.allocPrintSentinel(a, "{s}/client.lock", .{s.data}, 0);
+    const path = try a.printSentinel("{s}/client.lock", .{s.data}, 0);
     defer a.free(path);
     const lock = u.c.zr_lock(path);
     if (lock < 0) return error.ClientAlreadyRunning;
@@ -94,14 +94,14 @@ fn preferences(a: u.Allocator, raw: []const u8) !Preferences {
 fn dataDirectory(a: u.Allocator, explicit: ?[]const u8, state: ?[]const u8, home: ?[]const u8) ![:0]const u8 {
     if (explicit) |path| {
         if (path.len == 0) return error.InvalidArguments;
-        return try a.dupeZ(u8, path);
+        return try a.dupeSentinel(u8, path, 0);
     }
     if (state) |base| if (std.fs.path.isAbsolute(base)) {
-        return try std.fmt.allocPrintSentinel(a, "{s}/" ++ directory_name, .{base}, 0);
+        return try a.printSentinel("{s}/" ++ directory_name, .{base}, 0);
     };
     const base = home orelse return error.HomeRequired;
     if (base.len == 0) return error.HomeRequired;
-    return try std.fmt.allocPrintSentinel(a, "{s}/.local/share/" ++ directory_name, .{base}, 0);
+    return try a.printSentinel("{s}/.local/share/" ++ directory_name, .{base}, 0);
 }
 
 /// Resolve launch options and prepare the state directory. Missing settings are
@@ -162,15 +162,15 @@ pub fn parse(init: std.process.Init) ParseError!Config {
         if (u.eq(arg, "--data-dir")) {
             explicit = value;
         } else if (u.eq(arg, "--relay-url")) {
-            config.overrides.relay_url = try a.dupeZ(u8, value);
+            config.overrides.relay_url = try a.dupeSentinel(u8, value, 0);
         } else if (u.eq(arg, "--ca-file")) {
-            config.overrides.ca_file = try a.dupeZ(u8, value);
+            config.overrides.ca_file = try a.dupeSentinel(u8, value, 0);
         } else if (u.eq(arg, "--client-cert-file")) {
-            config.overrides.client_cert_file = try a.dupeZ(u8, value);
+            config.overrides.client_cert_file = try a.dupeSentinel(u8, value, 0);
         } else if (u.eq(arg, "--client-key-file")) {
-            config.overrides.client_key_file = try a.dupeZ(u8, value);
+            config.overrides.client_key_file = try a.dupeSentinel(u8, value, 0);
         } else if (u.eq(arg, "--screenshot")) {
-            config.screenshot = try a.dupeZ(u8, value);
+            config.screenshot = try a.dupeSentinel(u8, value, 0);
         } else if (u.eq(arg, "--frames")) {
             config.frames = std.fmt.parseInt(usize, value, 10) catch return error.InvalidArguments;
         } else return error.InvalidArguments;
@@ -185,9 +185,9 @@ pub fn parse(init: std.process.Init) ParseError!Config {
     const home = init.environ_map.get("HOME");
     config.data = try dataDirectory(a, explicit, init.environ_map.get("XDG_STATE_HOME"), home);
     const confbase = init.environ_map.get("XDG_CONFIG_HOME") orelse
-        if (home) |base| try std.fmt.allocPrint(a, "{s}/.config", .{base}) else null;
+        if (home) |base| try a.print("{s}/.config", .{base}) else null;
     if (confbase) |base| if (std.fs.path.isAbsolute(base)) {
-        config.legacy_path = try std.fmt.allocPrintSentinel(a, "{s}/" ++ directory_name ++ "/config.json", .{base}, 0);
+        config.legacy_path = try a.printSentinel("{s}/" ++ directory_name ++ "/config.json", .{base}, 0);
     };
     _ = u.c.umask(0o077);
     try std.Io.Dir.cwd().createDirPath(init.io, config.data);
@@ -203,7 +203,7 @@ pub fn read(a: u.Allocator, store: Store) Store.ReadError!?Config {
     if (!try q.step()) return null;
     var config = Config{ .data = "", .enter_to_send = q.int(4) != 0 };
     inline for (connection_fields, 0..) |field, index| {
-        @field(config, field) = try a.dupeZ(u8, q.bytes(index));
+        @field(config, field) = try a.dupeSentinel(u8, q.bytes(index), 0);
     }
     return config;
 }
@@ -229,7 +229,7 @@ fn importLegacy(s: *Config, a: u.Allocator) !void {
     defer c.zc_private_free(raw, length);
     if (length > 8192) return error.ConfigurationTooLarge;
     const pref = try preferences(a, raw[0..length]);
-    inline for (connection_fields) |field| @field(s, field) = try a.dupeZ(u8, @field(pref, field));
+    inline for (connection_fields) |field| @field(s, field) = try a.dupeSentinel(u8, @field(pref, field), 0);
     s.enter_to_send = pref.enter_to_send;
 }
 
@@ -237,7 +237,7 @@ fn importLegacy(s: *Config, a: u.Allocator) !void {
 /// has no settings yet. Overrides persist only with an explicit save_connection
 /// request, after validating the complete connection and local credentials.
 pub fn load(s: *Config, a: u.Allocator) LoadError!void {
-    const path = try std.fmt.allocPrintSentinel(a, "{s}/client.db", .{s.data}, 0);
+    const path = try a.printSentinel("{s}/client.db", .{s.data}, 0);
     const store = try Store.open(path);
     defer store.close();
     if (try read(a, store)) |saved| {
@@ -275,7 +275,7 @@ pub fn resetCache(s: Config, io: std.Io) ResetCacheError!void {
     const a = arena.allocator();
     const dir = try std.Io.Dir.cwd().openDir(io, s.data, .{ .follow_symlinks = false });
     defer dir.close(io);
-    const path = try std.fmt.allocPrintSentinel(a, "{s}/client.db", .{s.data}, 0);
+    const path = try a.printSentinel("{s}/client.db", .{s.data}, 0);
     const saved = saved: {
         const stat = dir.statFile(io, "client.db", .{ .follow_symlinks = false }) catch |err| switch (err) {
             error.FileNotFound => break :saved null,
@@ -290,8 +290,8 @@ pub fn resetCache(s: Config, io: std.Io) ResetCacheError!void {
             },
         };
     };
-    const name = try std.fmt.allocPrint(a, ".client-reset-{s}.db", .{try u.id(a)});
-    const temporary = try std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ s.data, name }, 0);
+    const name = try a.print(".client-reset-{s}.db", .{try u.id(a)});
+    const temporary = try a.printSentinel("{s}/{s}", .{ s.data, name }, 0);
     const file = try dir.createFile(io, name, .{ .exclusive = true, .permissions = .fromMode(0o600) });
     file.close(io);
     defer dir.deleteFile(io, name) catch {};
@@ -324,7 +324,7 @@ fn removeSidecars(dir: std.Io.Dir, io: std.Io, name: []const u8) std.Io.Dir.Dele
         // Fit client.db or the bounded temporary basename plus a SQLite sidecar suffix.
         var buffer: [128]u8 = undefined;
         // Only client.db and the bounded temporary name above are passed here.
-        const path = std.fmt.bufPrint(&buffer, "{s}{s}", .{ name, suffix }) catch unreachable;
+        const path = std.mem.print(&buffer, "{s}{s}", .{ name, suffix }) catch unreachable;
         dir.deleteFile(io, path) catch |err| switch (err) {
             error.FileNotFound => {},
             else => return err,
@@ -346,7 +346,7 @@ pub fn validate(s: Config) ValidateError!void {
 fn validText(value: []const u8) bool {
     // Bound configured paths and origins to 4 KiB before passing them to native APIs.
     return value.len > 0 and value.len <= 4096 and std.unicode.utf8ValidateSlice(value) and
-        std.mem.indexOfAny(u8, value, "\x00\r\n") == null;
+        std.mem.findAny(u8, value, "\x00\r\n") == null;
 }
 
 /// Check local credentials without connecting to the relay. On failure, detail

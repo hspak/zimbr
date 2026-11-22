@@ -43,13 +43,13 @@ pub fn decode(a: u.Allocator, body: []const u8) DecodeError![]const u8 {
                 a.free(decoded);
                 return error.Oversized;
             }
-            if (std.mem.indexOfScalar(u8, decoded, 0) != null) {
+            if (std.mem.findScalar(u8, decoded, 0) != null) {
                 a.free(decoded);
                 return error.Malformed;
             }
             return decoded;
         }
-        if (!std.unicode.utf8ValidateSlice(text) or std.mem.indexOfScalar(u8, text, 0) != null) return error.Malformed;
+        if (!std.unicode.utf8ValidateSlice(text) or std.mem.findScalar(u8, text, 0) != null) return error.Malformed;
         return a.dupe(u8, text);
     }
     return error.Unsupported;

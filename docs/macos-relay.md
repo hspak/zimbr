@@ -1,6 +1,6 @@
 # macOS relay
 
-The Zig 0.16 relay serves the Messages account on a logged-in Mac. It reads
+The Zig 0.17.1 relay serves the Messages account on a logged-in Mac. It reads
 Apple's SQLite database without modifying it, exposes a TLS 1.3 HTTPS/SSE API
 requiring an enrolled client certificate, and sends through a bounded Messages
 AppleScript subprocess. Its native menu bar interface uses AppKit, with system
@@ -148,7 +148,7 @@ Maintainers should see [combined releases](linux-packaging.md).
 
 ## Build and test
 
-Install Zig **0.16.0**, Apple's Command Line Tools, and a target build of
+Install Zig **0.17.1**, Apple's Command Line Tools, and a target build of
 **OpenSSL 3.5 LTS** with static archives. The packaged build uses 3.5.8; use current
 3.5 security patches and rebuild/re-sign the app when updating OpenSSL. The relay
 uses system SQLite and native AppKit, with no Homebrew runtime dependency.
@@ -157,7 +157,7 @@ Zig fetches and statically builds the pinned nghttp2 HTTP/2 engine.
 For an Apple M1 target, an optional optimized build selects its CPU features:
 
 ```sh
-zig build relay -Doptimize=ReleaseFast -Dtarget=aarch64-macos -Dcpu=apple_m1 \
+zig build relay -Doptimize=fast -Dtarget=aarch64-macos -Dcpu=apple_m1 \
   -Dopenssl-prefix=/absolute/openssl-3.5
 ```
 
@@ -291,7 +291,7 @@ Keep that user logged into the Mac's graphical session. From the checkout, run:
 ./tools/update-relay.sh --profile dev --release=safe
 ```
 
-The script builds the current checkout, including local edits, in ReleaseSafe
+The script builds the current checkout, including local edits, in safe
 and runs the relay and native enrichment tests before installing. It uses a fresh
 build output directory and stops if a step fails. It reuses the installed
 credentials and persistent signing identity, preserves existing messages and

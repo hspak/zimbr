@@ -1,14 +1,12 @@
 //! A separate verified copy inside Messages attachment storage. Once automation
 //! may have used it, its lifetime belongs to Messages history, not upload cleanup.
 const std = @import("std");
+const repeat = @import("../../fixtures.zig").repeat;
 const log = std.log.scoped(.send_handoff);
 const u = @import("../../common.zig");
 const attachments = @import("../../protocol.zig").attachments;
 const uploads = @import("../uploads.zig");
-const c = @cImport({
-    @cInclude("errno.h");
-    @cInclude("relay/media.h");
-});
+const c = @import("relay_c");
 const Handoff = @This();
 
 storage: uploads.Files,
@@ -21,12 +19,12 @@ pub const InitError = uploads.Files.BeginError || uploads.Files.Transfer.SealErr
 /// Borrow the original descriptor without changing its offset. All strings use
 /// a and must outlive this value. On error, no file is passed to automation.
 pub fn init(a: u.Allocator, attachment_root: []const u8, original: c_int, file: attachments.Upload) InitError!Handoff {
-    const root = try a.dupeZ(u8, attachment_root);
+    const root = try a.dupeSentinel(u8, attachment_root, 0);
     const opened = c.zr_media_directory(root, 0);
     const root_fd = if (opened == -2) c.zr_media_directory(root, 1) else opened;
     if (root_fd < 0) return error.UploadStorageUnavailable;
     defer _ = u.c.close(root_fd);
-    const directory = try std.fmt.allocPrintSentinel(a, "{s}/zimbr", .{attachment_root}, 0);
+    const directory = try a.printSentinel("{s}/zimbr", .{attachment_root}, 0);
     const directory_fd = c.zr_media_directory(directory, 1);
     if (directory_fd < 0) return error.UploadStorageUnavailable;
     defer _ = u.c.close(directory_fd);
@@ -89,11 +87,11 @@ test "handoff keeps separate verified bytes only after ownership passes to Messa
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const relative = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0);
+    const relative = try a.printSentinel(".zig-cache/tmp/{s}", .{tmp.sub_path}, 0);
     var absolute: [4096]u8 = undefined;
     const base = u.c.realpath(relative, &absolute) orelse return error.TestUnexpectedResult;
-    const original = try std.fmt.allocPrintSentinel(a, "{s}/original", .{base}, 0);
-    const root = try std.fmt.allocPrint(a, "{s}/attachments", .{base});
+    const original = try a.printSentinel("{s}/original", .{base}, 0);
+    const root = try a.print("{s}/attachments", .{base});
     const fd = u.c.open(original, u.c.O_RDWR | u.c.O_CREAT | u.c.O_EXCL, @as(c_uint, 0o600));
     try std.testing.expect(fd >= 0);
     defer _ = u.c.close(fd);
@@ -109,11 +107,11 @@ test "handoff keeps separate verified bytes only after ownership passes to Messa
         .sha256 = try a.dupe(u8, &std.fmt.bytesToHex(digest, .lower)),
     };
     var unstarted = try Handoff.init(a, root, fd, file);
-    const discarded_path = try a.dupeZ(u8, unstarted.path);
+    const discarded_path = try a.dupeSentinel(u8, unstarted.path, 0);
     unstarted.deinit();
     try std.testing.expect(u.c.access(discarded_path, u.c.F_OK) != 0);
     var attempted = try Handoff.init(a, root, fd, file);
-    const kept_path = try a.dupeZ(u8, attempted.path);
+    const kept_path = try a.dupeSentinel(u8, attempted.path, 0);
     const copy = try attempted.storage.open(a, attempted.file);
     defer _ = u.c.close(copy);
     var source_fingerprint: c.ZrMediaFingerprint = undefined;
@@ -129,10 +127,10 @@ test "handoff keeps separate verified bytes only after ownership passes to Messa
     var received: [content.len]u8 = undefined;
     try std.testing.expectEqual(@as(isize, content.len), u.c.read(copy, &received, received.len));
     try std.testing.expectEqualStrings(content, &received);
-    file.sha256 = "0" ** 64;
+    file.sha256 = repeat("0", 64);
     try std.testing.expectError(error.UploadHashMismatch, Handoff.init(a, root, fd, file));
-    const linked = try std.fmt.allocPrintSentinel(a, "{s}/linked", .{base}, 0);
-    const root_name = try a.dupeZ(u8, root);
+    const linked = try a.printSentinel("{s}/linked", .{base}, 0);
+    const root_name = try a.dupeSentinel(u8, root, 0);
     try std.testing.expectEqual(@as(c_int, 0), u.c.symlink(root_name, linked));
     try std.testing.expectError(error.UploadStorageUnavailable, Handoff.init(a, linked, fd, file));
 }

@@ -1,14 +1,16 @@
 """Serial production-loop latency measurements with independent effect checks."""
 from dataclasses import replace
+import os
+from pathlib import Path
 
 from zrct import Benchmark, TestCase
 
 import scenarios
 
 SUITE = replace(scenarios.SUITE, name="zimbr-benchmarks", desktop_input=False,
-                build=(*scenarios.SUITE.build, "-Doptimize=ReleaseSafe"),
+                build=(*scenarios.SUITE.build, "-Doptimize=safe"),
                 benchmark=Benchmark(
-                    optimization="ReleaseSafe",
+                    optimization="safe",
                     fixture={"kind": "indexed-synthetic-relay", "extra_messages": 10000,
                              "initial_conversation": "Fixture group"},
                     cache="fresh-process-and-private-app-state; OS-page-cache-uncontrolled; cached-switch-preopened",
@@ -17,7 +19,8 @@ SUITE = replace(scenarios.SUITE, name="zimbr-benchmarks", desktop_input=False,
                         "tests/fixture.py", "tests/attachment_sends.py", "tests/attachment_uploads.py",
                         "tests/relay_tls.py", "tests/relay_fixture.py", "tools/tls_admin.py",
                         "tools/tls_support.py", "tools/http2.py", "tests/tls_fixture.py", "tests/http2_server.py",
-                        "tests/client_media_transport.py", "zig-out/bin/fake-relay")))
+                        "tests/client_media_transport.py",
+                        ("zig-out/bin/fake-relay", Path(os.environ.get("ZIMBR_TEST_BIN", "zig-out/bin")) / "fake-relay"))))
 
 
 class Workflows(TestCase):

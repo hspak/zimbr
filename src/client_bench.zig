@@ -17,8 +17,8 @@ fn record(store: Store, index: usize, revision: usize, text: []const u8) !void {
     defer arena.deinit();
     const a = arena.allocator();
     const message = t.Message{
-        .id = try std.fmt.allocPrint(a, "m{d:0>8}", .{index}),
-        .revision = try std.fmt.allocPrint(a, "{d}", .{revision}),
+        .id = try a.print("m{d:0>8}", .{index}),
+        .revision = try a.print("{d}", .{revision}),
         .conversation_id = "bench",
         .sender = "fixture@example.invalid",
         .direction = .incoming,

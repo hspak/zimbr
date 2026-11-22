@@ -226,7 +226,7 @@ if git -C "$repo_dir" rev-parse --verify --quiet "refs/tags/$version" >/dev/null
 fi
 
 echo "Building and testing the Linux client before tagging..."
-(cd -- "$repo_dir" && zig build client test-client -Dprofile=release -Doptimize=ReleaseSafe -Dcpu=baseline)
+(cd -- "$repo_dir" && zig build client test-client -Dprofile=release -Doptimize=safe -Dcpu=baseline)
 previous_tag=$(git -C "$repo_dir" describe --tags --abbrev=0 --match '[0-9]*.[0-9]*.[0-9]*' \
   --exclude "$version" HEAD 2>/dev/null || true)
 git -C "$repo_dir" log --no-decorate --format='- %s (%h)' \

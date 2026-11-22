@@ -30,7 +30,7 @@ and the [ChaCha20 comparison](https://www.rfc-editor.org/rfc/rfc8439.html#sectio
 
 ## Build
 
-Use Zig 0.16.0 and OpenSSL **3.5 LTS**, including current patches. The repository
+Use Zig 0.17.1 and OpenSSL **3.5 LTS**, including current patches. The repository
 tooling defaults to **3.5.8**. Obtain source and verify its
 published digest from [OpenSSL downloads](https://openssl-library.org/source/).
 Build static libraries for the target architecture, for example on Apple Silicon:

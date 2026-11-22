@@ -28,7 +28,7 @@ pub fn dispatchFile(
     file: attachments.Upload,
     filename: []const u8,
 ) DispatchError!void {
-    const root = try std.fmt.allocPrint(a, "{s}.attachments/", .{path});
+    const root = try a.print("{s}.attachments/", .{path});
     if (!std.mem.startsWith(u8, filename, root)) return error.Rejected;
     if (u.eq(file.name, "fake-stall.bin")) {
         // Three seconds makes in-flight dispatch observable to interruption and retry tests.
@@ -77,7 +77,7 @@ fn dispatchImpl(a: u.Allocator, path: [:0]const u8, route: Journal.Route, text: 
         const hid = u.c.sqlite3_last_insert_rowid(db.handle);
         const conversation = try db.prepare("INSERT INTO chat(guid,service_name,display_name) VALUES(?,'iMessage','')");
         defer conversation.close();
-        try conversation.bind(&.{.{ .text = try std.fmt.allocPrint(a, "iMessage;-;{s}", .{route.destination}) }});
+        try conversation.bind(&.{.{ .text = try a.print("iMessage;-;{s}", .{route.destination}) }});
         _ = try conversation.step();
         chat = u.c.sqlite3_last_insert_rowid(db.handle);
         const j = try db.prepare("INSERT INTO chat_handle_join VALUES(?,?)");
@@ -127,7 +127,7 @@ fn sourceGuid(a: u.Allocator) u.IdError![]const u8 {
     bytes[6] = (bytes[6] & 15) | 64;
     bytes[8] = (bytes[8] & 63) | 128;
     const hex = std.fmt.bytesToHex(bytes, .lower);
-    return std.fmt.allocPrint(a, "{s}-{s}-{s}-{s}-{s}", .{
+    return a.print("{s}-{s}-{s}-{s}-{s}", .{
         hex[0..8],
         hex[8..12],
         hex[12..16],

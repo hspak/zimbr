@@ -256,8 +256,7 @@ pub fn run(a: u.Allocator, source: Source) RunError!Report {
         }
     }
     if (source.features.reaction_target) {
-        const sql = try std.fmt.allocPrintSentinel(
-            a,
+        const sql = try a.printSentinel(
             "SELECT associated_message_type,substr(associated_message_guid,1,1100),{s},ROWID,is_from_me FROM message WHERE associated_message_type BETWEEN 1000 AND 3999 ORDER BY ROWID DESC LIMIT 100",
             .{if (source.features.reaction_emoji) "substr(associated_message_emoji,1,257)" else "NULL"},
             0,
@@ -270,7 +269,7 @@ pub fn run(a: u.Allocator, source: Source) RunError!Report {
             report.reaction_samples += 1;
             // Fit any signed 64-bit associated-message code as decimal without allocation.
             var buffer: [32]u8 = undefined;
-            if (!bump(report.reaction_types, try std.fmt.bufPrint(&buffer, "{d}", .{q.int(0)}))) _ = bump(
+            if (!bump(report.reaction_types, try std.mem.print(&buffer, "{d}", .{q.int(0)}))) _ = bump(
                 report.reaction_types,
                 "other",
             );

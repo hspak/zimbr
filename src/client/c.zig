@@ -1,5 +1,1 @@
-pub const api = @cImport({
-    @cInclude("bridge.h");
-    @cInclude("outgoing.h");
-    @cInclude("drop.h");
-});
+pub const api = @import("client_c");

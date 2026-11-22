@@ -8,7 +8,7 @@ Zig package hash: N-V-__8AABHq9wIiTHGY4qR6mw45F_TX8FSvqsQQ-Wtq1tzY
 This directory retains provenance and SDL's license. build.zig.zon pins the
 upstream archive; Zig downloads and verifies it as a lazy dependency. The full
 upstream archive lives in the dependency cache, outside the tracked source tree.
-Zimbr builds the library directly through build/sdl.zig with Zig 0.16.0.
+Zimbr builds the library directly through build/sdl.zig with Zig 0.17.1.
 
 Local C changes are recorded in build/sdl/vulkan.patch and confined to
 src/render/vulkan/SDL_render_vulkan.c:

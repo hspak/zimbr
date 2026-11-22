@@ -71,7 +71,7 @@ fn control(init: std.process.Init, worker: *Worker) !void {
         const n = u.c.read(0, &buf, buf.len);
         if (n == 0) return;
         if (n > 0) try input.appendSlice(a, buf[0..@intCast(n)]);
-        while (std.mem.indexOfScalar(u8, input.items, '\n')) |end| {
+        while (std.mem.findScalar(u8, input.items, '\n')) |end| {
             const line = input.items[0..end];
             if (u.eq(line, "quit")) return;
             const kind = try std.json.parseFromSliceLeaky(

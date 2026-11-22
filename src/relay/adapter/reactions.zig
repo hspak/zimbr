@@ -56,14 +56,14 @@ pub fn decode(
             // Preserve the entire supplied sequence, including ZWJ, selectors,
             // skin modifiers, and flags; no byte/codepoint truncation.
             for (emoji) |byte| if (byte < 32 or byte == 127) return value;
-            value.event.key = try std.fmt.allocPrint(a, "emoji:{s}", .{emoji});
+            value.event.key = try a.print("emoji:{s}", .{emoji});
             value.event.emoji = try a.dupe(u8, emoji);
         } else return value;
         value.event.resolution = .pending;
     }
     var guid = target;
     if (std.mem.startsWith(u8, target, "p:")) {
-        const separator = std.mem.indexOfScalar(u8, target, '/') orelse {
+        const separator = std.mem.findScalar(u8, target, '/') orelse {
             value.event.resolution = .malformed;
             return value;
         };

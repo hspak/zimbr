@@ -2,6 +2,7 @@
 //! journal writer owns all calls, so section changes and their message revision
 //! commit together. Overflow tokens bind to the full message revision.
 const std = @import("std");
+const repeat = @import("../fixtures.zig").repeat;
 const u = @import("../common.zig");
 const t = @import("../protocol.zig").types;
 const Json = @import("../protocol.zig").Json;
@@ -80,7 +81,7 @@ pub fn fallbackParts(a: u.Allocator, v: t.Message) u.Allocator.Error![]const t.M
     };
     for (v.attachments) |attachment| if (!attachment.preview_artwork) {
         try parts.append(a, .{
-            .id = try std.fmt.allocPrint(a, "attachment:{s}", .{attachment.id}),
+            .id = try a.print("attachment:{s}", .{attachment.id}),
             .kind = .attachment,
             .attachment_id = attachment.id,
         });
@@ -284,7 +285,7 @@ test "text-first history preserves captions and cursors without inline metadata"
     const attachments = try a.alloc(t.Attachment, 32);
     for (attachments, 0..) |*item, i| item.* = .{
         .id = try u.decimal(a, @intCast(i)),
-        .name = "Photo " ++ "x" ** 200,
+        .name = "Photo " ++ repeat("x", 200),
         .mime_type = "image/png",
         .bytes = "123",
     };
@@ -355,7 +356,7 @@ pub fn page(
     if (!u.eq(m.bytes(0), revision)) return error.EnrichmentRestartRequired;
     var position: i64 = -1;
     if (after) |token| {
-        const prefix = try std.fmt.allocPrint(a, "{s}:{s}:{s}:", .{
+        const prefix = try a.print("{s}:{s}:{s}:", .{
             id,
             revision,
             @tagName(section),
@@ -381,7 +382,7 @@ pub fn page(
     var next: ?[]const u8 = null;
     while (try q.step()) {
         if (items.items.len == limit or bytes + q.bytes(1).len + 1 > t.max_metadata_page) {
-            next = try std.fmt.allocPrint(a, "{s}:{s}:{s}:{d}", .{
+            next = try a.print("{s}:{s}:{s}:{d}", .{
                 id,
                 revision,
                 @tagName(section),
@@ -427,8 +428,7 @@ test "overflow is lossless, revision-bound, and preserves captions and independe
     const reactions = try a.alloc(t.Reaction, 150);
     for (reactions, 0..) |*item, i| item.* = .{
         .id = try u.decimal(a, @intCast(i)),
-        .actor = .{ .service = "imessage", .address = try std.fmt.allocPrint(
-            a,
+        .actor = .{ .service = "imessage", .address = try a.print(
             "actor-{d}@example.invalid",
             .{i},
         ) },
@@ -563,7 +563,7 @@ test "large escaped metadata stays within a bounded preparation arena" {
     var arena = std.heap.ArenaAllocator.init(bounded.allocator());
     defer arena.deinit();
     const a = arena.allocator();
-    const escaped = [_]u8{1} ** 2048;
+    const escaped: [2048]u8 = @splat(1);
     var attachments: [32]t.Attachment = undefined;
     var reactions: [128]t.Reaction = undefined;
     var parts: [128]t.MessagePart = undefined;
@@ -576,7 +576,7 @@ test "large escaped metadata stays within a bounded preparation arena" {
     };
     for (&reactions, 0..) |*item, i| item.* = .{
         .id = try u.decimal(a, @intCast(i)),
-        .actor = .{ .service = "imessage", .address = "a" ** 240 ++ "@example.test" },
+        .actor = .{ .service = "imessage", .address = repeat("a", 240) ++ "@example.test" },
         .key = "like",
         .emoji = "👍",
     };

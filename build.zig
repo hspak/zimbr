@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const Translator = @import("translate_c").Translator;
 const gui = @import("build/gui.zig");
 const nghttp2 = @import("build/nghttp2.zig");
 const sdl = @import("build/sdl.zig");
@@ -40,15 +41,15 @@ pub fn build(b: *std.Build) !void {
         return error.OpenSslPrefixRequired;
     }
     const sdk = b.option([]const u8, "macos-sdk", "macOS SDK for native or cross compilation") orelse
-        if (target.result.os.tag == .macos and builtin.os.tag == .macos)
-            std.mem.trim(u8, b.run(&.{
+        if (target.result.os.tag == .macos and builtin.target.os.tag == .macos) sdk_path: {
+            b.graph.poisonCache();
+            break :sdk_path std.mem.trim(u8, b.run(&.{
                 "xcrun",
                 "--sdk",
                 "macosx",
                 "--show-sdk-path",
-            }), " \r\n")
-        else
-            null;
+            }), " \r\n");
+        } else null;
     for ([_]bool{ false, true }) |fake| {
         const mod = module(b, target, optimize, sdk, openssl, fake, profile);
         const exe = b.addExecutable(.{ .name = if (fake) "fake-relay" else "relay", .root_module = mod });
@@ -58,6 +59,7 @@ pub fn build(b: *std.Build) !void {
             "share/zimbr/licenses/nghttp2.txt",
         );
         install.step.dependOn(&http2_license.step);
+        install.step.dependOn(&translatorLicense(b).step);
         if (fake or target.result.os.tag == .macos) {
             const helper = imageHelper(b, target, optimize, sdk, fake);
             install.step.dependOn(&b.addInstallArtifact(helper, .{}).step);
@@ -103,10 +105,45 @@ pub fn build(b: *std.Build) !void {
     if (target.result.os.tag == .linux) client(b, target, optimize, profile_name);
 }
 
+fn translatorLicense(b: *std.Build) *std.Build.Step.InstallFile {
+    return b.addInstallFile(b.path("licenses/translate-c.txt"), "share/zimbr/licenses/translate-c.txt");
+}
+
+fn bindings(
+    b: *std.Build,
+    m: *std.Build.Module,
+    name: []const u8,
+    header: std.Build.LazyPath,
+    libs: []const Translator.LinkSystemLib,
+) Translator {
+    const t: Translator = .init(b.dependency("translate_c", .{}), .{
+        .name = name,
+        .c_source_file = header,
+        .target = m.resolved_target.?,
+        .optimize = m.optimize.?,
+        .link_system_libs = libs,
+        .default_init = true,
+    });
+    m.addImport(name, t.mod);
+    return t;
+}
+
+fn platformBindings(b: *std.Build, m: *std.Build.Module, sdk: ?[]const u8) void {
+    const platform = bindings(b, m, "platform_c", b.path("build/bindings/platform.h"), &.{.{ .name = "sqlite3" }});
+    platform.addIncludePath(b.path("src"));
+    const relay = bindings(b, m, "relay_c", b.path("build/bindings/relay.h"), &.{});
+    relay.addIncludePath(b.path("src"));
+    if (sdk) |root| {
+        const headers = b.graph.cwdRelativePath(b.pathJoin(&.{ root, "usr/include" }));
+        platform.addSystemIncludePath(headers);
+        relay.addSystemIncludePath(headers);
+    }
+}
+
 fn clientModule(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     root: []const u8,
     options: *std.Build.Step.Options,
 ) *std.Build.Module {
@@ -116,6 +153,9 @@ fn clientModule(
         .optimize = optimize,
         .link_libc = true,
     });
+    platformBindings(b, m, null);
+    const bridge = bindings(b, m, "client_c", b.path("build/bindings/client.h"), &.{});
+    bridge.addIncludePath(b.path("src/client"));
     m.addOptions("client_options", options);
     m.addIncludePath(b.path("src"));
     m.addIncludePath(b.path("src/client"));
@@ -148,7 +188,7 @@ fn clientModule(
 fn client(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     profile: ProfileName,
 ) void {
     const fps_counter = b.option(
@@ -157,6 +197,8 @@ fn client(
         "Show the FPS counter in the bottom-right corner",
     ) orelse false;
     const automation = b.option(bool, "automation", "Enable private Zrct GUI instrumentation") orelse false;
+    const gui_filter = b.option([]const u8, "gui-test-filter", "Filter existing GUI regressions");
+    const desktop_tests = b.option(bool, "desktop-tests", "Enable isolated GUI and compositor tests") orelse false;
     const options = b.addOptions();
     options.addOption(bool, "automation", automation);
     options.addOption([]const u8, "version", manifest.version);
@@ -232,7 +274,6 @@ fn client(
     addDesktop(desktop_probe, desktop_sdl);
     const desktop_exe = b.addExecutable(.{ .name = "client-desktop-probe", .root_module = desktop_probe });
     b.step("client-desktop-probe", "Build the native desktop integration probe").dependOn(&b.addInstallArtifact(desktop_exe, .{}).step);
-    const gui_filter = b.option([]const u8, "gui-test-filter", "Filter existing GUI regressions");
     const gui_tests = b.addTest(.{ .root_module = m, .filters = if (gui_filter) |filter| &.{filter} else &.{} });
     const install_gui = b.addInstallArtifact(gui_tests, .{ .dest_sub_path = "zimbr-gui-tests" });
     b.step("gui-test-exe", "Install the GUI regression executable without running it").dependOn(&install_gui.step);
@@ -247,7 +288,6 @@ fn client(
     attachment_run.step.dependOn(&b.top_level_steps.get("fake-relay").?.step);
     b.step("test-gui-attachments", "Send native file drops through the GUI to a synthetic relay").dependOn(&attachment_run.step);
     const exe = b.addExecutable(.{ .name = "zimbr", .root_module = m });
-    const desktop_tests = b.option(bool, "desktop-tests", "Enable isolated GUI and compositor tests") orelse false;
     addGuiSuites(b, desktop_sdl, .{
         .client = exe,
         .native_tests = gui_tests,
@@ -258,6 +298,7 @@ fn client(
     install.step.dependOn(&license.step);
     const emoji_license = b.addInstallFile(b.path("licenses/gemoji.txt"), "share/zimbr/licenses/gemoji.txt");
     install.step.dependOn(&emoji_license.step);
+    install.step.dependOn(&translatorLicense(b).step);
     const yuv_license = b.addInstallFile(
         desktop_sdl.source.path("src/video/yuv2rgb/LICENSE"),
         "share/zimbr/licenses/SDL-yuv2rgb.txt",
@@ -266,7 +307,7 @@ fn client(
     step.dependOn(&install.step);
     b.getInstallStep().dependOn(&install.step);
     const run = b.addRunArtifact(exe);
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     b.step("run", "Run the Linux client").dependOn(&run.step);
     const desktop = b.addInstallFileWithDir(
         b.path("packaging/linux/zimbr.desktop"),
@@ -301,16 +342,12 @@ fn addGuiSuites(
     }
     // Merely configuring a production build must not fetch Zrct or its native tools.
     const zrct_dep = b.lazyDependency("zrct", .{}) orelse return;
-    const zrct = ZrctBuild() orelse {
-        isolated_step.dependOn(&b.addFail("GUI tests require the zrct dependency declared in build.zig.zon").step);
-        return;
-    };
+    const zrct = b.lazyImport(@This(), "zrct") orelse return;
     if (options.desktop_tests) {
         const desktop_suite = gui.addRun(zrct, b, zrct_dep, .{
             .suite = b.path("tests/zrct/desktop_native.py"),
             .executable = executables.desktop_probe,
             .desktop = true,
-            .args = b.args orelse &.{},
         });
         b.step("test-sdl-desktop", "Test SDL services through a real Wayland compositor").dependOn(&desktop_suite.step);
     }
@@ -319,7 +356,13 @@ fn addGuiSuites(
     if (options.automation) {
         const m = executables.client.root_module;
         const zrct_module = zrct.createModule(b, zrct_dep, .{
-            .backend = .sdl3,
+            .sdl = m.import_table.get("desktop_c").?,
+            .posix = Translator.init(b.dependency("translate_c", .{}), .{
+                .name = "posix_c",
+                .c_source_file = zrct_dep.path("src/posix.h"),
+                .target = m.resolved_target.?,
+                .optimize = m.optimize.?,
+            }).mod,
             .link_system_sdl = false,
             .target = m.resolved_target.?,
             .optimize = m.optimize.?,
@@ -331,7 +374,6 @@ fn addGuiSuites(
         .suite = b.path("tests/zrct/native.py"),
         .executable = executables.native_tests,
         .python_extras = &.{"zimbr"},
-        .args = b.args orelse &.{},
     });
     isolated_gui.step.dependOn(&b.top_level_steps.get("fake-relay").?.step);
     isolated_step.dependOn(&isolated_gui.step);
@@ -341,7 +383,6 @@ fn addGuiSuites(
             .executable = executables.client,
             .desktop = true,
             .python_extras = &.{"zimbr"},
-            .args = b.args orelse &.{},
         });
         scenarios.step.dependOn(&b.top_level_steps.get("fake-relay").?.step);
         b.step("test-zrct", "Run isolated GUI scenarios with Zrct").dependOn(&scenarios.step);
@@ -350,7 +391,6 @@ fn addGuiSuites(
             .executable = executables.client,
             .desktop = true,
             .python_extras = &.{"zimbr"},
-            .args = b.args orelse &.{},
         });
         all_gui.step.dependOn(&b.top_level_steps.get("fake-relay").?.step);
         b.step("test-zrct-all", "Run all GUI workflow scenarios in one report").dependOn(&all_gui.step);
@@ -376,7 +416,6 @@ fn addGuiSuites(
                 .executable = executables.client,
                 .benchmark = suite.benchmark,
                 .python_extras = &.{"zimbr"},
-                .args = b.args orelse &.{},
             });
             run_suite.step.dependOn(&b.top_level_steps.get("fake-relay").?.step);
             const description = if (suite.benchmark)
@@ -390,27 +429,20 @@ fn addGuiSuites(
             .executable = executables.client,
             .desktop = true,
             .python_extras = &.{"zimbr"},
-            .args = b.args orelse &.{},
         });
         ime.step.dependOn(&b.top_level_steps.get("fake-relay").?.step);
         b.step("test-ime", "Test Korean composition with an isolated IBus/Hangul engine").dependOn(&ime.step);
     }
 }
 
-fn ZrctBuild() ?type {
-    // Zig's --system mode marks even omitted lazy packages available. lazyImport
-    // then raises a compile error for their absent build.zig, before options run.
-    const dependencies = @import("root").dependencies;
-    inline for (dependencies.root_deps) |dependency| {
-        if (comptime std.mem.eql(u8, dependency[0], "zrct")) {
-            const package = @field(dependencies.packages, dependency[1]);
-            return if (@hasDecl(package, "build_zig")) package.build_zig else null;
-        }
-    }
-    return null;
-}
-
 fn addDesktop(m: *std.Build.Module, desktop_sdl: sdl.Library) void {
+    if (m.root_source_file != null) {
+        const b = m.owner;
+        const desktop = bindings(b, m, "desktop_c", b.path("build/bindings/desktop.h"), &.{});
+        desktop.addIncludePath(desktop_sdl.source.path("include"));
+        desktop.addIncludePath(b.path("src/client"));
+        _ = bindings(b, m, "png_c", b.path("build/bindings/png.h"), &.{.{ .name = "libpng" }});
+    }
     // SDL already compiles these protocol interfaces into its static library.
     m.addIncludePath(desktop_sdl.protocol_headers);
     m.addCSourceFiles(.{ .files = &.{ "src/client/desktop.c", "src/client/desktop/wayland.c" }, .flags = &.{
@@ -426,7 +458,7 @@ fn addDesktop(m: *std.Build.Module, desktop_sdl: sdl.Library) void {
 fn module(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     sdk: ?[]const u8,
     openssl: ?[]const u8,
     fake: bool,
@@ -440,15 +472,19 @@ fn module(
     });
     const opts = b.addOptions();
     opts.addOption(bool, "fake", fake);
-    inline for (std.meta.fields(RelayProfile)) |field|
-        opts.addOption(field.type, "relay_" ++ field.name, @field(profile, field.name));
+    const fields = @typeInfo(RelayProfile).@"struct";
+    inline for (fields.field_names, fields.field_types) |name, T|
+        opts.addOption(T, "relay_" ++ name, @field(profile, name));
     m.addOptions("options", opts);
     const h2 = nghttp2.addLibrary(b, .{
         .target = target,
         .optimize = optimize,
         .sdk = sdk,
     }) orelse return m;
-    m.linkLibrary(h2);
+    platformBindings(b, m, sdk);
+    const http2 = bindings(b, m, "nghttp2_c", b.path("build/bindings/nghttp2.h"), &.{});
+    http2.linkLibrary(h2);
+    if (sdk) |root| http2.addSystemIncludePath(b.graph.cwdRelativePath(b.pathJoin(&.{ root, "usr/include" })));
     m.linkSystemLibrary("sqlite3", .{});
     m.addIncludePath(b.path("src"));
     m.addCSourceFile(.{ .file = b.path("src/platform.c"), .flags = &.{
@@ -533,7 +569,7 @@ fn module(
 fn imageHelper(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     sdk: ?[]const u8,
     fake: bool,
 ) *std.Build.Step.Compile {
