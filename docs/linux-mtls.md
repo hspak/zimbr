@@ -2,7 +2,7 @@
 
 Use [AUR client setup](linux-setup.md) for an installed client, or
 [development setup](development.md) when building from source. The helper
-ships with Python cryptography, OpenSSH, and OpenSSL 3 dependencies in AUR.
+ships with Python cryptography, OpenSSH, and OpenSSL dependencies in AUR.
 mkcert runs on the Mac issuer; Linux generates and retains its own key and CSR.
 The installed helper is `zimbr-provision`; from a checkout use
 `python3 packaging/linux/provision.py`.
@@ -84,8 +84,9 @@ with the application stopped before changing deployments.
 
 ## Linux verification and server handoff
 
-The client requires libcurl **8.10 or newer with HTTP/2 and the OpenSSL 3 backend**, plus
-OpenSSL development headers. Unsupported TLS backends fail closed. Every curl
+The client requires libcurl **8.10 or newer with HTTP/2 and OpenSSL 3 or 4**.
+The client headers, linked OpenSSL library, and libcurl backend must share the
+same OpenSSL major version because they exchange TLS objects. Every curl
 option is checked. Peer/hostname verification, TLS 1.3 with only
 `TLS_AES_256_GCM_SHA384`, HTTPS protocols only, HTTP/2, disabled redirects/proxies,
 and disabled TLS session caching apply to API, SSE, and media connections. See the

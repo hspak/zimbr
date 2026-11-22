@@ -17,8 +17,9 @@ Run source-build and test commands below from the repository root.
 ## Build and install
 
 Use Zig **0.17.1**, GNU `patch`, `pkg-config`, and development headers/libraries for SQLite,
-libcurl (8.10+ with HTTP/2 and the OpenSSL 3 backend), OpenSSL 3, Pango/Cairo (Pango 1.48+), Fontconfig, GLib/GIO,
-libpng, libjpeg, D-Bus, libdecor (0.2+), OpenGL/EGL, Wayland, and xkbcommon,
+libcurl (8.10+ with HTTP/2 and the OpenSSL backend), matching OpenSSL 3 or 4 headers
+and libraries, Pango/Cairo (Pango 1.48+), Fontconfig, GLib/GIO, libpng, libjpeg,
+D-Bus, libdecor (0.2+), OpenGL/EGL, Wayland, and xkbcommon,
 plus `wayland-scanner`. Install the Vulkan loader and your GPU's Vulkan driver.
 Install a system sans-serif font and an emoji font for the scripts you use.
 

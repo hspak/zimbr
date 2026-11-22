@@ -15,8 +15,8 @@ The checklist below records the port. [0.17.0 release notes](https://ziglang.org
 | Release tools | The Arch source archive built with a fresh package cache and passed its checks. The Mac release builder signed the app with the existing local identity, verified the extracted signature, and validated the archive manifest, helper, and license files. All 29 Python packaging tests passed. |
 | Rendering | The 0.16.0 reference and migrated safe builds each ran all nine Vulkan workloads with 100 measured frames per workload on the same headless Weston and Lavapipe setup. The migrated OpenGL and Vulkan report and startup benchmark also passed. |
 
-The Arch host's default libcurl uses OpenSSL 4. The Linux client requires its
-OpenSSL 3 backend, so the integration and GUI checks used an OpenSSL 3 build
+The Arch host's default libcurl used OpenSSL 4. At the time of the migration
+the Linux client required OpenSSL 3, so the integration and GUI checks used an OpenSSL 3 build
 of libcurl. The local Arch artifact was built with curl 8.23.0 and OpenSSL
 3.6.5. Its packaged executable opened a Wayland window and synced all four
 fixture conversations over mutual TLS. The macOS archive identifies the

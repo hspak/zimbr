@@ -280,8 +280,12 @@ ZcNet *zc_net_new(const char *origin, const char *ca, const char *cert, const ch
     if (version->version_num < 0x080a00 || !(version->features & CURL_VERSION_HTTP2)) {
         failure(error,ZC_CONFIG,"Zimbr requires libcurl 8.10 or newer with HTTP/2 support. Install a supported build."); goto fail;
     }
-    if (!version->ssl_version || strncmp(version->ssl_version,"OpenSSL/3.",10) || OpenSSL_version_num()<0x30000000L) {
-        failure(error,ZC_CONFIG,"Zimbr requires libcurl with the OpenSSL 3 TLS backend. Install a supported build."); goto fail;
+    // The curl callbacks pass SSL and SSL_CTX objects to our linked libssl.
+    const unsigned int major = OPENSSL_version_major();
+    const char *backend = major == 3 ? "OpenSSL/3." : "OpenSSL/4.";
+    if ((major != 3 && major != 4) || major != OPENSSL_VERSION_MAJOR ||
+        !version->ssl_version || strncmp(version->ssl_version, backend, strlen(backend))) {
+        failure(error,ZC_CONFIG,"Zimbr and libcurl must use the same OpenSSL 3 or 4 TLS backend."); goto fail;
     }
     if (!zc_origin_valid(origin)) { failure(error,ZC_CONFIG,"relay_url must be an HTTPS origin with a hostname and optional port only."); goto fail; }
     n->origin=strdup(origin); if (!n->origin) goto oom;
