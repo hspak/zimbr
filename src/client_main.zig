@@ -7292,6 +7292,60 @@ test "text and attachment messages retain identical sender and date alignment" {
     }
 }
 
+test "texture updates preserve geometry queued at the start of a frame" {
+    try openWindow(320, 160, "Geometry batch lifetime");
+    defer closeWindow();
+    desktop.poll();
+    const renderer = desktop.c.SDL_GetRenderer(desktop.window()).?;
+    const red = [_]u8{
+        255,
+        0,
+        0,
+        255,
+    };
+    const white = [_]u8{
+        255,
+        255,
+        255,
+        255,
+    };
+    const texture = try graphics.upload(&red, 1, 1, .nearest);
+    defer graphics.destroyTexture(texture);
+    for (0..3) |_| {
+        try std.testing.expect(desktop.c.SDL_UpdateTexture(texture, null, &red, 4));
+        graphics.clear(.black);
+        try std.testing.expect(desktop.c.SDL_RenderPresent(renderer));
+        graphics.beginFrame();
+        graphics.setScale(1);
+        graphics.clear(.black);
+        graphics.drawTexture(texture, .{
+            .x = 0,
+            .y = 0,
+            .width = 32,
+            .height = 32,
+        });
+        // Updating a queued texture flushes SDL's CPU commands without waiting for
+        // GPU completion. An explicit SDL_FlushRenderer would hide premature reuse.
+        try std.testing.expect(desktop.c.SDL_UpdateTexture(texture, null, &white, 4));
+        graphics.drawTexture(texture, .{
+            .x = 32,
+            .y = 0,
+            .width = 32,
+            .height = 32,
+        });
+        const shot = try graphics.capture();
+        defer graphics.destroyImage(shot);
+        try std.testing.expectEqual(graphics.Color{
+            .r = 255,
+            .g = 0,
+            .b = 0,
+            .a = 255,
+        }, graphics.imageColor(shot, 16, 16));
+        try std.testing.expectEqual(graphics.Color.white, graphics.imageColor(shot, 48, 16));
+        try std.testing.expect(desktop.c.SDL_RenderPresent(renderer));
+    }
+}
+
 test "retired texture storage is reused without changing queued draws" {
     try openWindow(320, 160, "Texture reuse ordering");
     defer closeWindow();

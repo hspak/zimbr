@@ -87,7 +87,11 @@ buffer capacity per command buffer, and raises the upload batch limit from 32 to
 for the associated completion fence or queue idle. Both swapchain recreation and
 renderer shutdown release every retained buffer.
 Geometry preserves shared vertices and normalizes indices to 32 bits, retaining
-SDL's draw batching. Vertex and index bytes share the existing GPU buffer lifetime.
+SDL's draw batching. Vertex and index bytes share buffers owned by each command-buffer
+slot. A slot's completion fence protects reuse across frames; command-list initialization
+runs before its first geometry upload. Storage grows on demand, and exhausting the
+slot's 256-buffer pool submits and waits before reuse. Swapchain recreation and
+renderer shutdown release all geometry buffers.
 Shader constants and matching descriptor bindings are reused only within the
 current command list; an entry never mutates a descriptor used by pending draws.
 The SDL revision reported by the benchmark includes a digest of the upstream

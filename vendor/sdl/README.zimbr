@@ -14,7 +14,13 @@ Local C changes are recorded in build/sdl/vulkan.patch and confined to
 src/render/vulkan/SDL_render_vulkan.c:
 - Reuse completed staging allocations with a bounded upload-buffer pool.
 - Preserve shared vertices and submit indexed geometry.
+- Keep geometry storage per command-buffer slot until its completion fence signals.
 - Reuse constant-buffer contents and matching descriptor sets within a command list.
+
+Geometry buffers are allocated on demand and released with the swapchain or
+renderer. The command list resets before selecting its first geometry buffer;
+later batches cannot overwrite an earlier draw. Pool wraparound submits and
+waits before reusing storage within a frame.
 
 The build invokes GNU patch with --batch, --forward, and --fuzz=0. Both the
 original renderer and patch are tracked build inputs. The patched renderer is a

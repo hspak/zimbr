@@ -5,8 +5,8 @@
    3. This notice may not be removed or altered from any source distribution.
  */
 +
-+/* Zimbr's modified SDL renderer: bounded upload reuse, indexed geometry, and
-+   command-list-local constant/descriptor reuse. See vendor/sdl/README.zimbr. */
++/* Zimbr's modified SDL renderer: frame-owned indexed geometry, bounded upload
++   reuse, and command-list-local constant/descriptor reuse. See vendor/sdl/README.zimbr. */
  #include "SDL_internal.h"
  
  #ifdef SDL_VIDEO_RENDER_VULKAN
@@ -57,18 +57,22 @@
  } VULKAN_DrawStateCache;
  
  // Private renderer data
-@@ -326,6 +348,11 @@
+@@ -326,8 +348,13 @@
      VkDescriptorSetLayout descriptorSetLayout;
      VkPipelineLayout pipelineLayout;
  
+-    // Vertex buffer data
+-    VULKAN_Buffer vertexBuffers[SDL_VULKAN_NUM_VERTEX_BUFFERS];
 +    // CPU indices refer to the shared vertex stream until RunCommandQueue consumes it.
 +    Uint32 *queuedIndices;
 +    size_t queuedIndexCount;
 +    size_t queuedIndexCapacity;
 +
-     // Vertex buffer data
-     VULKAN_Buffer vertexBuffers[SDL_VULKAN_NUM_VERTEX_BUFFERS];
++    // Each command-buffer slot owns its geometry until its completion fence signals.
++    VULKAN_Buffer (*vertexBuffers)[SDL_VULKAN_NUM_VERTEX_BUFFERS];
      VULKAN_VertexShaderConstants vertexShaderConstantsData;
+ 
+     // Data for staging/allocating textures
 @@ -345,6 +372,10 @@
      uint32_t *numDescriptorPools;
      uint32_t currentDescriptorPoolIndex;
@@ -80,7 +84,39 @@
  
      int pipelineStateCount;
      VULKAN_PipelineState *pipelineStates;
-@@ -669,7 +700,7 @@
+@@ -509,6 +540,19 @@
+ static VkSurfaceTransformFlagBitsKHR VULKAN_GetRotationForCurrentRenderTarget(VULKAN_RenderData *rendererData);
+ static bool VULKAN_IsDisplayRotated90Degrees(VkSurfaceTransformFlagBitsKHR rotation);
+ 
++static void VULKAN_DestroyVertexBuffers(VULKAN_RenderData *rendererData)
++{
++    if (rendererData->vertexBuffers) {
++        for (uint32_t i = 0; i < rendererData->swapchainImageCount; ++i) {
++            for (uint32_t j = 0; j < SDL_VULKAN_NUM_VERTEX_BUFFERS; ++j) {
++                VULKAN_DestroyBuffer(rendererData, &rendererData->vertexBuffers[i][j]);
++            }
++        }
++        SDL_free(rendererData->vertexBuffers);
++        rendererData->vertexBuffers = NULL;
++    }
++}
++
+ static void VULKAN_DestroyAll(SDL_Renderer *renderer)
+ {
+     VULKAN_RenderData *rendererData;
+@@ -588,10 +632,7 @@
+             rendererData->samplers[i] = VK_NULL_HANDLE;
+         }
+     }
+-    for (uint32_t i = 0; i < SDL_arraysize(rendererData->vertexBuffers); i++ ) {
+-        VULKAN_DestroyBuffer(rendererData, &rendererData->vertexBuffers[i]);
+-    }
+-    SDL_zeroa(rendererData->vertexBuffers);
++    VULKAN_DestroyVertexBuffers(rendererData);
+     for (uint32_t i = 0; i < VULKAN_RENDERPASS_COUNT; i++) {
+         if (rendererData->renderPasses[i] != VK_NULL_HANDLE) {
+             vkDestroyRenderPass(rendererData->device, rendererData->renderPasses[i], NULL);
+@@ -669,7 +710,7 @@
  
      if (rendererData->currentUploadBuffer) {
          for (uint32_t i = 0; i < rendererData->swapchainImageCount; ++i) {
@@ -89,7 +125,7 @@
                  VULKAN_DestroyBuffer(rendererData, &rendererData->uploadBuffers[i][j]);
              }
              SDL_free(rendererData->uploadBuffers[i]);
-@@ -1059,6 +1090,10 @@
+@@ -1059,6 +1100,10 @@
      if (stateCache->vertexBuffer != VK_NULL_HANDLE) {
          VkDeviceSize offset = 0;
          vkCmdBindVertexBuffers(rendererData->currentCommandBuffer, 0, 1, &stateCache->vertexBuffer, &offset);
@@ -100,7 +136,7 @@
      }
  
      return true;
-@@ -1072,6 +1107,7 @@
+@@ -1072,6 +1117,7 @@
  
  static void VULKAN_ResetCommandList(VULKAN_RenderData *rendererData)
  {
@@ -108,7 +144,7 @@
      vkResetCommandBuffer(rendererData->currentCommandBuffer, 0);
      for (uint32_t i = 0; i < rendererData->numDescriptorPools[rendererData->currentCommandBufferIndex]; i++) {
          vkResetDescriptorPool(rendererData->device, rendererData->descriptorPools[rendererData->currentCommandBufferIndex][i], 0);
-@@ -1091,9 +1127,16 @@
+@@ -1091,9 +1137,16 @@
      rendererData->currentConstantBufferOffset = -1;
      rendererData->currentConstantBufferIndex = 0;
  
@@ -128,7 +164,7 @@
      }
      rendererData->currentUploadBuffer[rendererData->currentCommandBufferIndex] = 0;
  }
-@@ -1154,6 +1197,7 @@
+@@ -1154,6 +1207,7 @@
              vkDeviceWaitIdle(rendererData->device);
              VULKAN_DestroyAll(renderer);
          }
@@ -136,7 +172,7 @@
          SDL_free(rendererData);
      }
  }
-@@ -1343,6 +1387,7 @@
+@@ -1343,6 +1397,7 @@
      if (!pipelineStates) {
          return NULL;
      }
@@ -144,8 +180,17 @@
      pipelineStates[rendererData->pipelineStateCount].shader = shader;
      pipelineStates[rendererData->pipelineStateCount].blendMode = blendMode;
      pipelineStates[rendererData->pipelineStateCount].topology = topology;
-@@ -1397,7 +1442,7 @@
-     VULKAN_DestroyBuffer(rendererData, &rendererData->vertexBuffers[vbidx]);
+@@ -1390,18 +1445,18 @@
+     return true;
+ }
+ 
+-static VkResult VULKAN_CreateVertexBuffer(VULKAN_RenderData *rendererData, size_t vbidx, size_t size)
++static VkResult VULKAN_CreateVertexBuffer(VULKAN_RenderData *rendererData, VULKAN_Buffer *buffer, size_t size)
+ {
+     VkResult result;
+ 
+-    VULKAN_DestroyBuffer(rendererData, &rendererData->vertexBuffers[vbidx]);
++    VULKAN_DestroyBuffer(rendererData, buffer);
  
      result = VULKAN_AllocateBuffer(rendererData, size,
 -        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
@@ -153,7 +198,48 @@
          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-@@ -2870,14 +2915,19 @@
+-        &rendererData->vertexBuffers[vbidx]);
++        buffer);
+     if (result != VK_SUCCESS) {
+         return result;
+     }
+@@ -1981,11 +2036,6 @@
+         return result;
+     }
+ 
+-    // Create default vertex buffers
+-    for (uint32_t i = 0; i < SDL_VULKAN_NUM_VERTEX_BUFFERS; ++i) {
+-        VULKAN_CreateVertexBuffer(rendererData, i, SDL_VULKAN_VERTEX_BUFFER_DEFAULT_SIZE);
+-    }
+-
+     SDL_PropertiesID props = SDL_GetRendererProperties(renderer);
+     SDL_SetPointerProperty(props, SDL_PROP_RENDERER_VULKAN_INSTANCE_POINTER, rendererData->instance);
+     SDL_SetNumberProperty(props, SDL_PROP_RENDERER_VULKAN_SURFACE_NUMBER, (Sint64)rendererData->surface);
+@@ -2091,6 +2141,9 @@
+         SET_ERROR_CODE("vkGetPhysicalDeviceSurfaceCapabilitiesKHR()", result);
+         return result;
+     }
++
++    // The caller has waited for queue idle, so all frame-owned geometry can retire.
++    VULKAN_DestroyVertexBuffers(rendererData);
+ 
+     // clean up previous swapchain resources
+     if (rendererData->swapchainImageViews) {
+@@ -2478,6 +2531,13 @@
+     rendererData->currentConstantBufferOffset = -1;
+     rendererData->currentConstantBufferIndex = 0;
+ 
++    // Allocate GPU storage on first use instead of preallocating 256 buffers per frame.
++    rendererData->vertexBuffers = SDL_calloc(rendererData->swapchainImageCount, sizeof(*rendererData->vertexBuffers));
++    if (!rendererData->vertexBuffers) {
++        VULKAN_DestroyAll(renderer);
++        return VK_ERROR_OUT_OF_HOST_MEMORY;
++    }
++
+     VULKAN_AcquireNextSwapchainImage(renderer);
+ 
+     SDL_PropertiesID props = SDL_GetRendererProperties(renderer);
+@@ -2870,14 +2930,19 @@
      int currentUploadBufferIndex = rendererData->currentUploadBuffer[rendererData->currentCommandBufferIndex];
      VULKAN_Buffer *uploadBuffer = &rendererData->uploadBuffers[rendererData->currentCommandBufferIndex][currentUploadBufferIndex];
  
@@ -181,7 +267,7 @@
      }
  
      src = (const Uint8 *)pixels;
-@@ -3236,62 +3286,80 @@
+@@ -3236,84 +3301,110 @@
                                 int num_vertices, const void *indices, int num_indices, int size_indices,
                                 float scale_x, float scale_y)
  {
@@ -297,27 +383,43 @@
 +                                    const void *vertexData, size_t dataSizeInBytes, size_t indexBytes, VULKAN_DrawStateCache *stateCache)
  {
      VULKAN_RenderData *rendererData = (VULKAN_RenderData *)renderer->internal;
-     const int vbidx = rendererData->currentVertexBuffer;
+-    const int vbidx = rendererData->currentVertexBuffer;
+-    VULKAN_Buffer *vertexBuffer;
 +    size_t bufferBytes;
 +    if (!SDL_size_add_check_overflow(dataSizeInBytes, indexBytes, &bufferBytes)) {
 +        return SDL_SetError("Vulkan geometry buffer is too large");
 +    }
-     VULKAN_Buffer *vertexBuffer;
  
      if (dataSizeInBytes == 0) {
-@@ -3304,16 +3372,21 @@
-         }
-     }
-     // If the existing vertex buffer isn't big enough, we need to recreate a big enough one
--    if (dataSizeInBytes > rendererData->vertexBuffers[vbidx].size) {
-+    if (bufferBytes > rendererData->vertexBuffers[vbidx].size) {
-         VULKAN_IssueBatch(rendererData);
-         VULKAN_WaitForGPU(rendererData);
--        VULKAN_CreateVertexBuffer(rendererData, vbidx, dataSizeInBytes);
-+        if (VULKAN_CreateVertexBuffer(rendererData, vbidx, bufferBytes) != VK_SUCCESS) return false;
+         return true; // nothing to do.
      }
  
-     vertexBuffer = &rendererData->vertexBuffers[vbidx];
++    // Reset the completed slot before selecting storage, never after its first upload.
++    VULKAN_EnsureCommandBuffer(rendererData);
+     if (rendererData->issueBatch) {
+         if (VULKAN_IssueBatch(rendererData) != VK_SUCCESS) {
+             return SDL_SetError("Failed to issue intermediate batch");
+         }
+     }
+-    // If the existing vertex buffer isn't big enough, we need to recreate a big enough one
+-    if (dataSizeInBytes > rendererData->vertexBuffers[vbidx].size) {
+-        VULKAN_IssueBatch(rendererData);
+-        VULKAN_WaitForGPU(rendererData);
+-        VULKAN_CreateVertexBuffer(rendererData, vbidx, dataSizeInBytes);
+-    }
+-
+-    vertexBuffer = &rendererData->vertexBuffers[vbidx];
++    const int vbidx = rendererData->currentVertexBuffer;
++    VULKAN_Buffer *vertexBuffer = &rendererData->vertexBuffers[rendererData->currentCommandBufferIndex][vbidx];
++    // This slot's fence (or IssueBatch's queue-idle wait) completed before reset.
++    // Earlier draws in this command list use lower indices, so growth is safe too.
++    if (bufferBytes > vertexBuffer->size) {
++        if (VULKAN_CreateVertexBuffer(rendererData, vertexBuffer,
++                SDL_max(bufferBytes, SDL_VULKAN_VERTEX_BUFFER_DEFAULT_SIZE)) != VK_SUCCESS) {
++            return false;
++        }
++    }
++
      SDL_memcpy(vertexBuffer->mappedBufferPtr, vertexData, dataSizeInBytes);
  
 +    if (indexBytes) {
@@ -329,7 +431,7 @@
  
      rendererData->currentVertexBuffer = vbidx + 1;
      if (rendererData->currentVertexBuffer >= SDL_VULKAN_NUM_VERTEX_BUFFERS) {
-@@ -3819,7 +3892,7 @@
+@@ -3819,7 +3910,7 @@
  
      constantBuffer = rendererData->constantBuffers[rendererData->currentCommandBufferIndex][rendererData->currentConstantBufferIndex].buffer;
      constantBufferOffset = (rendererData->currentConstantBufferOffset < 0) ? 0 : rendererData->currentConstantBufferOffset;
@@ -338,7 +440,7 @@
          SDL_memcmp(shader_constants, &rendererData->currentPipelineState->shader_constants, sizeof(*shader_constants)) != 0) {
  
          if (rendererData->currentConstantBufferOffset == -1) {
-@@ -3870,12 +3943,44 @@
+@@ -3870,12 +3961,44 @@
          uint8_t *dst = (uint8_t *)rendererData->constantBuffers[rendererData->currentCommandBufferIndex][rendererData->currentConstantBufferIndex].mappedBufferPtr;
          dst += constantBufferOffset;
          SDL_memcpy(dst, &rendererData->currentPipelineState->shader_constants, sizeof(VULKAN_PixelShaderConstants));
@@ -389,7 +491,7 @@
      }
  
      // Bind the descriptor set with the sampler/UBO/image views
-@@ -4055,6 +4160,9 @@
+@@ -4055,6 +4178,9 @@
      VkSurfaceTransformFlagBitsKHR currentRotation = VULKAN_GetRotationForCurrentRenderTarget(rendererData);
      VULKAN_DrawStateCache stateCache;
      SDL_zero(stateCache);
@@ -399,7 +501,7 @@
  
      if (!rendererData->device) {
          return SDL_SetError("Device lost and couldn't be recovered");
-@@ -4073,7 +4181,7 @@
+@@ -4073,7 +4199,7 @@
          rendererData->recreateSwapchain = false;
      }
  
@@ -408,7 +510,7 @@
          return false;
      }
  
-@@ -4220,7 +4328,7 @@
+@@ -4220,7 +4346,7 @@
              SDL_RenderCommand *nextcmd;
              size_t count = cmd->data.draw.count;
              const size_t first = cmd->data.draw.first;
@@ -417,7 +519,7 @@
              for (nextcmd = cmd->next; nextcmd; nextcmd = nextcmd->next) {
                  const SDL_RenderCommandType nextcmdtype = nextcmd->command;
                  if (nextcmdtype != thiscmdtype) {
-@@ -4249,7 +4357,7 @@
+@@ -4249,7 +4375,7 @@
                      VULKAN_SetDrawState(renderer, cmd, rendererData->pipelineLayout, rendererData->descriptorSetLayout, NULL, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, 0, NULL, 0, NULL, NULL, &stateCache, false);
                  }
  
